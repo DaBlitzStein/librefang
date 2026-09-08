@@ -1,2 +1,2 @@
-Add a workflow run timeline to the dashboard's Workflows page, surfacing each run's outcome once it completes.
-The task board gains canvas helpers and richer run status so an operator can follow a workflow from trigger to result without leaving the dashboard. (#7997) (@DaBlitzStein)
+Add a workflow run timeline to the dashboard's Workflows page, surfacing each run's live step progress and outcome as it executes.
+The page now polls a selected run every 3 seconds while it is active — including while paused at an operator gate — and stops once it reaches a terminal state, so an operator watching a run does not need to reload to see it advance past an approval or finish. (#7997) (@DaBlitzStein)
