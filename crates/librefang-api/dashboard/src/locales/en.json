@@ -859,6 +859,7 @@
       "tools_customize": "Customize — switch to allowlist",
       "tools_all_title": "Using all available tools",
       "tools_all_desc": "no tools registered in the system yet",
+      "mcp_hard_disabled_note": "MCP servers are hard-disabled for this agent (tools_disabled or mcp_disabled). Granting one here would change nothing until the hard switch is turned off, so the toggles are inert.",
       "tools_fine_grain": "Configure individual tools",
       "tools_remove_group": "Remove entire group",
       "tools_available": "Available",

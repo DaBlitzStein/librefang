@@ -345,9 +345,15 @@ export function SystemPromptSection({
 export function DescriptionSection({
   agentId,
   description,
+  onSaved,
 }: {
   agentId: string;
   description: string;
+  /// #7749 review: `description` comes from the parent's imperatively-held
+  /// detail state, so a success that only toasts leaves `current` at the old
+  /// text — the section stays dirty and the header shows the stale value.
+  /// The parent refreshes its detail state through this hook.
+  onSaved?: () => void;
 }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -366,11 +372,13 @@ export function DescriptionSection({
     patchAgent.mutate(
       { agentId, body: { description: draft } },
       {
-        onSuccess: () =>
+        onSuccess: () => {
           addToast(
             t("agents.detail.description_saved", { defaultValue: "Description saved" }),
             "success",
-          ),
+          );
+          onSaved?.();
+        },
         onError: (e: Error) =>
           addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
       },
@@ -628,6 +636,12 @@ export function AgentsPage() {
   const resumeMutation = useResumeAgent();
   const patchAgentRuntimeConfigMutation = usePatchAgentRuntimeConfig();
   const patchAgentMutation = usePatchAgent();
+  // #7749 review: the manifest editor's drawer must not read the rename
+  // flow's mutation state — a failed rename (duplicate name → 400) would
+  // render its error inside the editor drawer and an in-flight rename would
+  // disable its Save. Its own instance, like DescriptionSection and
+  // ChannelsSection have theirs.
+  const manifestPatchMutation = usePatchAgent();
   const cloneMutation = useCloneAgent();
   const resetSessionMutation = useResetAgentSession();
   const updateToolsMutation = useUpdateAgentTools();
@@ -1181,6 +1195,16 @@ export function AgentsPage() {
     setManifestEditorSeeded(false);
     setManifestEditorErrors(new Set());
     setManifestEditorParseError(null);
+    // #7749 review: the query cache holds the TOML for `staleTime: 30_000`,
+    // so reopening inside that window serves the stale copy synchronously —
+    // the seed effect below marks the editor seeded from it and then
+    // discards the refetch, and a save writes the older manifest over
+    // whatever changed on the server since (file-watcher reload, another
+    // tab, POST /reload). Drop the cached entry so the enabled query
+    // refetches and the editor only seeds from post-open data.
+    if (detailAgent?.id) {
+      qc.removeQueries({ queryKey: agentQueries.manifest(detailAgent.id).queryKey });
+    }
     setManifestEditorOpen(true);
   };
   const closeManifestEditor = () => {
@@ -1210,7 +1234,7 @@ export function AgentsPage() {
     setManifestEditorErrors(new Set(errors));
     if (errors.length > 0) return;
     const toml = serializeManifestForm(manifestEditorFormState, manifestEditorExtras);
-    patchAgentMutation.mutate(
+    manifestPatchMutation.mutate(
       { agentId: detailAgent.id, body: { manifest_toml: toml } },
       {
         onSuccess: async () => {
@@ -2245,9 +2269,14 @@ export function AgentsPage() {
         // draft/endpoint from `capabilities_tools` (#6565 follow-up) — see
         // `handleSave`. Nothing to toggle once the server is already
         // granted through the `["*"]`/"all" wildcard; that requires
-        // editing the wildcard itself, not a per-server pin.
+        // editing the wildcard itself, not a per-server pin. And nothing to
+        // stage under a hard switch either: with `tools_disabled` or
+        // `mcp_disabled` the kernel skips MCP entirely, so a staged grant
+        // would arm a Save that changes nothing visible or effective
+        // (#7749 review) — the banner below explains why instead.
+        const mcpHardDisabled = agent.tools_disabled || agent.mcp_disabled;
         const server = mcpServerByGroup.get(groupName);
-        if (!server || mcpModeEffective === "all") return;
+        if (!server || mcpModeEffective === "all" || mcpHardDisabled) return;
         setMcpServersDraft((prev) => toggleMcpServerGrant(prev ?? persistedMcpServers, server));
         if (expandedToolGroup === groupName) setExpandedToolGroup(null);
         return;
@@ -2516,6 +2545,12 @@ export function AgentsPage() {
               </Button>
             </>
           ) : (
+            <>
+            {(agent as AgentView).tools_disabled || (agent as AgentView).mcp_disabled ? (
+              <p className="text-xs text-warning mb-2">
+                {t("agents.detail.mcp_hard_disabled_note", { defaultValue: "MCP servers are hard-disabled for this agent (tools_disabled or mcp_disabled). Granting one here would change nothing until the hard switch is turned off, so the toggles are inert." })}
+              </p>
+            ) : null}
             <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
               <Wrench className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
               <div className="min-w-0 flex-1">
@@ -2527,6 +2562,7 @@ export function AgentsPage() {
                 </div>
               </div>
             </div>
+            </>
           )
         ) : (
           <>
@@ -3071,6 +3107,7 @@ export function AgentsPage() {
               <DescriptionSection
                 agentId={detailAgent.id}
                 description={(detailAgent as AgentView).description ?? ""}
+                onSaved={() => void refreshDetailAgent(detailAgent.id, detailAgent.is_hand)}
               />
 
               {/* Channels */}
@@ -3646,9 +3683,9 @@ export function AgentsPage() {
                 />
               </div>
             )}
-            {patchAgentMutation.error && (
+            {manifestPatchMutation.error && (
               <p className="text-xs text-error">
-                {toastErr(patchAgentMutation.error, String(patchAgentMutation.error))}
+                {toastErr(manifestPatchMutation.error, String(manifestPatchMutation.error))}
               </p>
             )}
             <div className="flex gap-2 pt-2">
@@ -3657,13 +3694,13 @@ export function AgentsPage() {
                 className="flex-1"
                 onClick={saveManifestEditor}
                 disabled={
-                  patchAgentMutation.isPending ||
+                  manifestPatchMutation.isPending ||
                   agentManifestQuery.isLoading ||
                   !!manifestEditorParseError ||
                   agentManifestQuery.isError
                 }
               >
-                {patchAgentMutation.isPending ? (
+                {manifestPatchMutation.isPending ? (
                   <Loader2 className="w-4 h-4 animate-spin mr-1" />
                 ) : (
                   <Save className="w-4 h-4 mr-1" />

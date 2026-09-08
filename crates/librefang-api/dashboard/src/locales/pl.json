@@ -858,6 +858,7 @@
       "tools_customize": "Dostosuj — przełącz na listę dozwolonych",
       "tools_all_title": "Używanie wszystkich dostępnych narzędzi",
       "tools_all_desc": "brak zarejestrowanych narzędzi w systemie",
+      "mcp_hard_disabled_note": "Serwery MCP są dla tego agenta sztywno wyłączone (tools_disabled lub mcp_disabled). Nadanie tutaj nic nie zmieni, dopóki twardy przełącznik nie zostanie wyłączony — więc przełączniki są nieaktywne.",
       "tools_fine_grain": "Skonfiguruj poszczególne narzędzia",
       "tools_remove_group": "Usuń całą grupę",
       "tools_available": "Dostępne",
