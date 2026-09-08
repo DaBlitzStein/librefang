@@ -1,5 +1,4 @@
 The TUI goals screen can now configure and read back loop engineering, closing the last gap where a goal run could be verified from the dashboard or the API but not from the terminal.
 Creating a goal walks two extra steps when the toggle is on — the verifier agent that grades the work and the optional evaluator model that judges the goal condition independently of the agent's own `GOAL_DONE` marker — and skips both when it is off, so a plain goal is still a three-field form.
 The detail pane shows all four values, falling back to the compiled defaults rather than blank cells, and `+` / `-` set the per-run verification-round budget the start request carries.
-The budget's default is now read from the kernel's own `DEFAULT_VERIFY_MAX_RETRIES` instead of a second copy of the number, so the figure the operator sees is the one the run will use.
-(#8229) (@DaBlitzStein)
+The budget's default is now read from the kernel's own `DEFAULT_VERIFY_MAX_RETRIES` instead of a second copy of the number, so the figure the operator sees is the one the run will use. (#8229) (@DaBlitzStein)
