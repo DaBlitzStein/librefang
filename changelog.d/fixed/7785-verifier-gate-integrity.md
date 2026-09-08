@@ -1,0 +1,4 @@
+A goal under `loop_engineering` could still finish on work its own verifier had just rejected, through two routes the gate did not close.
+A rejected iteration's `GOAL_PROGRESS: 100` was still persisted, and the pre-existing `progress >= 100` check ended the run one iteration later through that back door, leaving the incoherent `progress: 100` plus `status: in_progress`.
+An unreachable verifier — a deleted agent, a revoked key — fed no circuit breaker, so a permanently dead one burned the whole iteration budget dispatching to it every round before reporting the cap as the reason it stopped, the exact waste the tick-failure breaker exists to prevent on the generator leg.
+Rejected progress is now clamped below the completion boundary, and five consecutive verifier failures now stop the run in `Stopped` with the cause on `last_error` (#7785) (@DaBlitzStein)

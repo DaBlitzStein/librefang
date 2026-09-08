@@ -182,7 +182,7 @@ pub async fn get_goal_run(
 /// POST /api/goals/{id}/start — Begin an autonomous long-horizon run that
 /// drives the goal's assigned agent toward completion (#5744).
 ///
-/// Optional body: `{ "max_iterations": <u32>, "verify_max_retries": <u32> }`.
+/// Optional body: `{ "max_iterations": <u32>, "verify_max_retries": <u32> }` — each `>= 1`, validated like `max_iterations` (400 otherwise).
 ///
 /// Whether the run is verified at all is a property of the goal
 /// (`loop_engineering`, `verify_agent_id`, `evaluator_model`), not of the
@@ -278,11 +278,24 @@ pub async fn start_goal_run(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let verify_max_retries = body
-        .as_ref()
-        .and_then(|b| b.0.get("verify_max_retries"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32);
+    // #7785 review: mirror `max_iterations`'s validation — a body field that
+    // reaches a u32 must not silently truncate (`as` on a bigger number
+    // wraps), a negative or fractional value must not silently parse as
+    // `None` (its `as_u64` failure was indistinguishable from an absent
+    // field), and 0 is rejected rather than clamped, same boundary as
+    // `max_iterations`.
+    let verify_max_retries = match body.as_ref().and_then(|b| b.0.get("verify_max_retries")) {
+        None => None,
+        Some(value) => match value.as_u64().and_then(|n| u32::try_from(n).ok()) {
+            Some(0) | None => {
+                return ApiErrorResponse::bad_request(
+                    "verify_max_retries must be an integer between 1 and 4294967295",
+                )
+                .into_json_tuple();
+            }
+            Some(value) => Some(value),
+        },
+    };
 
     let started = state.kernel.start_goal_run(
         goal_id,
@@ -443,17 +456,16 @@ pub async fn create_goal(
     };
 
     let loop_engineering = req["loop_engineering"].as_bool().unwrap_or(false);
-    // Same boundary rule as `agent_id`: reject a bad verifier id here rather
-    // than storing junk that `start_goal_run` has to reject later.
-    let verify_agent_id_str: Option<String> = req
-        .get("verify_agent_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string());
-    if let Some(ref vid) = verify_agent_id_str {
-        if vid.parse::<uuid::Uuid>().is_err() {
+    // Same boundary rule as `agent_id`, through the same helper: blank or
+    // null clears (nothing to store on a create), a non-empty value must be
+    // a UUID, and a non-string value is a 400 rather than a silently
+    // dropped field (#7785 review).
+    let verify_agent_id_str = match optional_uuid_field(&req, "verify_agent_id") {
+        Ok(value) => value.flatten(),
+        Err(()) => {
             return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
         }
-    }
+    };
     // Deliberately NOT validated the way the verifier id is: a model id has no
     // checkable shape, and whether it resolves depends on the provider config
     // at call time, not at save time. An unresolvable id degrades — the runner
@@ -593,7 +605,12 @@ pub async fn update_goal_by_id(
         return ApiErrorResponse::bad_request("A goal cannot be its own parent").into_json_tuple();
     }
 
-    let verifier_clear = req.get("verify_agent_id").is_some_and(is_clear_signal);
+    let verifier_update = match optional_uuid_field(&req, "verify_agent_id") {
+        Ok(value) => value,
+        Err(()) => {
+            return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
+        }
+    };
 
     let agent_update = match optional_uuid_field(&req, "agent_id") {
         Ok(value) => value,
@@ -601,17 +618,6 @@ pub async fn update_goal_by_id(
             return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
         }
     };
-
-    // Same rule for the verifier, and for the same reason: storing an id the
-    // run path will refuse leaves the operator with a gate that looks
-    // configured and is not.
-    if !verifier_clear {
-        if let Some(vid) = req.get("verify_agent_id").and_then(|v| v.as_str()) {
-            if vid.trim().parse::<uuid::Uuid>().is_err() {
-                return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
-            }
-        }
-    }
 
     // --- Atomic validate-then-mutate under BEGIN IMMEDIATE (#5138) ---
     //
@@ -700,12 +706,11 @@ pub async fn update_goal_by_id(
                     {
                         g["loop_engineering"] = serde_json::json!(loop_engineering);
                     }
-                    if let Some(verify_agent_id) = req.get("verify_agent_id") {
-                        if verifier_clear {
+                    if let Some(verifier_update) = verifier_update.as_ref() {
+                        if let Some(vid) = verifier_update {
+                            g["verify_agent_id"] = serde_json::Value::String(vid.clone());
+                        } else {
                             g.as_object_mut().map(|obj| obj.remove("verify_agent_id"));
-                        } else if let Some(vid) = verify_agent_id.as_str() {
-                            g["verify_agent_id"] =
-                                serde_json::Value::String(vid.trim().to_string());
                         }
                     }
                     if let Some(evaluator_model) = req.get("evaluator_model") {
