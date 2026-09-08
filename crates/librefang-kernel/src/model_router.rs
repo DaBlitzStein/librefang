@@ -476,6 +476,7 @@ mod tests {
             provider: "anthropic".to_string(),
             model: format!("model-{name}"),
             context_window: None,
+            max_output_tokens: None,
             cost_tier: tier,
             priority,
             max_complexity: max,

@@ -7,7 +7,8 @@
 //! Routes covered:
 //!   GET  /api/agents/{id}/model_routing  (default shape, flexible shape)
 //!   PUT  /api/agents/{id}/model_routing  (round-trip, clear back to fixed,
-//!                                         validation, bad id, unknown agent)
+//!                                         validation, bad id, unknown agent,
+//!                                         non-owner)
 //!   GET  /api/model-router/profiles      (builtin catalog, home override,
 //!                                         deterministic ordering)
 //!
@@ -15,6 +16,7 @@
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use librefang_api::middleware;
 use librefang_api::routes::AppState;
 use librefang_api::server;
 use librefang_kernel::LibreFangKernel;
@@ -365,6 +367,90 @@ async fn put_model_routing_rejects_an_unknown_mode() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// #7781 review: an unknown agent id must 404, the same as the GET side,
+/// instead of falling through to the kernel call and coming back as a 400
+/// — the shape a malformed body gets, which hides "this agent does not
+/// exist" behind "you sent something wrong".
+#[tokio::test(flavor = "multi_thread")]
+async fn put_model_routing_404s_for_an_unknown_agent() {
+    let h = boot().await;
+    let missing = AgentId::new();
+    let (status, _) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{missing}/model_routing"),
+            serde_json::json!({ "mode": "flexible" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// #7781 review: the write side of this route must apply the same
+/// per-agent ownership scoping the GET side already does (`can_access_agent`)
+/// — a caller who cannot see this agent must not be able to mutate its
+/// routing settings either.
+///
+/// The full server's RBAC role gate (`middleware::user_role_allows_request`)
+/// requires Admin+ for any non-GET verb, and `can_access_agent` itself
+/// admits Admin+ unconditionally, so a real request through the whole
+/// stack can never exercise a denial here. This mounts the agents router
+/// directly and injects the caller identity the same way
+/// `api_integration_test.rs` does for its handler-level ownership checks,
+/// isolating `can_access_agent` from that unrelated role gate one layer up.
+#[tokio::test(flavor = "multi_thread")]
+async fn put_model_routing_404s_for_a_non_owner() {
+    let h = boot().await;
+    let agent_id = h
+        .state
+        .kernel
+        .spawn_agent_typed(AgentManifest {
+            name: "routing-owner-scope".to_string(),
+            author: "Alice".to_string(),
+            ..AgentManifest::default()
+        })
+        .expect("spawn authored agent");
+
+    let app = axum::Router::new()
+        .nest("/api", librefang_api::routes::agents::router())
+        .with_state(h.state.clone());
+
+    let mut request = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/api/agents/{agent_id}/model_routing"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({ "mode": "flexible" }).to_string(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(middleware::AuthenticatedApiUser {
+            name: "Bob".to_string(),
+            role: middleware::UserRole::User,
+            user_id: librefang_types::agent::UserId::from_name("Bob"),
+        });
+
+    let response = app.oneshot(request).await.expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "a non-owner must not be able to see or mutate another user's agent"
+    );
+
+    // The refused write must not have taken effect.
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .expect("agent still registered");
+    assert_eq!(
+        entry.manifest.model.mode,
+        librefang_types::agent::ModelMode::Fixed
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
