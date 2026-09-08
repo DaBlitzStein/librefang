@@ -2259,6 +2259,15 @@ pub async fn comms_task(
                 "task_id": task_id,
             })),
         ),
+        // Mirrors `task_queue_post_root`: an unresolvable `assigned_to` is a
+        // bad request body, not a server failure, so it is reported as 400
+        // rather than falling through to the generic 500 scrub below.
+        Err(librefang_kernel_handle::KernelOpError::AgentNotFound(name)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("Field 'assigned_to' names no known agent: '{name}'")
+            })),
+        ),
         Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }
