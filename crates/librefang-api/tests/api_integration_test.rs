@@ -6549,9 +6549,6 @@ async fn task_timeout_secs_overrides_the_global_claim_ttl() {
         serde_json::json!({
             "title": "Quick probe",
             "description": "one-second budget",
-            // Small enough that the deadline genuinely elapses inside the test
-            // rather than being simulated by rewriting `claimed_at`, so the
-            // epoch arithmetic in the sweeper's query is exercised for real.
             "timeout_secs": 1,
         }),
     )
@@ -6573,17 +6570,32 @@ async fn task_timeout_secs_overrides_the_global_claim_ttl() {
         .expect("the posted task is claimable");
     assert_eq!(claimed["id"], task_id);
 
+    // Back-date `claimed_at` directly instead of racing a real 1s deadline
+    // against however long the test runner takes to get here — an
+    // immediate assert right after the claim, with nothing to fall back on
+    // if the process stalls even briefly, is exactly the kind of margin-free
+    // timing check that turns into a false red under load.
+    let set_claimed_at = |age: chrono::Duration| {
+        let conn = substrate.pool().get().unwrap();
+        let claimed_at = (chrono::Utc::now() - age).to_rfc3339();
+        conn.execute(
+            "UPDATE task_queue SET claimed_at = ?1 WHERE id = ?2",
+            rusqlite::params![claimed_at, task_id],
+        )
+        .unwrap();
+    };
+
     // Before the deadline the sweeper must leave it alone, so the reset below
     // is attributable to the elapsed timeout and not to an always-reset bug.
+    set_claimed_at(chrono::Duration::milliseconds(200));
     let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
     assert!(
         reset.is_empty(),
-        "a freshly claimed task is not yet past its 1s deadline, got {reset:?}"
+        "a claim 200ms old is not yet past its 1s deadline, got {reset:?}"
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
-
     // A one-hour global TTL would leave this claimed; the row's own 1s wins.
+    set_claimed_at(chrono::Duration::seconds(5));
     let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
     assert_eq!(
         reset,
