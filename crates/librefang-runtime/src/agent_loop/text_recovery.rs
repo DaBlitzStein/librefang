@@ -690,7 +690,7 @@ fn strip_tool_call_spans(text: &str) -> String {
         let mut earliest: Option<(usize, (&str, &str))> = None;
         for (open, close) in SPANS {
             if let Some(pos) = rest.find(open) {
-                if earliest.map_or(true, |(p, _)| pos < p) {
+                if earliest.is_none_or(|(p, _)| pos < p) {
                     earliest = Some((pos, (open, close)));
                 }
             }
