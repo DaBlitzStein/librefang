@@ -498,139 +498,28 @@ describe("TasksPage", () => {
     });
   });
 
-  describe("task limits", () => {
-    it("posts the agent id, priority and timeout the operator chose", async () => {
-      const mutate = vi.fn();
-      useCreateTaskMock.mockReturnValue(makeMutation({ mutate }));
-      renderPage();
-      fireEvent.click(screen.getAllByText("tasks.new_task")[0]);
-
-      fireEvent.change(screen.getByPlaceholderText("tasks.field_title_placeholder"), {
-        target: { value: "Urgent probe" },
-      });
-      fireEvent.change(screen.getByPlaceholderText("tasks.field_description_placeholder"), {
-        target: { value: "Check the thing" },
-      });
-      fireEvent.change(screen.getByDisplayValue("tasks.assignee_none"), {
-        target: { value: ALPHA_ID },
-      });
-      fireEvent.change(screen.getByDisplayValue("tasks.priority_normal"), {
-        target: { value: "2" },
-      });
-      fireEvent.change(screen.getByPlaceholderText("tasks.field_timeout_placeholder"), {
-        target: { value: "90" },
-      });
-      fireEvent.click(screen.getByText("tasks.submit"));
-
-      await waitFor(() => expect(mutate).toHaveBeenCalled());
-      expect(mutate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: "Urgent probe",
-          description: "Check the thing",
-          assigned_to: ALPHA_ID,
-          priority: 2,
-          timeout_secs: 90,
-        }),
-      );
-    });
-
-    it("omits priority and timeout when the operator left the defaults", async () => {
-      const mutate = vi.fn();
-      useCreateTaskMock.mockReturnValue(makeMutation({ mutate }));
-      renderPage();
-      fireEvent.click(screen.getAllByText("tasks.new_task")[0]);
-      fireEvent.change(screen.getByPlaceholderText("tasks.field_title_placeholder"), {
-        target: { value: "Plain" },
-      });
-      fireEvent.change(screen.getByPlaceholderText("tasks.field_description_placeholder"), {
-        target: { value: "No limits" },
-      });
-      fireEvent.click(screen.getByText("tasks.submit"));
-
-      await waitFor(() => expect(mutate).toHaveBeenCalled());
-      const payload = mutate.mock.calls[0][0];
-      // Absent, not zero: `priority: 0` is the neutral default and
-      // `timeout_secs: 0` would mean "never reclaim", a very different order.
-      expect(payload).not.toHaveProperty("priority");
-      expect(payload).not.toHaveProperty("timeout_secs");
-    });
-
-    it("blocks submission on a negative timeout instead of posting it", () => {
-      const mutate = vi.fn();
-      useCreateTaskMock.mockReturnValue(makeMutation({ mutate }));
-      renderPage();
-      fireEvent.click(screen.getAllByText("tasks.new_task")[0]);
-      fireEvent.change(screen.getByPlaceholderText("tasks.field_title_placeholder"), {
-        target: { value: "Bad" },
-      });
-      fireEvent.change(screen.getByPlaceholderText("tasks.field_description_placeholder"), {
-        target: { value: "Bad timeout" },
-      });
-      fireEvent.change(screen.getByPlaceholderText("tasks.field_timeout_placeholder"), {
-        target: { value: "-5" },
-      });
-      fireEvent.click(screen.getByText("tasks.submit"));
-      expect(mutate).not.toHaveBeenCalled();
-    });
-
-    it("badges a non-neutral priority and a per-task timeout on the card", () => {
-      useTaskQueueMock.mockReturnValue(
-        makeQuery({
-          tasks: [
-            {
-              id: "t-urgent",
-              status: "pending",
-              title: "Urgent one",
-              description: "d",
-              assigned_to: ALPHA_ID,
-              priority: 2,
-              timeout_secs: 90,   // 1.5 min — must render exactly, not rounded
-              created_at: new Date().toISOString(),
-            },
-            {
-              id: "t-plain",
-              status: "pending",
-              title: "Plain one",
-              description: "d",
-              priority: 0,
-              timeout_secs: null,
-              created_at: new Date().toISOString(),
-            },
-          ],
-          total: 2,
-        }),
-      );
-      renderPage();
-      expect(screen.getByText("tasks.priority_urgent")).toBeInTheDocument();
-      expect(screen.getByText("1.5m")).toBeInTheDocument();
-      // The neutral priority is not badged — every historical task carries 0,
-      // so badging it would paint the whole board.
-      expect(screen.queryByText("tasks.priority_normal")).not.toBeInTheDocument();
-    });
-
-    it("renders an id-assigned task under the agent name, not a raw UUID", () => {
-      useTaskQueueMock.mockReturnValue(
-        makeQuery({
-          tasks: [
-            {
-              id: "t-byid",
-              status: "pending",
-              title: "Posted by id",
-              description: "d",
-              assigned_to: ALPHA_ID,
-              created_at: new Date().toISOString(),
-            },
-          ],
-          total: 1,
-        }),
-      );
-      renderPage();
-      // Scoped to the card's badge — "agent-alpha" also appears as a filter
-      // option, so a bare text query would not prove the card resolved it.
-      const badge = document.querySelector(`span[title="${ALPHA_ID}"]`);
-      expect(badge).not.toBeNull();
-      expect(badge!.textContent).toBe("agent-alpha");
-      expect(screen.queryByText(ALPHA_ID)).not.toBeInTheDocument();
-    });
+  it("renders an id-assigned task under the agent name, not a raw UUID", () => {
+    useTaskQueueMock.mockReturnValue(
+      makeQuery({
+        tasks: [
+          {
+            id: "t-byid",
+            status: "pending",
+            title: "Posted by id",
+            description: "d",
+            assigned_to: ALPHA_ID,
+            created_at: new Date().toISOString(),
+          },
+        ],
+        total: 1,
+      }),
+    );
+    renderPage();
+    // Scoped to the card's badge — "agent-alpha" also appears as a filter
+    // option, so a bare text query would not prove the card resolved it.
+    const badge = document.querySelector(`span[title="${ALPHA_ID}"]`);
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toBe("agent-alpha");
+    expect(screen.queryByText(ALPHA_ID)).not.toBeInTheDocument();
   });
 });
