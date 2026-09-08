@@ -3,6 +3,48 @@ import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
 import { generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
+
+/// The tri-state caption for a memory capability field (#7749 review):
+/// `null` is the omitted key (unrestricted), `[]` is the declared-empty deny.
+/// Only shown when the list is empty — a non-empty list speaks for itself.
+/// The toggle exists because an empty tag input cannot carry the distinction.
+function MemoryScopeNote({
+  value,
+  onSet,
+}: {
+  value: string[] | null;
+  onSet: (next: string[] | null) => void;
+}) {
+  const { t } = useTranslation();
+  const isEmpty = (value ?? []).length === 0;
+  if (!isEmpty) return null;
+  if (value === null) {
+    return (
+      <p className="mt-1 text-xs text-text-dim">
+        {t("agents.form.memory_scope_unrestricted")}{" "}
+        <button
+          type="button"
+          className="underline hover:text-brand"
+          onClick={() => onSet([])}
+        >
+          {t("agents.form.memory_scope_restrict")}
+        </button>
+      </p>
+    );
+  }
+  return (
+    <p className="mt-1 text-xs text-warning">
+      {t("agents.form.memory_scope_denied")}{" "}
+      <button
+        type="button"
+        className="underline hover:text-brand"
+        onClick={() => onSet(null)}
+      >
+        {t("agents.form.memory_scope_unrestrict")}
+      </button>
+    </p>
+  );
+}
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
 import { ModelParamField } from "./ui/ModelParamField";
 import { formatTokens } from "../lib/modelParamLadders";
@@ -516,16 +558,24 @@ export function AgentManifestForm({
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.memory_read")}>
             <TagInput
-              value={value.capabilities.memory_read}
+              value={value.capabilities.memory_read ?? []}
               onChange={(next) => updateCapabilities({ memory_read: next })}
               placeholder={t("agents.form.memory_glob_placeholder")}
+            />
+            <MemoryScopeNote
+              value={value.capabilities.memory_read}
+              onSet={(next) => updateCapabilities({ memory_read: next })}
             />
           </Field>
           <Field label={t("agents.form.memory_write")}>
             <TagInput
-              value={value.capabilities.memory_write}
+              value={value.capabilities.memory_write ?? []}
               onChange={(next) => updateCapabilities({ memory_write: next })}
               placeholder={t("agents.form.memory_glob_placeholder")}
+            />
+            <MemoryScopeNote
+              value={value.capabilities.memory_write}
+              onSet={(next) => updateCapabilities({ memory_write: next })}
             />
           </Field>
           <Field label={t("agents.form.agent_message")}>
@@ -714,7 +764,7 @@ export function AgentManifestForm({
 
       <CollapsibleSection title={t("agents.form.fallback_models")} defaultOpen={false}>
         <p className="text-[10px] text-text-dim/70 mb-2">{t("agents.form.fallback_models_hint")}</p>
-        {value.fallback_models.map((fb, idx) => (
+        {(value.fallback_models ?? []).map((fb, idx) => (
           <div
             key={fb._uid}
             className="rounded-lg border border-border-subtle/60 bg-main/40 p-2 mb-2 space-y-2"
@@ -723,7 +773,7 @@ export function AgentManifestForm({
               <span className="text-[10px] font-bold text-text-dim uppercase">#{idx + 1}</span>
               <button
                 type="button"
-                onClick={() => update({ fallback_models: value.fallback_models.filter((_, i) => i !== idx) })}
+                onClick={() => update({ fallback_models: (value.fallback_models ?? []).filter((_, i) => i !== idx) })}
                 className="text-text-dim hover:text-error"
                 aria-label={t("agents.form.remove_fallback")}
               >
@@ -734,28 +784,28 @@ export function AgentManifestForm({
               <input
                 type="text"
                 value={fb.provider}
-                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, provider: e.target.value }) })}
+                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models ?? [], idx, { ...fb, provider: e.target.value }) })}
                 placeholder={t("agents.form.provider")}
                 className={inputClass}
               />
               <input
                 type="text"
                 value={fb.model}
-                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, model: e.target.value }) })}
+                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models ?? [], idx, { ...fb, model: e.target.value }) })}
                 placeholder={t("agents.form.model_id")}
                 className={inputClass}
               />
               <input
                 type="text"
                 value={fb.api_key_env}
-                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, api_key_env: e.target.value }) })}
+                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models ?? [], idx, { ...fb, api_key_env: e.target.value }) })}
                 placeholder={t("agents.form.api_key_env")}
                 className={inputClass}
               />
               <input
                 type="text"
                 value={fb.base_url}
-                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, base_url: e.target.value }) })}
+                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models ?? [], idx, { ...fb, base_url: e.target.value }) })}
                 placeholder={t("agents.form.base_url")}
                 className={inputClass}
               />
@@ -767,7 +817,7 @@ export function AgentManifestForm({
           onClick={() =>
             update({
               fallback_models: [
-                ...value.fallback_models,
+                ...value.fallback_models ?? [],
                 { _uid: generateUid(), provider: "", model: "", api_key_env: "", base_url: "", extras: {} },
               ],
             })
@@ -777,6 +827,30 @@ export function AgentManifestForm({
           <Plus className="w-3.5 h-3.5" />
           {t("agents.form.add_fallback")}
         </button>
+        {(value.fallback_models ?? []).length === 0 &&
+          (value.fallback_models === null ? (
+            <p className="mt-1 text-xs text-text-dim">
+              {t("agents.form.fallback_scope_inherited")}{" "}
+              <button
+                type="button"
+                className="underline hover:text-brand"
+                onClick={() => update({ fallback_models: [] })}
+              >
+                {t("agents.form.fallback_scope_disable")}
+              </button>
+            </p>
+          ) : (
+            <p className="mt-1 text-xs text-warning">
+              {t("agents.form.fallback_scope_disabled")}{" "}
+              <button
+                type="button"
+                className="underline hover:text-brand"
+                onClick={() => update({ fallback_models: null })}
+              >
+                {t("agents.form.fallback_scope_inherit")}
+              </button>
+            </p>
+          ))}
       </CollapsibleSection>
 
       <CollapsibleSection title={t("agents.form.thinking")} defaultOpen={false}>
