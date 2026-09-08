@@ -334,11 +334,18 @@ async fn start_or_resume(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let verify_max_retries = body
-        .as_ref()
-        .and_then(|b| b.0.get("verify_max_retries"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32);
+    let verify_max_retries = match body.as_ref().and_then(|b| b.0.get("verify_max_retries")) {
+        None => None,
+        Some(value) => match value.as_u64().and_then(|n| u32::try_from(n).ok()) {
+            Some(0) | None => {
+                return ApiErrorResponse::bad_request(
+                    "verify_max_retries must be an integer between 1 and 4294967295",
+                )
+                .into_json_tuple();
+            }
+            Some(value) => Some(value),
+        },
+    };
 
     let started = if require_paused {
         state.kernel.resume_goal_run(
@@ -573,26 +580,31 @@ pub async fn create_goal(
     };
 
     let loop_engineering = req["loop_engineering"].as_bool().unwrap_or(false);
-    // Same boundary rule as `agent_id`: reject a bad verifier id here rather
-    // than storing junk that `start_goal_run` has to reject later.
-    let verify_agent_id_str: Option<String> = req
-        .get("verify_agent_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string());
-    if let Some(ref vid) = verify_agent_id_str {
-        if vid.parse::<uuid::Uuid>().is_err() {
+    // Same boundary rule as `agent_id` / `parent_id`: `optional_uuid_field`
+    // treats a blank string or `null` as "not set" rather than a malformed
+    // UUID (#6562), so a verifier field left blank in a form no longer 400s
+    // as "Invalid verify_agent_id" — only a non-blank, non-UUID value does.
+    let verify_agent_id_str = match optional_uuid_field(&req, "verify_agent_id") {
+        Ok(value) => value.flatten(),
+        Err(()) => {
             return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
         }
-    }
+    };
     // Deliberately NOT validated the way the verifier id is: a model id has no
     // checkable shape, and whether it resolves depends on the provider config
     // at call time, not at save time. An unresolvable id degrades — the runner
     // warns per iteration and falls back to the agent's own marker. See the
     // field doc on `librefang_types::goal::Goal::evaluator_model`.
+    //
+    // A blank string IS filtered here, though: unlike an unresolvable model
+    // id, an empty string has no provider to ever resolve against, so storing
+    // it would leave `evaluator_model` set to `Some("")` instead of the
+    // `None` the field is documented to mean when no evaluator is configured.
     let evaluator_model_str: Option<String> = req
         .get("evaluator_model")
         .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string());
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let tick_interval_secs = match validate_tick_interval(&req) {
         Ok(v) => v,
         Err(resp) => return resp,
