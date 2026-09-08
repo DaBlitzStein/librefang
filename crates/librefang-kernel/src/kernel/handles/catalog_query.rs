@@ -78,16 +78,59 @@ impl kernel_handle::CatalogQuery for LibreFangKernel {
     /// asked for; naming a profile on an `agent_spawn` call is an explicit
     /// choice by the parent agent, and silently ignoring an explicit
     /// parameter is the exact failure this lookup exists to remove. It also
-    /// keeps the subagent case usable — spawning a cheap verifier does not
-    /// require switching every agent onto automatic routing.
+    /// keeps the subagent case usable — spawning a cheap verifier does
+    /// not require switching every agent onto automatic routing.
+    ///
+    /// The profile's `model` is resolved through the live model catalog the
+    /// same way `route_to_profile` resolves it (#7789 review): every builtin
+    /// profile names a catalog alias (`"haiku"`, `"sonnet"`, …) and an
+    /// unresolved alias reaches the provider as a model id nobody accepts,
+    /// so the spawned agent would fail auth on its first turn.
     fn resolve_model_profile(
         &self,
         name: &str,
     ) -> Option<librefang_types::model_profile::ModelProfile> {
         let cfg = self.config.load();
-        crate::model_router::ProfileCatalog::load_cached(cfg.home_dir.as_path(), &cfg.model_router)
-            .get(name)
-            .cloned()
+        let mut profile = crate::model_router::ProfileCatalog::load_cached(
+            cfg.home_dir.as_path(),
+            &cfg.model_router,
+        )
+        .get(name)?
+        .clone();
+        // Resolve catalog aliases ("haiku" -> "claude-haiku-4-5-…") so the
+        // builtin profiles do not pin dated model snapshots.
+        let model_catalog = self.model_catalog_ref().load();
+        if let Some(resolved) = model_catalog.resolve_alias(&profile.model) {
+            profile.model = resolved.to_string();
+        }
+        Some(profile)
+    }
+
+    /// Whether `provider` has credentials the kernel can see (#7789 review).
+    ///
+    /// The same guard `route_to_profile` applies per turn — local provider,
+    /// credential pool, or the env var the kernel resolves for the provider
+    /// (operator pin, catalog `api_key_env`, or the `<PROVIDER>_API_KEY`
+    /// convention). `route_to_profile`'s fallback for a miss is "skip the
+    /// profile for this turn"; on the spawn path a wrong provider is
+    /// persisted into a manifest, so the miss is refused instead, with the
+    /// env var named so the operator can fix it.
+    fn check_provider_credentials(&self, provider: &str) -> Result<(), String> {
+        if librefang_runtime::provider_health::is_local_provider(provider) {
+            return Ok(());
+        }
+        if self.llm.credential_pools.contains_key(provider) {
+            return Ok(());
+        }
+        let cfg = self.config.load();
+        let key_env = self.resolve_non_default_api_key_env(&cfg, provider);
+        if std::env::var(&key_env).is_ok() {
+            return Ok(());
+        }
+        Err(format!(
+            "provider '{provider}' has no API key configured — set {key_env} \
+             or add a credential pool for it"
+        ))
     }
 
     /// Ordered by construction: `ProfileCatalog` name-sorts at load (#3298).

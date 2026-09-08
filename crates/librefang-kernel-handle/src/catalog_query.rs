@@ -117,4 +117,24 @@ pub trait CatalogQuery: Send + Sync {
     ) -> Result<Option<librefang_types::model_profile::AgentRouterOverride>, String> {
         Ok(None)
     }
+
+    /// Whether `provider` has credentials the kernel can see (#7789 review).
+    ///
+    /// Lets the runtime refuse an `agent_spawn` naming a profile whose
+    /// provider nobody configured a key for — the same guard
+    /// `route_to_profile` applies per turn, where the fallback is "skip the
+    /// profile for this turn". On the spawn path a wrong provider is
+    /// persisted into a manifest, so the runtime refuses instead, and the
+    /// error names the env var the operator must set.
+    ///
+    /// The knowledge lives kernel-side: the credential pools, the operator's
+    /// `[provider_api_keys]` pin and the model catalog's `api_key_env` are
+    /// all kernel state the runtime cannot see through this seam.
+    ///
+    /// Default impl returns `Ok(())` so existing stubs and tooling keep
+    /// treating every provider as configured; the real kernel impl applies
+    /// the real check.
+    fn check_provider_credentials(&self, _provider: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
