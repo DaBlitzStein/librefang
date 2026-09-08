@@ -380,7 +380,16 @@ pub fn match_profile<'a>(
         .copied()
         .filter(|p| complexity.score <= p.max_complexity && p.cost_tier <= tier_ceiling)
         .map(|p| {
-            let tag_hits = p.tags.iter().filter(|t| words.contains(t.as_str())).count() as u32;
+            // `words` is lowercased; profile tags are operator input read
+            // verbatim out of model_profiles.toml, so a tag with any
+            // uppercase letter would score zero hits on every task and the
+            // profile could only ever be reached through default_profile
+            // (#7781 review). Compare on the same case.
+            let tag_hits = p
+                .tags
+                .iter()
+                .filter(|t| words.contains(t.to_lowercase().as_str()))
+                .count() as u32;
             (p, tag_hits)
         })
         .collect();
@@ -408,9 +417,16 @@ pub fn match_profile<'a>(
         .and_then(|o| o.default_profile.as_deref())
         .or(config.default_profile.as_deref());
     if let Some(name) = fallback_name {
-        // Re-check permissions: a `default_profile` naming an expensive
-        // profile must not become a way around the agent's cost budget.
-        if let Some(p) = permitted.iter().copied().find(|p| p.name == name) {
+        // Re-check permissions AND the ranking filters: a `default_profile`
+        // naming an expensive profile must not become a way around the
+        // agent's cost budget, and one naming a heavy profile for a trivial
+        // task must not escape the complexity ceiling either — both filters
+        // above apply to `candidates`, not to this lookup, so a default
+        // could otherwise return a profile the ranking had excluded
+        // (#7781 review).
+        if let Some(p) = permitted.iter().copied().find(|p| {
+            p.name == name && complexity.score <= p.max_complexity && p.cost_tier <= tier_ceiling
+        }) {
             return (Some(p), RoutingDecision::Fellback);
         }
         warn!(

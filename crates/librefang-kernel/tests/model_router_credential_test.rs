@@ -26,6 +26,12 @@ fn write_profiles(home: &std::path::Path, profiles_toml: &str) {
 /// A catalog provider with a custom `api_key_env` (e.g. `UNSLOTH_API_KEY`
 /// instead of the convention `UNSLOTH_STUDIO_API_KEY`) must be routable when
 /// that custom env var is set. Regression for the #7781 review P1.
+// `set_var` races any other thread that reads the environment, and the
+// default libtest harness runs both tests in this binary on a thread pool —
+// `keyless_local_provider_allows_routing` boots a kernel that reads the
+// environment. `#[serial]` keeps the two off concurrent threads (#7781
+// review: the "single-threaded test binary" justification below was wrong).
+#[serial_test::serial]
 #[test]
 fn catalog_defined_env_name_allows_routing() {
     let (kernel, tmp) = common::boot_kernel();
@@ -74,7 +80,8 @@ max_complexity = 1.0
     cfg.data_dir = home.join("data");
 
     // Set the catalog-defined env var (not the convention one).
-    // SAFETY: single-threaded integration test binary; no other thread races.
+    // SAFETY: `#[serial]` above keeps this test and the keyless one — whose
+    // boot_kernel reads the environment — off concurrent threads.
     unsafe { std::env::set_var("UNSLOTH_API_KEY", "test-key") };
     let result = kernel.route_to_profile(&manifest, "implement the new feature", &cfg);
     unsafe { std::env::remove_var("UNSLOTH_API_KEY") };
@@ -89,6 +96,7 @@ max_complexity = 1.0
 
 /// A local/keyless provider (e.g. ollama) must be routable without any API key.
 /// Regression for the #7781 review P1.
+#[serial_test::serial]
 #[test]
 fn keyless_local_provider_allows_routing() {
     let (kernel, tmp) = common::boot_kernel();
