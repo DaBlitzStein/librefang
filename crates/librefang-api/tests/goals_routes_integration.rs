@@ -1127,7 +1127,11 @@ async fn goals_update_blank_verify_agent_id_clears_assignment() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
 }
-/// Reporting those as unassigned points the operator at a field that already looks filled in, so the two cases get distinct messages.
+
+/// #6562: create / update now reject a non-UUID `agent_id`, but goals written
+/// before that fix still carry junk. Reporting those as unassigned points the
+/// operator at a field that already looks filled in, so the two cases get
+/// distinct messages.
 #[tokio::test(flavor = "multi_thread")]
 async fn goal_run_start_distinguishes_a_corrupt_agent_id_from_an_unassigned_one_6562() {
     let h = boot().await;

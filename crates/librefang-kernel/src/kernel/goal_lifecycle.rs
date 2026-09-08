@@ -157,8 +157,8 @@ impl LibreFangKernel {
         // (`load_goal` in the spawn), and `goal_run_start` — therefore
         // `KernelApi::start_goal_run`, whose doc reads as fallible — must
         // propagate that refusal instead of hardcoding success. The old
-        // `true` made the dead 409 path unreachable: every caller reported
-        // a started run that did not exist.
+        // `true` made the caller's own `!started` check dead code: every
+        // caller reported a started run that did not exist.
         self.workflows.goal_runner.start(
             goal_id,
             agent_id,
