@@ -1677,6 +1677,9 @@
               "application/toml": {}
             }
           },
+          "400": {
+            "description": "Invalid agent ID"
+          },
           "404": {
             "description": "Agent not found"
           }

@@ -1544,6 +1544,7 @@ pub async fn reload_agent_manifest(
     params(("id" = String, Path, description = "Agent ID")),
     responses(
         (status = 200, description = "Agent manifest as raw TOML", content_type = "application/toml"),
+        (status = 400, description = "Invalid agent ID"),
         (status = 404, description = "Agent not found")
     )
 )]

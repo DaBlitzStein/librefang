@@ -610,7 +610,7 @@ export function useSetAgentMcpServers() {
   });
 }
 
-export function useAgentTypeToml() {
+export function useAgentTemplateToml() {
   return useMutation({
     mutationFn: getAgentTemplateToml,
   });
