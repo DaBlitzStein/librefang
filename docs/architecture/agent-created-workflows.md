@@ -19,8 +19,7 @@ Two layers, mirroring the HTTP API:
 
 ## Persistence
 
-Workflows are written atomically (tmp file + rename) to `~/.librefang/workflows/<name>.workflow.toml`, then hot-registered in the `WorkflowEngine`.
-The engine also persists its own JSON copy (`<id>.workflow.json`) — both are scanned at boot and deduped by UUID.
+Workflows are written atomically (tmp file + rename) to `~/.librefang/workflows/<id>.workflow.json`, keyed by the workflow's UUID, then hot-registered in the `WorkflowEngine`.
 A failed write never leaves a partial file on disk.
 
 ## Budget and recursion guards
@@ -57,7 +56,7 @@ Steps can reference an **agent type** (a template) instead of a concrete agent:
 { "type": "researcher" }
 ```
 
-Resolution is find-or-spawn: reuse the registered agent with that name, otherwise load the template manifest (`templates/` first, then `workspaces/agents/`) and spawn it with the canonical name-derived UUID. Add `"fresh": true` to spawn a brand-new instance per run (uid name tag, never shadows the canonical one). A missing template fails the step with a ByType-specific error.
+Resolution is find-or-spawn: reuse the registered agent with that name, otherwise load the template manifest (searched in order: `agent-types/`, then `workspaces/agents/`, then `registry/agents/`) and spawn it with the canonical name-derived UUID. There is deliberately no `"fresh": true` variant that would spawn a throwaway instance per run (#7714); to isolate a step from the type's prior context, set `WorkflowStep::session_mode` to `New` instead. A missing template fails the step with a ByType-specific error.
 
 Steps can also declare `required_skills`. The engine checks them right after agent resolution, before dispatch, and fails the step with a precise error distinguishing two cases:
 
@@ -70,6 +69,6 @@ A run records its `owner_agent_id` (migration v48): the caller of `workflow_run`
 
 ## Agent types
 
-Agent types are templates: the canonical spelling is "agent type" everywhere (`/api/agent-types` aliases the `/api/templates` routes; the TUI templates screen is titled "Agent types"). Agents can author types with the `agent_type_create` tool (same validation as the API), and ephemeral workers spawned from a type get a uid display name plus a transient mission workspace under `~/.librefang/transient/<name>` that is deleted when the run ends.
+Agent types are templates: the canonical spelling is "agent type" everywhere, in prose and UI, though the API stays at `/api/templates` (there is deliberately no `/api/agent-types` alias, #7722; the TUI templates screen is titled "Agent types"). Agents can author types with the `agent_type_create` tool (same validation as the API), and ephemeral workers spawned from a type get a uid display name plus a transient mission workspace under `~/.librefang/transient/<name>` that is deleted when the run ends.
 
-An agent type carries the full manifest surface relevant to spawns: `name`, `description`, `system_prompt`, `provider`/`model` (spawn defaults), `tools`, `skills`, a `channels` allowlist (empty = all configured channels), and preferred-model tiers via `routing` (`simple_model` / `medium_model` / `complex_model` + thresholds — the `[routing]` block of the generated TOML). The dashboard editor exposes all of them with catalog-backed pickers (skills, tools, channels) mirroring the agent editor; the shared `agent_type_json_to_toml` conversion in `librefang-types` is the single source of truth for the API route and the tool, so the two authoring surfaces cannot drift.
+An agent type carries the full manifest surface relevant to spawns: `name`, `description`, `system_prompt`, `provider`/`model` (spawn defaults), `tools`, `skills`, a `channels` allowlist (empty = all configured channels), and preferred-model tiers via `routing` (`simple_model` / `medium_model` / `complex_model` + thresholds — the `[routing]` block of the generated TOML). The dashboard editor exposes all of them with catalog-backed pickers (skills, tools, channels) mirroring the agent editor; the shared `AgentTypeSpec` / `AgentTypeSpec::apply_to` in `librefang-types` is the single source of truth for the API route and the tool, so the two authoring surfaces cannot drift.
