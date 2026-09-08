@@ -693,6 +693,26 @@ mod tests {
         assert!(matched.is_none());
     }
 
+    /// A profile tag written with any uppercase letter must still match: the
+    /// task word set is lowercased before comparison, but a tag read
+    /// verbatim from `model_profiles.toml` was compared case-sensitively
+    /// before, so `"API"` could never hit a task that only ever wrote
+    /// lowercase words (#7781 review).
+    #[test]
+    fn tag_with_uppercase_matches_the_lowercased_task_word_set() {
+        let profiles = vec![profile("custom", &["API"], CostTier::Medium, 1, 1.0)];
+        let cfg = enabled_config();
+        let (matched, decision) = match_profile(
+            "please wire up the api client",
+            &score(0.4),
+            &profiles,
+            &cfg,
+            None,
+        );
+        assert_eq!(decision, RoutingDecision::Matched);
+        assert_eq!(matched.unwrap().name, "custom");
+    }
+
     #[test]
     fn builtin_tags_and_keywords_survive_the_word_tokenizer() {
         // The word matcher can only ever fire for a tag or keyword that its
@@ -898,6 +918,45 @@ mod tests {
         };
         let (matched, decision) =
             match_profile("do the thing", &score(0.2), &profiles, &cfg, Some(&ov));
+        assert_eq!(decision, RoutingDecision::NoCandidate);
+        assert!(matched.is_none());
+    }
+
+    /// The fallback lookup re-applies the same `max_complexity` filter the
+    /// ranking pass applies to `candidates` — a `default_profile` naming a
+    /// profile too weak for this task's score must not become a way around
+    /// that ceiling (#7781 review).
+    #[test]
+    fn fallback_cannot_escape_the_complexity_ceiling() {
+        let profiles = test_profiles();
+        let cfg = ModelRouterConfig {
+            enabled: true,
+            complexity_threshold: 0.0,
+            // "quick" caps out at 0.3; the task below scores well above it.
+            default_profile: Some("quick".to_string()),
+            ..Default::default()
+        };
+        let (matched, decision) = match_profile("do the thing", &score(0.5), &profiles, &cfg, None);
+        assert_eq!(decision, RoutingDecision::NoCandidate);
+        assert!(matched.is_none());
+    }
+
+    /// Same guard, the tier half: a sub-threshold task caps the tier ceiling
+    /// at the cheapest permitted tier, and a `default_profile` naming a
+    /// more expensive profile must not bypass that cap either (#7781
+    /// review).
+    #[test]
+    fn fallback_cannot_escape_the_tier_ceiling() {
+        let profiles = test_profiles();
+        let cfg = ModelRouterConfig {
+            enabled: true,
+            complexity_threshold: 0.5,
+            // "architect" is Expensive; the task scores below the
+            // threshold, which caps the ceiling at "quick"'s Cheap tier.
+            default_profile: Some("architect".to_string()),
+            ..Default::default()
+        };
+        let (matched, decision) = match_profile("do the thing", &score(0.1), &profiles, &cfg, None);
         assert_eq!(decision, RoutingDecision::NoCandidate);
         assert!(matched.is_none());
     }

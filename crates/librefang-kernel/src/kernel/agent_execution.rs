@@ -162,6 +162,39 @@ pub(crate) fn apply_routed_profile(
     model.max_output_tokens = profile.max_output_tokens;
 }
 
+/// Resolve a routed profile's model id against the catalog, in place.
+///
+/// Returns `true` when routing must be declined (extracted out of
+/// `route_to_profile` for a unit test that does not need a live kernel or
+/// on-disk catalog, #7781 review):
+///
+/// - `false` (proceed) — the id resolved to a catalog alias (mutates
+///   `profile.model` to the resolved id), OR the catalog already lists this
+///   exact model, OR the provider is local (accepts any model string), OR
+///   the catalog lists no models at all for this provider (offline,
+///   unsynced, custom — it cannot judge the id either way).
+/// - `true` (decline) — the provider is remote and the catalog lists models
+///   for it, but none matches. Posting an unresolved alias like the literal
+///   string `"sonnet"` to such a provider would 404 on every routed turn,
+///   and the credential gate below cannot see that failure coming.
+fn model_resolution_declines_routing(
+    model_catalog: &librefang_runtime::model_catalog::ModelCatalog,
+    profile: &mut librefang_types::model_profile::ModelProfile,
+) -> bool {
+    if let Some(resolved) = model_catalog.resolve_alias(&profile.model) {
+        profile.model = resolved.to_string();
+        return false;
+    }
+    if model_catalog.find_model(&profile.model).is_some() {
+        return false;
+    }
+    let is_local = librefang_runtime::provider_health::is_local_provider(&profile.provider);
+    let provider_has_models = !model_catalog
+        .models_by_provider(&profile.provider)
+        .is_empty();
+    !is_local && provider_has_models
+}
+
 impl LibreFangKernel {
     // -----------------------------------------------------------------------
     // Module dispatch: WASM / Python / LLM
@@ -482,27 +515,7 @@ impl LibreFangKernel {
         // builtin profiles do not pin dated model snapshots.
         let mut profile = profile.clone();
         let model_catalog = self.llm.model_catalog.load();
-        if let Some(resolved) = model_catalog.resolve_alias(&profile.model) {
-            profile.model = resolved.to_string();
-        } else if model_catalog.find_model(&profile.model).is_none()
-            && !{
-                // #7781 review: a remote provider whose catalog lists models
-                // validates ids — posting the literal alias "sonnet" to it fails
-                // with 404 on *every* routed turn, and the credential gate below
-                // cannot see it (the key is fine). Decline to route when the
-                // catalog knows this provider well enough to reject the id.
-                // Local providers (ollama, llama.cpp) accept any model string
-                // and never appear in the catalog, and a remote provider the
-                // catalog lists no models for (offline, unsynced, custom) cannot
-                // be judged — in both cases the id passes through untouched.
-                let is_local =
-                    librefang_runtime::provider_health::is_local_provider(&profile.provider);
-                let provider_has_models = !model_catalog
-                    .models_by_provider(&profile.provider)
-                    .is_empty();
-                is_local || !provider_has_models
-            }
-        {
+        if model_resolution_declines_routing(&model_catalog, &mut profile) {
             warn!(
                 agent = %manifest.name,
                 profile = %profile.name,
@@ -1992,6 +2005,105 @@ mod apply_routed_profile_tests {
             model.base_url.as_deref(),
             Some("https://cloudverse.example/v1")
         );
+    }
+}
+
+/// Regression tests for `model_resolution_declines_routing` (#7781 review):
+/// the gate must decline only when the catalog can actually prove the id is
+/// wrong, not merely because the id is unfamiliar.
+#[cfg(test)]
+mod model_resolution_declines_routing_tests {
+    use super::model_resolution_declines_routing;
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::model_catalog::ModelCatalogEntry;
+    use librefang_types::model_profile::{CostTier, ModelProfile};
+
+    fn profile(provider: &str, model: &str) -> ModelProfile {
+        ModelProfile {
+            name: "test-profile".to_string(),
+            tags: Default::default(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            context_window: None,
+            max_output_tokens: None,
+            cost_tier: CostTier::Medium,
+            priority: 0,
+            max_complexity: 1.0,
+            description: None,
+        }
+    }
+
+    fn catalog_entry(provider: &str, id: &str) -> ModelCatalogEntry {
+        ModelCatalogEntry {
+            id: id.to_string(),
+            provider: provider.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// A remote provider the catalog lists models for, given an id that
+    /// matches none of them, must decline — posting it would 404 on every
+    /// routed turn.
+    #[test]
+    fn remote_cataloged_provider_with_unresolvable_model_declines() {
+        let catalog = ModelCatalog::from_entries(
+            vec![catalog_entry("anthropic", "claude-sonnet-4-5")],
+            Vec::new(),
+        );
+        let mut p = profile("anthropic", "totally-not-a-real-model");
+
+        assert!(
+            model_resolution_declines_routing(&catalog, &mut p),
+            "a cataloged remote provider with no matching model must decline"
+        );
+    }
+
+    /// The gate is not too wide: a provider the catalog has no models for at
+    /// all (offline, unsynced, custom) cannot be judged either way, so an
+    /// unresolvable id must still be allowed through.
+    #[test]
+    fn provider_absent_from_catalog_allows_unresolvable_model() {
+        let catalog = ModelCatalog::from_entries(
+            vec![catalog_entry("anthropic", "claude-sonnet-4-5")],
+            Vec::new(),
+        );
+        let mut p = profile("totally-custom-vllm", "custom/whatever-model");
+
+        assert!(
+            !model_resolution_declines_routing(&catalog, &mut p),
+            "a provider absent from the catalog must not be judged"
+        );
+        assert_eq!(p.model, "custom/whatever-model", "the id is left untouched");
+    }
+
+    /// A local provider accepts any model string, cataloged or not.
+    #[test]
+    fn local_provider_allows_unresolvable_model() {
+        let catalog = ModelCatalog::from_entries(Vec::new(), Vec::new());
+        let mut p = profile("ollama", "llama3.2");
+
+        assert!(
+            !model_resolution_declines_routing(&catalog, &mut p),
+            "a local provider must never be declined on model id alone"
+        );
+    }
+
+    /// A resolvable alias is rewritten to the concrete id and always allowed.
+    #[test]
+    fn resolvable_alias_is_rewritten_and_allowed() {
+        let catalog = ModelCatalog::from_entries(
+            vec![ModelCatalogEntry {
+                id: "claude-sonnet-4-5".to_string(),
+                provider: "anthropic".to_string(),
+                aliases: vec!["sonnet".to_string()],
+                ..Default::default()
+            }],
+            Vec::new(),
+        );
+        let mut p = profile("anthropic", "sonnet");
+
+        assert!(!model_resolution_declines_routing(&catalog, &mut p));
+        assert_eq!(p.model, "claude-sonnet-4-5");
     }
 }
 

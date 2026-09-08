@@ -6,9 +6,10 @@
 //!
 //! Routes covered:
 //!   GET  /api/agents/{id}/model_routing  (default shape, flexible shape)
-//!   PUT  /api/agents/{id}/model_routing  (round-trip, clear back to fixed,
-//!                                         validation, bad id, unknown agent,
-//!                                         non-owner)
+//!   PUT  /api/agents/{id}/model_routing  (round-trip, fixed/default_profile
+//!                                         partial-save preservation, clear
+//!                                         back to fixed, validation, bad id,
+//!                                         unknown agent, non-owner)
 //!   GET  /api/model-router/profiles      (builtin catalog, home override,
 //!                                         deterministic ordering)
 //!
@@ -229,6 +230,101 @@ async fn put_model_routing_flexible_round_trips() {
     );
 }
 
+/// #7781 review: `fixed` — the documented per-agent router bypass — must be
+/// readable through GET so a client can round-trip it (it was write-only
+/// before), and `default_profile` must survive a save that omits it or
+/// sends an explicit `null`; only an explicit empty string clears it.
+#[tokio::test(flavor = "multi_thread")]
+async fn put_model_routing_preserves_fixed_and_default_profile_across_partial_saves() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "routing-fixed-and-default");
+
+    // Establish fixed=true and default_profile="coder".
+    send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({
+                "mode": "flexible",
+                "fixed": true,
+                "default_profile": "coder",
+            }),
+        ),
+    )
+    .await;
+    let (_, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/model_routing")),
+    )
+    .await;
+    assert_eq!(
+        body["fixed"], true,
+        "GET must round-trip the stored fixed flag"
+    );
+    assert_eq!(body["default_profile"], "coder");
+
+    // A save that omits both keys must not clear either.
+    send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({ "mode": "flexible", "allowed_profiles": ["coder"] }),
+        ),
+    )
+    .await;
+    let (_, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/model_routing")),
+    )
+    .await;
+    assert_eq!(
+        body["fixed"], true,
+        "omitting fixed must preserve the stored value"
+    );
+    assert_eq!(
+        body["default_profile"], "coder",
+        "omitting default_profile must preserve it"
+    );
+
+    // An explicit null for default_profile must also preserve it, not clear it.
+    send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({ "mode": "flexible", "default_profile": null }),
+        ),
+    )
+    .await;
+    let (_, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/model_routing")),
+    )
+    .await;
+    assert_eq!(
+        body["default_profile"], "coder",
+        "explicit null must preserve, not clear"
+    );
+
+    // Only an explicit empty string clears it.
+    send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({ "mode": "flexible", "default_profile": "" }),
+        ),
+    )
+    .await;
+    let (_, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/model_routing")),
+    )
+    .await;
+    assert!(
+        body["default_profile"].is_null(),
+        "an explicit empty string is the one way to clear it"
+    );
+}
+
 /// The allowlist is a set: duplicates collapse and order is normalised, so
 /// two clients sending the same names in different orders converge on the
 /// same manifest and the same provider prompt cache (#3298).
@@ -326,6 +422,35 @@ async fn put_model_routing_rejects_an_unknown_cost_budget() {
     )
     .await;
     assert_eq!(after["mode"], "fixed");
+}
+
+/// A non-string, non-null `cost_budget` (a number, or a boolean left behind
+/// by an unset form toggle) must not silently read as "no cap" — that would
+/// hand the agent the most expensive tier with no cap at all (#7781 review).
+#[tokio::test(flavor = "multi_thread")]
+async fn put_model_routing_rejects_a_non_string_cost_budget() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "routing-numeric-budget");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({ "mode": "flexible", "cost_budget": 5 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+
+    let (_, after) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/model_routing")),
+    )
+    .await;
+    assert_eq!(
+        after["mode"], "fixed",
+        "the rejected write must not take effect"
+    );
 }
 
 /// An explicit `null` budget is the documented "no cap" value and is accepted.
