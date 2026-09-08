@@ -34,9 +34,10 @@ impl librefang_memory::proactive::EmbeddingFn for EmbeddingBridge {
 /// Wall-clock ceiling on the single extraction call that turns a conversation
 /// slice into candidate memories.
 ///
-/// Named rather than inlined because the caller in `agent_loop::end_turn` has
-/// to budget for it: a ceiling here that the end-of-turn budget does not cover
-/// would cut off extractions that were about to succeed.
+/// Named rather than inlined so it sits next to [`DECISION_TIMEOUT_SECS`] and
+/// can be compared to it. The caller (`agent_loop::end_turn`) does not wrap
+/// `auto_memorize` in a timeout of its own — this ceiling is enforced
+/// entirely inside the extraction call.
 pub const EXTRACTION_TIMEOUT_SECS: u64 = 30;
 
 /// Wall-clock ceiling on the follow-up call that decides whether a candidate
