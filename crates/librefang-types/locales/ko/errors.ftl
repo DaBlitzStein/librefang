@@ -32,6 +32,7 @@ api-error-template-parse-failed = 템플릿 분석에 실패했습니다: { $err
 api-error-template-required = 'manifest_toml' 또는 'template' 중 하나가 필요합니다
 api-error-template-invalid-manifest = 유효하지 않은 템플릿 매니페스트입니다
 api-error-template-read-failed = 템플릿을 읽는 데 실패했습니다
+api-error-template-snapshot-failed = 현재 에이전트 유형의 스냅샷을 저장하지 못해 복원을 취소했으며 아무것도 덮어쓰지 않았습니다. 다시 시도하세요.
 api-error-template-promote-no-token = GitHub 토큰이 구성되지 않았습니다. 설정에서 GitHub를 연결하거나 GITHUB_TOKEN을 설정하세요.
 api-error-template-promote-review-required = 이 템플릿에는 게시 전에 제거해야 하는 비공개 정보가 아직 포함되어 있습니다. 검사 결과를 확인하고 매니페스트를 편집하세요.
 api-error-template-promote-render-failed = 정리된 매니페스트를 TOML로 렌더링할 수 없습니다: { $error }

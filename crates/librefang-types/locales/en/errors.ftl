@@ -32,6 +32,7 @@ api-error-template-parse-failed = Failed to parse template: { $error }
 api-error-template-required = Either 'manifest_toml' or 'template' is required
 api-error-template-invalid-manifest = Invalid template manifest
 api-error-template-read-failed = Failed to read template
+api-error-template-snapshot-failed = Could not save a snapshot of the current agent type, so the restore was cancelled and nothing was overwritten. Try again.
 api-error-template-promote-no-token = No GitHub token configured. Connect GitHub in Settings or set GITHUB_TOKEN.
 api-error-template-promote-review-required = This template still contains private details that must be removed before publishing. Review the findings and edit the manifest.
 api-error-template-promote-render-failed = Cannot render the sanitized manifest as TOML: { $error }
