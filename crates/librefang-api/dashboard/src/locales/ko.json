@@ -3066,7 +3066,10 @@
     "verifier_agent": "검증 에이전트",
     "no_verifier_selected": "검증자 없음(게이트 없이 실행)",
     "evaluator_model": "평가 모델",
-    "evaluator_model_placeholder": "평가 모델(선택)"
+    "evaluator_model_placeholder": "평가 모델(선택)",
+    "tick_interval": "반복 간격",
+    "tick_interval_placeholder": "루프 반복 사이의 초 (기본값 {{defaultSecs}})",
+    "tick_interval_out_of_range": "반복 간격은 {{min}}초에서 {{max}}초 사이의 정수여야 합니다."
   },
   "sessions": {
     "title": "세션",
@@ -4395,7 +4398,7 @@
     "name_hint": "영문자, 숫자, 하이픈, 밑줄만 사용할 수 있으며 나중에 변경할 수 없습니다.",
     "name_placeholder": "customer-support",
     "new": "새 에이전트 타입",
-    "preserved_note": "저장 시 위 필드만 다시 기록됩니다. 이 타입의 agent.toml에 있는 트리거, 컴팩션, MCP 허용 목록, 세션 모드 등 나머지는 그대로 유지됩니다.",
+    "promote": "레지스트리에 등록",
     "promote_copied": "정제된 TOML을 복사했습니다",
     "promote_copy": "TOML 복사",
     "promote_copy_failed": "TOML을 복사하지 못했습니다",
@@ -4428,7 +4431,6 @@
     "saved": "에이전트 타입을 저장했습니다",
     "subtitle": "스폰에 재사용할 수 있는 에이전트 매니페스트입니다.",
     "title": "에이전트 타입",
-    "promote": "레지스트리에 등록",
     "confirm_promote": "에이전트 유형 '{{name}}'을(를) 공개 레지스트리에 등록하시겠습니까? 매니페스트가 정리된 후 GitHub pull request로 제출됩니다.",
     "promoted": "레지스트리 PR 생성됨",
     "promote_failed": "에이전트 유형을 등록할 수 없습니다",

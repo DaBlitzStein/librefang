@@ -5172,6 +5172,7 @@ fn goal_from_json(g: &serde_json::Value) -> GoalInfo {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        tick_interval_secs: g["tick_interval_secs"].as_u64(),
         run_phase: None,
         run_iteration: None,
         run_max_iterations: None,
@@ -5242,6 +5243,7 @@ pub fn spawn_create_goal(
     loop_engineering: bool,
     verify_agent_id: String,
     evaluator_model: String,
+    tick_interval_secs: Option<u64>,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
@@ -5261,6 +5263,11 @@ pub fn spawn_create_goal(
             }
             if !evaluator_model.is_empty() {
                 body["evaluator_model"] = serde_json::Value::String(evaluator_model);
+            }
+            // Omitted rather than sent as null: the goal document only carries
+            // the field when it overrides the default cadence.
+            if let Some(secs) = tick_interval_secs {
+                body["tick_interval_secs"] = serde_json::json!(secs);
             }
             match client
                 .post(format!("{base_url}/api/goals"))

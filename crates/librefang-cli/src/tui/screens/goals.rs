@@ -4,6 +4,9 @@
 //! A goal document carries only its own fields; the live run state (phase, iteration, cap) lives in the kernel's run registry and is served separately by `GET /api/goals/{id}/run`, so the detail pane fetches it on open rather than expecting it inside the list payload.
 
 use crate::tui::{theme, widgets};
+use librefang_types::goal::{
+    DEFAULT_GOAL_TICK_INTERVAL_SECS, MAX_GOAL_TICK_INTERVAL_SECS, MIN_GOAL_TICK_INTERVAL_SECS,
+};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -14,19 +17,22 @@ use std::collections::BTreeMap;
 
 /// Create-wizard steps, in the order they are walked.
 ///
-/// The verifier and evaluator steps come last because they configure loop
-/// engineering and are skipped entirely when it is off — see
+/// The tick-interval cadence sits right after the fields every goal has
+/// (title, description, agent) because it applies regardless of loop
+/// engineering; the verifier and evaluator steps come last because they
+/// configure loop engineering and are skipped entirely when it is off — see
 /// [`GoalsState::create_visible_steps`].
 const STEP_TITLE: usize = 0;
 const STEP_DESCRIPTION: usize = 1;
 const STEP_AGENT: usize = 2;
-const STEP_LOOP_ENGINEERING: usize = 3;
-const STEP_VERIFIER: usize = 4;
-const STEP_EVALUATOR: usize = 5;
+const STEP_TICK_INTERVAL: usize = 3;
+const STEP_LOOP_ENGINEERING: usize = 4;
+const STEP_VERIFIER: usize = 5;
+const STEP_EVALUATOR: usize = 6;
 
-/// Number of fields in the create wizard: title, description, agent, loop
-/// engineering, verifier agent, evaluator model.
-pub const CREATE_STEPS: usize = 6;
+/// Number of fields in the create wizard: title, description, agent, tick
+/// interval, loop engineering, verifier agent, evaluator model.
+pub const CREATE_STEPS: usize = 7;
 
 /// Steps walked when loop engineering is off: everything up to and including
 /// the loop-engineering toggle itself.
@@ -59,6 +65,10 @@ pub struct GoalInfo {
     /// Model that judges the goal condition independently of the agent's own
     /// `GOAL_DONE` marker. Only consulted when [`Self::loop_engineering`] is set.
     pub evaluator_model: Option<String>,
+    /// Pause between the runner's loop iterations, in seconds.
+    /// `None` is the goal document omitting the field, which leaves the run on
+    /// [`DEFAULT_GOAL_TICK_INTERVAL_SECS`] — not "no pause".
+    pub tick_interval_secs: Option<u64>,
     /// Live run phase, populated by [`GoalsAction::ShowDetail`]; `None` until then.
     pub run_phase: Option<String>,
     pub run_iteration: Option<u32>,
@@ -107,6 +117,8 @@ pub struct GoalsState {
     pub create_loop_engineering: bool,
     pub create_verify_agent_id: String,
     pub create_evaluator_model: String,
+    /// Raw digits typed into the cadence step; empty means "use the default".
+    pub create_tick_interval: String,
     /// Verification-round budgets the `+` / `-` keys have set, by goal id.
     ///
     /// It is a property of the run request, not of the stored goal — the API
@@ -143,6 +155,8 @@ pub enum GoalsAction {
         loop_engineering: bool,
         verify_agent_id: String,
         evaluator_model: String,
+        /// `None` omits the field so the goal keeps the compiled default cadence.
+        tick_interval_secs: Option<u64>,
     },
     StartRun {
         goal_id: String,
@@ -197,6 +211,7 @@ impl GoalsState {
             create_loop_engineering: false,
             create_verify_agent_id: String::new(),
             create_evaluator_model: String::new(),
+            create_tick_interval: String::new(),
             pending_verify_max_retries: BTreeMap::new(),
             status_msg: String::new(),
             confirm_delete: false,
@@ -422,6 +437,7 @@ impl GoalsState {
                 self.create_loop_engineering = false;
                 self.create_verify_agent_id.clear();
                 self.create_evaluator_model.clear();
+                self.create_tick_interval.clear();
             }
             KeyCode::Char('d') if self.list_state.selected().is_some() => {
                 self.confirm_delete = true;
@@ -509,6 +525,27 @@ impl GoalsState {
         }
     }
 
+    /// Parse the wizard's cadence field into the value the create call sends.
+    ///
+    /// An empty field is not an error: it means "leave this goal on the
+    /// compiled default", which the API expresses by omitting the field.
+    /// A number outside the accepted band is refused here rather than posted,
+    /// so the operator is told at the keyboard instead of reading back a 400.
+    pub fn parsed_create_tick_interval(&self) -> Result<Option<u64>, ()> {
+        let trimmed = self.create_tick_interval.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        match trimmed.parse::<u64>() {
+            Ok(secs)
+                if (MIN_GOAL_TICK_INTERVAL_SECS..=MAX_GOAL_TICK_INTERVAL_SECS).contains(&secs) =>
+            {
+                Ok(Some(secs))
+            }
+            _ => Err(()),
+        }
+    }
+
     fn handle_create_key(&mut self, key: KeyEvent) -> GoalsAction {
         match key.code {
             KeyCode::Esc => {
@@ -521,68 +558,100 @@ impl GoalsState {
             KeyCode::Enter => {
                 if self.create_step + 1 < self.create_visible_steps() {
                     self.create_step += 1;
-                } else if self.create_is_submittable() {
-                    // A verifier / evaluator typed before the toggle was turned
-                    // back off is not sent: the operator's last word on the
-                    // toggle is the one that decides, and the daemon would
-                    // otherwise store a gate the loop never consults.
-                    let configured = self.create_loop_engineering;
-                    let action = GoalsAction::CreateGoal {
-                        title: self.create_title.trim().to_string(),
-                        description: self.create_desc.trim().to_string(),
-                        agent_id: self.create_agent_id.trim().to_string(),
-                        loop_engineering: configured,
-                        verify_agent_id: if configured {
-                            self.create_verify_agent_id.trim().to_string()
-                        } else {
-                            String::new()
-                        },
-                        evaluator_model: if configured {
-                            self.create_evaluator_model.trim().to_string()
-                        } else {
-                            String::new()
-                        },
-                    };
-                    self.create_open = false;
-                    return action;
-                } else {
+                } else if !self.create_is_submittable() {
                     self.status_msg = crate::i18n::t("tui-goals-create-incomplete");
+                } else {
+                    match self.parsed_create_tick_interval() {
+                        Ok(tick_interval_secs) => {
+                            // A verifier / evaluator typed before the toggle
+                            // was turned back off is not sent: the operator's
+                            // last word on the toggle is the one that
+                            // decides, and the daemon would otherwise store a
+                            // gate the loop never consults.
+                            let configured = self.create_loop_engineering;
+                            let action = GoalsAction::CreateGoal {
+                                title: self.create_title.trim().to_string(),
+                                description: self.create_desc.trim().to_string(),
+                                agent_id: self.create_agent_id.trim().to_string(),
+                                loop_engineering: configured,
+                                verify_agent_id: if configured {
+                                    self.create_verify_agent_id.trim().to_string()
+                                } else {
+                                    String::new()
+                                },
+                                evaluator_model: if configured {
+                                    self.create_evaluator_model.trim().to_string()
+                                } else {
+                                    String::new()
+                                },
+                                tick_interval_secs,
+                            };
+                            self.create_open = false;
+                            return action;
+                        }
+                        Err(()) => {
+                            self.status_msg = crate::i18n::t_args(
+                                "tui-goals-tick-out-of-range",
+                                &[
+                                    ("min", &MIN_GOAL_TICK_INTERVAL_SECS.to_string()),
+                                    ("max", &MAX_GOAL_TICK_INTERVAL_SECS.to_string()),
+                                ],
+                            );
+                        }
+                    }
                 }
             }
-            KeyCode::Char(c) => match self.create_step {
-                STEP_TITLE => self.create_title.push(c),
-                STEP_DESCRIPTION => self.create_desc.push(c),
-                STEP_AGENT => self.create_agent_id.push(c),
-                // A boolean field has no text to type into, so the same keys
-                // that read as "yes" / "no" set it and space flips it.
-                STEP_LOOP_ENGINEERING => match c {
-                    ' ' => self.create_loop_engineering = !self.create_loop_engineering,
-                    'y' | 'Y' => self.create_loop_engineering = true,
-                    'n' | 'N' => self.create_loop_engineering = false,
+            // Editing any field also clears the rejection message: it names a
+            // value that is no longer the one in the box, and a stale error
+            // sitting under a corrected number reads as a second rejection.
+            KeyCode::Char(c) => {
+                self.status_msg.clear();
+                match self.create_step {
+                    STEP_TITLE => self.create_title.push(c),
+                    STEP_DESCRIPTION => self.create_desc.push(c),
+                    STEP_AGENT => self.create_agent_id.push(c),
+                    // The cadence step takes digits only: silently dropping a
+                    // letter beats accepting one and failing the parse at
+                    // submit time.
+                    STEP_TICK_INTERVAL if c.is_ascii_digit() => self.create_tick_interval.push(c),
+                    // A boolean field has no text to type into, so the same
+                    // keys that read as "yes" / "no" set it and space flips
+                    // it.
+                    STEP_LOOP_ENGINEERING => match c {
+                        ' ' => self.create_loop_engineering = !self.create_loop_engineering,
+                        'y' | 'Y' => self.create_loop_engineering = true,
+                        'n' | 'N' => self.create_loop_engineering = false,
+                        _ => {}
+                    },
+                    STEP_VERIFIER => self.create_verify_agent_id.push(c),
+                    STEP_EVALUATOR => self.create_evaluator_model.push(c),
                     _ => {}
-                },
-                STEP_VERIFIER => self.create_verify_agent_id.push(c),
-                STEP_EVALUATOR => self.create_evaluator_model.push(c),
-                _ => {}
-            },
-            KeyCode::Backspace => match self.create_step {
-                STEP_TITLE => {
-                    self.create_title.pop();
                 }
-                STEP_DESCRIPTION => {
-                    self.create_desc.pop();
+            }
+            KeyCode::Backspace => {
+                self.status_msg.clear();
+                match self.create_step {
+                    STEP_TITLE => {
+                        self.create_title.pop();
+                    }
+                    STEP_DESCRIPTION => {
+                        self.create_desc.pop();
+                    }
+                    STEP_AGENT => {
+                        self.create_agent_id.pop();
+                    }
+                    STEP_TICK_INTERVAL => {
+                        self.create_tick_interval.pop();
+                    }
+                    STEP_VERIFIER => {
+                        self.create_verify_agent_id.pop();
+                    }
+                    STEP_EVALUATOR => {
+                        self.create_evaluator_model.pop();
+                    }
+                    _ => {}
                 }
-                STEP_AGENT => {
-                    self.create_agent_id.pop();
-                }
-                STEP_VERIFIER => {
-                    self.create_verify_agent_id.pop();
-                }
-                STEP_EVALUATOR => {
-                    self.create_evaluator_model.pop();
-                }
-                _ => {}
-            },
+            }
             _ => {}
         }
         GoalsAction::Continue
@@ -799,6 +868,13 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
                 )
             },
         ]),
+        Line::from(vec![
+            label_span("tui-goals-label-tick"),
+            Span::styled(
+                describe_tick_interval(g.tick_interval_secs),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+        ]),
     ];
 
     // The verifier, the evaluator and the round budget are only ever consulted
@@ -925,7 +1001,8 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
         Constraint::Length(1), // field label
         Constraint::Length(1), // input
         Constraint::Length(1), // info hint
-        Constraint::Min(0),
+        Constraint::Min(0),    // spacer
+        Constraint::Length(1), // status
         Constraint::Length(1), // nav hints
     ])
     .split(area);
@@ -982,6 +1059,16 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
             state.create_desc.clone(),
             "tui-goals-description-hint",
         ),
+        STEP_AGENT => (
+            "tui-goals-label-agent",
+            state.create_agent_id.clone(),
+            "tui-goals-agent-hint",
+        ),
+        STEP_TICK_INTERVAL => (
+            "tui-goals-label-tick",
+            state.create_tick_interval.clone(),
+            "tui-goals-tick-hint",
+        ),
         STEP_LOOP_ENGINEERING => (
             "tui-goals-label-loop-engineering",
             // A boolean field renders its value as prose either way, so the
@@ -1004,9 +1091,9 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
             state.create_evaluator_model.clone(),
             "tui-goals-evaluator-hint",
         ),
-        // `STEP_AGENT`, and any index a future step count leaves unmapped —
-        // a wizard that renders the wrong known field beats one that renders
-        // nothing at all.
+        // Any index a future step count leaves unmapped — a wizard that
+        // renders the wrong known field beats one that renders nothing at
+        // all.
         _ => (
             "tui-goals-label-agent",
             state.create_agent_id.clone(),
@@ -1033,23 +1120,39 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
     f.render_widget(Paragraph::new(Line::from(vec![display])), chunks[5]);
 
     // Info hint: the variable-shaped detail lives here, never in the label.
+    // The cadence bounds are passed to every step; a message without those
+    // placeholders simply ignores them, which keeps this one call site.
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  \u{24d8} ", Style::default().fg(theme::ACCENT)),
             Span::styled(
-                crate::i18n::t(hint_key),
+                crate::i18n::t_args(
+                    hint_key,
+                    &[
+                        ("min", &MIN_GOAL_TICK_INTERVAL_SECS.to_string()),
+                        ("max", &MAX_GOAL_TICK_INTERVAL_SECS.to_string()),
+                        ("default", &DEFAULT_GOAL_TICK_INTERVAL_SECS.to_string()),
+                    ],
+                ),
                 Style::default().fg(theme::TEXT_SECONDARY),
             ),
         ])),
         chunks[6],
     );
 
+    // The wizard owns the whole screen while it is open, so `draw_list_panel`
+    // — the only other place that renders `status_msg` — is not running. Until
+    // this line existed, an out-of-range cadence set a message that reached no
+    // surface at all: Enter simply appeared to do nothing, on the one step
+    // whose whole point is telling the operator the number was refused.
+    f.render_widget(widgets::status_or_hint(&state.status_msg, ""), chunks[8]);
+
     let nav_key = if state.create_step + 1 < visible_steps {
         "tui-goals-nav-next"
     } else {
         "tui-goals-nav-submit"
     };
-    f.render_widget(widgets::hint_bar(&crate::i18n::t(nav_key)), chunks[8]);
+    f.render_widget(widgets::hint_bar(&crate::i18n::t(nav_key)), chunks[9]);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1099,6 +1202,21 @@ pub fn goal_status_badge(status: &str) -> (String, Style) {
             crate::i18n::t("tui-goals-phase-pend"),
             Style::default().fg(theme::YELLOW),
         )
+    }
+}
+
+/// Render a goal's cadence for the detail pane.
+///
+/// An unset override is shown as the default it resolves to, marked as such:
+/// a blank cell would read as "no pause between iterations", which is the one
+/// thing the field can never mean.
+pub fn describe_tick_interval(secs: Option<u64>) -> String {
+    match secs {
+        Some(s) => crate::i18n::t_args("tui-goals-tick-value", &[("secs", &s.to_string())]),
+        None => crate::i18n::t_args(
+            "tui-goals-tick-default",
+            &[("secs", &DEFAULT_GOAL_TICK_INTERVAL_SECS.to_string())],
+        ),
     }
 }
 
@@ -1580,6 +1698,10 @@ mod tests {
         for c in "agent-7".chars() {
             s.handle_key(key(KeyCode::Char(c)));
         }
+        s.handle_key(key(KeyCode::Enter));
+        for c in "900".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
         // Loop engineering is the last step of a plain draft; leaving it off
         // must not walk the operator through the verifier and evaluator.
         s.handle_key(key(KeyCode::Enter));
@@ -1594,6 +1716,7 @@ mod tests {
                 loop_engineering,
                 verify_agent_id,
                 evaluator_model,
+                tick_interval_secs,
             } => {
                 assert_eq!(title, "Ship");
                 assert_eq!(description, "Do it");
@@ -1601,6 +1724,7 @@ mod tests {
                 assert!(!loop_engineering);
                 assert_eq!(verify_agent_id, "");
                 assert_eq!(evaluator_model, "");
+                assert_eq!(tick_interval_secs, Some(900));
             }
             _ => panic!("the final Enter must submit"),
         }
@@ -1665,6 +1789,50 @@ mod tests {
     }
 
     #[test]
+    fn tick_interval_step_takes_digits_and_drops_anything_else() {
+        let mut s = state_with(vec![]);
+        s.handle_key(key(KeyCode::Char('n')));
+        s.create_step = STEP_TICK_INTERVAL;
+
+        for c in "9a0b0".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            s.create_tick_interval, "900",
+            "letters must not reach a numeric field"
+        );
+
+        s.handle_key(key(KeyCode::Backspace));
+        assert_eq!(s.create_tick_interval, "90");
+    }
+
+    #[test]
+    fn an_empty_tick_interval_submits_as_no_override() {
+        // Empty means "keep the compiled default", which the API expresses by
+        // omitting the field — not by sending zero.
+        let mut s = state_with(vec![]);
+        s.handle_key(key(KeyCode::Char('n')));
+        for c in "Ship".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        s.create_step = STEP_AGENT;
+        for c in "agent-7".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        s.create_step = STEP_TICK_INTERVAL;
+        // Leaving the cadence blank and stepping past loop engineering (left
+        // at its default, off) is what reaches the final submitting Enter.
+        s.handle_key(key(KeyCode::Enter));
+
+        match s.handle_key(key(KeyCode::Enter)) {
+            GoalsAction::CreateGoal {
+                tick_interval_secs, ..
+            } => assert_eq!(tick_interval_secs, None),
+            _ => panic!("an empty cadence must still submit"),
+        }
+    }
+
+    #[test]
     fn turning_loop_engineering_back_off_drops_the_verifier_and_evaluator() {
         // The toggle is the operator's last word: a gate the loop will never
         // consult must not be stored as if it were live.
@@ -1692,6 +1860,121 @@ mod tests {
             }
             _ => panic!("Enter on the last visible step must submit"),
         }
+    }
+
+    #[test]
+    fn an_out_of_range_tick_interval_blocks_submission_and_explains() {
+        let mut s = state_with(vec![]);
+        s.handle_key(key(KeyCode::Char('n')));
+        for c in "Ship".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        s.create_step = STEP_AGENT;
+        for c in "agent-7".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        s.create_step = STEP_TICK_INTERVAL;
+        // One second past the ceiling the API accepts.
+        for c in (MAX_GOAL_TICK_INTERVAL_SECS + 1).to_string().chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        // Stepping past the cadence field (unchecked) onto loop engineering
+        // (left at its default, off) is what reaches the submitting Enter.
+        s.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Enter)),
+            GoalsAction::Continue
+        ));
+        assert!(
+            s.create_open,
+            "the wizard stays open rather than posting a value the API refuses"
+        );
+        assert!(!s.status_msg.is_empty(), "and says what the bounds are");
+
+        // Setting the field is not telling the operator. `draw_list_panel` is
+        // the only other place that renders `status_msg`, and it does not run
+        // while the wizard owns the screen — so this message reached no
+        // surface at all and Enter simply looked inert, on the one step whose
+        // whole point is saying the number was refused.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| draw_create(f, f.area(), &s))
+            .expect("the create wizard must render");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            rendered.contains(&s.status_msg),
+            "the wizard must show the rejection, not just store it.\nlooked for: {}\nrendered:\n{rendered}",
+            s.status_msg
+        );
+    }
+
+    /// A rejection describes the number that was in the box. Once the operator
+    /// starts correcting it, the message is about a value that is no longer
+    /// there, and leaving it up reads as a second refusal.
+    #[test]
+    fn editing_a_refused_cadence_clears_the_message() {
+        let mut s = state_with(vec![]);
+        s.create_open = true;
+        s.create_step = STEP_TICK_INTERVAL;
+        s.status_msg = "Tick interval must be between 1 and 86400 seconds.".to_string();
+
+        s.handle_key(key(KeyCode::Backspace));
+        assert!(
+            s.status_msg.is_empty(),
+            "backspace clears the stale message"
+        );
+
+        s.status_msg = "Tick interval must be between 1 and 86400 seconds.".to_string();
+        s.handle_key(key(KeyCode::Char('9')));
+        assert!(s.status_msg.is_empty(), "typing clears the stale message");
+    }
+
+    #[test]
+    fn tick_interval_accepts_both_ends_of_the_range() {
+        let mut s = GoalsState::new();
+
+        s.create_tick_interval = MIN_GOAL_TICK_INTERVAL_SECS.to_string();
+        assert_eq!(
+            s.parsed_create_tick_interval(),
+            Ok(Some(MIN_GOAL_TICK_INTERVAL_SECS))
+        );
+
+        s.create_tick_interval = MAX_GOAL_TICK_INTERVAL_SECS.to_string();
+        assert_eq!(
+            s.parsed_create_tick_interval(),
+            Ok(Some(MAX_GOAL_TICK_INTERVAL_SECS))
+        );
+
+        // Zero is below the floor: it would remove the only gap between
+        // consecutive provider calls.
+        s.create_tick_interval = "0".to_string();
+        assert_eq!(s.parsed_create_tick_interval(), Err(()));
+    }
+
+    #[test]
+    fn detail_pane_shows_the_default_cadence_when_no_override_is_set() {
+        // A blank cell would read as "no pause between iterations", which is
+        // the one thing an absent override cannot mean.
+        let unset = describe_tick_interval(None);
+        assert!(!unset.is_empty());
+        assert!(
+            unset.contains(&DEFAULT_GOAL_TICK_INTERVAL_SECS.to_string()),
+            "an unset cadence must name the default it resolves to, got {unset:?}"
+        );
+
+        let overridden = describe_tick_interval(Some(900));
+        assert!(
+            overridden.contains("900"),
+            "an override must show its own value, got {overridden:?}"
+        );
     }
 
     #[test]
