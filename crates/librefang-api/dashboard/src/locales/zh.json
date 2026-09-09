@@ -4190,6 +4190,7 @@
     "field_timeout_placeholder": "覆盖全局认领 TTL，0 表示永不回收",
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}秒",
+    "timeout_badge_never": "TTL：永不回收",
     "submit": "创建任务",
     "cancel": "取消",
     "empty": "暂无任务",
