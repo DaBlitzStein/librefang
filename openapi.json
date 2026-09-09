@@ -5828,8 +5828,18 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Post a task to the agent task queue",
+          "201": {
+            "description": "Task enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing title, or an unknown assignee",
             "content": {
               "application/json": {
                 "schema": {
