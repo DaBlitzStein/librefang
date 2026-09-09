@@ -1,1 +1,2 @@
-Add `sessions.parent_session_id` so a sub-agent run records which session spawned it — the parent can enumerate what it delegated, and deleting the parent cascades to its children. (#7991) (@DaBlitzStein)
+Add `sessions.parent_session_id` plus an application-side cascade so deleting a parent session removes every descendant session with it, and expose `SessionStore::children_of` to enumerate them.
+No production path writes the column yet — an ephemeral worker's own session is `incognito` and never persisted, so stamping a parent on it would be a write nobody reads — this lands the storage, cascade and query layer for the sub-agent lineage feature ahead of a persisted writer. (#7991) (@DaBlitzStein)
