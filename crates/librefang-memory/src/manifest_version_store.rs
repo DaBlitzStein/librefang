@@ -1,8 +1,8 @@
 //! SQLite-backed agent manifest version history (refs version-history feature).
 //!
 //! Every time an agent's manifest is persisted to disk the full TOML
-//! snapshot is recorded here so operators can see what changed over time
-//! and restore a prior configuration.
+//! snapshot is recorded here so operators can see what changed over time.
+//! Read-only: there is no restore endpoint for agent manifests.
 //!
 //! Retention is per-agent, capped at [`MAX_VERSIONS_PER_AGENT`] most
 //! recent snapshots. Trimmed on insert inside the same transaction.
@@ -10,6 +10,7 @@
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::OptionalExtension;
 
 /// Most recent manifest snapshots kept per agent.
 pub const MAX_VERSIONS_PER_AGENT: usize = 50;
@@ -47,9 +48,13 @@ impl ManifestVersionStore {
     /// Record one manifest snapshot and trim the agent back to
     /// [`MAX_VERSIONS_PER_AGENT`].
     ///
-    /// Skips the insert when the TOML is byte-identical to the most
-    /// recent stored version for this agent (avoids noise from
-    /// no-op persists during boot reconciliation).
+    /// Skips the insert when both the TOML and `change_source` are
+    /// identical to the most recent stored version for this agent (avoids
+    /// noise from no-op persists during boot reconciliation). Comparing
+    /// `change_source` too means a `update-persist-failed` row never
+    /// suppresses the next successful `update` of the same content — the
+    /// disk-write failure this row exists to surface would otherwise stay
+    /// the newest entry forever even after a successful retry.
     pub fn record_version(
         &self,
         agent_id: &str,
@@ -57,26 +62,38 @@ impl ManifestVersionStore {
         manifest_toml: &str,
         change_source: &str,
     ) -> LibreFangResult<()> {
-        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        // Deduplicate: skip if latest snapshot is identical.
-        let latest: Option<String> = conn
+        // `Immediate` takes the write lock up front, so two concurrent
+        // `record_version` calls for the same agent cannot both observe
+        // the same latest row and double-insert — the dedupe below holds
+        // under concurrency rather than only in the happy path.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(LibreFangError::memory)?;
+
+        // Deduplicate: skip if the latest snapshot matches on both fields.
+        // `.optional()` distinguishes "no rows" from a real read failure;
+        // `.ok()` would read a missing table or I/O error as "no previous
+        // version" and fall through to a much less useful insert error.
+        let latest: Option<(String, String)> = tx
             .query_row(
-                "SELECT manifest_toml FROM manifest_versions
+                "SELECT manifest_toml, change_source FROM manifest_versions
                  WHERE agent_id = ?1
                  ORDER BY timestamp DESC, id DESC
                  LIMIT 1",
                 [agent_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .ok();
-        if latest.as_deref() == Some(manifest_toml) {
+            .optional()
+            .map_err(|e| {
+                LibreFangError::memory_msg(format!("manifest version dedup read failed: {e}"))
+            })?;
+        if latest.as_ref().map(|(t, s)| (t.as_str(), s.as_str()))
+            == Some((manifest_toml, change_source))
+        {
             return Ok(());
         }
-
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(LibreFangError::memory)?;
 
         tx.execute(
             "INSERT INTO manifest_versions
@@ -149,20 +166,6 @@ impl ManifestVersionStore {
     }
 }
 
-/// Transaction-scoped cascade delete, called from `remove_agent_inner`
-/// inside the same transaction as every other agent-scoped table.
-pub(crate) fn execute_manifest_version_agent_deletes(
-    tx: &rusqlite::Transaction<'_>,
-    agent_id: &str,
-) -> LibreFangResult<()> {
-    tx.execute(
-        "DELETE FROM manifest_versions WHERE agent_id = ?1",
-        rusqlite::params![agent_id],
-    )
-    .map_err(LibreFangError::memory)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +230,49 @@ mod tests {
         let deleted = store.delete_for_agent("a1").unwrap();
         assert_eq!(deleted, 2);
         assert!(store.list_for_agent("a1", 10).unwrap().is_empty());
+    }
+
+    /// A disk-full write records `update-persist-failed` with the
+    /// in-memory TOML; the operator retries and the identical content now
+    /// persists successfully as `update`. The dedup must not read that as
+    /// "no change" and leave the failure row as the newest entry forever.
+    #[test]
+    fn identical_content_with_a_different_change_source_is_not_deduped() {
+        let store = ManifestVersionStore::new(test_pool());
+        store
+            .record_version("a1", "agent", "same", "update-persist-failed")
+            .unwrap();
+        store
+            .record_version("a1", "agent", "same", "update")
+            .unwrap();
+
+        let versions = store.list_for_agent("a1", 10).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].change_source, "update");
+        assert_eq!(versions[1].change_source, "update-persist-failed");
+    }
+
+    /// A read failure on the dedup SELECT must surface as its own error,
+    /// not get swallowed into "no previous version" and reappear as a
+    /// misleading insert failure against a table that in fact exists.
+    #[test]
+    fn dedup_read_failure_is_reported_as_a_read_failure() {
+        let store = ManifestVersionStore::new(test_pool());
+        // Drop the table out from under the store to force the SELECT to
+        // fail with something other than "no rows".
+        store
+            .pool
+            .get()
+            .unwrap()
+            .execute("DROP TABLE manifest_versions", [])
+            .unwrap();
+
+        let err = store
+            .record_version("a1", "agent", "v1", "dashboard")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("dedup read failed"),
+            "expected the dedup read's own error, got: {err}"
+        );
     }
 }
