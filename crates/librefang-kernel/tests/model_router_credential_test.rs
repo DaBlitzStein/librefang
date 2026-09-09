@@ -4,7 +4,7 @@ use librefang_runtime::kernel_handle::CatalogQuery;
 use librefang_types::{
     agent::{AgentManifest, ModelConfig, ModelMode},
     config::KernelConfig,
-    model_catalog::ProviderInfo,
+    model_catalog::{ModelCatalogEntry, ModelTier, ProviderInfo},
 };
 
 fn flexible_manifest(provider: &str) -> AgentManifest {
@@ -143,8 +143,22 @@ fn resolve_model_profile_resolves_catalog_alias() {
     let (kernel, tmp) = common::boot_kernel();
     let home = tmp.path();
 
+    // The alias has to arrive attached to a real catalog entry, not on its own.
+    // Resolution is provider-scoped (`find_model_for_manifest`, filtered to the
+    // profile's own provider), and every path through it ends at
+    // `models.iter().find(|m| m.id == canonical)` — a bare `add_alias` naming an
+    // id no entry carries resolves to nothing. `add_custom_model` registers the
+    // entry and its `aliases` in one call, which is also how a real provider
+    // file lands in the catalog.
     kernel.model_catalog_update(|cat| {
-        cat.add_alias("quick-alias", "claude-haiku-4-5-canonical");
+        cat.add_custom_model(ModelCatalogEntry {
+            id: "claude-haiku-4-5-canonical".to_string(),
+            display_name: "Claude Haiku 4.5".to_string(),
+            provider: "anthropic".to_string(),
+            tier: ModelTier::Custom,
+            aliases: vec!["quick-alias".to_string()],
+            ..Default::default()
+        });
     });
 
     write_profiles(
