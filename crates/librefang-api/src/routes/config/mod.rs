@@ -361,6 +361,11 @@ pub fn ui_sections_overlay() -> serde_json::Value {
                 // rather than as its own section.
                 "default_owner",
                 "max_concurrent_bg_llm", "max_agent_call_depth", "max_request_body_bytes",
+                // Upload concurrency cap (#8181). Sits with the two size caps it
+                // works against: `max_request_body_bytes` bounds one request,
+                // `max_upload_size_bytes` bounds one upload, and this bounds how
+                // many of those buffers can be resident at once.
+                "max_concurrent_uploads",
                 "workflow_stale_timeout_minutes", "workflow_default_total_timeout_secs",
                 "tool_timeout_secs",
                 "local_probe_interval_secs", "require_auth_for_reads",
@@ -627,6 +632,10 @@ const WRITABLE_EXACT_PATHS: &[&str] = &[
     "max_concurrent_bg_llm",
     "max_agent_call_depth",
     "max_request_body_bytes",
+    // Restart-required like the two size caps above it (`config_reload.rs`
+    // classifies all three), which is the established shape for this group
+    // rather than a reason to withhold the knob.
+    "max_concurrent_uploads",
     "workflow_stale_timeout_minutes",
     "tool_timeout_secs",
     // The local backend's per-command default, sibling of `tool_timeout_secs`
