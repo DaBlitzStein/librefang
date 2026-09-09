@@ -253,9 +253,31 @@ describe("agentManifest serializer", () => {
 });
 
 describe("agentManifest validator", () => {
+  // An agent type authored without a pinned provider persists `provider = ""`
+  // verbatim — `AgentTypeSpec::apply_to` and `into_new_manifest` both treat
+  // `Some("")` as "the caller cleared it", and `ModelConfig::provider` is a
+  // plain `String` with no skip-if-empty, so the blank reaches the agent's
+  // `agent.toml` on disk and back into this form.
+  // Requiring it here turned Save into a silent no-op for those agents:
+  // `saveManifestEditor` returns before issuing the PATCH, with no toast and no
+  // request — the only signal is a red border on a Model section that sits
+  // below the fold of the configuration drawer.
+  it("does not block Save on a manifest that inherits the daemon's default model (#7749)", () => {
+    const parsed = parseManifestToml(
+      ['name = "inherits-default"', 'module = "builtin:chat"', "", "[model]", 'provider = ""', 'model = ""'].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.provider).toBe("");
+    expect(parsed.form.model.model).toBe("");
+    expect(validateManifestForm(parsed.form)).toEqual([]);
+  });
+
   it("flags a missing name", () => {
     const errors = validateManifestForm(emptyManifestForm());
     expect(errors).toContain("name");
+    expect(errors).not.toContain("model.provider");
+    expect(errors).not.toContain("model.model");
   });
 
   // #8028: a blank provider/model is the documented way an agent inherits
