@@ -6,4 +6,5 @@ Neither interface can display a stored value — the API has no read-back endpoi
 That status is the effective source and not vault presence, which matters on any host that already exports the credential: the daemon reads its environment first, so both surfaces would otherwise have shown `Not set` while promotion worked, and shown it again after a removal that revoked nothing.
 An environment-overridden key is now badged as such in both places, with wording that says storing or clearing a value there changes the stored copy rather than the credential the daemon uses, and the confirmation after each write says the same instead of reporting a plain success.
 The TUI additionally holds the secret an operator is typing in a `Zeroizing` buffer, so the allocation is overwritten when it is dropped rather than merely moved out of.
-(#8164) (@DaBlitzStein)
+Both controls require an Owner account, and both report a refusal as one: the TUI previously turned any failed listing — a role the daemon rejected, a vault it could not unlock, or a daemon that was not running — into the empty-list message, telling the operator this build has no writable vault keys.
+(#8164, #8187) (@DaBlitzStein)
