@@ -116,7 +116,10 @@ const LEARNINGS_IN_PROMPT: usize = 6;
 /// Rework rounds allowed per iteration when the caller does not pick a number.
 /// Each round is a verifier turn plus a generator turn, so the default stays
 /// small.
-const DEFAULT_VERIFY_MAX_RETRIES: u32 = 3;
+/// Public so a surface that offers the budget as a control — the TUI goals
+/// screen does — shows the number the run will really use instead of its own
+/// copy of it, which drifts the moment this one changes.
+pub const DEFAULT_VERIFY_MAX_RETRIES: u32 = 3;
 
 /// Structured-memory key prefix under which a run's captured learnings are
 /// stored, alongside the goals document itself.
