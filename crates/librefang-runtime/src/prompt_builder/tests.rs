@@ -1477,13 +1477,39 @@ fn current_time_message_absent_when_unset() {
 }
 
 // ── channel_send guidance per channel kind (#7995) ──────────────────────────
-// The kernel's synthetic channels have no messaging adapter, so a `channel_send`
-// aimed at them fails and pushes the agent to fall back to a real channel.
+// `webui` has no messaging adapter at all — media only reaches the user by
+// being embedded in the reply text, so `channel_send` there would silently
+// fail. `cron` and `autonomous` are different: they have no *default*
+// channel or recipient, but `channel_send` still works there when the agent
+// names a real channel and recipient explicitly, so it must stay offered
+// rather than suppressed (that regressed a working capability — see the
+// #7995 review).
 
 #[test]
-fn system_channels_suppress_the_channel_send_recipient_instruction() {
+fn webui_suppresses_the_channel_send_recipient_instruction() {
     let granted = vec!["channel_send".to_string()];
-    for channel in ["webui", "cron", "autonomous"] {
+    let section = build_channel_section(
+        "webui",
+        Some("Paco"),
+        Some("127.0.0.1"),
+        false,
+        false,
+        &granted,
+    );
+    assert!(
+        section.contains("Do NOT use `channel_send`"),
+        "webui should tell the agent not to use channel_send, got: {section}"
+    );
+    assert!(
+        !section.contains("recipient=\"127.0.0.1\""),
+        "webui must not hand the agent a recipient for a non-existent adapter, got: {section}"
+    );
+}
+
+#[test]
+fn cron_and_autonomous_keep_channel_send_but_require_an_explicit_target() {
+    let granted = vec!["channel_send".to_string()];
+    for channel in ["cron", "autonomous"] {
         let section = build_channel_section(
             channel,
             Some("Paco"),
@@ -1493,14 +1519,38 @@ fn system_channels_suppress_the_channel_send_recipient_instruction() {
             &granted,
         );
         assert!(
-            section.contains("do NOT use `channel_send`"),
-            "{channel} should tell the agent not to use channel_send, got: {section}"
+            !section.contains("Do NOT use `channel_send`"),
+            "{channel} must not be told to avoid channel_send — it has no adapter of its \
+             own, but a real one named explicitly still works, got: {section}"
+        );
+        assert!(
+            section.contains("channel_send"),
+            "{channel} must still offer channel_send, got: {section}"
         );
         assert!(
             !section.contains("recipient=\"127.0.0.1\""),
-            "{channel} must not hand the agent a recipient for a non-existent adapter, got: {section}"
+            "{channel} must not hand the agent a recipient for the sentinel channel itself, \
+             got: {section}"
         );
     }
+}
+
+/// Nothing attaches agent-generated media to an assistant message — the
+/// only path that reaches the user is the agent embedding the returned
+/// URL/path as markdown in the reply. The webui instruction must say that,
+/// not claim media is attached automatically (#7995 review).
+#[test]
+fn webui_states_the_true_media_delivery_mechanism() {
+    let granted = vec!["channel_send".to_string()];
+    let section = build_channel_section("webui", None, None, false, false, &granted);
+    assert!(
+        section.contains("include the returned URL or file path in your reply as markdown"),
+        "webui must say media is delivered by embedding the URL/path, got: {section}"
+    );
+    assert!(
+        !section.contains("shown to the user automatically"),
+        "webui must not claim media is attached automatically, got: {section}"
+    );
 }
 
 #[test]
@@ -1519,7 +1569,7 @@ fn real_channels_keep_the_channel_send_recipient_instruction() {
         "telegram should still name the recipient, got: {section}"
     );
     assert!(
-        !section.contains("do NOT use `channel_send`"),
+        !section.contains("Do NOT use `channel_send`"),
         "telegram must not be told to avoid channel_send, got: {section}"
     );
 }

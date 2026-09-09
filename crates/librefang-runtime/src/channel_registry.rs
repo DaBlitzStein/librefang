@@ -12,16 +12,18 @@ use std::path::Path;
 /// Whether `channel` is one of the kernel's synthetic channel sentinels rather
 /// than a real messaging adapter.
 ///
-/// Keep these literals in sync with the kernel-side constants:
-/// `librefang_kernel::SYSTEM_CHANNEL_{CRON,AUTONOMOUS,WEBUI}`.
-/// Runtime can't import them directly (circular dep — runtime is below kernel),
-/// so a grep-pointer is the best we can do; api / cli / kernel sites reference
-/// the kernel constants by name and stay in lock-step.
+/// Keep this aligned with the kernel-side constants
+/// `librefang_kernel::SYSTEM_CHANNEL_{CRON,AUTONOMOUS,WEBUI}`. Runtime can't
+/// import those directly (circular dep — runtime is below kernel), but
+/// `librefang-channels` mirrors the same list for the same reason and is
+/// drift-guarded against the kernel constants by
+/// `crates/librefang-kernel/tests/audit_cron_channel_name_test.rs`, so defer to
+/// it rather than keeping a third copy of the literals here.
 ///
 /// Every runtime site that needs the distinction calls this, so adding a fourth
 /// sentinel is a one-line edit rather than a hunt for `matches!` copies.
 pub fn is_system_channel(channel: &str) -> bool {
-    matches!(channel, "webui" | "cron" | "autonomous")
+    librefang_channels::types::is_reserved_system_channel(channel)
 }
 
 /// Metadata for a single communication channel, parsed from a registry TOML file.
