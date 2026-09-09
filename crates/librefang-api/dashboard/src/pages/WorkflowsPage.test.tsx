@@ -375,6 +375,31 @@ describe("WorkflowsPage", () => {
     });
   });
 
+  it("disables the re-run control while a re-run is already in flight", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    const mutations = setMutationDefaults();
+    mutations.rerun.isPending = true;
+    useWorkflowRunsMock.mockReturnValue(
+      makeQuery([
+        {
+          id: "run-3",
+          workflow_name: "alpha-flow",
+          state: "completed",
+          steps_completed: 1,
+          input: '{"sector":"fintech"}',
+          started_at: "2026-01-02T00:00:00Z",
+          completed_at: "2026-01-02T00:01:00Z",
+        },
+      ]),
+    );
+    renderPage();
+
+    const rerunBtn = screen.getByLabelText("Re-run with same parameters");
+    expect(rerunBtn).toBeDisabled();
+    fireEvent.click(rerunBtn);
+    expect(mutations.rerun.mutateAsync).not.toHaveBeenCalled();
+  });
+
   it("requires a second click to confirm delete and only then calls the mutation", () => {
     useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
     const mutations = setMutationDefaults();
