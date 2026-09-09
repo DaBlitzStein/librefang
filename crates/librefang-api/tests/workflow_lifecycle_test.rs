@@ -884,6 +884,85 @@ async fn run_detail_exposes_per_step_error_for_failed_step() {
     );
 }
 
+/// `GET /api/workflows/runs/{run_id}` reports `total_steps` from the
+/// workflow definition and `current_step_index` as the completed-step
+/// count. Both were previously absent from this payload entirely, which
+/// left the dashboard's live progress bar (#7997) permanently reading
+/// "Starting…" at 0% no matter how far the run had actually gotten.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_detail_reports_total_steps_and_current_step_index() {
+    use librefang_kernel::workflow::{
+        ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
+    };
+
+    let h = boot().await;
+    let engine = h.state.kernel.workflow_engine();
+
+    // Two independent Transform steps with trivial templates — both
+    // execute (and succeed) without any agent call, same as the
+    // failed-step test above.
+    let make_step = |name: &str| WorkflowStep {
+        name: name.to_string(),
+        agent: StepAgent::ByName {
+            name: "unused".to_string(),
+        },
+        prompt_template: String::new(),
+        mode: StepMode::Transform {
+            code: "{{ prev }}".to_string(),
+        },
+        timeout_secs: 10,
+        error_mode: ErrorMode::Fail,
+        output_var: None,
+        inherit_context: None,
+        depends_on: vec![],
+        session_mode: None,
+        required_skills: Vec::new(),
+    };
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "two-step-transform".to_string(),
+        description: String::new(),
+        steps: vec![make_step("s1"), make_step("s2")],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+        input_schema: None,
+        owner: None,
+    };
+    let wf_id = engine.register(wf).await;
+    let run_id = engine
+        .create_run(wf_id, "input".to_string())
+        .await
+        .expect("create run");
+
+    let resolver =
+        |_a: &StepAgent| -> Option<(librefang_types::agent::AgentId, String, bool)> { None };
+    let sender =
+        |_id: librefang_types::agent::AgentId,
+         msg: String,
+         _sm: Option<librefang_types::agent::SessionMode>| async move { Ok((msg, 0u64, 0u64)) };
+    let _ = engine.execute_run(run_id, resolver, sender).await;
+
+    let (status, detail) = get(&h, &format!("/api/workflows/runs/{run_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail:?}");
+    let steps = detail["step_results"]
+        .as_array()
+        .expect("step_results array");
+    assert_eq!(
+        steps.len(),
+        2,
+        "both transform steps must have run: {detail:?}"
+    );
+    assert_eq!(
+        detail["total_steps"], 2,
+        "total_steps must come from the workflow definition: {detail:?}"
+    );
+    assert_eq!(
+        detail["current_step_index"], 2,
+        "current_step_index must equal the completed-step count: {detail:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/workflows/{id}/runs scoping (regression)
 // ---------------------------------------------------------------------------

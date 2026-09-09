@@ -1827,9 +1827,6 @@
     "delete_failed": "삭제 실패",
     "run_failed": "실행 실패",
     "run_started": "실행이 시작되었습니다",
-    "rerun": "동일한 매개변수로 다시 실행",
-    "rerun_started": "동일한 매개변수로 다시 실행 시작됨",
-    "rerun_failed": "재실행 실패",
     "runs_label": "실행",
     "schedule_failed": "일정 생성 실패",
     "skip": "건너뛰기",
@@ -1873,7 +1870,26 @@
       "load_failed": "대기 중인 운영자 검토를 불러오지 못했습니다.",
       "review_run": "{{workflow}} — {{step}} 검토",
       "more_pending": "대기 중 {{count}}개 더 있음"
-    }
+    },
+    "console": "콘솔",
+    "console_completed": "{{duration}}에 완료 — {{tokens}} 토큰",
+    "console_executing": "실행 중… {{done}}/{{total}} 단계 완료",
+    "console_failed": "실패: {{error}}",
+    "console_run_started": "실행 시작 — {{steps}}단계 정의됨",
+    "console_var_line": "{{varName}} = \"{{value}}\"",
+    "console_step_line": "단계 {{current}}/{{total}} \"{{name}}\" → {{agent}}",
+    "console_step_line_failed": "단계 {{current}}/{{total}} \"{{name}}\" → {{agent}} 실패",
+    "step_via": "{{agent}} 경유",
+    "console_step_io": "프롬프트: {{inTokens}} 토큰 → 응답: {{outTokens}} 토큰, {{duration}} 소요",
+    "console_step_error": "오류: {{error}}",
+    "rerun_hint": "이 매개변수로 다시 실행",
+    "rerun_same": "같은 매개변수로 다시 실행",
+    "rerun_started": "동일한 매개변수로 다시 실행 시작됨",
+    "rerun_failed": "재실행 실패",
+    "starting": "시작 중…",
+    "step_executing": "단계 {{current}}/{{total}} 실행 중…",
+    "step_output": "출력",
+    "step_pending": "대기 중…"
   },
   "scheduler": {
     "title": "스케줄러",
@@ -4253,7 +4269,8 @@
     "status_pending": "보류 중",
     "status_in_progress": "진행 중",
     "status_completed": "완료",
-    "status_failed": "실패"
+    "status_failed": "실패",
+    "field_description_hint": "에이전트가 이 내용을 그대로 읽습니다. 목표, 제약 조건, 완료 기준을 포함하세요."
   },
   "prompts": {
     "title": "프롬프트",

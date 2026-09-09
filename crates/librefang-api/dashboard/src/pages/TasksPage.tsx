@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Kanban,
@@ -26,7 +26,7 @@ import {
   useDeleteTask,
   useRetryTask,
 } from "../lib/mutations/runtime";
-import type { TaskQueueItem } from "../api";
+import type { AgentItem, TaskQueueItem } from "../api";
 import { toastErr } from "../lib/errors";
 import { useUIStore } from "../lib/store";
 
@@ -45,6 +45,32 @@ const COLUMNS: Array<{
   { key: "failed",      labelKey: "tasks.col_failed",      variant: "error",   statuses: ["failed"] },
   { key: "cancelled",   labelKey: "tasks.col_cancelled",   variant: "default", statuses: ["cancelled"] },
 ];
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// `assigned_to` is stored as whichever spelling the poster used: the backend's
+// `task_claim` matches the canonical UUID *or* the display name (issue #2841),
+// and tasks predating the agent-registry-backed picker hold names. Resolve to a
+// name for display so a task posted by id does not render as a raw UUID, and
+// fall back to the stored string so a name-stored (or orphaned) task stays
+// readable instead of blanking out.
+function assigneeLabel(raw: string, agentsById: Map<string, AgentItem>): string {
+  const known = agentsById.get(raw);
+  if (known) return known.name;
+  return UUID_RE.test(raw) ? raw.slice(0, 8) : raw;
+}
+
+// True when `task` is assigned to `agentId`, in either stored spelling.
+function taskMatchesAgent(
+  task: TaskQueueItem,
+  agentId: string,
+  agentsById: Map<string, AgentItem>,
+): boolean {
+  const raw = task.assigned_to ?? "";
+  if (!raw) return false;
+  if (raw === agentId) return true;
+  return agentsById.get(agentId)?.name === raw;
+}
 
 function relativeTime(iso?: string): string {
   if (!iso) return "-";
@@ -78,9 +104,10 @@ interface TaskCardProps {
   task: TaskQueueItem;
   isDragTarget?: boolean;
   onDragStart: (id: string) => void;
+  agentsById: Map<string, AgentItem>;
 }
 
-function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
+function TaskCard({ task, isDragTarget, onDragStart, agentsById }: TaskCardProps) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const deleteMutation = useDeleteTask();
@@ -149,9 +176,12 @@ function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
       {/* Meta row */}
       <div className="flex items-center gap-2 mt-1.5 flex-wrap">
         {task.assigned_to ? (
-          <span className="flex items-center gap-1 text-[10px] font-mono text-brand bg-brand/8 px-1.5 py-0.5 rounded-md shrink-0">
+          <span
+            title={task.assigned_to}
+            className="flex items-center gap-1 text-[10px] font-mono text-brand bg-brand/8 px-1.5 py-0.5 rounded-md shrink-0"
+          >
             <User className="w-2.5 h-2.5" />
-            {task.assigned_to}
+            {assigneeLabel(task.assigned_to, agentsById)}
           </span>
         ) : (
           <span className="text-[10px] text-text-dim/50 italic shrink-0">{t("tasks.unassigned")}</span>
@@ -240,6 +270,7 @@ interface KanbanColumnProps {
   dragTaskId: string | null;
   onDragStart: (id: string) => void;
   onDropRequeue: (taskId: string) => void;
+  agentsById: Map<string, AgentItem>;
 }
 
 function KanbanColumn({
@@ -250,6 +281,7 @@ function KanbanColumn({
   dragTaskId,
   onDragStart,
   onDropRequeue,
+  agentsById,
 }: KanbanColumnProps) {
   const { t } = useTranslation();
   const [isDragOver, setIsDragOver] = useState(false);
@@ -312,6 +344,7 @@ function KanbanColumn({
               task={task}
               isDragTarget={dragTaskId === task.id && !acceptsDrop}
               onDragStart={onDragStart}
+              agentsById={agentsById}
             />
           ))
         )}
@@ -327,7 +360,7 @@ function KanbanColumn({
 interface NewTaskModalProps {
   isOpen: boolean;
   onClose: () => void;
-  agents: string[];
+  agents: AgentItem[];
 }
 
 function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
@@ -354,7 +387,6 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
     });
   }
 
-  // Reset form when modal opens
   // Reset form when modal opens. The previous `if (isOpen && !prev.current)
   // setX(...)` block called setState during render, which React strict-mode
   // warns against and can misbehave under Suspense / concurrent rendering.
@@ -392,14 +424,17 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
           <label className="block text-xs font-semibold text-text-dim mb-1.5">
             {t("tasks.field_description")} <span className="text-error">*</span>
           </label>
+          {/* The agent reads this verbatim, so it is where the operator puts
+              the actual brief — resizable and roomy rather than a 3-line slot. */}
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder={t("tasks.field_description_placeholder")}
             required
-            rows={3}
-            className={`${INPUT_CLASS} resize-none`}
+            rows={8}
+            className={`${INPUT_CLASS} resize-y min-h-[8rem] font-mono text-[13px] leading-relaxed`}
           />
+          <p className="mt-1 text-[10px] text-text-dim/50">{t("tasks.field_description_hint")}</p>
         </div>
 
         <div>
@@ -427,7 +462,7 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
           />
           <datalist id="new-task-assignee-agents">
             {agents.map((a) => (
-              <option key={a} value={a} />
+              <option key={a.id} value={a.name} />
             ))}
           </datalist>
         </div>
@@ -485,7 +520,9 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
             size="md"
             className="flex-1"
             isLoading={createMutation.isPending}
-            disabled={!title.trim() || !description.trim() || createMutation.isPending}
+            disabled={
+              !title.trim() || !description.trim() || createMutation.isPending
+            }
           >
             {t("tasks.submit")}
           </Button>
@@ -523,28 +560,21 @@ export function TasksPage() {
     (task): task is TaskQueueItem & { id: string } => typeof task.id === "string" && task.id.length > 0,
   );
 
-  // The filter dropdown still derives from the tasks themselves: filtering
-  // by a historical assignee whose agent has since been deleted is a read,
-  // not a write — those rows are still there and still filterable.
-  const agentNames = Array.from(
-    new Set(
-      validTasks
-        .map((t) => t.assigned_to)
-        .filter((a): a is string => typeof a === "string" && a.length > 0),
-    ),
-  ).sort();
+  const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
 
-  const registryAgentNames = Array.from(
-    new Set(
-      (agentsQuery.data ?? [])
-        .map((a) => a.name)
-        .filter((n): n is string => typeof n === "string" && n.length > 0),
-    ),
-  ).sort();
+  // #7997 needs the registry rows themselves, not just their names: a card
+  // resolves an `assigned_to` id back to the agent's current name through
+  // this map, and the agent filter matches on the same pair. Kept alongside
+  // `registryAgentNames` rather than replacing it — #7974's assignee input is
+  // a free-text field over a `<datalist>` of names, so both shapes are live.
+  const agentsById = useMemo(
+    () => new Map((agentsQuery.data ?? []).map((a) => [a.id, a])),
+    [agentsQuery.data],
+  );
 
   // Apply agent filter
   const filteredTasks = agentFilter
-    ? validTasks.filter((t) => t.assigned_to === agentFilter)
+    ? validTasks.filter((t) => taskMatchesAgent(t, agentFilter, agentsById))
     : validTasks;
 
   // Group by status
@@ -624,8 +654,8 @@ export function TasksPage() {
               className="rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs focus:border-brand focus:ring-1 focus:ring-brand/10 outline-none"
             >
               <option value="">{t("tasks.all_agents")}</option>
-              {agentNames.map((a) => (
-                <option key={a} value={a}>{a}</option>
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>{a.name}</option>
               ))}
             </select>
 
@@ -692,6 +722,7 @@ export function TasksPage() {
                 dragTaskId={dragTaskId}
                 onDragStart={handleDragStart}
                 onDropRequeue={handleDropRequeue}
+                agentsById={agentsById}
               />
             );
           })}
@@ -718,7 +749,7 @@ export function TasksPage() {
       <NewTaskModal
         isOpen={showNewTask}
         onClose={() => setShowNewTask(false)}
-        agents={registryAgentNames}
+        agents={agents}
       />
     </div>
   );
