@@ -870,6 +870,10 @@ async fn run_agent_loop_streaming_inner(
         };
         // The stripped-tools request has been built; restore tools for any
         // subsequent iteration (the degrade is a single forced prose turn).
+        // Capture this turn's value before resetting — see the non-streaming
+        // mirror in `mod.rs` for why recovery below must not re-arm the
+        // #5979 block-stall loop (#8236).
+        let forced_tools_stripped_this_turn = force_tools_stripped;
         force_tools_stripped = false;
 
         // Notify phase: on first iteration emit Streaming; on subsequent
@@ -1036,11 +1040,11 @@ async fn run_agent_loop_streaming_inner(
 
         // Recover tool calls output as text (streaming path)
         let mut tools_recovered_from_text = false;
-        if matches!(
+        if text_recovery::should_attempt_text_recovery(
+            forced_tools_stripped_this_turn,
             response.stop_reason,
-            StopReason::EndTurn | StopReason::StopSequence
-        ) && response.tool_calls.is_empty()
-        {
+            response.tool_calls.is_empty(),
+        ) {
             let recovered = recover_text_tool_calls(&response.text(), available_tools);
             if !recovered.is_empty() {
                 info!(
@@ -1101,10 +1105,7 @@ async fn run_agent_loop_streaming_inner(
                 // Cascade scaffolding-leak guard (streaming path) — see
                 // non-stream mirror above. Drops text-only EndTurn replies
                 // that contain 2+ structural prompt/memory markers.
-                if response.tool_calls.is_empty()
-                    && !tools_recovered_from_text
-                    && is_cascade_leak(&text)
-                {
+                if response.tool_calls.is_empty() && is_cascade_leak(&text) {
                     warn!(
                         agent = %manifest.name,
                         text_excerpt = %text.chars().take(120).collect::<String>(),
@@ -1133,10 +1134,7 @@ async fn run_agent_loop_streaming_inner(
                 // Progress-text-leak guard (streaming path) — see non-stream
                 // mirror above. Drops ellipsis-terminated short preambles
                 // that arrive without the promised tool_use.
-                if response.tool_calls.is_empty()
-                    && !tools_recovered_from_text
-                    && is_progress_text_leak(&text)
-                {
+                if response.tool_calls.is_empty() && is_progress_text_leak(&text) {
                     warn!(
                         agent = %manifest.name,
                         text_excerpt = %text.chars().take(80).collect::<String>(),
@@ -1217,6 +1215,27 @@ async fn run_agent_loop_streaming_inner(
                         continue;
                     }
                     None => {}
+                }
+
+                // #8235/#8236: see the non-streaming mirror in `mod.rs` for
+                // why this runs here — after retry classification, right
+                // before delivery — rather than right after directive
+                // parsing. `tools_recovered_from_text` is always false on
+                // this arm for the same reason as the non-streaming loop.
+                let text = match replace_unrecoverable_tool_call_reply(&text) {
+                    std::borrow::Cow::Borrowed(_) => text,
+                    std::borrow::Cow::Owned(replacement) => replacement,
+                };
+
+                // #8236: the incremental guard in `stream_with_retry`
+                // withholds a delta while it might still resolve to pure
+                // markup, so nothing reached the client live for a reply
+                // that turns out to need replacing. Send the corrected text
+                // now, as the one delta the client will ever see for it.
+                if stream_result.withheld_markup.is_some() {
+                    let _ = stream_tx
+                        .send(StreamEvent::TextDelta { text: text.clone() })
+                        .await;
                 }
 
                 let text = finalize_end_turn_text(
@@ -1696,6 +1715,22 @@ async fn run_agent_loop_streaming_inner(
                     let (cleaned_text, parsed_directives) =
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
+                    // #8236: same guard as the non-streaming mirror in
+                    // `mod.rs` — the token cap can cut a tool-call markup
+                    // span off mid-call, leaving it permanently unterminated.
+                    let text = match replace_unrecoverable_tool_call_reply(&text) {
+                        std::borrow::Cow::Borrowed(_) => text,
+                        std::borrow::Cow::Owned(replacement) => replacement,
+                    };
+                    // …and the same catch-up send as the EndTurn arm below:
+                    // a reply that opened with a candidate opener was withheld
+                    // delta by delta, so without this the client gets no delta
+                    // at all for this turn.
+                    if stream_result.withheld_markup.is_some() {
+                        let _ = stream_tx
+                            .send(StreamEvent::TextDelta { text: text.clone() })
+                            .await;
+                    }
                     session.push_message(Message::assistant(&text));
                     if !opts.is_fork && !opts.incognito {
                         if let Err(e) = memory.save_session_async(session).await {
