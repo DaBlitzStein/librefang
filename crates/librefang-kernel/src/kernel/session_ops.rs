@@ -310,11 +310,12 @@ impl LibreFangKernel {
                 // with `Message::system` entries, so counting the whole row
                 // makes the *next* agent-wide reset report the previous
                 // reset's injections as cleared history (#7701 review).
-                cleared += old_session
+                let non_system_count = old_session
                     .messages
                     .iter()
                     .filter(|m| m.role != librefang_types::message::Role::System)
                     .count();
+                cleared += non_system_count;
                 // Fire session:end before removing the old session.
                 self.governance.external_hooks.fire(
                     crate::hooks::ExternalHookEvent::SessionEnd,
@@ -323,7 +324,14 @@ impl LibreFangKernel {
                         "session_id": old_session.id.0.to_string(),
                     }),
                 );
-                if save_summary && old_session.messages.len() >= 2 {
+                // Gated on the same non-system count as `cleared`, not the
+                // raw row length: a session holding only a previous reset's
+                // injected system messages is a no-op, not history worth an
+                // aux-LLM summary call — and `render_session_transcript`
+                // renders `Role::System` into the transcript, so summarising
+                // it would hand the LLM the reset prompt as if it were
+                // conversation (#7701 review).
+                if save_summary && non_system_count >= 2 {
                     self.save_session_summary(agent_id, entry, &old_session);
                 }
             }
@@ -486,7 +494,14 @@ impl LibreFangKernel {
                     "session_id": s.id.0.to_string(),
                 }),
             );
-            if save_summary && s.messages.len() >= 2 {
+            // Gated on `cleared`, the non-system count computed above, not
+            // the raw row length: a session holding only a previous reset's
+            // injected system messages is a no-op, not history worth an
+            // aux-LLM summary call — and `render_session_transcript` renders
+            // `Role::System` into the transcript, so summarising it would
+            // hand the LLM the reset prompt as if it were conversation
+            // (#7701 review).
+            if save_summary && cleared >= 2 {
                 self.save_session_summary(agent_id, entry, s);
             }
 
