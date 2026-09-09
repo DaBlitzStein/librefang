@@ -26,6 +26,7 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
+import { ApiError } from "../lib/http/errors";
 import { copyToClipboard } from "../lib/clipboard";
 
 /**
@@ -510,7 +511,7 @@ function PromotionPreviewModal({ name, onClose }: { name: string; onClose: () =>
   );
 }
 
-function RestoreDiffModal({
+export function RestoreDiffModal({
   name,
   onClose,
 }: {
@@ -545,7 +546,14 @@ function RestoreDiffModal({
       ) : diff.isError ? (
         <div className="space-y-3">
           <p className="text-[13px] text-text-dim">
-            {t("agentTypes.restore_no_registry")}
+            {/* `registry_type_not_found` is the one failure that is actually a
+                statement about the registry — every other code (an unparseable
+                local manifest, a read failure, a transport error) means something
+                else went wrong and telling the operator "not in the registry" is
+                misleading, or for the unparseable case the opposite of the truth. */}
+            {diff.error instanceof ApiError && diff.error.code === "registry_type_not_found"
+              ? t("agentTypes.restore_no_registry")
+              : toastErr(diff.error, t("agentTypes.restore_from_registry_failed"))}
           </p>
           <div className="flex justify-end">
             <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>

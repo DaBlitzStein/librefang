@@ -34,6 +34,7 @@ export function useUpdateAgentType() {
       updateAgentType(name, spec),
     onSuccess: (_data, { name }) => {
       qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.registryDiff(name) });
       qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
     },
   });
@@ -54,6 +55,7 @@ export function useRestoreAgentType() {
     mutationFn: (name: string) => restoreAgentTypeFromRegistry(name),
     onSuccess: (_data, name) => {
       qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.registryDiff(name) });
       qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
     },
   });
