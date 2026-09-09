@@ -505,6 +505,14 @@ fn load_pause_checkpoint(substrate: &MemorySubstrate, goal_id: GoalId) -> Option
             .parse()
             .ok()?,
         iteration: value.get("iteration").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        // Aborts the load like `agent_id` above, rather than defaulting.
+        // Zero is a meaningful value for `iteration` and `last_progress`, so
+        // those keep `unwrap_or(0)`; a cap of zero is not a state an operator
+        // can ask for — the API rejects `max_iterations: 0` and
+        // `goal_run_start` clamps it up with `.max(1)` — so reading one out of
+        // a partial checkpoint would report a paused run that never existed.
+        // Falling through to `None` puts a damaged checkpoint on the restart
+        // path, which is what an unreadable one already does.
         max_iterations: value
             .get("max_iterations")
             .and_then(|v| v.as_u64())
