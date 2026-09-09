@@ -685,7 +685,10 @@ export function WorkflowsPage() {
           for (const p of detectedParams) {
             if (parsed[p.name] !== undefined) values[p.name] = String(parsed[p.name]);
           }
-          setParamValues(values);
+          // Merge onto whatever the form already holds — same reasoning
+          // as the auto-populate effect above: a param absent from this
+          // run's stored input still has a seeded default worth keeping.
+          setParamValues((prev) => ({ ...prev, ...values }));
           if (typeof parsed.input === "string") setRunInput(parsed.input);
         }
       } catch {
@@ -700,9 +703,15 @@ export function WorkflowsPage() {
     if (run?.id) {
       void rerunMutation
         .mutateAsync({ runId: run.id, workflowId: selectedWorkflowId })
+        .then(() => {
+          addToast(
+            t("workflows.rerun_started", { defaultValue: "Re-run started with the same parameters" }),
+            "success",
+          );
+        })
         .catch((err) => {
           addToast(
-            err instanceof Error ? err.message : String(err),
+            err instanceof Error ? err.message : t("workflows.rerun_failed", { defaultValue: "Re-run failed" }),
             "error",
           );
         });
@@ -1514,13 +1523,11 @@ export function WorkflowsPage() {
                                 for (let i = 0; i < allSteps.length; i++) {
                                   const s = allSteps[i];
                                   const hasErr = !!s.error;
-                                  const stepLine = t("workflows.console_step_line", { defaultValue: 'Step {{current}}/{{total}} "{{name}}" → {{agent}}', current: i + 1, total: totalSteps || allSteps.length, name: s.step_name, agent: s.agent_name || s.agent_id });
-                                  logs.push({ts: fmtTime(rd.started_at), level: hasErr ? "error" : "info", msg: hasErr ? stepLine + t("workflows.console_step_failed_suffix", { defaultValue: " FAILED" }) : stepLine});
-                                  if (s.variables && Object.keys(s.variables).length > 0) {
-                                    for (const [k,v] of Object.entries(s.variables)) {
-                                      logs.push({ts: fmtTime(rd.started_at), level: "info", msg: varLine(k, v)});
-                                    }
-                                  }
+                                  const stepLineArgs = { current: i + 1, total: totalSteps || allSteps.length, name: s.step_name, agent: s.agent_name || s.agent_id };
+                                  const stepLine = hasErr
+                                    ? t("workflows.console_step_line_failed", { defaultValue: 'Step {{current}}/{{total}} "{{name}}" → {{agent}} FAILED', ...stepLineArgs })
+                                    : t("workflows.console_step_line", { defaultValue: 'Step {{current}}/{{total}} "{{name}}" → {{agent}}', ...stepLineArgs });
+                                  logs.push({ts: fmtTime(rd.started_at), level: hasErr ? "error" : "info", msg: stepLine});
                                   logs.push({ts: fmtTime(rd.started_at), level: "info", msg: "  " + t("workflows.console_step_io", { defaultValue: "Prompt: {{inTokens}} tokens → Response: {{outTokens}} tokens in {{duration}}", inTokens: fmtN(s.input_tokens || 0), outTokens: fmtN(s.output_tokens || 0), duration: fmtDur(s.duration_ms || 0) })});
                                   if (hasErr && s.error) logs.push({ts: fmtTime(rd.started_at), level: "error", msg: "  " + t("workflows.console_step_error", { defaultValue: "Error: {{error}}", error: s.error })});
                                 }
@@ -1571,7 +1578,6 @@ export function WorkflowsPage() {
                                 const hasError = !!step.error;
                                 const stepStatus = hasError ? "failed" : "completed";
                                 const expanded = expandedStepIdx === i;
-                                const hasVars = step.variables && Object.keys(step.variables).length > 0;
                                 return (
                                 <div key={step.step_name + i} className="relative">
                                   {/* Connector line */}
@@ -1594,7 +1600,7 @@ export function WorkflowsPage() {
                                       <button className="w-full text-left" onClick={() => setExpandedStepIdx(expanded ? null : i)}>
                                         <div className="flex items-center gap-2">
                                           <span className="text-[10px] font-bold truncate">{step.step_name}</span>
-                                          <span className="text-[9px] text-text-dim/40 truncate">via {step.agent_name || step.agent_id}</span>
+                                          <span className="text-[9px] text-text-dim/40 truncate">{t("workflows.step_via", { defaultValue: "via {{agent}}", agent: step.agent_name || step.agent_id })}</span>
                                           <span className="text-[9px] text-text-dim/30">{fmtDuration(step.duration_ms || 0)}</span>
                                           <span className="text-[8px] text-text-dim/30">{fmtTokens(step.input_tokens || 0)}→{fmtTokens(step.output_tokens || 0)}</span>
                                           <ChevronRight className={`w-3 h-3 text-text-dim/30 ml-auto transition-transform ${expanded ? "rotate-90" : ""}`} />
@@ -1607,20 +1613,6 @@ export function WorkflowsPage() {
                                             <p className="text-[8px] font-semibold text-text-dim/40 uppercase tracking-wider mb-0.5">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
                                             <pre className="text-[9px] text-text-dim/80 bg-main rounded p-1.5 max-h-32 overflow-y-auto whitespace-pre-wrap">{step.prompt}</pre>
                                           </div>
-                                          {/* Variables */}
-                                          {hasVars && (
-                                            <div>
-                                              <p className="text-[8px] font-semibold text-text-dim/40 uppercase tracking-wider mb-0.5">{t("workflows.variables", { defaultValue: "Variables" })}</p>
-                                              <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[9px] bg-main rounded p-1.5">
-                                                {Object.entries(step.variables!).map(([k, v]) => (
-                                                  <div key={k} className="contents">
-                                                    <span className="text-brand/70 font-mono whitespace-nowrap">{`{{${k}}}`}</span>
-                                                    <span className="text-text-dim/60 truncate" title={v}>{v.length > 60 ? v.slice(0, 60) + "…" : v}</span>
-                                                  </div>
-                                                ))}
-                                              </div>
-                                            </div>
-                                          )}
                                           {/* Output */}
                                           <div>
                                             <p className="text-[8px] font-semibold text-text-dim/40 uppercase tracking-wider mb-0.5">{t("workflows.step_output", { defaultValue: "Output" })}</p>

@@ -1813,16 +1813,18 @@
     "console_run_started": "运行已开始 — 定义了 {{steps}} 个步骤",
     "console_var_line": "{{varName}} = \"{{value}}\"",
     "console_step_line": "步骤 {{current}}/{{total}} \"{{name}}\" → {{agent}}",
-    "console_step_failed_suffix": " 失败",
+    "console_step_line_failed": "步骤 {{current}}/{{total}} \"{{name}}\" → {{agent}} 失败",
+    "step_via": "经由 {{agent}}",
     "console_step_io": "提示：{{inTokens}} 个token → 响应：{{outTokens}} 个token，耗时 {{duration}}",
     "console_step_error": "错误：{{error}}",
     "rerun_hint": "使用这些参数重新运行",
     "rerun_same": "使用相同参数重新运行",
+    "rerun_started": "已用相同参数重新运行",
+    "rerun_failed": "重跑失败",
     "starting": "启动中…",
     "step_executing": "步骤 {{current}}/{{total}} 执行中…",
     "step_output": "输出",
-    "step_pending": "等待中…",
-    "variables": "变量"
+    "step_pending": "等待中…"
   },
   "scheduler": {
     "title": "调度器",

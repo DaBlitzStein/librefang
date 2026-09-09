@@ -1819,16 +1819,18 @@
     "console_run_started": "Запуск розпочато — визначено {{steps}} кроків",
     "console_var_line": "{{varName}} = \"{{value}}\"",
     "console_step_line": "Крок {{current}}/{{total}} \"{{name}}\" → {{agent}}",
-    "console_step_failed_suffix": " ПОМИЛКА",
+    "console_step_line_failed": "Крок {{current}}/{{total}} \"{{name}}\" → {{agent}} ПОМИЛКА",
+    "step_via": "через {{agent}}",
     "console_step_io": "Промпт: {{inTokens}} токенів → Відповідь: {{outTokens}} токенів за {{duration}}",
     "console_step_error": "Помилка: {{error}}",
     "rerun_hint": "Перезапустити з цими параметрами",
     "rerun_same": "Перезапустити з тими ж параметрами",
+    "rerun_started": "Повторний запуск розпочато з тими самими параметрами",
+    "rerun_failed": "Не вдалося повторити запуск",
     "starting": "Запуск…",
     "step_executing": "Крок {{current}}/{{total}} виконується…",
     "step_output": "Результат",
-    "step_pending": "Очікування…",
-    "variables": "Змінні"
+    "step_pending": "Очікування…"
   },
   "scheduler": {
     "title": "Планувальник",

@@ -2925,7 +2925,6 @@ export interface WorkflowStepResult {
   duration_ms: number;
   /** Step-level failure message; present on the step that failed. */
   error?: string;
-  variables?: Record<string, string>;
 }
 
 /** Full detail for a single workflow run. */

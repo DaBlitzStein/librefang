@@ -1813,16 +1813,18 @@
     "console_run_started": "Run started — {{steps}} steps defined",
     "console_var_line": "{{varName}} = \"{{value}}\"",
     "console_step_line": "Step {{current}}/{{total}} \"{{name}}\" → {{agent}}",
-    "console_step_failed_suffix": " FAILED",
+    "console_step_line_failed": "Step {{current}}/{{total}} \"{{name}}\" → {{agent}} FAILED",
+    "step_via": "via {{agent}}",
     "console_step_io": "Prompt: {{inTokens}} tokens → Response: {{outTokens}} tokens in {{duration}}",
     "console_step_error": "Error: {{error}}",
     "rerun_hint": "Re-run with these parameters",
     "rerun_same": "Re-run with same parameters",
+    "rerun_started": "Re-run started with the same parameters",
+    "rerun_failed": "Re-run failed",
     "starting": "Starting…",
     "step_executing": "Step {{current}}/{{total}} executing…",
     "step_output": "Output",
-    "step_pending": "Pending…",
-    "variables": "Variables"
+    "step_pending": "Pending…"
   },
   "scheduler": {
     "title": "Scheduler",
