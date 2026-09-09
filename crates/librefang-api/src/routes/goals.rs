@@ -239,19 +239,21 @@ async fn start_or_resume(
         Err(error) => return error,
     };
 
-    if require_paused {
-        let paused = state
-            .kernel
-            .goal_run_state(goal_id)
-            .is_some_and(|run| run.phase == librefang_types::goal::GoalRunPhase::Paused);
-        if !paused {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "error": "This goal has no paused run to resume. Use POST /api/goals/{id}/start to begin a new run."
-                })),
-            );
-        }
+    // Read once and reuse below: `/start` also auto-resumes from an existing
+    // checkpoint (same as `/resume`), so both routes need the checkpoint's
+    // iteration count to validate an explicit `max_iterations` against it.
+    let run_state = state.kernel.goal_run_state(goal_id);
+    let paused_run = run_state
+        .as_ref()
+        .filter(|run| run.phase == librefang_types::goal::GoalRunPhase::Paused);
+
+    if require_paused && paused_run.is_none() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "This goal has no paused run to resume. Use POST /api/goals/{id}/start to begin a new run."
+            })),
+        );
     }
 
     // Same swallow as #6654/#6653 on a start rather than a read: the old catch-all `_ => Vec::new()` folded a substrate failure into the empty array, so an unreadable store answered `404 Goal '<id>' not found` for a goal that exists — sending the operator to re-create it instead of to the host.
@@ -306,6 +308,25 @@ async fn start_or_resume(
             Some(value) => Some(value),
         },
     };
+    // An explicit cap is a total budget, not a top-up on top of the
+    // checkpoint's already-spent iterations (`GoalRunner::start` compares
+    // it against the RESTORED iteration count, not against 0) — so a cap at
+    // or below that count would resume, immediately trip the iteration-cap
+    // check on the very first pass with no turn run, and clear the
+    // checkpoint on the way out. Refusing it up front keeps the checkpoint
+    // (and the learnings it carries) intact instead of destroying it for a
+    // request that could never have advanced the run.
+    if let (Some(cap), Some(run)) = (max_iterations, paused_run) {
+        if cap <= run.iteration {
+            return ApiErrorResponse::bad_request(format!(
+                "max_iterations ({cap}) must exceed the paused run's already-completed \
+                 iteration count ({}); the run would resume only to hit the cap immediately \
+                 and discard its checkpoint",
+                run.iteration
+            ))
+            .into_json_tuple();
+        }
+    }
 
     // Loop-engineering configuration lives on the goal, not on the request, so
     // a run started from the dashboard, the CLI or a script all get the same
