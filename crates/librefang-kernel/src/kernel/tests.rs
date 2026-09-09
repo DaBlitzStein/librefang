@@ -18078,3 +18078,80 @@ fn a_requested_iteration_cap_is_clamped_to_the_operator_ceiling() {
         "zero is not a request for a worker that does nothing before answering"
     );
 }
+
+/// #8231: `set_agent_mcp_servers` reaches `persist_mcp_servers_to_disk`, which
+/// patches the `mcp_servers` array in the existing `agent.toml` with
+/// `patch_mcp_servers` + `atomic_write_toml` rather than going through
+/// `persist_full_manifest_at`. Snapshots are recorded only from the latter, so an
+/// operator changing an agent's MCP allowlist changed the file on disk while the
+/// History tab and the TUI pane kept showing the previous snapshot as the newest —
+/// "what changed on this agent, and when" answering wrong rather than incompletely.
+#[test]
+fn changing_the_mcp_allowlist_records_a_manifest_version_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-mcp-history-8231");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "mcp-history-agent".to_string(),
+                source_template: None,
+                description: "exercises MCP allowlist version history".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                // Seeded so clearing the list is a real content change on disk and
+                // not a no-op write that would pass for the wrong reason.
+                mcp_servers: vec!["seeded-server".to_string()],
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+
+    // `persist_mcp_servers_to_disk` patches `agent.toml` only when it already
+    // exists; the file-missing branch falls back to `persist_full_manifest_at`,
+    // which records anyway and would make this test pass without the fix.
+    kernel.persist_manifest_to_disk(agent_id);
+    let baseline = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    assert_eq!(
+        baseline.first().map(|v| v.change_source.as_str()),
+        Some("update"),
+        "the baseline persist is the newest snapshot before the allowlist changes"
+    );
+
+    // An empty list skips name validation, so this exercises the persist path
+    // rather than the allowlist checks above it.
+    kernel
+        .set_agent_mcp_servers(agent_id, Vec::new())
+        .expect("clearing the MCP allowlist should succeed");
+
+    let after = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    let newest = after.first().expect("a snapshot must exist");
+    assert_eq!(
+        newest.change_source, "mcp-servers",
+        "an MCP allowlist change must record its own snapshot, or the newest \
+         recorded version disagrees with what is on disk"
+    );
+    assert!(
+        !newest.manifest_toml.contains("seeded-server"),
+        "the snapshot must be the patched file, not a stale manifest: {}",
+        newest.manifest_toml
+    );
+
+    kernel.shutdown();
+}
