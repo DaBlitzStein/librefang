@@ -1325,12 +1325,7 @@ fn run_state_label(state: &serde_json::Value) -> String {
     state
         .as_str()
         .map(str::to_string)
-        .or_else(|| {
-            state
-                .as_object()
-                .and_then(|o| o.keys().next())
-                .map(String::clone)
-        })
+        .or_else(|| state.as_object().and_then(|o| o.keys().next()).cloned())
         .unwrap_or_else(|| "?".to_string())
 }
 
@@ -1385,7 +1380,7 @@ pub fn spawn_fetch_workflow_runs(
                     // does on the run list. Consult the status before the body.
                     .filter(|resp| resp.status().is_success())
                     .and_then(|resp| resp.json::<serde_json::Value>().ok())
-                    .and_then(|body| body.as_array().map(parse_workflow_runs))
+                    .and_then(|body| body.as_array().map(|arr| parse_workflow_runs(arr)))
             }
             BackendRef::InProcess(_) => Some(Vec::new()),
         };

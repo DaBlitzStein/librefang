@@ -3259,3 +3259,87 @@ pub fn run(config: Option<PathBuf>) {
     );
     ratatui::restore();
 }
+
+#[cfg(test)]
+mod run_history_refresh_tests {
+    use super::*;
+
+    fn app_on_the_run_history() -> App {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.workflows.sub = workflows::WorkflowSubScreen::Runs;
+        app.workflows.runs = vec![workflows::WorkflowRun {
+            id: "run-1".to_string(),
+            state: "running".to_string(),
+            started_at: "2026-09-09T10:00:00+00:00".to_string(),
+            duration: String::new(),
+            steps_completed: 1,
+            current_step_index: Some(1),
+            total_steps: 4,
+        }];
+        app
+    }
+
+    /// The `loading` flag belongs to a load the operator asked for, and both
+    /// the workflow list and the run-result pane render it. A background poll
+    /// landing just after they launched a run would otherwise clear it and drop
+    /// the run-result spinner while the run is still executing.
+    #[test]
+    fn a_background_poll_does_not_touch_the_operators_spinner() {
+        let mut app = app_on_the_run_history();
+        app.workflows.loading = true;
+        app.workflows.poll_in_flight = true;
+
+        app.handle_event(AppEvent::WorkflowRunsLoaded {
+            runs: Some(Vec::new()),
+            clear_loading: false,
+        });
+
+        assert!(
+            app.workflows.loading,
+            "a poll must leave the operator's own spinner alone"
+        );
+        assert!(
+            !app.workflows.poll_in_flight,
+            "the answer ends the outstanding poll either way"
+        );
+    }
+
+    /// The operator's own load owns the flag and must clear it.
+    #[test]
+    fn an_operator_load_clears_the_spinner() {
+        let mut app = app_on_the_run_history();
+        app.workflows.loading = true;
+
+        app.handle_event(AppEvent::WorkflowRunsLoaded {
+            runs: Some(Vec::new()),
+            clear_loading: true,
+        });
+
+        assert!(!app.workflows.loading);
+    }
+
+    /// A failed fetch reports `runs: None`. Replacing the rows with an empty
+    /// list would blank a populated history to "No runs yet" on one transient
+    /// 500 — every two seconds, with nothing on screen saying anything failed.
+    #[test]
+    fn a_failed_fetch_leaves_the_rows_that_are_on_screen() {
+        let mut app = app_on_the_run_history();
+        app.workflows.loading = true;
+
+        app.handle_event(AppEvent::WorkflowRunsLoaded {
+            runs: None,
+            clear_loading: true,
+        });
+
+        assert_eq!(
+            app.workflows.runs.len(),
+            1,
+            "a failed fetch must not empty the run history"
+        );
+        assert!(
+            !app.workflows.loading,
+            "the spinner still has to come down, or an operator load hangs forever"
+        );
+    }
+}

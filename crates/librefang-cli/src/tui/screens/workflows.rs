@@ -47,21 +47,26 @@ const PROGRESS_BAR_CELLS: usize = 5;
 /// `▰▰▰▰▰ 999/999` is 13, which covers any workflow anyone hand-writes.
 const PROGRESS_CELL: usize = 13;
 
-/// Trim a progress label to [`PROGRESS_CELL`] *columns*.
+/// Fit a label to exactly [`PROGRESS_CELL`] columns, trimming or padding.
 ///
-/// `widgets::truncate` measures bytes, and `▰` is three of them, so handing it
-/// a width of 13 would cut the bar after four glyphs on every row. This counts
-/// chars, which is also what `{:<width$}` pads by — so the cell and the header
-/// stay the same width and `Duration` keeps its alignment.
+/// Both the trim and the pad live here rather than in a `{:<width$}` on the
+/// format string, so the column's width is stated once and the header and the
+/// rows cannot drift apart.
+///
+/// `widgets::truncate` is the wrong tool for this cell: it measures bytes, and
+/// `▰` is three of them, so a width of 13 would cut every bar after four
+/// glyphs. Counting chars is also what `{:<n}` pads by, which is how the
+/// neighbouring columns stay aligned.
 fn fit_progress_cell(label: &str) -> String {
-    if label.chars().count() <= PROGRESS_CELL {
-        return label.to_string();
+    let width = label.chars().count();
+    if width > PROGRESS_CELL {
+        return label
+            .chars()
+            .take(PROGRESS_CELL - 1)
+            .chain(['\u{2026}'])
+            .collect();
     }
-    label
-        .chars()
-        .take(PROGRESS_CELL - 1)
-        .chain(['\u{2026}'])
-        .collect()
+    format!("{label}{}", " ".repeat(PROGRESS_CELL - width))
 }
 
 /// The `Progress` cell for one run — how far it has got, out of how many.
@@ -652,10 +657,10 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
             // Narrowing it to make room for Progress would have been trading
             // width between a live column and a dead one.
             format!(
-                "  {:<12} {:<12} {:<PROGRESS_CELL$} {}",
+                "  {:<12} {:<12} {} {}",
                 crate::i18n::t("tui-workflows-header-run-id"),
                 crate::i18n::t("tui-workflows-header-state"),
-                crate::i18n::t("tui-workflows-header-progress"),
+                fit_progress_cell(&crate::i18n::t("tui-workflows-header-progress")),
                 crate::i18n::t("tui-workflows-header-duration"),
             ),
             theme::table_header(),
@@ -686,10 +691,7 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
                         // Trimmed like every other cell in the row: `{:<n}`
                         // pads but never trims, so a wide count would push
                         // Duration right and break alignment with the header.
-                        format!(
-                            " {:<PROGRESS_CELL$}",
-                            fit_progress_cell(&run_progress_label(run))
-                        ),
+                        format!(" {}", fit_progress_cell(&run_progress_label(run))),
                         // A run still in flight is the one the operator is
                         // watching, so its bar gets the accent; anything
                         // finished states its final count in the muted tone.
@@ -1333,21 +1335,27 @@ mod step_progress_tests {
     /// shared helper would cut every bar after four glyphs. The cell needs a
     /// char-counted trim to stay the width `{:<n}` pads to.
     #[test]
-    fn the_progress_cell_is_trimmed_by_columns_not_bytes() {
+    fn the_progress_cell_is_fitted_by_columns_not_bytes() {
+        // 9 columns but 19 bytes, because the bar glyph is three bytes each.
+        // A byte-measured fit would trim this; it must only be padded.
         let ordinary = run_progress_label(&run(Some(1), 0, 4));
-        assert_eq!(
-            fit_progress_cell(&ordinary),
-            ordinary,
-            "a 9-column label is 19 bytes and must survive untouched"
+        assert_eq!(ordinary.chars().count(), 9, "{ordinary}");
+        let fitted = fit_progress_cell(&ordinary);
+        assert!(
+            fitted.starts_with(&ordinary),
+            "a label inside the column must survive whole: {fitted:?}"
         );
+        assert_eq!(fitted.chars().count(), PROGRESS_CELL);
 
         let wide = run_progress_label(&run(None, 1234, 1234));
         assert!(wide.chars().count() > PROGRESS_CELL, "{wide}");
+        let fitted = fit_progress_cell(&wide);
         assert_eq!(
-            fit_progress_cell(&wide).chars().count(),
+            fitted.chars().count(),
             PROGRESS_CELL,
             "a wide count must be trimmed to the column, not pushed into Duration"
         );
+        assert!(fitted.ends_with('\u{2026}'), "{fitted:?}");
     }
 
     /// A slow daemon answers a 2s poll interval inside a 5s client timeout, so
