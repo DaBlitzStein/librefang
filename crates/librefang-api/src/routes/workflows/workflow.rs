@@ -785,58 +785,40 @@ pub async fn get_workflow_run(
         }
     });
 
-    let engine = state.kernel.workflow_engine();
-    match engine.get_run(run_id).await {
-        Some(run) => {
-            // Total step count comes from the workflow definition, not the
-            // run — `step_results` only holds *completed* steps, so it
-            // under-counts by exactly the steps still ahead. `None` (workflow
-            // deleted since this run finished) leaves the dashboard to fall
-            // back to `step_results.len()`, which is never wrong, only blind
-            // to steps that have not executed yet.
-            let total_steps = engine
-                .get_workflow(run.workflow_id)
-                .await
-                .map(|w| w.steps.len());
-            // Steps before this index are in `step_results`; the step at
-            // this index is the one currently executing (when the run is
-            // still active). Cheap to compute because it is exactly the
-            // completed-step count — no separate "current step" field is
-            // tracked on `WorkflowRun` for this to drift out of sync with.
-            let current_step_index = run.step_results.len();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "id": run.id.to_string(),
-                    "workflow_id": run.workflow_id.to_string(),
-                    "workflow_name": run.workflow_name,
-                    "input": run.input,
-                    "state": serde_json::to_value(&run.state).unwrap_or_default(),
-                    "output": run.output,
-                    "error": run.error,
-                    "started_at": run.started_at.to_rfc3339(),
-                    "completed_at": run.completed_at.map(|t| t.to_rfc3339()),
-                    // #7714: the agent that asked for this run, `null` when an
-                    // operator started it. Recording ownership is only useful if
-                    // something can read it back, and this is the one endpoint
-                    // that renders a single run in full.
-                    "owner_agent_id": run.owner_agent_id.map(|a| a.to_string()),
-                    "step_results": run.step_results.iter().map(|s| serde_json::json!({
-                        "step_name": s.step_name,
-                        "agent_id": s.agent_id,
-                        "agent_name": s.agent_name,
-                        "prompt": s.prompt,
-                        "output": s.output,
-                        "input_tokens": s.input_tokens,
-                        "output_tokens": s.output_tokens,
-                        "duration_ms": s.duration_ms,
-                        "error": s.error,
-                    })).collect::<Vec<_>>(),
-                    "total_steps": total_steps,
-                    "current_step_index": current_step_index,
-                })),
-            )
-        }
+    match state.kernel.workflow_engine().get_run(run_id).await {
+        Some(run) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": run.id.to_string(),
+                "workflow_id": run.workflow_id.to_string(),
+                "workflow_name": run.workflow_name,
+                "input": run.input,
+                "state": serde_json::to_value(&run.state).unwrap_or_default(),
+                "current_step_index": run.live_step_index(),
+                "total_steps": run.total_steps,
+                "output": run.output,
+                "error": run.error,
+                "started_at": run.started_at.to_rfc3339(),
+                "completed_at": run.completed_at.map(|t| t.to_rfc3339()),
+                // #7714: the agent that asked for this run, `null` when an
+                // operator started it. Recording ownership is only useful if
+                // something can read it back, and this is the one endpoint
+                // that renders a single run in full.
+                "owner_agent_id": run.owner_agent_id.map(|a| a.to_string()),
+                "step_results": run.step_results.iter().map(|s| serde_json::json!({
+                    "step_name": s.step_name,
+                    "agent_id": s.agent_id,
+                    "agent_name": s.agent_name,
+                    "prompt": s.prompt,
+                    "output": s.output,
+                    "input_tokens": s.input_tokens,
+                    "output_tokens": s.output_tokens,
+                    "duration_ms": s.duration_ms,
+                    "error": s.error,
+                    "variables": s.variables,
+                })).collect::<Vec<_>>(),
+            })),
+        ),
         None => ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple(),
     }
 }
@@ -1511,7 +1493,12 @@ pub async fn list_pending_operator_workflow_runs(
 }
 
 /// GET /api/workflows/:id/runs — List runs for the workflow named in the path.
-#[utoipa::path(get, path = "/api/workflows/{id}/runs", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "List workflow runs", body = Vec<serde_json::Value>), (status = 400, description = "Invalid workflow ID")))]
+///
+/// `steps_completed` and `total_steps` are deliberately not a fraction, and a client that renders them as one will be wrong in both directions.
+/// `steps_completed` counts *executions* — the entries in `step_results` — while `total_steps` counts the steps the workflow *defines*.
+/// A `StepMode::Loop` step pushes one result per iteration, so a one-step workflow looping five times reports `steps_completed: 5, total_steps: 1`; a `StepMode::Conditional` step that is skipped pushes none, so a fully completed four-step workflow can report `steps_completed: 2, total_steps: 4`.
+/// The field `total_steps` actually bounds is `current_step_index`, which is an index into the workflow's step list; that pair is the one safe to render as "step 2 of 4".
+#[utoipa::path(get, path = "/api/workflows/{id}/runs", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "List workflow runs; `steps_completed` counts step executions (a loop step contributes one per iteration) while `total_steps` counts defined steps — the two are not a fraction", body = Vec<serde_json::Value>), (status = 400, description = "Invalid workflow ID")))]
 pub async fn list_workflow_runs(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1536,6 +1523,8 @@ pub async fn list_workflow_runs(
                 "workflow_name": r.workflow_name,
                 "state": serde_json::to_value(&r.state).unwrap_or_default(),
                 "steps_completed": r.step_results.len(),
+                "current_step_index": r.live_step_index(),
+                "total_steps": r.total_steps,
                 "input": r.input,
                 "error": r.error,
                 "started_at": r.started_at.to_rfc3339(),

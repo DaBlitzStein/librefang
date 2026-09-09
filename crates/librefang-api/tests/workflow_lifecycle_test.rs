@@ -957,9 +957,143 @@ async fn run_detail_reports_total_steps_and_current_step_index() {
         detail["total_steps"], 2,
         "total_steps must come from the workflow definition: {detail:?}"
     );
+    // This assertion originally read `current_step_index == 2` — the
+    // completed-step count, reported for every run state. #8177 redefined the
+    // field as a *live* index that is null unless the run is still Running,
+    // and persists `total_steps` on the run so the count survives a restart
+    // instead of being derived from a workflow definition that may since have
+    // changed or been deleted.
+    // Both contracts agree while a run is Running, which is the only state the
+    // dashboard reads this field in (`WorkflowsPage.tsx` renders the progress
+    // bar under `isActive`), so nothing the progress bar showed is lost.
+    assert!(
+        detail["current_step_index"].is_null(),
+        "a terminal run must not report a live step index: {detail:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Live step progress (refs #6504)
+// ---------------------------------------------------------------------------
+
+/// The run detail and list endpoints expose the run's step progress:
+/// `total_steps` (copied at creation) and each step's `variables` snapshot
+/// (`{{var}}` -> resolved value at the time the step executed). This is
+/// what makes the dashboard's "Step 2/4" rendering — and #7997's
+/// timeline — functional without loading the workflow definition
+/// separately.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_detail_and_list_expose_total_steps_and_step_variables() {
+    use librefang_kernel::workflow::{StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep};
+
+    let h = boot().await;
+    let engine = h.state.kernel.workflow_engine();
+
+    // Two Prompt steps: the first binds `greeting` via `output_var`, the
+    // second expands `{{greeting}}` in its template. The no-op sender
+    // echoes the expanded prompt back as the step output, so the second
+    // step's `variables` snapshot proves the binding was live.
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "progress-exposure".to_string(),
+        description: String::new(),
+        steps: vec![
+            WorkflowStep {
+                name: "bind".to_string(),
+                agent: StepAgent::ByName {
+                    name: "unused".to_string(),
+                },
+                prompt_template: "hello".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 10,
+                error_mode: Default::default(),
+                output_var: Some("greeting".to_string()),
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+                required_skills: Vec::new(),
+            },
+            WorkflowStep {
+                name: "expand".to_string(),
+                agent: StepAgent::ByName {
+                    name: "unused".to_string(),
+                },
+                prompt_template: "{{greeting}}".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 10,
+                error_mode: Default::default(),
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+                required_skills: Vec::new(),
+            },
+        ],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+        input_schema: None,
+        owner: None,
+    };
+    let wf_id = engine.register(wf).await;
+    let run_id = engine
+        .create_run(wf_id, "input".to_string())
+        .await
+        .expect("create run");
+
+    let resolver = |_a: &StepAgent| {
+        Some((
+            librefang_types::agent::AgentId::new(),
+            "test-agent".to_string(),
+            false,
+        ))
+    };
+    let sender =
+        |_id: librefang_types::agent::AgentId,
+         msg: String,
+         _sm: Option<librefang_types::agent::SessionMode>| async move { Ok((msg, 0u64, 0u64)) };
+    let _ = engine.execute_run(run_id, resolver, sender).await;
+
+    // Detail: total_steps plus the second step's variables snapshot.
+    let (status, detail) = get(&h, &format!("/api/workflows/runs/{run_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail:?}");
     assert_eq!(
-        detail["current_step_index"], 2,
-        "current_step_index must equal the completed-step count: {detail:?}"
+        detail["total_steps"].as_u64(),
+        Some(2),
+        "run detail must expose the step count: {detail:?}"
+    );
+    let steps = detail["step_results"]
+        .as_array()
+        .expect("step_results array");
+    assert_eq!(steps.len(), 2, "both steps must have completed: {detail:?}");
+    let expand_step = steps
+        .iter()
+        .find(|s| s["step_name"] == "expand")
+        .expect("expand step present");
+    assert_eq!(
+        expand_step["variables"]["greeting"].as_str(),
+        Some("hello"),
+        "expand step must expose the binding the earlier step made: {steps:?}"
+    );
+    assert!(
+        detail["current_step_index"].is_null(),
+        "a terminal run must not report a live step index: {detail:?}"
+    );
+
+    // List: total_steps present per run row.
+    let (status, list) = get(&h, &format!("/api/workflows/{wf_id}/runs")).await;
+    assert_eq!(status, StatusCode::OK, "{list:?}");
+    let row = list
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|r| r["id"].as_str() == Some(run_id.to_string().as_str()))
+        })
+        .expect("run present in list");
+    assert_eq!(
+        row["total_steps"].as_u64(),
+        Some(2),
+        "list rows must expose the step count: {list:?}"
     );
 }
 
