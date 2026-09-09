@@ -6522,6 +6522,78 @@ async fn comms_task_rejects_unknown_assignee_with_400_not_500() {
     );
 }
 
+/// The other half of the `/api/comms/task` ↔ `/api/tasks` agreement: this
+/// route hardcoded `TaskPostOptions::default()`, so a client sending
+/// `priority` / `timeout_secs` got a 201 for a task queued at priority 0 with
+/// no per-task deadline, and no way to tell (#7974 review).
+///
+/// Asserts against the claim queue rather than the read-back alone: the
+/// read-back proves the columns were written, the claim proves the value is
+/// the one the `ORDER BY` uses. Both matter — a route that stored `priority`
+/// somewhere the queue never reads would pass a read-back-only assertion.
+#[tokio::test(flavor = "multi_thread")]
+async fn comms_task_honours_priority_and_timeout_secs() {
+    let harness = start_full_router("").await;
+
+    // Posted first and with the lower priority, so age alone would claim it
+    // first. Only a priority that actually reached the INSERT reorders these.
+    let (status, low) = task_request(
+        &harness,
+        "POST",
+        "/api/comms/task",
+        Some(serde_json::json!({
+            "title": "Low",
+            "description": "d",
+            "priority": 0,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {low}");
+    let low = low["task_id"].as_str().unwrap().to_string();
+
+    let (status, high) = task_request(
+        &harness,
+        "POST",
+        "/api/comms/task",
+        Some(serde_json::json!({
+            "title": "High",
+            "description": "d",
+            "priority": 5,
+            "timeout_secs": 300,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {high}");
+    let high = high["task_id"].as_str().unwrap().to_string();
+
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{high}")).await;
+    assert_eq!(
+        task["priority"], 5,
+        "priority must survive `/api/comms/task`, not be replaced by the default 0"
+    );
+    assert_eq!(
+        task["timeout_secs"], 300,
+        "timeout_secs must survive `/api/comms/task`, not be dropped to NULL"
+    );
+
+    let substrate = harness.state.kernel.memory_substrate();
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("a pending task is claimable");
+    assert_eq!(
+        claimed["id"], high,
+        "the priority posted through /api/comms/task must outrank age in the claim queue"
+    );
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the second task is still claimable");
+    assert_eq!(claimed["id"], low);
+}
+
 /// An unassigned task is legitimate — it is the "any worker may claim this"
 /// form that `task_claim` matches via `assigned_to = ''`. Validation must not
 /// have turned the optional field into a required one.
