@@ -922,19 +922,26 @@ export function ChannelsPage() {
     [channels, search, sortField, sortOrder],
   );
 
-  // Catalog of channel types, surfaced in the Add picker. One row per type:
-  // the unconfigured discovery row is the preferred representative (its
-  // `name` IS the type and it carries the cached schema), but a type that
-  // only exists as configured instances is still represented, by one of
-  // them. Without the dedupe the picker would list one row per existing
-  // instance; without dropping the old `!configured` filter the types that
-  // already have an instance would vanish from the picker entirely —
-  // leaving nowhere to click to add a second one (#8091).
+  // Catalog of channel types, surfaced in the Add picker. One row per type,
+  // taken from the unconfigured discovery row: its `name` IS the type and it
+  // carries the cached schema, and `list_channels` emits one for every
+  // `SIDECAR_CATALOG` entry whether or not instances of it exist — so an
+  // already-configured type is still listed here, which is what gives a
+  // second instance somewhere to be added from (#8091).
+  //
+  // Seeding from the discovery rows only is also what keeps the picker to
+  // types this page can actually create. A `[[sidecar_channels]]` entry whose
+  // `channel_type` is not a catalog name (a third-party adapter) has no
+  // discovery row, no cached schema, and no `configure_sidecar_channel`
+  // catalog entry to save against — electing its configured instance as the
+  // type's representative would add a row that opens the "setup form
+  // unavailable" panel and could never be saved. `instanceCountByType` below
+  // already accounts for configured rows.
   const pickerChannels = useMemo(() => {
     const byType = new Map<string, Channel>();
     for (const c of channels) {
       const type = c.channel_type ?? c.name;
-      if (!c.configured || !byType.has(type)) byType.set(type, c);
+      if (!c.configured) byType.set(type, c);
     }
     return [...byType.values()]
       .filter(c => !pickerSearch
@@ -1043,10 +1050,21 @@ export function ChannelsPage() {
             <Button variant="secondary" size="sm" onClick={handleReload} disabled={reloadMut.isPending}>
               {t("channels.reload", { defaultValue: "Reload" })}
             </Button>
+            {/* `PageHeader` renders above the loading / error / empty
+                branches below, so this button is on screen before the query
+                resolves and with the daemon unreachable. Gate it on the
+                catalog having actually arrived: opening the picker on an
+                empty `channels` would show its "nothing to add" panel, which
+                would be a statement about the catalog rather than about the
+                fetch that has not happened. Not gated on
+                `unconfiguredCount === 0` any more — a configured type still
+                belongs in the picker so a second instance can be added
+                (#8091). */}
             <Button
               variant="primary"
               size="sm"
               onClick={openPicker}
+              disabled={!channelsQuery.data}
               leftIcon={<Plus className="h-3.5 w-3.5" />}
               title={t("channels.add_channel", { defaultValue: "Add channel" })}
             >
@@ -1278,9 +1296,14 @@ export function ChannelsPage() {
           />
           {pickerChannels.length === 0 ? (
             <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+              {/* "Everything is already configured" is no longer a state the
+                  picker can be in: every catalog type is listed whether or not
+                  it has instances. With the Add button gated on loaded data,
+                  the one remaining way to get here without a search term is a
+                  daemon that reported no catalog at all. */}
               {pickerSearch
                 ? t("channels.no_results")
-                : t("channels.all_configured_desc", { defaultValue: "All available channel types are already configured." })}
+                : t("channels.picker_empty_catalog", { defaultValue: "No channel types are available to add." })}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">

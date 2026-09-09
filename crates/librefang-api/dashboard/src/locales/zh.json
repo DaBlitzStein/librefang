@@ -1023,7 +1023,7 @@
   "channels": {
     "add": "添加",
     "add_channel": "添加通道",
-    "all_configured_desc": "所有可用的通道类型都已配置。",
+    "picker_empty_catalog": "没有可添加的通道类型。",
     "picker_instances_configured": "已配置 {{instances}} 个",
     "picker_instances_configured_hint": "此通道类型已配置的实例数",
     "category": "类别",

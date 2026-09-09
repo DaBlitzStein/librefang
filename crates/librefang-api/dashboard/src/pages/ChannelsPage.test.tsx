@@ -827,6 +827,56 @@ describe("ChannelsPage", () => {
     expect(within(drawer).queryByText("channels.instance_name_hint_edit")).not.toBeInTheDocument();
   });
 
+  it("keeps a non-catalog channel_type out of the Add picker (#8091)", () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({
+          name: "telegram",
+          display_name: "Telegram",
+          configured: false,
+          channel_type: undefined,
+        }),
+        // A `[[sidecar_channels]]` entry on a type that is not in
+        // SIDECAR_CATALOG. It therefore has no discovery row, no cached
+        // schema, and no catalog entry for the configure endpoint to save
+        // against, so the picker must not offer it: the drawer would open on
+        // the "setup form unavailable" panel with Save disabled, and the
+        // request behind it would 404. Listing it would also label the row
+        // with the instance name rather than the type.
+        makeChannel({
+          name: "mybot",
+          display_name: "mybot",
+          channel_type: "acme-chat",
+          configured: true,
+        }),
+      ]),
+    );
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /channels\.add/ }));
+    const drawer = screen.getByTestId("drawer-slot");
+    expect(within(drawer).getByText("Telegram")).toBeInTheDocument();
+    expect(within(drawer).queryByText("mybot")).not.toBeInTheDocument();
+    expect(within(drawer).queryByText("acme-chat")).not.toBeInTheDocument();
+  });
+
+  it("disables Add until the channel catalog has loaded (#8091)", () => {
+    // `PageHeader` renders above the loading / error branches, so without the
+    // gate the picker opens on an empty catalog and its empty state makes a
+    // claim about configuration when the truth is that nothing was fetched.
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[] | undefined>(undefined, { isLoading: true }),
+    );
+    const { unmount } = renderPage();
+    expect(screen.getByRole("button", { name: /channels\.add/ })).toBeDisabled();
+    unmount();
+
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[] | undefined>(undefined, { isError: true }),
+    );
+    renderPage();
+    expect(screen.getByRole("button", { name: /channels\.add/ })).toBeDisabled();
+  });
+
   it("offers the copyable config_template snippet inside the SidecarForm drawer", () => {
     useChannelsMock.mockReturnValue(
       makeQuery<ChannelItem[]>([

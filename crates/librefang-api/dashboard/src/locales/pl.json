@@ -1025,7 +1025,7 @@
   "channels": {
     "add": "Dodaj",
     "add_channel": "Dodaj kanał",
-    "all_configured_desc": "Wszystkie dostępne typy kanałów są już skonfigurowane.",
+    "picker_empty_catalog": "Brak typów kanałów, które można dodać.",
     "picker_instances_configured": "skonfigurowane: {{instances}}",
     "picker_instances_configured_hint": "Liczba już skonfigurowanych instancji tego typu kanału",
     "category": "Kategoria",
