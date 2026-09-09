@@ -55,7 +55,11 @@ pub fn discover_template_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Load all templates from discovered directories, falling back to bundled templates.
+/// Load every agent template: the flat `agent-types/` store first, then the
+/// directory-per-type sources from `discover_template_dirs`. There is no
+/// bundled-template fallback — an empty result is what sends
+/// `librefang agent new` to `commands/agent.rs`'s `agent-new-no-templates`
+/// error instead.
 pub fn load_all_templates() -> Vec<AgentTemplate> {
     let mut templates = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
@@ -263,25 +267,14 @@ description = "second"
     }
 
     // -----------------------------------------------------------------------
-    // discover_template_dirs — env-var-driven path discovery.
-    //
-    // These tests mutate process-global env vars; group them in a single
-    // test (and serialize via a Mutex) so the cargo parallel harness can't
-    // race on LIBREFANG_HOME / LIBREFANG_AGENTS_DIR.
+    // discover_template_dirs / load_all_templates — env-var-driven path
+    // discovery. `LIBREFANG_HOME` is also mutated by `launcher.rs`'s tests,
+    // so these serialize on the crate-wide `crate::test_env_lock::env_lock`
+    // rather than a module-private mutex (#8239) — a private one only
+    // protects tests within this file from each other, not from a
+    // `launcher.rs` test flipping the same var mid-assertion.
     // -----------------------------------------------------------------------
-
-    /// Process-wide guard for the env-mutating tests in this module: cargo
-    /// runs `#[test]` fns in parallel, and `LIBREFANG_HOME`/`LIBREFANG_AGENTS_DIR`
-    /// are global state. Both tests must lock the same mutex.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        // If a previous test panicked while holding the guard, the mutex is
-        // poisoned but the data inside is still sound — recover and proceed.
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-    }
+    use crate::test_env_lock::env_lock;
 
     #[test]
     fn discover_template_dirs_picks_up_env_override() {
@@ -336,27 +329,26 @@ description = "second"
     fn load_all_templates_finds_type_written_only_to_agent_types_dir() {
         let _guard = env_lock();
 
-        let home = std::env::temp_dir().join("librefang-cli-templates-test-8239-home");
-        let _ = std::fs::remove_dir_all(&home);
-        let agent_types_dir = librefang_types::agent_type_store::agent_types_dir_in(&home);
+        let home = tempfile::tempdir().expect("tempdir");
+        let agent_types_dir = librefang_types::agent_type_store::agent_types_dir_in(home.path());
         std::fs::create_dir_all(&agent_types_dir).unwrap();
         std::fs::write(
-            agent_types_dir.join("dashboard-only.toml"),
-            "name = \"dashboard-only\"\ndescription = \"created via the dashboard\"\n",
+            agent_types_dir.join("regression8239.toml"),
+            "name = \"regression8239\"\ndescription = \"created via the dashboard\"\n",
         )
         .unwrap();
 
         let prev_home = std::env::var("LIBREFANG_HOME").ok();
         let prev_agents = std::env::var("LIBREFANG_AGENTS_DIR").ok();
-        // SAFETY: serialized on ENV_LOCK.
+        // SAFETY: serialized on env_lock.
         unsafe {
-            std::env::set_var("LIBREFANG_HOME", &home);
+            std::env::set_var("LIBREFANG_HOME", home.path());
             std::env::remove_var("LIBREFANG_AGENTS_DIR");
         }
 
         let templates = load_all_templates();
 
-        // SAFETY: see above — still under ENV_LOCK.
+        // SAFETY: see above — still under env_lock.
         unsafe {
             match prev_home {
                 Some(v) => std::env::set_var("LIBREFANG_HOME", v),
@@ -367,13 +359,12 @@ description = "second"
                 None => std::env::remove_var("LIBREFANG_AGENTS_DIR"),
             }
         }
-        let _ = std::fs::remove_dir_all(&home);
 
         let names: Vec<&str> = templates.iter().map(|t| t.name.as_str()).collect();
         let found = templates
             .iter()
-            .find(|t| t.name == "dashboard-only")
-            .unwrap_or_else(|| panic!("dashboard-only type not found in {names:?}"));
+            .find(|t| t.name == "regression8239")
+            .unwrap_or_else(|| panic!("regression8239 type not found in {names:?}"));
         assert_eq!(found.description, "created via the dashboard");
     }
 
@@ -386,10 +377,9 @@ description = "second"
     fn load_all_templates_prefers_agent_types_over_workspace_agent_of_same_name() {
         let _guard = env_lock();
 
-        let home = std::env::temp_dir().join("librefang-cli-templates-test-8239-precedence");
-        let _ = std::fs::remove_dir_all(&home);
+        let home = tempfile::tempdir().expect("tempdir");
 
-        let agent_types_dir = librefang_types::agent_type_store::agent_types_dir_in(&home);
+        let agent_types_dir = librefang_types::agent_type_store::agent_types_dir_in(home.path());
         std::fs::create_dir_all(&agent_types_dir).unwrap();
         std::fs::write(
             agent_types_dir.join("shared-name.toml"),
@@ -397,7 +387,11 @@ description = "second"
         )
         .unwrap();
 
-        let workspace_dir = home.join("workspaces").join("agents").join("shared-name");
+        let workspace_dir = home
+            .path()
+            .join("workspaces")
+            .join("agents")
+            .join("shared-name");
         std::fs::create_dir_all(&workspace_dir).unwrap();
         std::fs::write(
             workspace_dir.join("agent.toml"),
@@ -407,15 +401,15 @@ description = "second"
 
         let prev_home = std::env::var("LIBREFANG_HOME").ok();
         let prev_agents = std::env::var("LIBREFANG_AGENTS_DIR").ok();
-        // SAFETY: serialized on ENV_LOCK.
+        // SAFETY: serialized on env_lock.
         unsafe {
-            std::env::set_var("LIBREFANG_HOME", &home);
+            std::env::set_var("LIBREFANG_HOME", home.path());
             std::env::remove_var("LIBREFANG_AGENTS_DIR");
         }
 
         let templates = load_all_templates();
 
-        // SAFETY: see above — still under ENV_LOCK.
+        // SAFETY: see above — still under env_lock.
         unsafe {
             match prev_home {
                 Some(v) => std::env::set_var("LIBREFANG_HOME", v),
@@ -426,7 +420,6 @@ description = "second"
                 None => std::env::remove_var("LIBREFANG_AGENTS_DIR"),
             }
         }
-        let _ = std::fs::remove_dir_all(&home);
 
         let matches: Vec<&AgentTemplate> = templates
             .iter()
