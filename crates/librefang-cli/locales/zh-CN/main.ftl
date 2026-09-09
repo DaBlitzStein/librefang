@@ -457,6 +457,7 @@ chat-runner-agent-killed = 智能体 "{ $name }" 已终止。
 chat-runner-failed-kill-agent = 终止智能体 "{ $name }" 失败。
 chat-runner-kill-failed = 终止失败: { $error }
 chat-runner-no-backend-connected = 未连接后端。
+chat-runner-goal-daemon-unsupported = 连接守护进程时尚不支持 /goal —— 请改用仪表盘创建并启动目标。
 chat-runner-no-models-available = 无可用模型。
 chat-runner-switched-model = 已切换到 { $model }
 chat-runner-failed-switch-model = 切换到 { $model } 失败

@@ -188,7 +188,10 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         name: "new",
         aliases: &[],
         category: Category::Session,
-        // Also reachable from CLI/TUI chat surfaces; both reset the agent session the same way.
+        // Also reachable from CLI/TUI chat surfaces, but the two do not reset
+        // the same way: dashboard `/new` mints a brand-new session id, while
+        // TUI `/new` clears history at the same session id (that distinction
+        // is what the sibling `/reset` comment below draws).
         scope: Scope::CHANNEL.union(Scope::CLI).union(Scope::DASHBOARD),
         description: "Reset session (clear messages)",
         args_hint: "",
@@ -274,7 +277,11 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "[on|off]",
         subcommands: &[],
         telegram_menu: true,
-        dashboard_exec: Some(DashboardExec::Backend),
+        // The dashboard has no "think" arm in `ws.rs::handle_command` — it
+        // toggles extended thinking through the `thinking` field on the
+        // message frame, not a slash command. `None` keeps it out of the
+        // slash menu, same state as `/status`.
+        dashboard_exec: None,
     },
     CommandDef {
         name: "verbose",
@@ -590,7 +597,11 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: false,
-        dashboard_exec: Some(DashboardExec::Client),
+        // The SPA has no client-side "/exit" branch — it would fall through
+        // to the ordinary send path and spend an LLM turn on the literal
+        // text "/exit". `None` keeps it out of the slash menu, same state as
+        // `/status`, until a real disconnect/navigate-away handler exists.
+        dashboard_exec: None,
     },
 ];
 
@@ -988,22 +999,33 @@ mod tests {
 
     /// Adding `Scope::CLI` to existing channel commands must not change the
     /// channel-visible set (golden assertion guard).
+    ///
+    /// Compares against a hardcoded golden list rather than re-deriving
+    /// `is_channel_command(name)` from the very `c.scope.contains(Scope::CHANNEL)`
+    /// field the filter just selected on — that re-check is true by
+    /// construction for every element and cannot catch a command silently
+    /// gaining (or losing) `Scope::CHANNEL`. `channel_command_names_match_historical_set`
+    /// pins the golden set for the CHANNEL side; this is its complement.
     #[test]
     fn cli_scope_does_not_leak_into_channel_set() {
+        let golden_non_channel: std::collections::BTreeSet<&str> = [
+            "reset", "verbose", "info", "context", "queue", "clear", "kill", "exit",
+        ]
+        .into_iter()
+        .collect();
         // Matches on "not channel-scoped" rather than "exactly Scope::CLI" so
         // the guard keeps covering commands that also gained
         // `Scope::DASHBOARD` (`/clear`, `/exit`).
-        let non_channel: Vec<&str> = COMMAND_REGISTRY
+        let actual: std::collections::BTreeSet<&str> = COMMAND_REGISTRY
             .iter()
             .filter(|c| !c.scope.contains(Scope::CHANNEL))
             .map(|c| c.name)
             .collect();
-        for name in &non_channel {
-            assert!(
-                !is_channel_command(name),
-                "non-channel command `{name}` must not appear as channel command"
-            );
-        }
+        assert_eq!(
+            actual, golden_non_channel,
+            "the non-channel command set drifted — a command gained or lost \
+             Scope::CHANNEL; update this golden list if the change is intentional"
+        );
     }
 
     #[test]
@@ -1067,10 +1089,15 @@ mod tests {
 
     #[test]
     fn dashboard_exec_matches_the_historical_chat_menu() {
-        let client: &[&str] = &["help", "clear", "agents", "info", "exit"];
+        // `think` and `exit` are deliberately absent from both lists: neither
+        // was in the hand-written menu this registry replaces (`git show
+        // c33876f36^:.../ChatPage.tsx` had `help`/`clear`/`agents`/`info`
+        // client-side and 13 others backend-side, not these two), and neither
+        // has a real execution path today — both are `dashboard_exec: None`.
+        let client: &[&str] = &["help", "clear", "agents", "info"];
         let backend: &[&str] = &[
             "new", "compact", "reset", "reboot", "stop", "model", "usage", "context", "verbose",
-            "budget", "peers", "a2a", "queue", "think",
+            "budget", "peers", "a2a", "queue",
         ];
         for name in client {
             let def = lookup(name).unwrap_or_else(|| panic!("`/{name}` must be registered"));
@@ -1113,7 +1140,10 @@ mod tests {
     /// `dashboard_exec: None` on a `Scope::DASHBOARD` command is a meaningful state:
     /// `chatCommands.ts` documents it as "catalogued but no dashboard execution path",
     /// which keeps the command out of the slash menu and lets it fall through to the
-    /// agent as ordinary text. `/status` is deliberately in that state.
+    /// agent as ordinary text. `/status` is deliberately in that state, and `/think`
+    /// and `/exit` joined it (#7996 review) once it turned out neither had a real
+    /// dashboard execution path — `/think` toggles via a message-frame field, not a
+    /// slash command, and `/exit` has no client-side handler in the SPA.
     ///
     /// Pinning the set is also strictly stronger than skipping the exceptions: it fails
     /// both when a command silently loses its exec and when one silently acquires a
@@ -1127,7 +1157,7 @@ mod tests {
 
         assert_eq!(
             catalogue_only,
-            std::collections::BTreeSet::from(["status"]),
+            std::collections::BTreeSet::from(["exit", "status", "think"]),
             "a Scope::DASHBOARD command without dashboard_exec is catalogued by the SPA \
              and hidden from the slash menu; if this set grew, that command silently \
              dropped out of the dashboard menu, and if it shrank, update this test"
