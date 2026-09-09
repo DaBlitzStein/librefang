@@ -360,7 +360,10 @@ export function AgentManifestForm({
               className={inputClass}
             />
           </Field>
-          <Field label={t("agents.form.top_p")}>
+          <Field
+            label={t("agents.form.top_p")}
+            hint={t("agents.form.sampling_provider_hint")}
+          >
             <input
               type="number"
               step="0.05"
@@ -376,7 +379,10 @@ export function AgentManifestForm({
               className={inputClass}
             />
           </Field>
-          <Field label={t("agents.form.frequency_penalty")}>
+          <Field
+            label={t("agents.form.frequency_penalty")}
+            hint={t("agents.form.sampling_provider_hint")}
+          >
             <input
               type="number"
               step="0.1"
@@ -392,7 +398,10 @@ export function AgentManifestForm({
               className={inputClass}
             />
           </Field>
-          <Field label={t("agents.form.presence_penalty")}>
+          <Field
+            label={t("agents.form.presence_penalty")}
+            hint={t("agents.form.sampling_provider_hint")}
+          >
             <input
               type="number"
               step="0.1"
