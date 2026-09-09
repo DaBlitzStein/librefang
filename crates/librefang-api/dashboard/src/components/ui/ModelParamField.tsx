@@ -141,6 +141,13 @@ interface ModelParamFieldProps {
    * parameter a different meaning — not to rename it for decoration.
    */
   label?: string;
+  /**
+   * The editor is refusing to save this value, e.g. `validateManifestForm`
+   * found it outside the range `PATCH /api/agents/{id}/model` accepts (#8112).
+   * Marks the control itself rather than leaving the operator to find which of
+   * the four fields the page's "cannot save" refers to.
+   */
+  invalid?: boolean;
 }
 
 /**
@@ -163,6 +170,7 @@ export function ModelParamField({
   warning,
   hint,
   label,
+  invalid,
 }: ModelParamFieldProps) {
   const { t } = useTranslation();
   return (
@@ -180,6 +188,7 @@ export function ModelParamField({
         min={MODEL_PARAM_RANGES[param].min}
         max={MODEL_PARAM_RANGES[param].max}
         step={STEPS[param]}
+        invalid={invalid}
       />
       {hint && <p className="mt-1 text-[10px] text-text-dim/70 leading-snug">{hint}</p>}
     </div>
