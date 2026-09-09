@@ -3777,6 +3777,20 @@ mod tests {
             .id;
         let external =
             LibreFangKernel::channel_session_id(assistant, "cron", Some("chat-7"), false);
+        // The discriminating premise (#7701 review round 2): comparing
+        // `external` against `for_channel(agent, "cron")` alone passes even
+        // with the reserved-name guard removed, because `for_sender_scope`
+        // composes "cron:chat-7" before hashing and is already a different
+        // id from `for_channel`'s "cron"-only formula regardless of the
+        // guard. Compare against the UNGUARDED derivation instead — that is
+        // exactly what `channel_session_id` would produce if
+        // `resolve_scope_channel` were dropped from it.
+        let unguarded = SessionId::for_sender_scope(assistant, "cron", Some("chat-7"));
+        assert_ne!(
+            external, unguarded,
+            "test premise: the reserved-name guard must rewrite 'cron' to 'ext-cron' \
+             before derivation — without it this test proves nothing"
+        );
         assert_ne!(
             external,
             SessionId::for_channel(assistant, "cron"),
