@@ -2942,7 +2942,8 @@
     "evaluator_model": "Evaluator model",
     "evaluator_model_placeholder": "Evaluator model (optional)",
     "tick_interval": "Tick interval",
-    "tick_interval_placeholder": "Seconds between loop iterations (default 2)"
+    "tick_interval_placeholder": "Seconds between loop iterations (default {{defaultSecs}})",
+    "tick_interval_out_of_range": "Tick interval must be an integer between {{min}} and {{max}} seconds."
   },
   "sessions": {
     "title": "Sessions",
@@ -4260,7 +4261,7 @@
     "name_placeholder": "customer-support",
     "new": "New agent type",
     "preserved_note": "Saving rewrites only the fields above. Anything else in this type's agent.toml — triggers, compaction, MCP allowlists, session mode — is preserved.",
-    "promote": "Promote",
+    "promote": "Promote to registry",
     "promote_copied": "Copied the sanitized TOML",
     "promote_copy": "Copy TOML",
     "promote_copy_failed": "Could not copy the TOML",
@@ -4303,7 +4304,6 @@
     "tools": "Tools",
     "tools_hint": "Picked from the tools this daemon exposes; unknown identifiers can still be typed.",
     "tools_search": "Search tools…",
-    "promote": "Promote to registry",
     "confirm_promote": "Promote the agent type '{{name}}' to the public registry? The manifest will be sanitized for publication and submitted as a GitHub pull request.",
     "promoted": "Registry PR opened",
     "promote_failed": "Could not promote the agent type",

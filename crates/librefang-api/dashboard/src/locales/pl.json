@@ -2948,7 +2948,8 @@
     "evaluator_model": "Model oceniający",
     "evaluator_model_placeholder": "Model oceniający (opcjonalnie)",
     "tick_interval": "Odstęp między iteracjami",
-    "tick_interval_placeholder": "Sekundy między iteracjami pętli (domyślnie 2)"
+    "tick_interval_placeholder": "Sekundy między iteracjami pętli (domyślnie {{defaultSecs}})",
+    "tick_interval_out_of_range": "Odstęp między iteracjami musi być liczbą całkowitą od {{min}} do {{max}} sekund."
   },
   "sessions": {
     "title": "Sesje",
@@ -4272,7 +4273,7 @@
     "name_placeholder": "customer-support",
     "new": "Nowy typ agenta",
     "preserved_note": "Zapis nadpisuje wyłącznie powyższe pola. Reszta pliku agent.toml tego typu — wyzwalacze, kompaktowanie, listy MCP, tryb sesji — zostaje zachowana.",
-    "promote": "Promuj",
+    "promote": "Opublikuj w rejestrze",
     "promote_copied": "Skopiowano oczyszczony plik TOML",
     "promote_copy": "Kopiuj TOML",
     "promote_copy_failed": "Nie udało się skopiować pliku TOML",
@@ -4315,7 +4316,6 @@
     "tools": "Narzędzia",
     "tools_hint": "Wybierane z narzędzi udostępnianych przez tego demona; nieznane identyfikatory można wpisać ręcznie.",
     "tools_search": "Szukaj narzędzi…",
-    "promote": "Opublikuj w rejestrze",
     "confirm_promote": "Opublikować typ agenta '{{name}}' w publicznym rejestrze? Manifest zostanie oczyszczony i przesłany jako pull request na GitHubie.",
     "promoted": "PR w rejestrze utworzony",
     "promote_failed": "Nie udało się opublikować typu agenta",

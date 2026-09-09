@@ -18,6 +18,12 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
+import {
+  DEFAULT_GOAL_TICK_INTERVAL_SECS,
+  MAX_GOAL_TICK_INTERVAL_SECS,
+  MIN_GOAL_TICK_INTERVAL_SECS,
+  parseGoalTickInterval,
+} from "../lib/goalTickInterval";
 import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
@@ -282,13 +288,18 @@ export function GoalsPage() {
       // Same for a blank cadence: omitting the field is what leaves the goal on
       // the default, whereas `""` fails the backend's integer check.
       const { parent_id, agent_id, verify_agent_id, evaluator_model, tick_interval_secs, ...rest } = createDraft;
+      const cadence = parseGoalTickInterval(tick_interval_secs);
+      if (cadence === undefined) {
+        addToast(t("goals.tick_interval_out_of_range", { min: MIN_GOAL_TICK_INTERVAL_SECS, max: MAX_GOAL_TICK_INTERVAL_SECS }), "error");
+        return;
+      }
       await createMutation.mutateAsync({
         ...rest,
         ...(parent_id.trim() ? { parent_id: parent_id.trim() } : {}),
         ...(agent_id.trim() ? { agent_id: agent_id.trim() } : {}),
         ...(verify_agent_id.trim() ? { verify_agent_id: verify_agent_id.trim() } : {}),
         ...(evaluator_model.trim() ? { evaluator_model: evaluator_model.trim() } : {}),
-        ...(tick_interval_secs.trim() ? { tick_interval_secs: Number(tick_interval_secs) } : {}),
+        ...(cadence === null ? {} : { tick_interval_secs: cadence }),
       });
       addToast(t("common.success"), "success");
       setCreateDraft({ title: "", description: "", status: "pending", progress: 0, parent_id: "", agent_id: "", loop_engineering: false, verify_agent_id: "", evaluator_model: "", tick_interval_secs: "" });
@@ -341,6 +352,17 @@ export function GoalsPage() {
 
   const handleSaveEdit = async () => {
     if (!editingId || !editDraft.title.trim()) return;
+    // Checked here rather than left to the input's `min` / `max`: this block is
+    // not a `<form>` and Save is a plain button, so those attributes never
+    // trigger constraint validation. The title, status, progress and agent
+    // changes travel in the same payload, and `validate_tick_interval` refuses
+    // it before the `structured_modify` transaction — so one bad cadence used
+    // to discard the entire edit and report only the cadence.
+    const cadence = parseGoalTickInterval(editDraft.tick_interval_secs);
+    if (cadence === undefined) {
+      addToast(t("goals.tick_interval_out_of_range", { min: MIN_GOAL_TICK_INTERVAL_SECS, max: MAX_GOAL_TICK_INTERVAL_SECS }), "error");
+      return;
+    }
     try {
       // `null` is the backend's clear signal; an empty select means "none".
       await updateMutation.mutateAsync({
@@ -350,9 +372,7 @@ export function GoalsPage() {
           agent_id: editDraft.agent_id.trim() || null,
           verify_agent_id: editDraft.verify_agent_id.trim() || null,
           evaluator_model: editDraft.evaluator_model.trim() || null,
-          tick_interval_secs: editDraft.tick_interval_secs.trim()
-            ? Number(editDraft.tick_interval_secs)
-            : null,
+          tick_interval_secs: cadence,
         },
       });
       addToast(t("common.success"), "success");
@@ -569,9 +589,9 @@ export function GoalsPage() {
                   <option value="">{t("goals.no_agent_selected")}</option>
                   {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
                 </select>
-                {/* Outside the loop-engineering block on purpose: the runner reads the cadence on every autonomous run, not only a loop-engineered one. Bounds mirror MIN/MAX_GOAL_TICK_INTERVAL_SECS in librefang-types. */}
+                {/* Outside the loop-engineering block on purpose: the runner reads the cadence on every autonomous run, not only a loop-engineered one. Bounds and default come from lib/goalTickInterval, which mirrors librefang-types. */}
                 <label htmlFor="goal-create-tick" className="sr-only">{t("goals.tick_interval")}</label>
-                <input id="goal-create-tick" type="number" min={1} max={86400} value={createDraft.tick_interval_secs} onChange={e => setCreateDraft({...createDraft, tick_interval_secs: e.target.value})} placeholder={t("goals.tick_interval_placeholder")} className={inputClass} />
+                <input id="goal-create-tick" type="number" min={MIN_GOAL_TICK_INTERVAL_SECS} max={MAX_GOAL_TICK_INTERVAL_SECS} value={createDraft.tick_interval_secs} onChange={e => setCreateDraft({...createDraft, tick_interval_secs: e.target.value})} placeholder={t("goals.tick_interval_placeholder", { defaultSecs: DEFAULT_GOAL_TICK_INTERVAL_SECS })} className={inputClass} />
                 <label className="flex items-center gap-2 text-xs text-text-dim cursor-pointer">
                   <input type="checkbox" checked={createDraft.loop_engineering} onChange={e => setCreateDraft({...createDraft, loop_engineering: e.target.checked})} className="rounded" />
                   {t("goals.loop_engineering")}
@@ -624,7 +644,7 @@ export function GoalsPage() {
                               {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
                             </select>
                             <label htmlFor="goal-edit-tick" className="sr-only">{t("goals.tick_interval")}</label>
-                            <input id="goal-edit-tick" type="number" min={1} max={86400} value={editDraft.tick_interval_secs} onChange={e => setEditDraft({...editDraft, tick_interval_secs: e.target.value})} placeholder={t("goals.tick_interval_placeholder")} className={`${inputClass} flex-1 min-w-[120px]`} />
+                            <input id="goal-edit-tick" type="number" min={MIN_GOAL_TICK_INTERVAL_SECS} max={MAX_GOAL_TICK_INTERVAL_SECS} value={editDraft.tick_interval_secs} onChange={e => setEditDraft({...editDraft, tick_interval_secs: e.target.value})} placeholder={t("goals.tick_interval_placeholder", { defaultSecs: DEFAULT_GOAL_TICK_INTERVAL_SECS })} className={`${inputClass} flex-1 min-w-[120px]`} />
                             <Button variant="primary" size="sm" onClick={handleSaveEdit}>{t("common.save")}</Button>
                             <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>{t("common.cancel")}</Button>
                           </div>
