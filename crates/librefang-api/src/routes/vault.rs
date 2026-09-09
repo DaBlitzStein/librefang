@@ -18,7 +18,7 @@
 //!
 //! Writes go through [`librefang_kernel::KernelApi::vault_set`], which mutates the same lazily-unlocked `CredentialVault` that [`librefang_kernel::KernelApi::vault_get`] reads from — the `Arc<RwLock<…>>` cached on the kernel by `vault_handle()` (#3598). `CredentialVault::set` inserts into that in-memory map *and* re-encrypts to disk, so the next request that calls `vault_get` observes the new value with no restart and no cache to invalidate.
 //!
-//! The stale-cache hazard the issue describes is real but belongs to a different path: `KernelOAuthProvider::vault_set` and the `librefang vault set` CLI each construct their own `CredentialVault`, so a write there updates the file while the running daemon keeps serving its cached map. Routing this endpoint through the kernel accessor is what avoids reproducing that surprise in-process.
+//! Routing through the kernel accessor is not by itself enough, because the cached map is not the only writer: `KernelOAuthProvider::vault_set` opens its own `CredentialVault` for every `mcp-oauth:*` entry, and `librefang vault set` runs in a separate process. `CredentialVault::save` re-encrypts the *whole* file from one instance's map, so a `PUT` here would erase every OAuth client secret stored since the kernel unlocked — dropping those servers back to `NeedsAuth` — and a `DELETE` would report a revocation it never performed. `LibreFangKernel::vault_set` / `vault_remove` therefore re-read `vault.enc` under the write guard before mutating; this endpoint is the operator-facing trigger that made that reconciliation load-bearing.
 //!
 //! # Hosts where the vault cannot be unlocked
 //!
@@ -107,12 +107,14 @@ pub struct VaultSetRequest {
     pub value: String,
 }
 
-/// Reject the request unless the caller is an authenticated `Admin`+.
+/// Reject the request unless the caller is an authenticated `Owner`.
 ///
-/// Writing a daemon-wide credential is an operator action. The trusted loopback / `LIBREFANG_ALLOW_NO_AUTH=1` path is accepted because the middleware injects a synthetic Owner there, which is what keeps the dashboard usable on a single-user install.
-fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> Option<Response> {
+/// `Admin` is deliberately not enough. `middleware::is_owner_only_write` already keeps `/api/config/set` and the `/api/users/{name}/provider-keys` writes at Owner, and `min_role_for_privileged_get` keeps even the names-only provider-key listing there, on the reasoning that Admin is "config write" by design rather than "custody of the credentials the daemon presents as itself". A vault key is exactly the latter: an Admin who could replace `GITHUB_TOKEN` would make skill proposal and agent-type promotion push under a token they chose, and one who could delete it would break both for everyone.
+///
+/// The three vault paths are registered in those two middleware tables so the policy stays in one place; this check is the in-handler half, and is what covers the code paths that reach the handler without the per-user API-key middleware verdict. The trusted loopback / `LIBREFANG_ALLOW_NO_AUTH=1` path still passes because the middleware injects a synthetic Owner there, which is what keeps the dashboard usable on a single-user install.
+fn require_owner(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> Option<Response> {
     match api_user {
-        Some(u) if u.role >= UserRole::Admin => None,
+        Some(u) if u.role >= UserRole::Owner => None,
         Some(u) => {
             state.kernel.audit().record_with_context(
                 "system",
@@ -123,7 +125,7 @@ fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> O
                 Some("api".to_string()),
             );
             Some(
-                ApiErrorResponse::forbidden("Admin role required for vault access").into_response(),
+                ApiErrorResponse::forbidden("Owner role required for vault access").into_response(),
             )
         }
         None => {
@@ -136,7 +138,7 @@ fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> O
                 Some("api".to_string()),
             );
             Some(
-                ApiErrorResponse::unauthorized("Admin credential required for vault access")
+                ApiErrorResponse::unauthorized("Owner credential required for vault access")
                     .into_response(),
             )
         }
@@ -150,7 +152,22 @@ fn writable_key(key: &str) -> Option<&'static str> {
     WRITABLE_KEYS.iter().copied().find(|c| *c == key)
 }
 
-fn not_a_writable_key(key: &str) -> Response {
+/// Reject a key outside [`WRITABLE_KEYS`], and record the attempt.
+///
+/// This is the branch the allowlist exists for — `PUT /api/vault/keys/mcp-oauth:…:client_secret`, or a `DELETE` aimed at `totp_secret` — so it is the one an operator most needs to find in the hash-chained log afterwards. Left unrecorded it was the only rejection on this surface that produced no audit entry, while the plain role denial in [`require_owner`] recorded a `PermissionDenied` for a far less interesting request.
+fn not_a_writable_key(
+    state: &AppState,
+    api_user: Option<&AuthenticatedApiUser>,
+    key: &str,
+) -> Response {
+    state.kernel.audit().record_with_context(
+        "system",
+        librefang_kernel::audit::AuditAction::PermissionDenied,
+        format!("vault write rejected for key outside the allowlist: {key}"),
+        "denied",
+        api_user.map(|u| u.user_id),
+        Some("api".to_string()),
+    );
     ApiErrorResponse::not_found(format!(
         "'{key}' is not a vault key this API may write; writable keys: {}",
         WRITABLE_KEYS.join(", ")
@@ -170,15 +187,15 @@ fn vault_unavailable(error: &str) -> Response {
     tag = "vault",
     responses(
         (status = 200, description = "Writable vault keys, whether the vault holds each one, and the effective source the daemon resolves it from (`unset` / `vault` / `environment`)", body = crate::types::JsonObject),
-        (status = 401, description = "Admin credential required"),
-        (status = 403, description = "Admin role required"),
+        (status = 401, description = "Owner credential required"),
+        (status = 403, description = "Owner role required"),
     )
 )]
 pub async fn vault_list_keys(
     State(state): State<Arc<AppState>>,
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> Response {
-    if let Some(deny) = require_admin(&state, api_user.as_ref().map(|e| &e.0)) {
+    if let Some(deny) = require_owner(&state, api_user.as_ref().map(|e| &e.0)) {
         return deny;
     }
     let keys: Vec<serde_json::Value> = WRITABLE_KEYS
@@ -204,8 +221,8 @@ pub async fn vault_list_keys(
     responses(
         (status = 200, description = "Secret stored; `source` reports whether the daemon will actually use it or the process environment still overrides it", body = crate::types::JsonObject),
         (status = 400, description = "Empty or oversized value"),
-        (status = 401, description = "Admin credential required"),
-        (status = 403, description = "Admin role required"),
+        (status = 401, description = "Owner credential required"),
+        (status = 403, description = "Owner role required"),
         (status = 404, description = "Key is not writable over HTTP"),
         (status = 503, description = "Vault could not be unlocked or written"),
     )
@@ -216,11 +233,11 @@ pub async fn vault_put_key(
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     Json(req): Json<VaultSetRequest>,
 ) -> Response {
-    if let Some(deny) = require_admin(&state, api_user.as_ref().map(|e| &e.0)) {
+    if let Some(deny) = require_owner(&state, api_user.as_ref().map(|e| &e.0)) {
         return deny;
     }
     let Some(key) = writable_key(&key) else {
-        return not_a_writable_key(&key);
+        return not_a_writable_key(&state, api_user.as_ref().map(|e| &e.0), &key);
     };
     let value = req.value.trim();
     if value.is_empty() {
@@ -260,8 +277,8 @@ pub async fn vault_put_key(
     params(("key" = String, Path, description = "Vault key name")),
     responses(
         (status = 200, description = "Vault copy removed (or already absent); `source` still reports `environment` when the process environment continues to supply the key", body = crate::types::JsonObject),
-        (status = 401, description = "Admin credential required"),
-        (status = 403, description = "Admin role required"),
+        (status = 401, description = "Owner credential required"),
+        (status = 403, description = "Owner role required"),
         (status = 404, description = "Key is not writable over HTTP"),
         (status = 503, description = "Vault could not be unlocked or written"),
     )
@@ -271,11 +288,11 @@ pub async fn vault_delete_key(
     Path(key): Path<String>,
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> Response {
-    if let Some(deny) = require_admin(&state, api_user.as_ref().map(|e| &e.0)) {
+    if let Some(deny) = require_owner(&state, api_user.as_ref().map(|e| &e.0)) {
         return deny;
     }
     let Some(key) = writable_key(&key) else {
-        return not_a_writable_key(&key);
+        return not_a_writable_key(&state, api_user.as_ref().map(|e| &e.0), &key);
     };
     let removed = match state.kernel.vault_remove(key) {
         Ok(removed) => removed,

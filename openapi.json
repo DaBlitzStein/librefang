@@ -13927,10 +13927,10 @@
             }
           },
           "401": {
-            "description": "Admin credential required"
+            "description": "Owner credential required"
           },
           "403": {
-            "description": "Admin role required"
+            "description": "Owner role required"
           }
         }
       }
@@ -13977,10 +13977,10 @@
             "description": "Empty or oversized value"
           },
           "401": {
-            "description": "Admin credential required"
+            "description": "Owner credential required"
           },
           "403": {
-            "description": "Admin role required"
+            "description": "Owner role required"
           },
           "404": {
             "description": "Key is not writable over HTTP"
@@ -14018,10 +14018,10 @@
             }
           },
           "401": {
-            "description": "Admin credential required"
+            "description": "Owner credential required"
           },
           "403": {
-            "description": "Admin role required"
+            "description": "Owner role required"
           },
           "404": {
             "description": "Key is not writable over HTTP"
