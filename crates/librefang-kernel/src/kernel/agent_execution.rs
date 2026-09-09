@@ -145,9 +145,16 @@ pub(crate) fn apply_routed_profile(
     // provider's endpoint and would send the routed request to the
     // wrong place with the wrong credentials. Same contract
     // `set_agent_model` applies (`agent_state.rs:269-278`).
+    //
+    // `context_window` / `max_output_tokens` get cleared here too, but it is
+    // a no-op for this caller: the two unconditional assignments below
+    // immediately overwrite them from the profile regardless of whether the
+    // provider changed. `clear_stale_provider_overrides` exists as one
+    // function so `apply_tier_routed_model` — which has no replacement
+    // value for the limits — shares the exact same four fields rather than
+    // redeclaring a subset of them.
     if model.provider != profile.provider {
-        model.api_key_env = None;
-        model.base_url = None;
+        clear_stale_provider_overrides(model);
     }
     model.provider = profile.provider;
     model.model = profile.model;
@@ -160,6 +167,38 @@ pub(crate) fn apply_routed_profile(
     // window (#7781 review).
     model.context_window = profile.context_window;
     model.max_output_tokens = profile.max_output_tokens;
+}
+
+/// Clear the overrides that describe the *previous* provider's endpoint —
+/// its credentials and its capacity limits — so a provider change never
+/// leaves them attached to the new one (#7781 review). Shared by
+/// [`apply_routed_profile`] and [`apply_tier_routed_model`].
+fn clear_stale_provider_overrides(model: &mut librefang_types::agent::ModelConfig) {
+    model.api_key_env = None;
+    model.base_url = None;
+    model.context_window = None;
+    model.max_output_tokens = None;
+}
+
+/// Apply a tier-routed model id onto an agent's `ModelConfig` (#7781
+/// review).
+///
+/// Unlike [`apply_routed_profile`], the tier router only ever produces a
+/// model id string — there is no `ModelProfile` carrying a replacement
+/// provider, credential, or limit, so a provider change has nothing to
+/// substitute and clearing the stale overrides is the whole fix.
+fn apply_tier_routed_model(
+    model: &mut librefang_types::agent::ModelConfig,
+    routed_model: &str,
+    new_provider: Option<&str>,
+) {
+    model.model = routed_model.to_string();
+    if let Some(new_provider) = new_provider {
+        if new_provider != model.provider {
+            clear_stale_provider_overrides(model);
+            model.provider = new_provider.to_string();
+        }
+    }
 }
 
 /// Resolve a routed profile's model id against the catalog, in place.
@@ -1241,15 +1280,9 @@ impl LibreFangKernel {
                     routed_model = %routed_model,
                     "Model routing applied"
                 );
-                manifest.model.model = routed_model.clone();
                 let cat = self.llm.model_catalog.load();
-                {
-                    if let Some(entry) = cat.find_model(&routed_model) {
-                        if entry.provider != manifest.model.provider {
-                            manifest.model.provider = entry.provider.clone();
-                        }
-                    }
-                }
+                let new_provider = cat.find_model(&routed_model).map(|e| e.provider.as_str());
+                apply_tier_routed_model(&mut manifest.model, &routed_model, new_provider);
             }
         }
 
@@ -2008,6 +2041,70 @@ mod apply_routed_profile_tests {
     }
 }
 
+/// Regression tests for `apply_tier_routed_model` (#7781 review): the tier
+/// router's provider-change branch must clear the same stale overrides
+/// `apply_routed_profile` clears, even though it has no `ModelProfile` to
+/// pull replacement limits from.
+#[cfg(test)]
+mod apply_tier_routed_model_tests {
+    use super::apply_tier_routed_model;
+    use librefang_types::agent::ModelConfig;
+
+    fn model_with_stale_state() -> ModelConfig {
+        ModelConfig {
+            provider: "cloudverse".to_string(),
+            model: "old-model".to_string(),
+            api_key_env: Some("CLOUDVERSE_API_KEY".to_string()),
+            base_url: Some("https://cloudverse.example/v1".to_string()),
+            context_window: Some(8_000),
+            max_output_tokens: Some(2_000),
+            ..ModelConfig::default()
+        }
+    }
+
+    /// A tier-routed model whose catalog entry names a different provider
+    /// must drop the previous provider's credentials and endpoint limits —
+    /// there is no replacement value, so clearing is the whole fix.
+    #[test]
+    fn provider_change_clears_stale_credentials_and_limits() {
+        let mut model = model_with_stale_state();
+        apply_tier_routed_model(&mut model, "new-model", Some("openrouter"));
+
+        assert_eq!(model.provider, "openrouter");
+        assert_eq!(model.model, "new-model");
+        assert!(model.api_key_env.is_none());
+        assert!(model.base_url.is_none());
+        assert_eq!(model.context_window, None);
+        assert_eq!(model.max_output_tokens, None);
+    }
+
+    /// Re-routing within the same provider must leave a legitimate
+    /// per-agent credential override and limit alone.
+    #[test]
+    fn same_provider_reroute_preserves_overrides() {
+        let mut model = model_with_stale_state();
+        apply_tier_routed_model(&mut model, "another-model", Some("cloudverse"));
+
+        assert_eq!(model.model, "another-model");
+        assert_eq!(model.api_key_env.as_deref(), Some("CLOUDVERSE_API_KEY"));
+        assert_eq!(model.context_window, Some(8_000));
+    }
+
+    /// An unresolved model id (no catalog entry, `new_provider = None`)
+    /// still updates the model string but has no provider to compare
+    /// against, so the overrides are left untouched.
+    #[test]
+    fn unresolved_model_id_does_not_touch_provider_overrides() {
+        let mut model = model_with_stale_state();
+        apply_tier_routed_model(&mut model, "unlisted-model", None);
+
+        assert_eq!(model.model, "unlisted-model");
+        assert_eq!(model.provider, "cloudverse");
+        assert_eq!(model.api_key_env.as_deref(), Some("CLOUDVERSE_API_KEY"));
+        assert_eq!(model.context_window, Some(8_000));
+    }
+}
+
 /// Regression tests for `model_resolution_declines_routing` (#7781 review):
 /// the gate must decline only when the catalog can actually prove the id is
 /// wrong, not merely because the id is unfamiliar.
@@ -2076,10 +2173,19 @@ mod model_resolution_declines_routing_tests {
         assert_eq!(p.model, "custom/whatever-model", "the id is left untouched");
     }
 
-    /// A local provider accepts any model string, cataloged or not.
+    /// A local provider accepts any model string, even one the catalog does
+    /// list models for under that provider — cataloged or not is
+    /// irrelevant to a local provider, unlike a remote one.
+    ///
+    /// The catalog here is deliberately non-empty for "ollama": an empty
+    /// catalog alone already forces `provider_has_models == false`, which
+    /// short-circuits the decline check regardless of `is_local` and would
+    /// let this test pass even if the local-provider exemption were deleted
+    /// (#7781 review).
     #[test]
     fn local_provider_allows_unresolvable_model() {
-        let catalog = ModelCatalog::from_entries(Vec::new(), Vec::new());
+        let catalog =
+            ModelCatalog::from_entries(vec![catalog_entry("ollama", "qwen3:8b")], Vec::new());
         let mut p = profile("ollama", "llama3.2");
 
         assert!(

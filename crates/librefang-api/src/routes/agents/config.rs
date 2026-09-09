@@ -764,7 +764,9 @@ pub async fn set_agent_channels(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "An agent's model routing mode and router override", body = crate::types::JsonObject)
+        (status = 200, description = "An agent's model routing mode and router override", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed agent id", body = crate::types::JsonObject),
+        (status = 404, description = "Agent not found, or not visible to the caller", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_agent_model_routing(
@@ -841,7 +843,9 @@ pub async fn get_agent_model_routing(
     request_body(content = crate::types::JsonObject, description = "Mode, allowed profiles, cost budget and default profile"),
     responses(
         (status = 200, description = "Updated model routing settings", body = crate::types::JsonObject),
-        (status = 400, description = "Invalid agent id, mode or cost budget", body = crate::types::JsonObject)
+        (status = 400, description = "Invalid agent id, mode or cost budget", body = crate::types::JsonObject),
+        (status = 404, description = "Agent not found, or not visible to the caller", body = crate::types::JsonObject),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_model_routing(

@@ -120,6 +120,11 @@ pub struct AgentSelectState {
     /// Not editable from this screen — carried through unchanged on save so
     /// it is not silently cleared (#7781 review).
     pub router_default_profile: Option<String>,
+    /// The per-agent router bypass loaded from the agent's stored routing
+    /// settings. Not editable from this screen — carried through unchanged
+    /// on save for the same reason as `router_default_profile` (#7781
+    /// review).
+    pub router_fixed: bool,
 
     // Inference-parameter editor (detail view)
     pub model_params: super::model_params::ModelParamsEditor,
@@ -210,6 +215,9 @@ pub enum AgentAction {
         /// Not editable from this screen — the value loaded from the
         /// agent's stored settings, carried through unchanged (#7781 review).
         default_profile: Option<String>,
+        /// Not editable from this screen — the value loaded from the
+        /// agent's stored settings, carried through unchanged (#7781 review).
+        fixed: bool,
     },
     /// Fetch an agent's model routing settings and the profile catalog.
     FetchAgentModelRouting(String),
@@ -266,6 +274,7 @@ impl AgentSelectState {
             router_profile_cursor: 0,
             cost_budget_idx: 0,
             router_default_profile: None,
+            router_fixed: false,
             spawned_toml: None,
             status_msg: String::new(),
         }
@@ -292,6 +301,7 @@ impl AgentSelectState {
         self.router_profile_cursor = 0;
         self.cost_budget_idx = 0;
         self.router_default_profile = None;
+        self.router_fixed = false;
         self.spawned_toml = None;
         self.status_msg.clear();
         self.search_active = false;
@@ -604,9 +614,19 @@ impl AgentSelectState {
                 }
             }
             KeyCode::Char('r') => {
-                // Edit model routing for this agent
+                // Edit model routing for this agent. Reset the editor state
+                // up front: if the fetch below fails (FetchError instead of
+                // AgentModelRoutingLoaded), a stale value left over from
+                // whatever agent was edited last must not get written onto
+                // this one on Enter (#7781 review).
                 if let Some(ref detail) = self.detail {
                     let id = detail.id.clone();
+                    self.model_mode = "fixed".to_string();
+                    self.router_profiles.clear();
+                    self.router_profile_cursor = 0;
+                    self.cost_budget_idx = 0;
+                    self.router_default_profile = None;
+                    self.router_fixed = false;
                     self.sub = AgentSubScreen::EditModelRouting;
                     return AgentAction::FetchAgentModelRouting(id);
                 }
@@ -1003,6 +1023,7 @@ impl AgentSelectState {
                         allowed_profiles,
                         cost_budget,
                         default_profile: self.router_default_profile.clone(),
+                        fixed: self.router_fixed,
                     };
                 }
                 self.sub = AgentSubScreen::AgentDetail;
@@ -2094,5 +2115,57 @@ mod tests {
             }
             _ => panic!("Enter must emit UpdateModelRouting"),
         }
+    }
+
+    /// #7781 review: `fixed` — the per-agent router bypass — is not
+    /// editable from this screen either, and the InProcess save path used
+    /// to hardcode it to `false` unconditionally. Same contract as
+    /// `default_profile` above.
+    #[test]
+    fn saving_model_routing_preserves_the_loaded_fixed_flag() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-1".to_string(),
+            ..AgentDetail::default()
+        });
+        state.model_mode = "flexible".to_string();
+        state.router_fixed = true;
+
+        let action = state.handle_edit_model_routing(key(KeyCode::Enter));
+
+        match action {
+            AgentAction::UpdateModelRouting { fixed, .. } => {
+                assert!(fixed, "save must not clear the loaded fixed flag");
+            }
+            _ => panic!("Enter must emit UpdateModelRouting"),
+        }
+    }
+
+    /// #7781 review: opening the editor for a different agent (`r` from the
+    /// detail pane) must not let the previous agent's routing values leak
+    /// into a save for the new one if the fetch that follows fails.
+    #[test]
+    fn entering_the_routing_editor_resets_stale_values() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-2".to_string(),
+            ..AgentDetail::default()
+        });
+        // Simulate leftover state from a previously edited agent.
+        state.model_mode = "flexible".to_string();
+        state.router_profiles = vec![("coder".to_string(), true)];
+        state.router_profile_cursor = 1;
+        state.cost_budget_idx = 2;
+        state.router_default_profile = Some("coder".to_string());
+        state.router_fixed = true;
+
+        state.handle_detail(key(KeyCode::Char('r')));
+
+        assert_eq!(state.model_mode, "fixed");
+        assert!(state.router_profiles.is_empty());
+        assert_eq!(state.router_profile_cursor, 0);
+        assert_eq!(state.cost_budget_idx, 0);
+        assert_eq!(state.router_default_profile, None);
+        assert!(!state.router_fixed);
     }
 }
