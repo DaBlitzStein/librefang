@@ -2358,6 +2358,7 @@ tui-goals-phase-label = { "  " }运行阶段:{ " " }
 # purge command
 purge-failed-config = 清除已中止：无法加载配置，因此无法确定要清除哪个安装：{ $error }
 purge-database-line = 数据库：{ $path }
+purge-home-line = 主目录（定时任务、事件触发器、代理类型模板、工作区）：{ $path }
 purge-failed-no-database = 清除失败：{ $path } 处无数据库
 purge-failed-open-database = 清除失败：打开数据库：{ $error }
 purge-nothing-to-purge = 无需清除：'{ $agent }' 在此安装中未留下痕迹。

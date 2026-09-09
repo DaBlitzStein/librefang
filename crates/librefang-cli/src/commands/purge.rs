@@ -41,11 +41,14 @@ pub(crate) fn cmd_purge(
     // nothing the daemon could race against, and `--force` is the explicit
     // override for an operator who has already stopped the daemon by other
     // means (or knows `daemon.json` is stale).
-    if let Some(base) = daemon_running_guard(
-        crate::commands::common::find_daemon_in_home(&home).as_deref(),
-        dry_run,
-        force,
-    ) {
+    //
+    // The probe is behind a closure because it is an HTTP round trip with a
+    // 1 s connect and 2 s read timeout: passing it as an argument made
+    // `--dry-run` and `--force` wait for a value the guard discards on its
+    // first line.
+    if let Some(base) = daemon_running_guard(dry_run, force, || {
+        crate::commands::common::find_daemon_in_home(&home)
+    }) {
         eprintln!(
             "{}",
             i18n::t_args("purge-failed-daemon-running", &[("url", &base)])
@@ -100,21 +103,22 @@ fn purge_db_path(config: &KernelConfig) -> std::path::PathBuf {
         .unwrap_or_else(|| config.data_dir.join("librefang.db"))
 }
 
-/// Whether the destructive path must refuse to run because a daemon
-/// (`daemon_base_url`) is holding this home directory.
+/// Whether the destructive path must refuse to run because a daemon is
+/// holding this home directory.
 ///
 /// A dry run and an explicit `--force` both bypass the refusal — a dry run
 /// touches nothing the daemon could race against, and `force` is the
-/// operator's explicit override.
+/// operator's explicit override — so `find_daemon` is only called when its
+/// answer can change the outcome.
 fn daemon_running_guard(
-    daemon_base_url: Option<&str>,
     dry_run: bool,
     force: bool,
+    find_daemon: impl FnOnce() -> Option<String>,
 ) -> Option<String> {
     if dry_run || force {
         return None;
     }
-    daemon_base_url.map(str::to_string)
+    find_daemon()
 }
 
 /// Resolve the configuration that names the purge target, refusing to guess.
@@ -165,11 +169,26 @@ fn purge_with(
     // kind of thing goes; only the path says *whose*, which is the difference
     // between confirming a cleanup and confirming it against the wrong
     // installation.
+    //
+    // The home directory goes with it because the database no longer names
+    // everything the command deletes: cron jobs (`<home>/data/cron_jobs.json`),
+    // triggers (`<home>/trigger_jobs.json`), the agent-type template and the
+    // workspaces root all hang off `home_dir`, while the database is resolved
+    // through `sqlite_path` / `data_dir` — which this command deliberately
+    // decoupled. On a relocated install those are two unrelated trees, and one
+    // path would have the operator confirm deletions in the other sight unseen.
     println!(
         "{}",
         i18n::t_args(
             "purge-database-line",
             &[("path", &db.display().to_string())]
+        )
+    );
+    println!(
+        "{}",
+        i18n::t_args(
+            "purge-home-line",
+            &[("path", &config.home_dir.display().to_string())]
         )
     );
 
@@ -213,54 +232,8 @@ fn purge_with(
 /// ("about to purge") or the real ("purged") heading; returns the process exit
 /// code (0 clean, 1 on any failure).
 fn print_outcome(agent: &str, report: &PurgeReport, failures: &[String], header: &str) -> i32 {
-    // `workspace_shared` and `other_orphans_present` are caveats, not
-    // removals, so `PurgeReport::is_empty()` deliberately excludes them —
-    // but that means a report with nothing to *remove* can still have
-    // something worth telling the operator, and the "nothing to purge"
-    // fast path must not swallow it.
-    let has_caveats = report.workspace_shared || report.other_orphans_present;
-    if report.is_empty() && !has_caveats && failures.is_empty() {
-        println!(
-            "{}",
-            i18n::t_args("purge-nothing-to-purge", &[("agent", agent)])
-        );
-        return 0;
-    }
-    if !report.is_empty() || has_caveats {
-        println!("{}", i18n::t_args(header, &[("agent", agent)]));
-        if report.roster_entry_removed {
-            println!("{}", i18n::t("purge-removed-roster-entry"));
-        }
-        if report.orphaned_data_removed {
-            println!("{}", i18n::t("purge-removed-orphaned-data"));
-        }
-        if report.identity_record_removed {
-            println!("{}", i18n::t("purge-removed-identity-record"));
-        }
-        if report.workspace_removed {
-            println!("{}", i18n::t("purge-removed-workspace"));
-        }
-        if report.workspace_unresolved {
-            println!("{}", i18n::t("purge-workspace-unresolved"));
-        }
-        if report.workspace_shared {
-            println!("{}", i18n::t("purge-workspace-shared"));
-        }
-        if report.agent_type_removed {
-            println!("{}", i18n::t("purge-removed-agent-type"));
-        }
-        if report.cron_jobs_removed {
-            println!("{}", i18n::t("purge-removed-cron-jobs"));
-        }
-        if report.trigger_jobs_removed {
-            println!("{}", i18n::t("purge-removed-trigger-jobs"));
-        }
-        if report.channel_bindings_removed {
-            println!("{}", i18n::t("purge-removed-channel-bindings"));
-        }
-        if report.other_orphans_present {
-            println!("{}", i18n::t("purge-other-orphans-present"));
-        }
+    for line in outcome_lines(agent, report, failures, header) {
+        println!("{line}");
     }
     for f in failures {
         eprintln!("{}", i18n::t_args("purge-failure-line", &[("error", f)]));
@@ -270,6 +243,68 @@ fn print_outcome(agent: &str, report: &PurgeReport, failures: &[String], header:
     } else {
         1
     }
+}
+
+/// The report as the localized stdout lines it prints as, so what the
+/// operator is told about a given plan is assertable rather than only
+/// observable by running the command and reading the terminal.
+fn outcome_lines(
+    agent: &str,
+    report: &PurgeReport,
+    failures: &[String],
+    header: &str,
+) -> Vec<String> {
+    // `workspace_shared` and `other_orphans_present` are caveats, not
+    // removals, so `PurgeReport::is_empty()` deliberately excludes them —
+    // but that means a report with nothing to *remove* can still have
+    // something worth telling the operator, and the "nothing to purge"
+    // fast path must not swallow it.
+    let has_caveats = report.workspace_shared || report.other_orphans_present;
+    if report.is_empty() && !has_caveats {
+        // Failures print as their own error lines; claiming there was
+        // nothing to purge on top of them would contradict them.
+        return if failures.is_empty() {
+            vec![i18n::t_args("purge-nothing-to-purge", &[("agent", agent)])]
+        } else {
+            Vec::new()
+        };
+    }
+
+    // A caveat is not a removal. `header` announces one ("About to
+    // permanently purge 'alpha':", "Purged 'alpha':"), so a plan whose only
+    // content is a caveat would promise a deletion, print the note, then
+    // prompt for nothing and exit 0 having touched nothing at all. The
+    // "nothing to purge" line carries the caveats in that case.
+    let announcement = if report.is_empty() && failures.is_empty() {
+        "purge-nothing-to-purge"
+    } else {
+        header
+    };
+    let mut lines = vec![i18n::t_args(announcement, &[("agent", agent)])];
+    for (present, key) in [
+        (report.roster_entry_removed, "purge-removed-roster-entry"),
+        (report.orphaned_data_removed, "purge-removed-orphaned-data"),
+        (
+            report.identity_record_removed,
+            "purge-removed-identity-record",
+        ),
+        (report.workspace_removed, "purge-removed-workspace"),
+        (report.workspace_unresolved, "purge-workspace-unresolved"),
+        (report.workspace_shared, "purge-workspace-shared"),
+        (report.agent_type_removed, "purge-removed-agent-type"),
+        (report.cron_jobs_removed, "purge-removed-cron-jobs"),
+        (report.trigger_jobs_removed, "purge-removed-trigger-jobs"),
+        (
+            report.channel_bindings_removed,
+            "purge-removed-channel-bindings",
+        ),
+        (report.other_orphans_present, "purge-other-orphans-present"),
+    ] {
+        if present {
+            lines.push(i18n::t(key));
+        }
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -318,33 +353,76 @@ mod tests {
         );
     }
 
+    /// One plan shape has caveats and no removals: nothing is attributable
+    /// to the name, but the installation holds orphan rows under an id no
+    /// name can be recovered for. `purge_with` then returns early on the
+    /// empty preview — so announcing "About to permanently purge 'alpha':"
+    /// promises a deletion that is never prompted for and never happens.
+    #[test]
+    fn a_caveat_only_plan_does_not_announce_a_deletion() {
+        let report = PurgeReport {
+            other_orphans_present: true,
+            ..PurgeReport::default()
+        };
+
+        let lines = outcome_lines("alpha", &report, &[], "purge-confirm-header");
+
+        assert_eq!(
+            lines,
+            vec![
+                i18n::t_args("purge-nothing-to-purge", &[("agent", "alpha")]),
+                i18n::t("purge-other-orphans-present"),
+            ],
+            "a caveat must be reported under the line that says nothing was removed"
+        );
+    }
+
+    /// And the header is still the header when there is a removal under it.
+    #[test]
+    fn a_plan_with_removals_announces_them_under_the_header() {
+        let report = PurgeReport {
+            agent_type_removed: true,
+            other_orphans_present: true,
+            ..PurgeReport::default()
+        };
+
+        let lines = outcome_lines("alpha", &report, &[], "purge-confirm-header");
+
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some(i18n::t_args("purge-confirm-header", &[("agent", "alpha")]).as_str())
+        );
+    }
+
+    /// A daemon-detection closure that fails the test if it is ever called.
+    fn never_probed() -> Option<String> {
+        panic!("the daemon probe ran on a path that discards its answer")
+    }
+
     #[test]
     fn daemon_running_guard_refuses_the_destructive_path_when_a_daemon_is_up() {
         assert_eq!(
-            daemon_running_guard(Some("http://127.0.0.1:4545"), false, false),
+            daemon_running_guard(false, false, || Some("http://127.0.0.1:4545".to_string())),
             Some("http://127.0.0.1:4545".to_string())
         );
     }
 
+    /// Both bypasses skip the probe rather than paying for it and throwing
+    /// the answer away: it is an HTTP round trip with a 1 s connect and 2 s
+    /// read timeout, on the two paths that are supposed to be the quick ones.
     #[test]
-    fn daemon_running_guard_allows_a_dry_run_regardless() {
-        assert_eq!(
-            daemon_running_guard(Some("http://127.0.0.1:4545"), true, false),
-            None
-        );
+    fn daemon_running_guard_allows_a_dry_run_without_probing() {
+        assert_eq!(daemon_running_guard(true, false, never_probed), None);
     }
 
     #[test]
-    fn daemon_running_guard_allows_an_explicit_force_override() {
-        assert_eq!(
-            daemon_running_guard(Some("http://127.0.0.1:4545"), false, true),
-            None
-        );
+    fn daemon_running_guard_allows_an_explicit_force_override_without_probing() {
+        assert_eq!(daemon_running_guard(false, true, never_probed), None);
     }
 
     #[test]
     fn daemon_running_guard_is_a_noop_when_no_daemon_is_up() {
-        assert_eq!(daemon_running_guard(None, false, false), None);
+        assert_eq!(daemon_running_guard(false, false, || None), None);
     }
 
     /// The destructive path asks the operator about a plan, so a purge that
@@ -479,6 +557,107 @@ mod tests {
             agent_type.exists(),
             "purge substituted the default installation as its target"
         );
+    }
+
+    /// `purge_db_path`'s own tests pass with `cmd_purge` still joining
+    /// `<home>/data/librefang.db`, because a default installation puts both
+    /// paths in the same place. This one separates them: `data_dir` points
+    /// at a tree that shares nothing with `home_dir`, and the only database
+    /// in the installation lives there. Against the old join the command
+    /// exits 1 on "no database at ..." and deletes nothing.
+    /// A `config.toml` naming both roots, so a `cmd_purge` test can point
+    /// the command at a temporary installation through `--config` alone.
+    /// `LIBREFANG_HOME` is process-wide and the tests that set it have to
+    /// serialize on `env_lock`; a config file needs neither, and leaves no
+    /// window in which an unrelated test could read the variable.
+    ///
+    /// Both roots are spelled out because `data_dir` is `#[serde(default)]`:
+    /// naming only `home_dir` would leave the command pointed at the real
+    /// installation's database.
+    fn config_naming(home: &Path, data_dir: &Path) -> std::path::PathBuf {
+        let path = home.join("config.toml");
+        // TOML literal strings: a Windows path in a basic string would read
+        // its separators as escapes.
+        std::fs::write(
+            &path,
+            format!(
+                "home_dir = '{}'\ndata_dir = '{}'\n",
+                home.display(),
+                data_dir.display()
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn cmd_purge_opens_the_database_data_dir_points_at_not_a_home_join() {
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+
+        let types = librefang_types::agent_type_store::agent_types_dir_in(home.path());
+        std::fs::create_dir_all(&types).unwrap();
+        let agent_type = types.join("worker.toml");
+        std::fs::write(&agent_type, "x").unwrap();
+        drop(
+            MemorySubstrate::open(&elsewhere.path().join("librefang.db"), PURGE_DECAY_RATE)
+                .unwrap(),
+        );
+
+        let config_path = config_naming(home.path(), elsewhere.path());
+        let code = cmd_purge(Some(&config_path), "worker", true, false, false);
+
+        assert_eq!(code, 0, "the configured database was not found");
+        assert!(!agent_type.exists(), "the agent-type template survived");
+    }
+
+    /// A socket answering `/api/health` with 200, on an ephemeral port, for
+    /// as long as the test process lives. `cmd_purge` reaches the guard
+    /// through the real `find_daemon_in_home`, which probes over HTTP, so
+    /// pinning the guard's *call site* — as opposed to the helper in
+    /// isolation, which stays green when the call site is deleted — needs a
+    /// port something can actually connect to.
+    fn serve_health() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local_addr").to_string();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::{Read as _, Write as _};
+                let _ = stream.read(&mut [0u8; 1024]);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+        addr
+    }
+
+    /// A running daemon holds this installation's data in memory and
+    /// re-persists a resurrected roster entry on its next save, so the
+    /// destructive path must refuse — and `--force` is the documented way
+    /// past it for an operator who stopped the daemon by other means.
+    #[test]
+    fn cmd_purge_refuses_while_a_daemon_answers_in_this_home_unless_forced() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_type = default_installation_with(home.path(), "worker");
+        std::fs::write(
+            home.path().join("daemon.json"),
+            format!(
+                r#"{{"pid":4242,"listen_addr":"{}","started_at":"1970-01-01T00:00:00Z","version":"0.0.0-test","platform":"test"}}"#,
+                serve_health()
+            ),
+        )
+        .unwrap();
+        let config_path = config_naming(home.path(), &home.path().join("data"));
+
+        let refused = cmd_purge(Some(&config_path), "worker", true, false, false);
+        assert_eq!(refused, 1, "a live daemon must fail the destructive path");
+        assert!(
+            agent_type.exists(),
+            "the refusal must happen before anything is deleted"
+        );
+
+        let forced = cmd_purge(Some(&config_path), "worker", true, false, true);
+        assert_eq!(forced, 0, "--force is the operator's explicit override");
+        assert!(!agent_type.exists(), "--force must actually purge");
     }
 
     /// A config file that is simply absent from the default location is not a

@@ -2499,6 +2499,7 @@ tui-goals-phase-label = { "  " }실행 단계:{ " " }
 # purge command
 purge-failed-config = 삭제 중단: 설정을 불러올 수 없어 삭제할 설치 대상을 알 수 없습니다: { $error }
 purge-database-line = 데이터베이스: { $path }
+purge-home-line = 홈 디렉터리(크론 작업, 이벤트 트리거, 에이전트 유형 템플릿, 작업 공간): { $path }
 purge-failed-no-database = 삭제 실패: { $path }에 데이터베이스가 없습니다
 purge-failed-open-database = 삭제 실패: 데이터베이스 열기: { $error }
 purge-nothing-to-purge = 삭제할 항목이 없습니다: '{ $agent }'은(는) 이 설치에 흔적을 남기지 않았습니다.
@@ -2508,11 +2509,17 @@ purge-removed-orphaned-data =   - 고아가 된 세션, 기억 및 KV 행 (로�
 purge-removed-identity-record =   - agent_identities.toml의 정식 UUID 레코드
 purge-removed-workspace =   - 작업 공간 디렉터리
 purge-workspace-unresolved =   - 참고: 작업 공간 디렉터리를 찾을 수 없습니다. 이 에이전트의 매니페스트가 남아 있지 않아 사용자 지정 작업 공간 경로는 찾을 수 없습니다. 작업 공간 디렉터리를 직접 확인하세요.
+purge-workspace-shared =   - 참고: 작업 공간 디렉터리를 그대로 두었습니다. 작업 공간 루트 자체이거나, 다른 등록된 에이전트의 매니페스트도 가리키는 디렉터리로 해석되어 삭제하면 이 에이전트의 데이터를 넘어서는 범위가 사라집니다. 작업 공간 디렉터리를 직접 확인하세요.
 purge-removed-agent-type =   - 에이전트 유형 템플릿
+purge-removed-cron-jobs =   - 크론 작업
+purge-removed-trigger-jobs =   - 이벤트 트리거
+purge-removed-channel-bindings =   - 채널/대화 라우팅 바인딩
+purge-other-orphans-present =   - 참고: 이 설치에는 어떤 이름에도 귀속할 수 없는 ID의 고아 행이 있습니다(로스터 항목이 이미 사라진 하위 에이전트나 임시 에이전트일 가능성이 높습니다). 해당 행은 그대로 두었습니다.
 purge-failure-line =   - 실패: { $error }
 purge-confirm-header = '{ $agent }'을(를) 영구 삭제하려 합니다:
 purge-confirm-warning = 되돌릴 수 없습니다.
-purge-dry-run-header = 드라이 런 — 아무것도 변경되지 않았습니다. '{ $agent }'을(를) 삭제할 예정입니다:
+purge-dry-run-header = 드라이 런 — '{ $agent }'을(를) 삭제할 예정입니다(아무것도 삭제되지 않지만, 데이터베이스를 여는 것만으로도 대기 중인 스키마 마이그레이션이 적용되고 검색 색인이 다시 생성될 수 있습니다):
+purge-failed-daemon-running = 삭제 중단: { $url }에서 데몬이 실행 중이며 이 설치의 데이터를 점유하고 있습니다. 먼저 데몬을 중지하거나, 확신이 있다면 --force를 전달하세요.
 
 # --- Channels screen (#8044) ---
 tui-tab-channels = 채널

@@ -253,7 +253,15 @@ pub fn plan_purge(substrate: &MemorySubstrate, cfg: &KernelConfig, agent_name: &
     if failures.is_empty() {
         match other_orphan_ids_exist(substrate, &orphan_agent_ids) {
             Ok(present) => preview.other_orphans_present = present,
-            Err(e) => failures.push(e),
+            // Everything in `failures` is fatal — `purge_agent` refuses to
+            // execute a plan that has any — and this scan has not earned
+            // that: it deletes nothing, and no other step's safety depends
+            // on its answer. A failure here means "could not determine",
+            // which must not veto a purge the rest of the plan proved safe
+            // and leave the operator no way to clean up.
+            Err(e) => {
+                tracing::warn!(error = %e, "Purge: orphan-id scan failed; not reported")
+            }
         }
     }
 
@@ -300,9 +308,19 @@ pub fn plan_purge(substrate: &MemorySubstrate, cfg: &KernelConfig, agent_name: &
     if let Some(dir) = &workspace {
         let this_id = roster_agent_id.or_else(|| orphan_agent_ids.first().copied());
         let is_a_root = *dir == agent_workspaces_root || *dir == cfg.effective_workspaces_dir();
+        // Containment, not equality. The direction that destroys data is
+        // another agent's directory living *inside* the one about to be
+        // `remove_dir_all`d — `workspace = "shared"` here, `"shared/team"`
+        // there — which an equality test does not see at all, so the nested
+        // agent's workspace goes with the parent and the report calls it a
+        // clean removal. The inverse (this workspace being a subtree of
+        // somebody else's) is the milder half of the same mistake and costs
+        // one more comparison.
         let shared_with_another_agent = entries.iter().any(|other| {
             Some(other.id) != this_id
-                && entry_workspace_dir(cfg, other).as_deref() == Some(dir.as_path())
+                && entry_occupied_dirs(cfg, other)
+                    .iter()
+                    .any(|o| o.starts_with(dir) || dir.starts_with(o))
         });
         if is_a_root || shared_with_another_agent {
             workspace_shared = true;
@@ -443,6 +461,16 @@ pub fn purge_agent(
             Ok(_) => {
                 let removed: usize = purge_ids.iter().map(|id| cron.remove_agent_jobs(*id)).sum();
                 if removed > 0 {
+                    // Rides along with this write: `CronScheduler::load`
+                    // disables any persisted job that fails re-validation
+                    // (a hand-edited `every_secs = 0` would divide by zero
+                    // in the scheduler), so persisting makes that quarantine
+                    // durable for jobs belonging to agents this purge never
+                    // touched. Not a state the installation was not headed
+                    // for anyway — the daemon writes exactly the same thing
+                    // at its next boot — and the alternative, merging our
+                    // removals into a fresh read of the file, would
+                    // resurrect a job that crash-loops the scheduler.
                     match cron.persist() {
                         Ok(()) => report.cron_jobs_removed = true,
                         Err(e) => failures.push(format!(
@@ -595,21 +623,36 @@ fn other_orphan_ids_exist(
         .get()
         .map_err(|e| format!("acquire database connection: {e}"))?;
     let attributed: Vec<String> = attributed.iter().map(|id| id.0.to_string()).collect();
+    let placeholders = vec!["?"; attributed.len()].join(",");
     for (_, table, column) in AGENT_SCOPED_TABLES {
         if *table == "agents" {
             continue; // the roster itself — every row here is a live agent.
         }
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT DISTINCT {column} FROM {table} WHERE {column} NOT IN (SELECT id FROM agents)"
-            ))
-            .map_err(|e| format!("prepare orphan scan on {table}: {e}"))?;
-        let ids: Vec<String> = stmt
-            .query_map([], |row| row.get(0))
-            .map_err(|e| format!("scan {table} for orphan ids: {e}"))?
-            .collect::<Result<_, _>>()
-            .map_err(|e| format!("read orphan ids from {table}: {e}"))?;
-        if ids.iter().any(|id| !attributed.contains(id)) {
+        // Both filters belong in SQL. The answer on a healthy installation
+        // is `false`, and materialising every distinct id of every
+        // agent-scoped table into a `Vec<String>` to reach it is work no
+        // answer needs; `EXISTS` stops at the first row that qualifies.
+        // Reading the id back out was also the one place a non-TEXT value
+        // in an agent-scoping column could raise `InvalidColumnType` —
+        // `EXISTS` yields an integer whatever the column holds.
+        // `NOT IN ()` is a syntax error, so an empty attributed list drops
+        // the clause rather than binding nothing to it.
+        let exclusion = if attributed.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {column} NOT IN ({placeholders})")
+        };
+        let exists: bool = conn
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} \
+                     WHERE {column} NOT IN (SELECT id FROM agents){exclusion})"
+                ),
+                rusqlite::params_from_iter(attributed.iter()),
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("scan {table} for orphan ids: {e}"))?;
+        if exists {
             return Ok(true);
         }
     }
@@ -638,6 +681,38 @@ fn entry_workspace_dir(cfg: &KernelConfig, entry: &AgentEntry) -> Option<PathBuf
         entry.id,
     )
     .ok()
+}
+
+/// Every directory under the workspaces tree that `entry` occupies: the one
+/// [`entry_workspace_dir`] resolves, plus each directory its manifest's
+/// `[workspaces]` table declares.
+///
+/// Named workspaces are the second way an agent gets a directory, and
+/// `ensure_named_workspaces` resolves a `path` entry as
+/// `workspaces_root.join(path)` with nothing forbidding `path =
+/// "agents/<something>"` — so a sharing guard that consulted only
+/// `manifest.workspace` would happily delete one.
+///
+/// A declaration that does not land inside the workspaces root is dropped
+/// rather than trusted. The directory being purged always lives inside that
+/// root, so an out-of-tree target can never be nested within it, while
+/// honouring one would let a single `mount = "/"` (or a malformed absolute
+/// `path`) veto every workspace deletion in the installation.
+fn entry_occupied_dirs(cfg: &KernelConfig, entry: &AgentEntry) -> Vec<PathBuf> {
+    let root = cfg.effective_workspaces_dir();
+    let mut dirs: Vec<PathBuf> = entry_workspace_dir(cfg, entry).into_iter().collect();
+    for decl in entry.manifest.workspaces.values() {
+        let declared = match (&decl.path, &decl.mount) {
+            (Some(rel), None) => root.join(rel),
+            (None, Some(mount)) => mount.clone(),
+            // Exactly one of the two is required; boot skips anything else.
+            _ => continue,
+        };
+        if declared.starts_with(&root) {
+            dirs.push(declared);
+        }
+    }
+    dirs
 }
 
 /// Count of channel routing rows (`channel_instance_defaults`,
@@ -1306,6 +1381,142 @@ mod tests {
         );
     }
 
+    /// The same collision one directory level up, which is the shape that
+    /// actually loses data: `alpha` owns `shared`, `beta` owns
+    /// `shared/team`. Nothing exotic is configured — two ordinary
+    /// `workspace` overrides — and a guard that compares the two resolved
+    /// directories for *equality* sees no collision at all, so
+    /// `remove_dir_all` on alpha's takes the live agent's subtree with it
+    /// and the report calls it a clean removal.
+    #[test]
+    fn a_nested_workspace_of_another_live_agent_is_never_deleted() {
+        let home = home_with(&[]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        for (name, ws) in [("alpha", "shared"), ("beta", "shared/team")] {
+            let mut entry = AgentEntry {
+                id: AgentId::from_name(name),
+                name: name.to_string(),
+                state: AgentState::Running,
+                ..Default::default()
+            };
+            entry.manifest.workspace = Some(PathBuf::from(ws));
+            substrate.save_agent(&entry).unwrap();
+        }
+        let alpha_ws = home.path().join("workspaces/agents/shared");
+        let beta_ws = alpha_ws.join("team");
+        seed_workspace(&alpha_ws);
+        seed_workspace(&beta_ws);
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(outcome.report.roster_entry_removed);
+        assert!(
+            !outcome.report.workspace_removed,
+            "a workspace containing a live agent's must never be deleted"
+        );
+        assert!(outcome.report.workspace_shared);
+        assert!(
+            beta_ws.join("agent.toml").exists(),
+            "beta's nested workspace must survive alpha's purge"
+        );
+    }
+
+    /// `[workspaces]` in a manifest is the second way an agent gets a
+    /// directory, resolved by `ensure_named_workspaces` against the
+    /// workspaces root — and nothing forbids one under `agents/`. A guard
+    /// that reads only `manifest.workspace` never sees beta's declaration,
+    /// so purging alpha deletes a directory beta is actively pointed at.
+    #[test]
+    fn another_agents_named_workspace_under_this_one_is_never_deleted() {
+        use librefang_types::agent::WorkspaceDecl;
+
+        let home = home_with(&[]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        substrate
+            .save_agent(&AgentEntry {
+                id: AgentId::from_name("alpha"),
+                name: "alpha".to_string(),
+                state: AgentState::Running,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut beta = AgentEntry {
+            id: AgentId::from_name("beta"),
+            name: "beta".to_string(),
+            state: AgentState::Running,
+            ..Default::default()
+        };
+        beta.manifest.workspaces.insert(
+            "library".to_string(),
+            WorkspaceDecl {
+                path: Some(PathBuf::from("agents/alpha/library")),
+                ..WorkspaceDecl::default()
+            },
+        );
+        substrate.save_agent(&beta).unwrap();
+        let alpha_ws = home.path().join("workspaces/agents/alpha");
+        let shared_library = alpha_ws.join("library");
+        seed_workspace(&alpha_ws);
+        std::fs::create_dir_all(&shared_library).unwrap();
+        std::fs::write(shared_library.join("notes.md"), "beta's").unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(outcome.report.roster_entry_removed);
+        assert!(
+            !outcome.report.workspace_removed,
+            "a directory a live agent declares as a named workspace must survive"
+        );
+        assert!(outcome.report.workspace_shared);
+        assert!(shared_library.join("notes.md").exists());
+    }
+
+    /// The unattributable-orphan scan is a diagnostic: it deletes nothing,
+    /// and no other step's safety depends on its answer. Letting its error
+    /// into `plan.failures` therefore made a *report* line able to veto the
+    /// whole command, with no flag to get past it.
+    ///
+    /// A BLOB in an agent-scoping column is the cheap way to provoke that:
+    /// TEXT affinity rewrites an integer to text on insert, but never a
+    /// BLOB, so reading the id back out as a `String` raises
+    /// `InvalidColumnType` — and the scan no longer reads it back out.
+    #[test]
+    fn a_failing_orphan_scan_never_vetoes_the_purge() {
+        let home = home_with(&[]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        // The name-derived id, so the candidate loop finds it live and
+        // `has_agent_rows` — which walks the same tables — is never reached.
+        seed_agent_rows(&substrate, "alpha", AgentId::from_name("alpha"));
+        substrate
+            .pool()
+            .get()
+            .unwrap()
+            .execute(
+                "INSERT INTO memories (id, agent_id, content, source, created_at, accessed_at) \
+                 VALUES ('blob-agent-id', x'deadbeef', 'x', 'test', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(
+            outcome.failures.is_empty(),
+            "a diagnostic scan must not veto the purge: {:?}",
+            outcome.failures
+        );
+        assert!(
+            outcome.report.roster_entry_removed,
+            "the agent's own data must still be removed"
+        );
+        assert!(
+            outcome.report.other_orphans_present,
+            "the unattributable row is still there and must be reported"
+        );
+    }
+
     /// Spawn rewrites a hand agent's `workspace` to the absolute,
     /// already-resolved `<workspaces>/hands/<hand>/<role>` path. Validating
     /// that against the `agents/` root alone (rather than the whole
@@ -1483,8 +1694,27 @@ mod tests {
         // tmp-file create (or the rename) fails, while the read that
         // `plan_purge` performs a moment later still succeeds — reading an
         // existing file by name needs no write permission on its parent.
+        //
+        // `persist_tmp_path` mixes a timestamp into the temporary file's
+        // name and the destination has to stay readable for the plan, so
+        // permissions are the only lever here — and root (or anything
+        // holding CAP_DAC_OVERRIDE, which is how `Dockerfile.rust-dev`
+        // runs) ignores the write bit and would make every assertion below
+        // pass against a persist that quietly succeeded. Confirm the
+        // sabotage actually bites rather than reporting a green that
+        // measured nothing.
         let original_perms = std::fs::metadata(home.path()).unwrap().permissions();
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let probe = home.path().join("write-bit-probe");
+        if std::fs::write(&probe, b"").is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            std::fs::set_permissions(home.path(), original_perms).unwrap();
+            eprintln!(
+                "skipped: this process writes to a 0o500 directory, so a persist failure \
+                 cannot be provoked here"
+            );
+            return;
+        }
 
         let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
 
