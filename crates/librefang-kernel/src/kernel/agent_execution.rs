@@ -2527,7 +2527,9 @@ mod route_to_profile_credential_gate_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path();
 
-        // Catalog entry for the custom provider, stored the same way the dashboard "Upload provider" flow stores one.
+        // Catalog entry for the custom provider, in the shape an operator hand-writes into `~/.librefang/providers/<id>.toml` and the shape the registry ships — a `[provider]` record followed by the `[[models]]` the provider serves.
+        // The model entry is load-bearing, not decoration: `model_resolution_declines_routing` runs *before* the credential gate this test is about, and declines a declared remote provider whose catalog does not know the routed model id.
+        // Omitting it made all three phases below return `None` for that earlier reason, so the two negative phases passed vacuously and the positive one could never pass at all.
         let providers = home.join("providers");
         std::fs::create_dir_all(&providers).unwrap();
         std::fs::write(
@@ -2539,6 +2541,17 @@ display_name = "Unsloth Studio"
 api_key_env = "UNSLOTH_API_KEY"
 base_url = "http://127.0.0.1:8888/v1"
 key_required = true
+
+[[models]]
+id = "unsloth/Llama-3.3-70B-Instruct"
+display_name = "Unsloth Llama 3.3 70B Instruct"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_streaming = true
 "#,
         )
         .unwrap();
@@ -2612,6 +2625,23 @@ description = "Custom-provider profile for the routing credential gate test"
     fn route_to_profile_routes_keyless_local_provider_without_api_key() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path();
+
+        // "ollama" is deliberately declared, and with no model matching the profile's `llama3.2`.
+        // Both halves are load-bearing for the same reason they are in `model_resolution_declines_routing_tests::local_provider_allows_unresolvable_model`: an undeclared provider short-circuits `!is_local && provider_declared` on `provider_declared == false` alone, so this test would still pass with the local-provider exemption deleted.
+        // Declaring it makes `is_local` the only reason routing survives as far as the credential gate this test is about.
+        let providers = home.join("providers");
+        std::fs::create_dir_all(&providers).unwrap();
+        std::fs::write(
+            providers.join("ollama.toml"),
+            r#"
+[provider]
+id = "ollama"
+display_name = "Ollama"
+base_url = "http://127.0.0.1:11434"
+key_required = false
+"#,
+        )
+        .unwrap();
 
         std::fs::write(
             home.join("model_profiles.toml"),
