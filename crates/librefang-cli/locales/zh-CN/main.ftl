@@ -1224,7 +1224,6 @@ tui-workflows-header-run-id = 运行 ID
 tui-workflows-header-state = 状态
 tui-workflows-header-progress = 进度
 tui-workflows-header-duration = 耗时
-tui-workflows-header-output = 输出
 tui-workflows-runs-empty = 尚无运行记录。在列表中按 [x] 运行。
 tui-workflows-badge-auto = 自动
 tui-workflows-badge-paused = 暂停

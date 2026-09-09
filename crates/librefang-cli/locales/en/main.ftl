@@ -2173,7 +2173,6 @@ tui-workflows-header-run-id = Run ID
 tui-workflows-header-state = State
 tui-workflows-header-progress = Progress
 tui-workflows-header-duration = Duration
-tui-workflows-header-output = Output
 tui-workflows-runs-empty = No runs yet. Press [x] from the list to run.
 tui-workflows-badge-auto = auto
 tui-workflows-badge-paused = paused

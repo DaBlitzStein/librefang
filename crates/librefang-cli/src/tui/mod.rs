@@ -305,8 +305,18 @@ impl App {
                 }
                 self.workflows.loading = false;
             }
-            AppEvent::WorkflowRunsLoaded(runs) => {
-                self.workflows.runs = runs;
+            AppEvent::WorkflowRunsLoaded {
+                runs,
+                clear_loading,
+            } => {
+                // Any answer, good or bad, ends the outstanding poll.
+                self.workflows.poll_in_flight = false;
+                // `None` means the fetch failed. Keep the rows already on
+                // screen rather than replacing a populated history with
+                // "No runs yet" because of one transient 500.
+                if let Some(runs) = runs {
+                    self.workflows.runs = runs;
+                }
                 // The auto-poll delivers this event every ~2s, so re-selecting
                 // row 0 unconditionally would drag the cursor off whatever the
                 // operator had highlighted. Select only when nothing is, and
@@ -319,7 +329,9 @@ impl App {
                     None => Some(0),
                 };
                 self.workflows.runs_list_state.select(selected);
-                self.workflows.loading = false;
+                if clear_loading {
+                    self.workflows.loading = false;
+                }
             }
             AppEvent::WorkflowRunResult(result) => {
                 self.workflows.run_result = Some(result);
@@ -1379,9 +1391,23 @@ impl App {
                 // Keeps the step counter on the run history moving while a
                 // workflow executes, instead of freezing at whatever it read
                 // when the operator opened the screen.
+                //
+                // Deliberately not routed through `WorkflowAction::LoadRuns`:
+                // that sets the screen-wide `loading` flag, which the workflow
+                // list and the run-result pane both render. A background
+                // refresh must not put a spinner on a screen nobody asked to
+                // reload.
                 Tab::Workflows if self.workflows.should_poll() => {
-                    if let Some(wf_id) = self.workflows.selected_workflow_id() {
-                        self.handle_workflow_action(workflows::WorkflowAction::LoadRuns(wf_id));
+                    if let (Some(backend), Some(wf_id)) =
+                        (self.backend.to_ref(), self.workflows.selected_workflow_id())
+                    {
+                        self.workflows.poll_in_flight = true;
+                        event::spawn_fetch_workflow_runs(
+                            backend,
+                            wf_id,
+                            self.event_tx.clone(),
+                            false,
+                        );
                     }
                 }
                 _ => {}
@@ -1985,7 +2011,7 @@ impl App {
             workflows::WorkflowAction::LoadRuns(wf_id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     self.workflows.loading = true;
-                    event::spawn_fetch_workflow_runs(backend, wf_id, self.event_tx.clone());
+                    event::spawn_fetch_workflow_runs(backend, wf_id, self.event_tx.clone(), true);
                 }
             }
             workflows::WorkflowAction::CreateWorkflow {

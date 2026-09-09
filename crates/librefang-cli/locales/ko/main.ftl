@@ -2168,7 +2168,6 @@ tui-workflows-header-run-id = 실행 ID
 tui-workflows-header-state = 상태
 tui-workflows-header-progress = 진행
 tui-workflows-header-duration = 소요 시간
-tui-workflows-header-output = 출력
 tui-workflows-runs-empty = 아직 실행 없음. 목록에서 [x]를 눌러 실행하십시오.
 tui-workflows-badge-auto = 자동
 tui-workflows-badge-paused = 일시 중지됨

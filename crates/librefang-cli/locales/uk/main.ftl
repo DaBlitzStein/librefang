@@ -2189,7 +2189,6 @@ tui-workflows-header-run-id = Run ID
 tui-workflows-header-state = Статус
 tui-workflows-header-progress = Прогрес
 tui-workflows-header-duration = Тривалість
-tui-workflows-header-output = Вивід
 tui-workflows-runs-empty = Запусків ще немає. Натисніть [x] у списку, щоб запустити.
 tui-workflows-badge-auto = авто
 tui-workflows-badge-paused = пауза
