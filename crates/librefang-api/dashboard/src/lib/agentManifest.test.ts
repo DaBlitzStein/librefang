@@ -3,6 +3,7 @@ import {
   emptyManifestExtras,
   emptyManifestForm,
   parseManifestToml,
+  preservedWorkspaceNamesFromExtras,
   serializeManifestForm,
   validateManifestForm,
 } from "./agentManifest";
@@ -1060,5 +1061,117 @@ shared = { path = "shared" }
     form.model.model = "gpt-4o";
     form.workspaces.push({ _uid: "w1", name: "shared", path: "shared/library", mode: "rw" });
     expect(validateManifestForm(form)).toEqual([]);
+  });
+
+  it.each(["r", "read", "read-only", "readonly"])(
+    // #8013: the kernel's `WorkspaceMode` accepts all four spellings, and
+    // "readonly" is the one it actually writes (persist_full_manifest_at,
+    // and the template endpoints). Missing any of them means a read-only
+    // shared folder silently becomes read-write the moment this form
+    // re-saves it.
+    "parses %j as read-only, matching the kernel's WorkspaceMode aliases",
+    (modeSpelling) => {
+      const parsed = parseManifestToml(`name = "agent"
+[workspaces]
+shared = { path = "shared", mode = "${modeSpelling}" }
+`);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.form.workspaces[0].mode).toBe("r");
+    },
+  );
+
+  it("parses an unrecognized mode spelling as read-write rather than silently upgrading", () => {
+    const parsed = parseManifestToml(`name = "agent"
+[workspaces]
+shared = { path = "shared", mode = "bogus" }
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.workspaces[0].mode).toBe("rw");
+  });
+
+  it("flags a half-filled row (name without a path) instead of dropping it silently", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.workspaces.push({ _uid: "w1", name: "shared", path: "", mode: "rw" });
+    const errors = validateManifestForm(form);
+    expect(errors).toContain("workspaces.w1.path");
+    expect(errors).not.toContain("workspaces.w1.name");
+  });
+
+  it("flags a half-filled row (path without a name) instead of dropping it silently", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.workspaces.push({ _uid: "w1", name: "", path: "shared", mode: "rw" });
+    const errors = validateManifestForm(form);
+    expect(errors).toContain("workspaces.w1.name");
+    expect(errors).not.toContain("workspaces.w1.path");
+  });
+
+  it("does not flag a wholly blank row", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.workspaces.push({ _uid: "w1", name: "  ", path: "  ", mode: "rw" });
+    expect(validateManifestForm(form)).toEqual([]);
+  });
+
+  it.each(["shared/library", "shared library", "@shared"])(
+    // #8013: expand_workspace_alias matches only the segment before the
+    // first '/' against the declared name, so a name with '/' can never be
+    // addressed via '@name/...'; whitespace and '@' are excluded for the
+    // same reason — they let the alias resolve to a name the agent never typed.
+    "rejects a workspace name outside the alias-safe character set: %j",
+    (name) => {
+      const form = emptyManifestForm();
+      form.name = "agent";
+      form.model.provider = "openai";
+      form.model.model = "gpt-4o";
+      form.workspaces.push({ _uid: "w1", name, path: "shared", mode: "rw" });
+      expect(validateManifestForm(form)).toContain("workspaces.w1.name");
+    },
+  );
+
+  it("preserves the remainder of a preserved workspace name containing a dot", () => {
+    // #8013: `dottedKey.split(".", 2)` truncates rather than preserving the
+    // remainder, so "workspaces.notes.v2" re-emitted as "[workspaces.notes]"
+    // and lost "v2" — silently colliding with a sibling entry literally
+    // named "notes".
+    const parsed = parseManifestToml(`name = "agent"
+[workspaces]
+"notes.v2" = { mount = "/data/notes" }
+notes = { mount = "/data/other" }
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const reserialized = serializeManifestForm(parsed.form, parsed.extras);
+    expect(reserialized).toContain('[workspaces."notes.v2"]');
+    expect(reserialized).toContain('mount = "/data/notes"');
+    expect(reserialized).toContain("[workspaces.notes]");
+    expect(reserialized).toContain('mount = "/data/other"');
+
+    const reparsed = parseManifestToml(reserialized);
+    expect(reparsed.ok).toBe(true);
+  });
+
+  it("preservedWorkspaceNamesFromExtras extracts the preserved-name collision list AgentsPage wires into validateManifestForm", () => {
+    // #8013: this parameter was never supplied at the only production call
+    // site, so the collision check below was dead outside its own test.
+    const parsed = parseManifestToml(`name = "agent"
+[workspaces]
+vault = { mount = "/data/vault" }
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    expect(preservedWorkspaceNamesFromExtras(parsed.extras)).toEqual(["vault"]);
+    expect(preservedWorkspaceNamesFromExtras(emptyManifestExtras())).toEqual([]);
   });
 });

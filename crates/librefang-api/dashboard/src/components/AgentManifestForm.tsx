@@ -1250,7 +1250,15 @@ export function AgentManifestForm({
         </div>
       </CollapsibleSection>
 
-      <CollapsibleSection title={t("agents.form.shared_folders")} defaultOpen={false}>
+      <CollapsibleSection
+        title={t("agents.form.shared_folders")}
+        defaultOpen={false}
+        invalid={value.workspaces.some(
+          (ws) =>
+            invalidFields.has(`workspaces.${ws._uid}.name`) ||
+            invalidFields.has(`workspaces.${ws._uid}.path`),
+        )}
+      >
         <p className="text-[10px] text-text-dim/70 mb-2">
           {t("agents.form.shared_folders_hint")}
         </p>
@@ -1296,9 +1304,14 @@ export function AgentManifestForm({
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
-              {(nameInvalid || pathInvalid) && (
+              {nameInvalid && (
                 <p className="text-[10px] text-error mt-1">
-                  {t(nameInvalid ? "agents.form.duplicate_folder_name" : "agents.form.folder_path_invalid")}
+                  {t("agents.form.duplicate_folder_name")}
+                </p>
+              )}
+              {pathInvalid && (
+                <p className="text-[10px] text-error mt-1">
+                  {t("agents.form.folder_path_invalid")}
                 </p>
               )}
             </div>
