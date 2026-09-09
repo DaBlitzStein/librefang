@@ -608,6 +608,7 @@ impl App {
             AppEvent::FetchError(err) => {
                 // Route to the active tab's status message
                 match self.active_tab {
+                    // Also covers every failure the shared-folders editor can hit (fetch, unreadable manifest, duplicate name on save) — without this arm they fell into `_ => {}` and vanished (#7835).
                     Tab::Agents => {
                         self.agents.status_msg = err;
                     }
@@ -630,11 +631,6 @@ impl App {
                         self.settings.config.status_msg = err;
                     }
                     Tab::Settings => self.settings.status_msg = err,
-                    // Covers every failure the shared-folders editor can hit
-                    // (fetch, unreadable manifest, duplicate name on save) —
-                    // without this arm they fell into `_ => {}` and vanished
-                    // (#7835).
-                    Tab::Agents => self.agents.status_msg = err,
                     Tab::Channels => {
                         // `draw_list` renders its spinner unconditionally while
                         // `loading` is set, so a failed fetch that only wrote a
