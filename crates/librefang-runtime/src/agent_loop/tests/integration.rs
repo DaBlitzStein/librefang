@@ -2498,6 +2498,7 @@ async fn test_max_tokens_pure_markup_overflow_replaced_with_honest_reply() {
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,
+        parent_session_id: None,
     };
     let manifest = test_manifest();
     let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
