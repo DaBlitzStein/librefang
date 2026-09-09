@@ -17,6 +17,7 @@ use librefang_types::goal::{
 };
 
 use super::{LibreFangKernel, SYSTEM_CHANNEL_AUTONOMOUS};
+use crate::registry::AgentRegistry;
 use crate::MemorySubsystemApi;
 
 impl LibreFangKernel {
@@ -106,12 +107,7 @@ impl LibreFangKernel {
         // back into the registry from there would mean carrying a kernel handle
         // for two `u32`s.
         let skills_dir = self.home_dir().join("skills");
-        let workshop = self
-            .agents
-            .registry
-            .get(agent_id)
-            .map(|e| e.manifest.skill_workshop)
-            .unwrap_or_default();
+        let workshop = resolve_workshop_config(&self.agents.registry, agent_id);
         let goal_title = self
             .goal_by_id(goal_id)
             .map(|g| g.title)
@@ -332,6 +328,18 @@ fn should_queue_learnings(workshop: &SkillWorkshopConfig) -> bool {
     workshop.enabled && workshop.auto_capture
 }
 
+/// Resolve the skill-workshop config a goal run's learnings capture is
+/// gated by. An agent absent from the registry — deleted, never spawned,
+/// or simply mistyped — denies via [`SkillWorkshopConfig::default`]
+/// (`enabled: false`) rather than assuming any particular default should
+/// permit queuing for an id nobody registered.
+fn resolve_workshop_config(registry: &AgentRegistry, agent_id: AgentId) -> SkillWorkshopConfig {
+    registry
+        .get(agent_id)
+        .map(|e| e.manifest.skill_workshop)
+        .unwrap_or_default()
+}
+
 /// Queue a run's lessons as a pending skill draft awaiting human approval.
 ///
 /// The lessons are model-authored text an autonomous loop wrote about itself, so they go where every other machine-proposed skill goes: the workshop's `pending/` queue (#3328), promoted only by an explicit `librefang skill pending approve` / `POST /api/skills/pending/{id}/approve`.
@@ -474,6 +482,52 @@ mod tests {
             ..SkillWorkshopConfig::default()
         };
         assert!(!should_queue_learnings(&workshop));
+    }
+
+    /// The half of the opt-in gate a pure predicate test can't reach: an
+    /// agent that isn't in the registry at all (deleted, never spawned,
+    /// mistyped id) must still deny queuing, not fall through to some other
+    /// default that happens to allow it.
+    #[test]
+    fn resolve_workshop_config_denies_when_the_agent_is_absent_from_the_registry() {
+        let registry = AgentRegistry::new();
+        let config = resolve_workshop_config(&registry, AgentId::new());
+        assert!(
+            !should_queue_learnings(&config),
+            "an agent absent from the registry must resolve to a denying config"
+        );
+    }
+
+    /// The other half: a REGISTERED agent's own manifest setting is what
+    /// gets read, not a hardcoded value — otherwise the denial above would
+    /// be indistinguishable from the function ignoring the registry
+    /// entirely and always returning a fixed config.
+    #[test]
+    fn resolve_workshop_config_reads_the_registered_agents_own_manifest() {
+        use librefang_types::agent::{AgentEntry, AgentManifest};
+
+        let registry = AgentRegistry::new();
+        let agent_id = AgentId::new();
+        registry
+            .register(AgentEntry {
+                id: agent_id,
+                name: format!("workshop-test-{agent_id}"),
+                manifest: AgentManifest {
+                    skill_workshop: SkillWorkshopConfig {
+                        enabled: true,
+                        ..SkillWorkshopConfig::default()
+                    },
+                    ..AgentManifest::default()
+                },
+                ..AgentEntry::default()
+            })
+            .expect("registering a fresh agent must succeed");
+
+        let config = resolve_workshop_config(&registry, agent_id);
+        assert!(
+            should_queue_learnings(&config),
+            "a registered agent's own opted-in workshop config must be the one read"
+        );
     }
 
     #[test]

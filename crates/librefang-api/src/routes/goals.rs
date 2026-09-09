@@ -213,6 +213,7 @@ pub async fn start_goal_run(
 ///
 /// Optional body: `{ "max_iterations": <u32> }`, which **re-budgets** the resumed run — an operator extending a run that is about to hit its cap has no other way to say so.
 /// Omitting it restores the cap the paused run was already under rather than substituting the default, which is what this route did before: with the iteration count restored from the same checkpoint, a smaller default ends the resumed run at the top of its first loop, and that exit clears the checkpoint, so the progress the resume was asked to continue is gone.
+/// It is a total ceiling compared against the restored iteration count, not additional headroom on top of it — a value at or below that count is rejected with a 400 rather than silently destroying the checkpoint the same way.
 pub async fn resume_goal_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
