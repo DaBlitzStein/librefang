@@ -972,17 +972,21 @@ async fn run_loop<F, Fut, L, E, Efut>(
                 break GoalRunPhase::Finished;
             }
         };
-        // #7785 review: `goal.progress` has a second writer — the `goal_update`
-        // tool, which the agent's own system prompt tells it to call, and
-        // which patches the same shared document this read comes from. That
-        // write does not go through `parse_tick`, so the verifier gate below
-        // never sees it, and a rejected iteration could still close the run
-        // one tick later through this check alone. Bare progress is only a
-        // completion signal when there is no verifier configured to bypass —
-        // a gated run needs `status == Completed`, which only the gate's own
-        // `done` branch (or an explicit external status write) sets.
-        if matches!(goal.status, GoalStatus::Completed | GoalStatus::Cancelled)
-            || (verify_agent_id.is_none() && goal.progress >= 100)
+        // #7785 review: `goal.progress` AND `goal.status` both have a second
+        // writer — the `goal_update` tool, which the agent's own system
+        // prompt tells it to call, and which patches the same shared
+        // document this read comes from (progress: goal_control.rs, status:
+        // same handler, `"completed"` is a valid enum value). Neither write
+        // goes through `parse_tick`, so the verifier gate below never sees
+        // them, and a rejected iteration could still close the run one tick
+        // later through this check alone. Both are only a completion signal
+        // when there is no verifier configured to bypass — a gated run needs
+        // the runner's own `done` branch to have actually run, which is what
+        // an unconditioned `Cancelled` still allows: a cancellation is a
+        // legitimate stop order regardless of what the run's own gate thinks.
+        if goal.status == GoalStatus::Cancelled
+            || (verify_agent_id.is_none()
+                && (goal.status == GoalStatus::Completed || goal.progress >= 100))
         {
             break GoalRunPhase::Finished;
         }
@@ -1140,11 +1144,15 @@ async fn run_loop<F, Fut, L, E, Efut>(
                 // #7785 review: only a REJECTED iteration's progress needs
                 // clamping — `parsed.progress` there is an assertion from
                 // work the verifier just refused. Clamping unconditionally
-                // also caught the plain no-verifier path and the accepted-
-                // but-undeclared-done path (`verified` true, no `GOAL_DONE`),
-                // pinning a legitimately-reported 100 at 99 and burning the
-                // rest of the iteration budget instead of letting the
-                // top-of-loop `progress >= 100` check end the run.
+                // also caught the plain no-verifier path, wrongly pinning a
+                // legitimately-reported 100 at 99 and burning the rest of
+                // the iteration budget instead of letting the top-of-loop
+                // `progress >= 100` check end the run right away. For a
+                // VERIFIED run the unclamped write is merely harmless, not
+                // an early exit: that check no longer fires while a
+                // verifier is configured, so a verified-but-undeclared-done
+                // iteration's 100 just sits on the document until an
+                // explicit `GOAL_DONE` closes it.
                 let new_progress = if done {
                     Some(100)
                 } else if verified {
@@ -1186,13 +1194,18 @@ async fn run_loop<F, Fut, L, E, Efut>(
                 if done {
                     break GoalRunPhase::Finished;
                 }
-                // #7785 review: gated by `verified` for the same reason
-                // `done` is — a `GOAL_BLOCKED` claim inside output the
-                // verifier just rejected is not a trustworthy signal either,
-                // and was the one remaining way a rejected iteration could
-                // end the run (as `Stopped`, not `Completed`, but still on
-                // the verifier's say-so rather than despite it).
-                if verified && parsed.blocked {
+                // #7785 review: deliberately NOT gated by `verified`, unlike
+                // `done`. `GOAL_BLOCKED` is a claim about the AGENT's own
+                // situation (missing credential, unreachable dependency),
+                // not a claim about the task the verifier judges — asking
+                // the same verifier to approve "I am stuck" conflates two
+                // different questions. Gating it also has no completion risk
+                // to justify the cost: a false claim only spends the run's
+                // own budget one iteration early and ends in `Stopped`, never
+                // `Completed`, so it cannot cross the boundary the gate on
+                // `done` exists to protect. A genuinely blocked agent in a
+                // verified run needs to be able to say so.
+                if parsed.blocked {
                     info!(goal_id = %goal_id, "Goal run: agent reported blocked; ending run");
                     break GoalRunPhase::Stopped;
                 }
@@ -1619,49 +1632,34 @@ mod tests {
         );
     }
 
-    /// #7785 review: a `GOAL_BLOCKED` claim inside output the verifier just
-    /// rejected was the one remaining way a rejected iteration could end a
-    /// run — as `Stopped` rather than `Completed`, so not a completion
-    /// bypass, but still the verifier's rejection being overruled by a
-    /// marker from the same rejected text. The claim must be ignored until
-    /// an iteration the verifier actually passes reports it.
-    #[tokio::test]
-    async fn a_rejected_iterations_blocked_marker_does_not_stop_the_run() {
+    /// #7785 re-review: `GOAL_BLOCKED` is a claim about the agent's own
+    /// situation, not about the task the verifier judges, so it is
+    /// deliberately not gated by `verified` the way `GOAL_DONE` is — a
+    /// genuinely blocked agent in a verified run must still be able to stop
+    /// the run rather than burn its whole iteration budget repeating a
+    /// rejected claim the verifier has no way to confirm either way.
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_iterations_blocked_marker_still_stops_the_run() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
         let agent_id = AgentId::new();
         let verifier = AgentId::new();
         let goal = test_goal(agent_id);
         seed_goal(&substrate, &goal);
         let (_tx, rx) = watch::channel(false);
-        let state = mk_verified_state(goal.id, agent_id, verifier, 2, 1);
+        let state = mk_verified_state(goal.id, agent_id, verifier, 5, 1);
 
-        let call = Arc::new(AtomicU64::new(0));
-        let c = call.clone();
-        let send = move |target: AgentId, _p: String| {
-            let c = c.clone();
-            async move {
-                if target == verifier {
-                    let n = c.load(Ordering::SeqCst);
-                    if n <= 1 {
-                        Ok("VERDICT: FAIL\nREASON: not really stuck".to_string())
-                    } else {
-                        Ok("VERDICT: PASS".to_string())
-                    }
-                } else {
-                    let n = c.fetch_add(1, Ordering::SeqCst);
-                    if n == 0 {
-                        Ok("stuck\nGOAL_BLOCKED: need a key".to_string())
-                    } else {
-                        Ok("done\nGOAL_DONE".to_string())
-                    }
-                }
+        let send = move |target: AgentId, _p: String| async move {
+            if target == verifier {
+                Ok("VERDICT: FAIL\nREASON: not really stuck".to_string())
+            } else {
+                Ok("stuck\nGOAL_BLOCKED: need a key".to_string())
             }
         };
 
         run_loop(
             goal.id,
             agent_id,
-            2,
+            5,
             substrate.clone(),
             send,
             no_learnings_hook,
@@ -1676,12 +1674,13 @@ mod tests {
 
         assert_eq!(
             state.lock().await.phase,
-            GoalRunPhase::Finished,
-            "the rejected iteration's blocked marker must not have stopped the run early"
+            GoalRunPhase::Stopped,
+            "a blocked claim must stop the run on the first iteration, verified or not"
         );
+        // Blocked must NOT mark the goal completed, verified or not.
         assert_eq!(
             load_goal(&substrate, goal.id).unwrap().status,
-            GoalStatus::Completed
+            GoalStatus::InProgress
         );
     }
 
@@ -2595,9 +2594,11 @@ mod tests {
     /// prompt tells it to call this) patches the same shared document
     /// directly, bypassing `parse_tick` entirely — so clamping the text
     /// marker alone does not close the back door. Simulated here by calling
-    /// `patch_goal` from the tick closure exactly as the tool's kernel-side
-    /// handler does: same function, same document, same key.
-    #[tokio::test]
+    /// `patch_goal` from the tick closure: not the tool's own handler (that
+    /// is `apply_goal_update` in `goal_control.rs`, a different function),
+    /// but the same document, the same key, and the same JSON shape, both
+    /// under `structured_modify`.
+    #[tokio::test(start_paused = true)]
     async fn a_rejected_iterations_tool_written_progress_cannot_cross_the_completion_boundary() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
         let agent_id = AgentId::new();
@@ -2659,13 +2660,127 @@ mod tests {
         );
     }
 
+    /// #7785 re-review: `goal_update`'s `status` field is the same shape of
+    /// bypass as its `progress` field — `"completed"` is a valid enum value
+    /// (`definitions.rs`), written to the same document, never seen by
+    /// `parse_tick` or the verifier. The top-of-loop check must ignore it
+    /// exactly the same way it now ignores tool-written progress.
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_iterations_tool_written_completed_status_cannot_finish_the_run() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let verifier = AgentId::new();
+        let goal = test_goal(agent_id);
+        let goal_id = goal.id;
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_verified_state(goal_id, agent_id, verifier, 3, 1);
+
+        let turns = Arc::new(AtomicU64::new(0));
+        let t = turns.clone();
+        let sub = substrate.clone();
+        let send = move |target: AgentId, _p: String| {
+            let t = t.clone();
+            let sub = sub.clone();
+            async move {
+                if target == verifier {
+                    Ok("VERDICT: FAIL\nREASON: not actually done".to_string())
+                } else {
+                    t.fetch_add(1, Ordering::SeqCst);
+                    // No `GOAL_DONE` marker — the agent called the tool with
+                    // status="completed" instead.
+                    patch_goal(&sub, goal_id, None, Some(GoalStatus::Completed));
+                    Ok("still working on it".to_string())
+                }
+            }
+        };
+
+        run_loop(
+            goal_id,
+            agent_id,
+            3,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            turns.load(Ordering::SeqCst),
+            3,
+            "a tool-written Completed status must not let the top-of-loop check \
+             short-circuit the run after the first rejected iteration"
+        );
+        assert_eq!(
+            state.lock().await.phase,
+            GoalRunPhase::MaxIterationsReached,
+            "the run must spend its full budget, not finish through a status \
+             the verifier never saw"
+        );
+    }
+
+    /// A cancellation is a legitimate stop order regardless of whether the
+    /// run has a verifier — unlike `Completed` / bare progress, it is not
+    /// something the runner's own gate produces, so it must not be gated.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_goal_still_stops_a_verified_run() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let verifier = AgentId::new();
+        let mut goal = test_goal(agent_id);
+        goal.status = GoalStatus::Cancelled;
+        let goal_id = goal.id;
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_verified_state(goal_id, agent_id, verifier, 3, 1);
+
+        let turns = Arc::new(AtomicU64::new(0));
+        let t = turns.clone();
+        let send = move |_a: AgentId, _p: String| {
+            let t = t.clone();
+            async move {
+                t.fetch_add(1, Ordering::SeqCst);
+                Ok("should never run".to_string())
+            }
+        };
+
+        run_loop(
+            goal_id,
+            agent_id,
+            3,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            turns.load(Ordering::SeqCst),
+            0,
+            "a cancelled goal must never tick"
+        );
+        assert_eq!(state.lock().await.phase, GoalRunPhase::Finished);
+    }
+
     /// #7785 review: the clamp on rejected progress must not reach the plain
     /// no-verifier path. There is no gate to bypass there, so a `100` an
     /// agent reports without an explicit `GOAL_DONE` (the two markers are
     /// independent) must still let the top-of-loop `progress >= 100` check
     /// end the run — clamping it unconditionally pinned it at 99 and burned
     /// the rest of the iteration budget instead.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn progress_100_without_goal_done_still_finishes_with_no_verifier_configured() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
         let agent_id = AgentId::new();
