@@ -995,6 +995,7 @@ pub async fn get_skill_detail(
         (status = 400, description = "Invalid request"),
         (status = 401, description = "No GitHub token configured"),
         (status = 404, description = "Skill not found"),
+        (status = 500, description = "Invalid skills.promotion configuration"),
         (status = 502, description = "GitHub request failed")
     )
 )]
@@ -1107,6 +1108,7 @@ async fn run_registry_proposal(
         (status = 400, description = "Invalid candidate id"),
         (status = 401, description = "No GitHub token configured"),
         (status = 404, description = "Candidate not found"),
+        (status = 500, description = "Invalid skills.promotion configuration"),
         (status = 502, description = "GitHub request failed")
     )
 )]

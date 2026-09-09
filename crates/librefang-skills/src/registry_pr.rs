@@ -463,7 +463,14 @@ fn validate_api_base_url(url: &str) -> Result<(), SkillError> {
 }
 
 /// Whether the host in the `scheme://` authority of a URL is loopback:
-/// `localhost`, `127.0.0.0/8` or `[::1]`.
+/// `localhost` or an IP address in `127.0.0.0/8` / `::1`.
+///
+/// Must parse the host as an `IpAddr` rather than testing a string prefix —
+/// `starts_with("127.")` also matches DNS labels that merely *begin* with
+/// those digits (RFC 1123 allows a label to start with a digit), so
+/// `127.attacker.example` would pass as loopback and every promotion request
+/// — bearer token attached — would go out in the clear to that host (#8179
+/// review).
 fn is_loopback_host(host_and_path: &str) -> bool {
     let authority = host_and_path
         .split(['/', '?', '#'])
@@ -475,7 +482,10 @@ fn is_loopback_host(host_and_path: &str) -> bool {
     } else {
         authority.split(':').next().unwrap_or_default()
     };
-    host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.")
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Reject a configured base branch that is not a valid git ref name.
@@ -484,11 +494,18 @@ fn is_loopback_host(host_and_path: &str) -> bool {
 /// pull request's `base`), so a `?` in it makes GitHub silently answer for a
 /// different branch (`heads/release?w=1` → `heads/release`) and everything
 /// after a `#` never leaves the URL — every write then lands before the pull
-/// request finally fails. Git's own ref-name rules are the cheapest correct
-/// check; `#` is rejected beyond those because a URL fragment is a URL
-/// property, not a git one (#8179 review).
+/// request finally fails. Git's own ref-name rules (`git check-ref-format`)
+/// are the cheapest correct check; `#` is rejected beyond those because a URL
+/// fragment is a URL property, not a git one (#8179 review).
+///
+/// A leading dot and a trailing `.lock` are per-*component* rules, not
+/// whole-string ones — `a/.b` and `a.lock/b` are invalid refs that a
+/// whole-string `starts_with`/`ends_with` check let through, and GitHub's
+/// 404 on the ref lookup that followed was exactly the opaque network error
+/// this function exists to turn into a config error (#8179 review, finding 8).
 fn validate_base_branch(branch: &str) -> Result<(), SkillError> {
     let invalid = branch.is_empty()
+        || branch == "@"
         || branch.bytes().any(|b| {
             b <= b' '
                 || b == 0x7f
@@ -496,11 +513,13 @@ fn validate_base_branch(branch: &str) -> Result<(), SkillError> {
         })
         || branch.starts_with('/')
         || branch.ends_with('/')
-        || branch.starts_with('.')
         || branch.ends_with('.')
         || branch.contains("..")
-        || branch.ends_with(".lock")
-        || branch.contains("@{");
+        || branch.contains("//")
+        || branch.contains("@{")
+        || branch
+            .split('/')
+            .any(|component| component.starts_with('.') || component.ends_with(".lock"));
     if invalid {
         Err(SkillError::InvalidConfig(format!(
             "Invalid skills.promotion.base_branch '{branch}' (expected a git ref name such as 'main' or 'release/1.0')"
@@ -544,13 +563,29 @@ fn repo_name(slug: &str) -> &str {
 }
 
 /// A repository that resolves is only a reusable fork when GitHub marks it
-/// `fork: true` and its parent is the configured upstream. A same-named
-/// repository that is not a fork of the upstream registry is an unrelated
-/// repository, and pushing to it is unrecoverable — the files land before the
-/// pull request fails 422 for having no common history (#8179 review).
+/// `fork: true` and either `parent` or `source` names the configured
+/// upstream. A same-named repository that is not a fork of the upstream
+/// registry is an unrelated repository, and pushing to it is unrecoverable —
+/// the files land before the pull request fails 422 for having no common
+/// history (#8179 review).
+///
+/// `parent` alone is not enough: it is the *immediate* fork parent, while
+/// `source` is the network's original repository. An operator who forked from
+/// a fork (or whose configured upstream got renamed after `registry_repo` was
+/// written) has `parent.full_name` pointing at that intermediate repo, not
+/// `upstream` — checking `source` too keeps that promotion working instead of
+/// failing with a message that names the wrong remedy (#8179 review, finding
+/// 4).
 fn verify_fork(existing: &Value, upstream: &str, fork_repo: &str) -> Result<(), SkillError> {
-    let parent = existing["parent"]["full_name"].as_str().unwrap_or_default();
-    if existing["fork"].as_bool() == Some(true) && parent.eq_ignore_ascii_case(upstream) {
+    let is_fork_of_upstream = existing["fork"].as_bool() == Some(true)
+        && [
+            existing["parent"]["full_name"].as_str(),
+            existing["source"]["full_name"].as_str(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|full_name| full_name.eq_ignore_ascii_case(upstream));
+    if is_fork_of_upstream {
         return Ok(());
     }
     Err(SkillError::InvalidConfig(format!(
@@ -812,6 +847,19 @@ impl RegistryGithubClient {
         upstream: &str,
         cfg: &RegistryPromotionConfig,
     ) -> Result<PromotionTarget, SkillError> {
+        // Validate before any network call. This used to run after
+        // `ensure_fork`, so an invalid `base_branch` still left a real fork
+        // created on GitHub — a side effect for a config value the flow was
+        // about to reject anyway (#8179 review, finding 5).
+        if let Some(branch) = cfg
+            .base_branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+        {
+            validate_base_branch(branch)?;
+        }
+
         let (push_repo, head_owner) = match cfg.mode {
             RegistryPromotionMode::DirectPush => (upstream.to_string(), None),
             RegistryPromotionMode::Fork => {
@@ -833,17 +881,6 @@ impl RegistryGithubClient {
             }
         };
 
-        // The base branch is interpolated into API paths and the PR's `base`;
-        // a `?` or `#` in it would silently retarget the ref lookup (#8179
-        // review). Validate the configured value before it is used anywhere.
-        if let Some(branch) = cfg
-            .base_branch
-            .as_deref()
-            .map(str::trim)
-            .filter(|b| !b.is_empty())
-        {
-            validate_base_branch(branch)?;
-        }
         let (base_branch, base_sha) = self
             .branch_head(&push_repo, cfg.base_branch.as_deref())
             .await?;
@@ -1254,6 +1291,63 @@ mod tests {
         );
     }
 
+    /// A repository whose *immediate* fork parent is not the upstream, but
+    /// whose `source` (the network's original repository) is, must still be
+    /// accepted — this is what a fork-of-a-fork, or an upstream renamed after
+    /// `registry_repo` was configured, looks like on the wire. Checking only
+    /// `parent` would reject a promotion that used to work with a message
+    /// naming the wrong remedy (#8179 review, finding 4).
+    #[tokio::test]
+    async fn a_fork_of_a_fork_is_accepted_via_source() {
+        let server = mock_github(None).await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme-bots/registry"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "default_branch": "trunk",
+                "fork": true,
+                "parent": {"full_name": "some-intermediate-fork/registry"},
+                "source": {"full_name": "acme/registry"}
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let cfg = RegistryPromotionConfig {
+            api_base_url: Some(server.uri()),
+            fork_owner: Some("acme-bots".to_string()),
+            ..Default::default()
+        };
+        propose_with(&cfg)
+            .await
+            .expect("a fork of a fork of upstream must be accepted via `source`");
+    }
+
+    /// An invalid `base_branch` must be rejected before the flow forks
+    /// anything on GitHub — it used to be validated only after `ensure_fork`
+    /// had already created a real fork for a config value about to be
+    /// rejected anyway (#8179 review, finding 5).
+    #[tokio::test]
+    async fn invalid_base_branch_is_rejected_before_any_fork_is_created() {
+        let server = mock_github(Some("acme-bots/registry")).await;
+        let cfg = RegistryPromotionConfig {
+            api_base_url: Some(server.uri()),
+            fork_owner: Some("acme-bots".to_string()),
+            base_branch: Some("release?w=1".to_string()),
+            ..Default::default()
+        };
+        let error = propose_with(&cfg)
+            .await
+            .expect_err("an invalid base_branch must be rejected");
+        assert!(
+            error.to_string().contains("base_branch"),
+            "unexpected error: {error}"
+        );
+        let reqs = requests(&server).await;
+        assert!(
+            find(&reqs, "POST", |p| p.ends_with("/forks")).is_none(),
+            "no fork must be requested for a config value that fails validation"
+        );
+    }
+
     /// `direct_push` skips the fork entirely: the branch is created on the
     /// upstream registry and the PR head carries no owner prefix.
     #[tokio::test]
@@ -1359,6 +1453,11 @@ mod tests {
             // in the clear to a redirectable destination (#8179 review).
             "http://attacker.example/",
             "http://ghe.internal/api/v3",
+            // A DNS label may start with a digit (RFC 1123), so these are
+            // registrable domains, not loopback — a `starts_with("127.")`
+            // check let both through (#8179 review, finding 1).
+            "http://127.attacker.example/api/v3",
+            "http://127.0.0.1.attacker.example/api/v3",
         ] {
             assert!(validate_api_base_url(bad).is_err(), "{bad:?}");
         }
@@ -1408,6 +1507,15 @@ mod tests {
             "trailing.",
             "x.lock",
             "@{x}",
+            // Per-component rules, not whole-string ones — a leading dot or
+            // trailing `.lock` on any `/`-separated component is invalid even
+            // when the branch as a whole doesn't start or end that way.
+            // Consecutive slashes and the single-character `@` are also
+            // rejected refs (#8179 review, finding 8).
+            "a/.b",
+            "a.lock/b",
+            "a//b",
+            "@",
         ] {
             assert!(validate_base_branch(bad).is_err(), "{bad:?}");
         }

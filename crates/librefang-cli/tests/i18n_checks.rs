@@ -449,11 +449,23 @@ fn is_inside_log_macro_args(collapsed: &str) -> bool {
 fn collapse_code_prefix(content: &str, end: usize, literal_spans: &[(usize, usize)]) -> String {
     content[..end]
         .char_indices()
-        .filter(|&(i, ch)| {
-            !ch.is_whitespace() && !literal_spans.iter().any(|&(s, e)| i >= s && i < e)
-        })
+        .filter(|&(i, ch)| !ch.is_whitespace() && !is_within_literal_span(i, literal_spans))
         .map(|(_, ch)| ch)
         .collect()
+}
+
+/// Whether byte index `i` falls inside one of `literal_spans`.
+///
+/// Binary search rather than a linear scan: spans are pushed one per closed
+/// literal in file order, so by construction they are already sorted by
+/// start and disjoint (literals never overlap), and `partition_point` finds
+/// the one span that could contain `i` in O(log spans). A linear `.any()`
+/// scan here made `collapse_code_prefix` — already O(file size) per literal,
+/// which is unchanged — pay an extra factor of the literal count on every
+/// character, measured at 48x on a real file (#8179 review, finding 3).
+fn is_within_literal_span(i: usize, literal_spans: &[(usize, usize)]) -> bool {
+    let idx = literal_spans.partition_point(|&(start, _)| start <= i);
+    idx > 0 && i < literal_spans[idx - 1].1
 }
 
 fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, String)> {

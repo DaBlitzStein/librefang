@@ -2324,54 +2324,85 @@ async fn config_set_writes_skills_promotion_leaf_and_reaches_the_kernel() {
     );
 }
 
-/// `skills.promotion.api_base_url` is a post-auth credential-redirect knob:
-/// every request the promotion flow builds from it carries the repo-scoped
-/// GitHub token as `Authorization: Bearer …`, so a write hands the credential
-/// to whatever host the value names. It joins `proxy.` /
-/// `telemetry.otlp_endpoint` / `audit.anchor_path` on the edit-on-disk side
-/// (#8179 review), which for the scrub list means the leaf is refused and a
-/// wholesale section payload containing the key is refused too.
+/// `skills.promotion.api_base_url`, `fork_owner` and `base_branch` are all
+/// post-auth destination fields of the promotion flow: every request it
+/// builds carries the repo-scoped GitHub token as `Authorization: Bearer …`,
+/// so a write to any of the three hands that credential to a destination the
+/// caller chose — `api_base_url` picks the host, `fork_owner` picks the
+/// repository namespace the token's push lands in, `base_branch` picks which
+/// ref inside it. `verify_fork` only proves `fork_owner`'s repository is *a*
+/// fork of the configured upstream, not that whoever set `fork_owner` is
+/// trusted, so an Owner-role attacker who forks the public registry into
+/// their own namespace once and then posts that namespace here gets every
+/// later promotion pushed to it with the operator's token. All three join
+/// `proxy.` / `telemetry.otlp_endpoint` / `audit.anchor_path` on the
+/// edit-on-disk side (#8179 review, finding 2), which for the scrub list
+/// means each leaf is refused and a wholesale section payload containing any
+/// of them is refused too.
 #[tokio::test(flavor = "multi_thread")]
-async fn config_set_rejects_skills_promotion_api_base_url() {
+async fn config_set_rejects_skills_promotion_destination_fields() {
     let h = boot_router_with_api_key(API_KEY).await;
-    let (status, body) = send(
-        h.app.clone(),
-        auth_post_json(
-            "/api/config/set",
-            serde_json::json!({
-                "path": "skills.promotion.api_base_url",
-                "value": "https://github.example.invalid/api/v3"
-            }),
+    for (key, value) in [
+        (
+            "api_base_url",
+            serde_json::Value::String("https://github.example.invalid/api/v3".to_string()),
         ),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "api_base_url must be edit-on-disk: {}",
-        String::from_utf8_lossy(&body)
-    );
+        (
+            "fork_owner",
+            serde_json::Value::String("attacker-org".to_string()),
+        ),
+        (
+            "base_branch",
+            serde_json::Value::String("attacker-branch".to_string()),
+        ),
+    ] {
+        let (status, body) = send(
+            h.app.clone(),
+            auth_post_json(
+                "/api/config/set",
+                serde_json::json!({
+                    "path": format!("skills.promotion.{key}"),
+                    "value": value
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{key} must be edit-on-disk: {}",
+            String::from_utf8_lossy(&body)
+        );
 
-    // The wholesale-table shape is refused by the payload scan.
-    let (status, body) = send(
-        h.app.clone(),
-        auth_post_json(
-            "/api/config/set",
-            serde_json::json!({
-                "path": "skills.promotion",
-                "value": {"api_base_url": "https://github.example.invalid/api/v3"}
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "payload scan must catch api_base_url: {}",
-        String::from_utf8_lossy(&body)
-    );
+        // The wholesale-table shape is refused by the payload scan too.
+        let mut table = serde_json::Map::new();
+        table.insert(key.to_string(), value);
+        let (status, body) = send(
+            h.app.clone(),
+            auth_post_json(
+                "/api/config/set",
+                serde_json::json!({
+                    "path": "skills.promotion",
+                    "value": serde_json::Value::Object(table)
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "payload scan must catch {key}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
 }
 
+/// `fork_owner` and `base_branch` are excluded from this payload: they are
+/// destination fields of the same credential-redirect shape as
+/// `api_base_url` and are refused by the scrub the same way (#8179 review,
+/// finding 2) — see `config_set_rejects_skills_promotion_destination_fields`.
+/// The whole-section write path stays exercised here through the fields
+/// that remain writable.
 #[tokio::test(flavor = "multi_thread")]
 async fn config_set_writes_whole_skills_promotion_section() {
     let h = boot_router_with_api_key(API_KEY).await;
@@ -2382,8 +2413,6 @@ async fn config_set_writes_whole_skills_promotion_section() {
             serde_json::json!({
                 "path": "skills.promotion",
                 "value": {
-                    "fork_owner": "acme-bots",
-                    "base_branch": "release",
                     "head_branch_prefix": "promo",
                     "commit_author_name": "LibreFang Bot",
                     "commit_author_email": "bot@example.invalid",
@@ -2407,13 +2436,11 @@ async fn config_set_writes_whole_skills_promotion_section() {
     );
     let written = std::fs::read_to_string(h.home.join("config.toml")).expect("toml exists");
     assert!(
-        written.contains("acme-bots"),
+        written.contains("promo"),
         "whole-section write did not land on disk:\n{written}"
     );
 
     let promotion = h.state.kernel.config_ref().skills.promotion.clone();
-    assert_eq!(promotion.fork_owner.as_deref(), Some("acme-bots"));
-    assert_eq!(promotion.base_branch.as_deref(), Some("release"));
     assert_eq!(promotion.head_branch_prefix.as_deref(), Some("promo"));
     assert_eq!(
         promotion.commit_author_name.as_deref(),
@@ -2433,8 +2460,8 @@ async fn config_set_writes_whole_skills_promotion_section() {
     assert_eq!(status, StatusCode::OK);
     let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
     assert_eq!(
-        dig(&json, "skills.promotion.fork_owner").and_then(|v| v.as_str()),
-        Some("acme-bots")
+        dig(&json, "skills.promotion.head_branch_prefix").and_then(|v| v.as_str()),
+        Some("promo")
     );
 }
 
