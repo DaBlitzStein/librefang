@@ -3403,12 +3403,12 @@ mod manifest_history_dispatch_tests {
     /// misleads rather than merely lags.
     #[test]
     fn a_late_response_for_another_agent_does_not_populate_this_ones_pane() {
-        let mut app = app_showing("agent-b");
+        let mut app = app_showing("agent-uuid-b");
         app.agents.manifest_history_loading = true;
 
         app.handle_event(AppEvent::AgentManifestHistoryLoaded {
-            agent_id: "agent-a".to_string(),
-            versions: vec![snapshot("name = \"agent-a\"")],
+            agent_id: "agent-uuid-a".to_string(),
+            versions: vec![snapshot("name = \"agent-uuid-a\"")],
         });
 
         assert!(
@@ -3421,14 +3421,14 @@ mod manifest_history_dispatch_tests {
         );
 
         app.handle_event(AppEvent::AgentManifestHistoryLoaded {
-            agent_id: "agent-b".to_string(),
-            versions: vec![snapshot("name = \"agent-b\"")],
+            agent_id: "agent-uuid-b".to_string(),
+            versions: vec![snapshot("name = \"agent-uuid-b\"")],
         });
 
         assert_eq!(app.agents.manifest_history.len(), 1);
         assert_eq!(
             app.agents.manifest_history[0].manifest_toml,
-            "name = \"agent-b\""
+            "name = \"agent-uuid-b\""
         );
         assert!(!app.agents.manifest_history_loading);
     }
@@ -3437,11 +3437,11 @@ mod manifest_history_dispatch_tests {
     /// agent B's spinner or supply B's pane with A's reason.
     #[test]
     fn a_failure_for_another_agent_does_not_clear_this_ones_loading_state() {
-        let mut app = app_showing("agent-b");
+        let mut app = app_showing("agent-uuid-b");
         app.agents.manifest_history_loading = true;
 
         app.handle_event(AppEvent::AgentManifestHistoryFailed {
-            agent_id: "agent-a".to_string(),
+            agent_id: "agent-uuid-a".to_string(),
             failure: event::FetchFailure::Error("agent A blew up".to_string()),
         });
 
@@ -3454,7 +3454,7 @@ mod manifest_history_dispatch_tests {
     /// "loading" and showed the skills error as this fetch's reason.
     #[test]
     fn an_unrelated_agent_tab_fetch_error_leaves_the_history_fetch_alone() {
-        let mut app = app_showing("agent-b");
+        let mut app = app_showing("agent-uuid-b");
         app.agents.manifest_history_loading = true;
 
         app.handle_event(AppEvent::FetchError("Failed to save skills".to_string()));
