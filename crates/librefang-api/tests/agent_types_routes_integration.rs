@@ -1275,6 +1275,135 @@ async fn toml_put_reports_keys_the_manifest_does_not_recognise() {
     cleanup(name);
 }
 
+/// `triggers = []` — the explicit way to clear the list — must not be reported as a
+/// key `AgentManifest` doesn't recognise. `Vec<Trigger>` carries `skip_serializing_if
+/// = "Vec::is_empty"`, so the round-tripped comparison document drops the key exactly
+/// the way it would for a genuinely unknown one; without excluding empty
+/// arrays/tables the report (and its accompanying WARN) told the operator the schema
+/// didn't know a key it understands perfectly well.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_does_not_misreport_an_explicitly_cleared_list_as_unrecognised() {
+    let _g = lock().lock().await;
+    let name = "at_toml_triggers_cleared";
+    cleanup(name);
+    write_agent_type(
+        name,
+        &format!("name = \"{name}\"\n\n[[triggers]]\npattern = \"git.push\"\n"),
+    );
+
+    let h = boot().await;
+    let doc = format!("name = \"{name}\"\ntriggers = []\n");
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let flagged_triggers = body
+        .get("unknown_keys")
+        .and_then(|k| k.as_array())
+        .is_some_and(|arr| arr.contains(&json!("triggers")));
+    assert!(
+        !flagged_triggers,
+        "triggers = [] is an explicit clear, not an unrecognised key: {body}"
+    );
+
+    cleanup(name);
+}
+
+/// A raw-body create — the shape `POST /api/templates/{name}/toml` (`text/plain`) takes.
+async fn post_toml(h: &Harness, path: &str, body: &str) -> (StatusCode, Json) {
+    send(
+        h,
+        "POST",
+        path,
+        Some("text/plain"),
+        body.as_bytes().to_vec(),
+    )
+    .await
+}
+
+/// The dashboard's original create flow was two requests — `POST /api/templates` (a
+/// name+description stub) then `PUT .../toml` (the manifest the operator actually
+/// authored) — which left the stub on disk if the second call failed, with no way to
+/// retry short of reopening the dialog, and recorded two version snapshots for one
+/// user action even when both calls succeeded (#8028). This endpoint takes the full
+/// manifest up front: one write, one snapshot.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_post_creates_a_type_in_one_write_with_one_snapshot() {
+    let _g = lock().lock().await;
+    let name = "at_toml_post_create";
+    cleanup(name);
+
+    let h = boot().await;
+    let doc = toml_tab_document(name);
+    let (status, body) = post_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, raw) = get(&h, &format!("/api/templates/{name}/toml")).await;
+    assert_eq!(status, StatusCode::OK);
+    let stored: toml::Value = toml::from_str(raw.as_str().unwrap()).unwrap();
+    assert_eq!(
+        stored["triggers"][0]["pattern"].as_str(),
+        Some("git.push"),
+        "the manifest sent to create must land in full, not a name+description stub: {stored}"
+    );
+
+    let (status, history) = get(&h, &format!("/api/templates/{name}/history")).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let versions = history["versions"].as_array().expect("versions array");
+    assert_eq!(
+        versions.len(),
+        1,
+        "one user action must record one snapshot, not a phantom stub followed by the real save: {history}"
+    );
+    assert_eq!(versions[0]["change_source"], "create", "{history}");
+
+    cleanup(name);
+}
+
+/// A second create for a name that already has an agent type must refuse, exactly
+/// like the flat-shape create, and must not touch the file that is already there.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_post_refuses_a_name_that_already_exists() {
+    let _g = lock().lock().await;
+    let name = "at_toml_post_exists";
+    cleanup(name);
+    write_agent_type(
+        name,
+        &format!("name = \"{name}\"\ndescription = \"already here\"\n"),
+    );
+
+    let h = boot().await;
+    let doc = format!("name = \"{name}\"\n");
+    let (status, body) = post_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_exists", "{body}");
+
+    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(
+        stored.contains("already here"),
+        "a refused create must not touch the existing file: {stored}"
+    );
+
+    cleanup(name);
+}
+
+/// A name already claimed by a live agent is refused, exactly like the flat-shape
+/// create, rather than shadowed by a type this catalog would list ahead of the
+/// agent that actually answers to the name.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_post_refuses_a_name_that_belongs_to_a_live_agent() {
+    let _g = lock().lock().await;
+    let name = "at_toml_post_liveagent";
+    cleanup(name);
+    write_workspace_agent(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let doc = format!("name = \"{name}\"\n");
+    let (status, body) = post_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_name_taken", "{body}");
+
+    cleanup(name);
+}
+
 /// Malformed syntax and a type-violation both refuse with 400 and carry the parser
 /// detail in `details.toml_error` rather than mixing it into the translated message.
 #[tokio::test(flavor = "multi_thread")]
