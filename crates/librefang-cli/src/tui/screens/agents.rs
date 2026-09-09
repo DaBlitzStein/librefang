@@ -2274,17 +2274,39 @@ mod workspaces_tests {
     #[test]
     fn editor_ignores_every_key_but_esc_until_loaded() {
         let mut state = editing_state();
+        // A non-empty `workspaces` with `ws_loaded == false` isn't reachable
+        // through the normal `w` reset, but proves the gate itself — not an
+        // empty vector — is what blocks `Enter`/`'d'` below. With an empty
+        // vector both are already no-ops regardless of the gate
+        // (`if len > 0`), so that alone wouldn't distinguish the two.
+        state.workspaces.push((
+            "library".into(),
+            "shared/library".into(),
+            "readwrite".into(),
+        ));
         state.ws_loaded = false;
 
         state.handle_key(key(KeyCode::Char('a')));
-        assert!(
-            state.workspaces.is_empty(),
-            "adding a row before the fetch lands has nothing real to add it to"
+        assert_eq!(
+            state.workspaces.len(),
+            1,
+            "adding a row before the fetch lands must not touch the table"
         );
         assert!(matches!(
             state.handle_key(key(KeyCode::Char('s'))),
             AgentAction::Continue
         ));
+        state.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(
+            state.workspaces.len(),
+            1,
+            "'d' must not delete a row while the fetch hasn't landed"
+        );
+        state.handle_key(key(KeyCode::Enter));
+        assert!(
+            state.ws_editing.is_none(),
+            "Enter must not open a field for editing while the fetch hasn't landed"
+        );
 
         state.handle_key(key(KeyCode::Esc));
         assert!(matches!(state.sub, AgentSubScreen::AgentDetail));
