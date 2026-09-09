@@ -1426,7 +1426,6 @@ tui-event-mcp-fetch-failed = Failed to fetch MCP servers
 tui-event-channels-fetch-failed = Failed to fetch channels
 tui-event-skills-update-failed = Failed to update skills
 tui-event-manifest-history-fetch-failed = Failed to load the agent's configuration history
-tui-event-manifest-history-daemon-only = Configuration history is recorded by the daemon; start it and reconnect.
 tui-event-model-params-fetch-failed = Failed to load the agent's model parameters
 tui-event-model-params-update-failed = Failed to save the model parameters
 tui-event-model-params-daemon-only = Model parameters are edited through the daemon; start it and reconnect.

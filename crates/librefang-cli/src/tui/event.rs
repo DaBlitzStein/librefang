@@ -401,7 +401,23 @@ pub enum AppEvent {
     },
     /// The agent's recorded manifest snapshots, newest first. An empty vector is
     /// a real answer — an agent whose manifest was never persisted has none.
-    AgentManifestHistoryLoaded(Vec<ManifestVersion>),
+    ///
+    /// `agent_id` is the agent the fetch was issued for. This pane renders another
+    /// agent's entire `agent.toml`, so a response that outlived its request has to
+    /// be droppable rather than displayed under whichever header is open now.
+    AgentManifestHistoryLoaded {
+        agent_id: String,
+        versions: Vec<ManifestVersion>,
+    },
+    /// The agent's manifest snapshots could not be read — see [`FetchFailure`].
+    ///
+    /// Separate from the catch-all `FetchError` so that clearing the history
+    /// pane's loading flag is scoped to a history failure, instead of any agent-tab
+    /// fetch failure standing in for one.
+    AgentManifestHistoryFailed {
+        agent_id: String,
+        failure: FetchFailure,
+    },
     /// Comms topology loaded.
     CommsTopologyLoaded {
         nodes: Vec<super::screens::comms::CommsNode>,
@@ -2049,62 +2065,91 @@ pub fn spawn_fetch_agent_manifest_history(
     tx: mpsc::Sender<AppEvent>,
 ) {
     let limit = MANIFEST_HISTORY_LIMIT;
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-            // A bad agent id is answered by the endpoint (400 for a non-UUID,
-            // 404 for one it does not know), so the reason it gives is reported
-            // instead of a generic failure.
-            let outcome = daemon_response(
-                client
-                    .get(format!(
-                        "{base_url}/api/agents/{agent_id}/manifest-history?limit={limit}"
-                    ))
-                    .send(),
-                || crate::i18n::t("tui-event-manifest-history-fetch-failed"),
-            );
-            let resp = match outcome {
-                Ok(resp) => resp,
-                Err(message) => {
-                    let _ = tx.send(AppEvent::FetchError(message));
+    std::thread::spawn(move || {
+        let fail = |tx: &mpsc::Sender<AppEvent>, failure: FetchFailure| {
+            let _ = tx.send(AppEvent::AgentManifestHistoryFailed {
+                agent_id: agent_id.clone(),
+                failure,
+            });
+        };
+        let versions = match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                let client = make_daemon_client(api_key.as_deref());
+                // A bad agent id is answered by the endpoint (400 for a non-UUID,
+                // 404 for one it does not know), so the reason it gives is reported
+                // instead of a generic failure.
+                let outcome = daemon_response(
+                    client
+                        .get(format!(
+                            "{base_url}/api/agents/{agent_id}/manifest-history?limit={limit}"
+                        ))
+                        .send(),
+                    || crate::i18n::t("tui-event-manifest-history-fetch-failed"),
+                );
+                let resp = match outcome {
+                    Ok(resp) => resp,
+                    Err(message) => {
+                        fail(&tx, FetchFailure::Error(message));
+                        return;
+                    }
+                };
+                let Ok(body) = resp.json::<serde_json::Value>() else {
+                    fail(
+                        &tx,
+                        FetchFailure::Error(crate::i18n::t(
+                            "tui-event-manifest-history-fetch-failed",
+                        )),
+                    );
                     return;
-                }
-            };
-            let Ok(body) = resp.json::<serde_json::Value>() else {
-                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                    "tui-event-manifest-history-fetch-failed",
-                )));
-                return;
-            };
-            let versions = body["versions"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .map(|v| ManifestVersion {
-                            timestamp: v["timestamp"].as_str().unwrap_or_default().to_string(),
-                            change_source: v["change_source"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .to_string(),
-                            manifest_toml: v["manifest_toml"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .to_string(),
+                };
+                body["versions"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|v| ManifestVersion {
+                                timestamp: v["timestamp"].as_str().unwrap_or_default().to_string(),
+                                change_source: v["change_source"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                manifest_toml: v["manifest_toml"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            // Snapshots are written into the substrate by the same kernel this arm
+            // holds, so an in-process TUI can read them directly — including rows a
+            // daemon wrote in an earlier session against the same `~/.librefang`.
+            // Unlike the model-params fetch this is modelled on, there is no advisory
+            // limit check that only the endpoint performs; it is a pure read.
+            BackendRef::InProcess(kernel) => {
+                use librefang_kernel::KernelApi;
+                let store =
+                    librefang_memory::ManifestVersionStore::new(kernel.memory_substrate().pool());
+                match store.list_for_agent(&agent_id, limit as usize) {
+                    Ok(rows) => rows
+                        .into_iter()
+                        .map(|r| ManifestVersion {
+                            timestamp: r.timestamp,
+                            change_source: r.change_source,
+                            manifest_toml: r.manifest_toml,
                         })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let _ = tx.send(AppEvent::AgentManifestHistoryLoaded(versions));
-        }
-        // Snapshots are recorded by the daemon as it persists manifests, and are
-        // read back through the endpoint above; an in-process TUI has no such
-        // history to show, so it says that rather than rendering an empty pane
-        // that would read as "this agent never changed".
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-event-manifest-history-daemon-only",
-            )));
-        }
+                        .collect(),
+                    Err(e) => {
+                        fail(&tx, FetchFailure::Error(e.to_string()));
+                        return;
+                    }
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::AgentManifestHistoryLoaded {
+            agent_id: agent_id.clone(),
+            versions,
+        });
     });
 }
 
