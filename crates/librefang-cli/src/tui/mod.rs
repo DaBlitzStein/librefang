@@ -558,8 +558,7 @@ impl App {
 
             // ── Goals events ──
             AppEvent::GoalsLoaded(list) => {
-                self.goals.goals = list;
-                self.goals.refilter();
+                self.goals.replace_goals(list);
                 self.goals.loading = false;
             }
             AppEvent::GoalRunLoaded {
