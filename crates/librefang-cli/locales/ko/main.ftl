@@ -2367,7 +2367,6 @@ tui-wizard-status-saved = 구성 저장됨 — { $provider } / { $model }
 tui-wizard-status-save-fail = 구성 저장에 실패: { $error }
 tui-wizard-status-continuing = 계속하는 중...
 tui-event-manifest-history-fetch-failed = 에이전트의 설정 기록을 불러오지 못했습니다
-tui-event-manifest-history-daemon-only = 설정 기록은 데몬이 남깁니다. 데몬을 실행한 뒤 다시 연결하세요.
 tui-event-model-params-fetch-failed = 에이전트의 모델 파라미터를 불러오지 못했습니다
 tui-event-model-params-update-failed = 모델 파라미터를 저장하지 못했습니다
 tui-event-model-params-daemon-only = 모델 파라미터는 데몬을 통해 편집합니다. 데몬을 실행한 뒤 다시 연결하세요.
