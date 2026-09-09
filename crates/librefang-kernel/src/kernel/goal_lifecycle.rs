@@ -117,9 +117,6 @@ impl LibreFangKernel {
             .map(|g| g.title)
             .unwrap_or_else(|| format!("Goal {goal_id}"));
         let on_learnings = move |learnings: Vec<String>| {
-            if !should_queue_learnings(&workshop) {
-                return;
-            }
             queue_learnings_as_pending_skill(
                 &skills_dir,
                 agent_id,
@@ -339,7 +336,7 @@ fn queue_learnings_as_pending_skill(
         CandidateKind, CandidateSkill, CaptureSource, Provenance, PROVENANCE_EXCERPT_MAX_CHARS,
     };
 
-    if learnings.is_empty() {
+    if !should_queue_learnings(workshop) || learnings.is_empty() {
         return;
     }
     let name = learned_skill_name(goal_id, goal_title);
@@ -535,6 +532,33 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    /// The opt-in gate lives inside this function (moved from its one
+    /// production caller, `goal_run_start`'s `on_learnings` closure, so
+    /// there is exactly one place to verify it): a disabled workshop must
+    /// queue nothing, no matter how many lessons a run captured.
+    #[test]
+    fn queue_learnings_as_pending_skill_does_nothing_when_the_workshop_is_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path();
+        let agent = AgentId::new();
+        let goal_id = GoalId::new();
+        queue_learnings_as_pending_skill(
+            skills,
+            agent,
+            &SkillWorkshopConfig::default(),
+            goal_id,
+            "Ship the report",
+            &["Back off before retrying".to_string()],
+        );
+
+        assert!(
+            crate::skill_workshop::storage::list_pending(skills, &agent.to_string())
+                .unwrap()
+                .is_empty(),
+            "a disabled workshop must not queue a pending draft"
+        );
+    }
+
     /// A goal run is an autonomous loop, and the lessons it captures are
     /// model-authored text. Writing them straight into the installed skills
     /// directory would let an agent author a skill that loads itself into the
@@ -546,10 +570,14 @@ mod tests {
         let skills = tmp.path();
         let agent = AgentId::new();
         let goal_id = GoalId::new();
+        let workshop = SkillWorkshopConfig {
+            enabled: true,
+            ..SkillWorkshopConfig::default()
+        };
         queue_learnings_as_pending_skill(
             skills,
             agent,
-            &SkillWorkshopConfig::default(),
+            &workshop,
             goal_id,
             "Ship the report",
             &["Back off before retrying".to_string()],
@@ -578,10 +606,14 @@ mod tests {
         let skills = tmp.path();
         let agent = AgentId::new();
         let goal_id = GoalId::new();
+        let workshop = SkillWorkshopConfig {
+            enabled: true,
+            ..SkillWorkshopConfig::default()
+        };
         queue_learnings_as_pending_skill(
             skills,
             agent,
-            &SkillWorkshopConfig::default(),
+            &workshop,
             goal_id,
             "Ship the report",
             &["Back off before retrying".to_string()],
