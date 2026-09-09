@@ -623,9 +623,29 @@ impl ToolExecBackend for DockerBackend {
 /// passthrough list); see [`crate::subprocess_sandbox::sandbox_command`]
 /// for the trust split (#6458).
 ///
-/// `tool_timeout_secs` is the global `KernelConfig` knob, used as the local
-/// backend's default timeout whenever `cfg.default_timeout_secs` is unset —
-/// so the two tool-timeout paths agree rather than drifting silently (#8171).
+/// `tool_timeout_secs` is the **global** `KernelConfig` knob, used as the local
+/// backend's default timeout whenever `cfg.default_timeout_secs` is unset — so
+/// the two tool-timeout paths agree rather than drifting silently (#8171).
+///
+/// Deliberately the global one and not `ToolPolicy::tool_timeout_secs_for`: a
+/// backend is built once per agent and does not know which tool it is about to
+/// run, whereas the per-tool `tool_timeouts` map is resolved per call. What the
+/// value here means is therefore *the floor for an `ExecSpec` that carries no
+/// timeout of its own* — a caller wiring the trait route must set
+/// `ExecSpec::limits.timeout` from `tool_timeout_secs_for(tool_name)`, or an
+/// operator's `tool_timeouts.shell_exec = 300` will be honoured by the outer
+/// dispatch and ignored by the process that actually runs the command.
+///
+/// One consequence of the fallback being *equal* to the dispatch timeout: the
+/// `tokio::time::timeout` wrapped around the tool call in
+/// `agent_loop/tool_call.rs` starts before the backend spawns the child, so in
+/// a default configuration it always expires first and
+/// [`LocalBackend`]'s own [`ExecError::Timeout`] is unreachable. That is
+/// acceptable rather than accidental — `run_command`'s timeout arm discards the
+/// collected stdout/stderr along with the cancelled future, so the outer path
+/// loses nothing and produces the better message. The backend's timeout becomes
+/// the one that fires when a spec, or an explicit `default_timeout_secs`, is
+/// shorter than the dispatch budget.
 // A factory over four backends: every argument feeds a different one, and
 // bundling them into a params struct would only move the same list one file
 // away.

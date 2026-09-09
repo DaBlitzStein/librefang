@@ -320,3 +320,72 @@ async fn end_to_end_resolution_local_runs_command() {
     #[cfg(not(unix))]
     let _ = backend;
 }
+
+/// Mirror of `librefang-runtime/tests/tool_exec_backend_selection.rs`'s
+/// timeout coverage, which this file's header promises but which landed only
+/// in the runtime crate.
+///
+/// `tool_exec.default_timeout_secs` has to reach the executed command, not
+/// merely parse. A default that is never overridden compiles and behaves
+/// plausibly, which is how #8171 survived: the parameter was threaded through
+/// `build_backend` and filled with the same constant on every path.
+#[tokio::test]
+#[cfg(unix)]
+async fn configured_default_timeout_reaches_the_executed_command() {
+    let cfg: KernelConfig =
+        toml::from_str("[tool_exec]\nkind = \"local\"\ndefault_timeout_secs = 1").unwrap();
+    let backend = build_backend(
+        BackendKind::Local,
+        &cfg.tool_exec,
+        &librefang_types::config::DockerSandboxConfig::default(),
+        "agent-1",
+        std::env::temp_dir(),
+        vec![],
+        vec![],
+        cfg.tool_timeout_secs,
+    )
+    .expect("local backend always builds");
+
+    let err = backend
+        .run_command(librefang_runtime::tool_exec_backend::ExecSpec::new(
+            "sleep 30",
+        ))
+        .await
+        .expect_err("the 1s default timeout fires before the 30s sleep returns");
+    assert!(
+        matches!(&err, ExecError::Timeout(msg) if msg.contains("after 1s")),
+        "expected the configured 1s timeout, got: {err:?}"
+    );
+}
+
+/// An unset `tool_exec.default_timeout_secs` inherits the global
+/// `tool_timeout_secs` rather than a private constant, so the two tool-timeout
+/// paths agree instead of merely both being configurable.
+#[tokio::test]
+#[cfg(unix)]
+async fn unset_default_timeout_inherits_the_global_tool_timeout() {
+    let cfg: KernelConfig = toml::from_str("tool_timeout_secs = 1").unwrap();
+    assert!(cfg.tool_exec.default_timeout_secs.is_none());
+    let backend = build_backend(
+        BackendKind::Local,
+        &cfg.tool_exec,
+        &librefang_types::config::DockerSandboxConfig::default(),
+        "agent-1",
+        std::env::temp_dir(),
+        vec![],
+        vec![],
+        cfg.tool_timeout_secs,
+    )
+    .expect("local backend always builds");
+
+    let err = backend
+        .run_command(librefang_runtime::tool_exec_backend::ExecSpec::new(
+            "sleep 30",
+        ))
+        .await
+        .expect_err("the inherited 1s timeout fires before the 30s sleep returns");
+    assert!(
+        matches!(&err, ExecError::Timeout(msg) if msg.contains("after 1s")),
+        "expected the inherited 1s timeout, got: {err:?}"
+    );
+}

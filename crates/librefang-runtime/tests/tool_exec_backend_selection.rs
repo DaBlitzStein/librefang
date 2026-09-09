@@ -11,7 +11,12 @@
 //! in `librefang-api/tests/` so the API crate exercises the same
 //! seam from its build.
 
-use librefang_runtime::tool_exec_backend::{build_backend, ExecError, LOCAL_DEFAULT_TIMEOUT_SECS};
+use librefang_runtime::tool_exec_backend::{build_backend, LOCAL_DEFAULT_TIMEOUT_SECS};
+// Only the two timeout tests below inspect the error variant, and both spawn a
+// shell — on Windows this name would have no users and `-D warnings` would fail
+// the `test-windows` lane.
+#[cfg(unix)]
+use librefang_runtime::tool_exec_backend::ExecError;
 use librefang_types::agent::AgentManifest;
 use librefang_types::config::{DockerSandboxConfig, KernelConfig};
 use librefang_types::tool_exec::{resolve_backend_kind, BackendKind, ToolExecConfig};
