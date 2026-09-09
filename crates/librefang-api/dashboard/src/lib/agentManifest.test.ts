@@ -313,9 +313,9 @@ content = "Be concise"
     expect(second.ok).toBe(true);
     if (!first.ok || !second.ok) return;
 
-    expect(first.form.fallback_models[0]._uid).toBe("parsed-1");
+    expect(first.form.fallback_models?.[0]._uid).toBe("parsed-1");
     expect(first.form.context_injection[0]._uid).toBe("parsed-2");
-    expect(second.form.fallback_models[0]._uid).toBe("parsed-1");
+    expect(second.form.fallback_models?.[0]._uid).toBe("parsed-1");
     expect(second.form.context_injection[0]._uid).toBe("parsed-2");
   });
 
@@ -407,7 +407,7 @@ params = { region = "us" }
     expect(result.form.autonomous.enabled).toBe(true);
     expect(result.form.autonomous.max_iterations).toBe("100");
     expect(result.form.autonomous.heartbeat_channel).toBe("telegram");
-    expect(result.form.fallback_models.map(({ _uid, ...rest }) => rest)).toEqual([
+    expect((result.form.fallback_models ?? []).map(({ _uid, ...rest }) => rest)).toEqual([
       {
         provider: "anthropic",
         model: "claude-3-5-sonnet",
@@ -425,6 +425,31 @@ params = { region = "us" }
     expect(result.extras.topLevel.tools).toEqual({
       web_search: { params: { region: "us" } },
     });
+  });
+
+  it("preserves an unmapped 'channels' allowlist through extras on round-trip (#7742)", () => {
+    // `channels` is a real AgentManifest field (agent.toml, PUT
+    // /agents/{id}/channels) but the visual editor doesn't have a
+    // first-class form widget for it — it must survive a
+    // parse → serialize → re-parse cycle unchanged via extras, the same
+    // guarantee every other unmapped field gets.
+    const toml = `name = "agent"
+channels = ["telegram", "discord"]
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+`;
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.extras.topLevel.channels).toEqual(["telegram", "discord"]);
+
+    const reserialized = serializeManifestForm(parsed.form, parsed.extras);
+    const reparsed = parseManifestToml(reserialized);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.extras.topLevel.channels).toEqual(["telegram", "discord"]);
   });
 
   it("returns a structured error on malformed TOML", () => {
@@ -695,7 +720,7 @@ custom_param = "preserved"
     const parsed = parseManifestToml(toml);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.form.fallback_models[0].extras).toEqual({
+    expect(parsed.form.fallback_models?.[0].extras).toEqual({
       enable_memory: true,
       custom_param: "preserved",
     });
@@ -703,7 +728,7 @@ custom_param = "preserved"
     const reparsed = parseManifestToml(reserialized);
     expect(reparsed.ok).toBe(true);
     if (!reparsed.ok) return;
-    expect(reparsed.form.fallback_models[0].extras).toEqual({
+    expect(reparsed.form.fallback_models?.[0].extras).toEqual({
       enable_memory: true,
       custom_param: "preserved",
     });
@@ -797,6 +822,84 @@ reasoning_mode = "max"
     expect(out).not.toContain("reasoning_mode");
   });
 
+  it("round-trips a declared fallback_models = [] without re-enabling global fallbacks", () => {
+    // #7749 review: `fallback_models = []` is the disable-all statement; an
+    // omitted key inherits the global fallback_providers. A form that
+    // collapses the two re-routes a pinned agent's spend on an unrelated save.
+    const original = `name = "agent"
+description = "test"
+
+fallback_models = []
+`;
+    const parsed = parseManifestToml(original);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.fallback_models).toEqual([]);
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("fallback_models = []");
+    const reparsed = parseManifestToml(round);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.fallback_models).toEqual([]);
+  });
+
+  it("keeps an absent fallback_models absent after a round trip (inherit stays inherit)", () => {
+    const original = `name = "agent"
+description = "test"
+`;
+    const parsed = parseManifestToml(original);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.fallback_models).toBeNull();
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).not.toContain("fallback_models");
+    const reparsed = parseManifestToml(round);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.fallback_models).toBeNull();
+  });
+
+  it("round-trips a declared memory_read = [] without flipping it to unrestricted", () => {
+    // #7749 review: `memory_read = []` is the deny-all declaration (#7605) —
+    // absent means unrestricted. A form state that cannot carry the
+    // distinction silently re-enables an agent's memory on an unrelated save.
+    const original = `name = "agent"
+description = "test"
+
+[capabilities]
+memory_read = []
+`;
+    const parsed = parseManifestToml(original);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.capabilities.memory_read).toEqual([]);
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("memory_read = []");
+    const reparsed = parseManifestToml(round);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.capabilities.memory_read).toEqual([]);
+  });
+
+  it("keeps an absent memory_read absent after a round trip (unrestricted stays unrestricted)", () => {
+    const original = `name = "agent"
+description = "test"
+
+[capabilities]
+network = ["api.openai.com:443"]
+`;
+    const parsed = parseManifestToml(original);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.capabilities.memory_read).toBeNull();
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).not.toContain("memory_read");
+    const reparsed = parseManifestToml(round);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.capabilities.memory_read).toBeNull();
+  });
+
   it("round-trips: serialize(parse(toml)) preserves form + extras", () => {
     const original = `name = "agent"
 description = "test"
@@ -864,7 +967,7 @@ params = { region = "us" }
       items.map(({ _uid, ...rest }) => rest) as Omit<T, "_uid">[];
     const cleanForm = (f: typeof parsed.form) => ({
       ...f,
-      fallback_models: stripUids(f.fallback_models),
+      fallback_models: f.fallback_models === null ? null : stripUids(f.fallback_models),
       context_injection: stripUids(f.context_injection),
     });
     expect(cleanForm(reparsed.form)).toEqual(cleanForm(parsed.form));
