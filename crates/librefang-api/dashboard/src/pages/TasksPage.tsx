@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Kanban,
@@ -12,6 +12,8 @@ import {
   AlertTriangle,
   CheckCircle2,
   Loader2,
+  ArrowUpNarrowWide,
+  Hourglass,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
@@ -20,13 +22,14 @@ import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
 import { useAgents } from "../lib/queries/agents";
 import { useTaskQueue } from "../lib/queries/runtime";
+import { useAgents } from "../lib/queries/agents";
 import {
   useCreateTask,
   useUpdateTaskStatus,
   useDeleteTask,
   useRetryTask,
 } from "../lib/mutations/runtime";
-import type { TaskQueueItem } from "../api";
+import type { AgentItem, TaskQueueItem } from "../api";
 import { toastErr } from "../lib/errors";
 import { useUIStore } from "../lib/store";
 
@@ -45,6 +48,57 @@ const COLUMNS: Array<{
   { key: "failed",      labelKey: "tasks.col_failed",      variant: "error",   statuses: ["failed"] },
   { key: "cancelled",   labelKey: "tasks.col_cancelled",   variant: "default", statuses: ["cancelled"] },
 ];
+
+// Operator-facing priority levels. The engine takes any integer and orders the
+// claim queue `priority DESC, created_at ASC`; these are the named rungs the
+// board offers. 0 is the neutral default every historical task carries.
+const PRIORITY_LEVELS: Array<{ value: number; labelKey: string }> = [
+  { value: 2,  labelKey: "tasks.priority_urgent" },
+  { value: 1,  labelKey: "tasks.priority_high" },
+  { value: 0,  labelKey: "tasks.priority_normal" },
+  { value: -1, labelKey: "tasks.priority_low" },
+];
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// `assigned_to` is stored as whichever spelling the poster used: the backend's
+// `task_claim` matches the canonical UUID *or* the display name (issue #2841),
+// and tasks predating the agent-registry-backed picker hold names. Resolve to a
+// name for display so a task posted by id does not render as a raw UUID, and
+// fall back to the stored string so a name-stored (or orphaned) task stays
+// readable instead of blanking out.
+function assigneeLabel(raw: string, agentsById: Map<string, AgentItem>): string {
+  const known = agentsById.get(raw);
+  if (known) return known.name;
+  return UUID_RE.test(raw) ? raw.slice(0, 8) : raw;
+}
+
+// True when `task` is assigned to `agentId`, in either stored spelling.
+function taskMatchesAgent(
+  task: TaskQueueItem,
+  agentId: string,
+  agentsById: Map<string, AgentItem>,
+): boolean {
+  const raw = task.assigned_to ?? "";
+  if (!raw) return false;
+  if (raw === agentId) return true;
+  return agentsById.get(agentId)?.name === raw;
+}
+
+// A deadline badge that rounds is worse than no badge: an operator who set 90s
+// and reads "2m" will mistrust the field. Keep one decimal when the value does
+// not divide evenly, so the rendered figure is always the one that was set.
+function formatTimeout(secs: number | null | undefined): string | null {
+  if (secs === null || secs === undefined) return null;
+  if (secs === 0) return "∞";
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) {
+    const mins = secs / 60;
+    return Number.isInteger(mins) ? `${mins}m` : `${mins.toFixed(1)}m`;
+  }
+  const hrs = secs / 3600;
+  return Number.isInteger(hrs) ? `${hrs}h` : `${hrs.toFixed(1)}h`;
+}
 
 function relativeTime(iso?: string): string {
   if (!iso) return "-";
@@ -78,9 +132,10 @@ interface TaskCardProps {
   task: TaskQueueItem;
   isDragTarget?: boolean;
   onDragStart: (id: string) => void;
+  agentsById: Map<string, AgentItem>;
 }
 
-function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
+function TaskCard({ task, isDragTarget, onDragStart, agentsById }: TaskCardProps) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const deleteMutation = useDeleteTask();
@@ -149,12 +204,40 @@ function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
       {/* Meta row */}
       <div className="flex items-center gap-2 mt-1.5 flex-wrap">
         {task.assigned_to ? (
-          <span className="flex items-center gap-1 text-[10px] font-mono text-brand bg-brand/8 px-1.5 py-0.5 rounded-md shrink-0">
+          <span
+            title={task.assigned_to}
+            className="flex items-center gap-1 text-[10px] font-mono text-brand bg-brand/8 px-1.5 py-0.5 rounded-md shrink-0"
+          >
             <User className="w-2.5 h-2.5" />
-            {task.assigned_to}
+            {assigneeLabel(task.assigned_to, agentsById)}
           </span>
         ) : (
           <span className="text-[10px] text-text-dim/50 italic shrink-0">{t("tasks.unassigned")}</span>
+        )}
+        {/* Only a non-neutral priority is worth pixels — every historical task
+            carries 0, so badging it would be noise on the whole board. */}
+        {typeof task.priority === "number" && task.priority !== 0 && (
+          <span
+            title={t("tasks.priority_tooltip")}
+            className={`flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-md shrink-0
+              ${task.priority > 0 ? "text-warning bg-warning/10" : "text-text-dim/60 bg-main/50"}`}
+          >
+            <ArrowUpNarrowWide className="w-2.5 h-2.5" />
+            {t(
+              PRIORITY_LEVELS.find((p) => p.value === task.priority)?.labelKey
+                ?? "tasks.priority_custom",
+              { value: task.priority },
+            )}
+          </span>
+        )}
+        {formatTimeout(task.timeout_secs) && (
+          <span
+            title={t("tasks.timeout_tooltip")}
+            className="flex items-center gap-1 text-[10px] font-mono text-text-dim/60 bg-main/50 px-1.5 py-0.5 rounded-md shrink-0"
+          >
+            <Hourglass className="w-2.5 h-2.5" />
+            {formatTimeout(task.timeout_secs)}
+          </span>
         )}
         {task.created_by && (
           <span className="text-[10px] text-text-dim/50 shrink-0">
@@ -240,6 +323,7 @@ interface KanbanColumnProps {
   dragTaskId: string | null;
   onDragStart: (id: string) => void;
   onDropRequeue: (taskId: string) => void;
+  agentsById: Map<string, AgentItem>;
 }
 
 function KanbanColumn({
@@ -250,6 +334,7 @@ function KanbanColumn({
   dragTaskId,
   onDragStart,
   onDropRequeue,
+  agentsById,
 }: KanbanColumnProps) {
   const { t } = useTranslation();
   const [isDragOver, setIsDragOver] = useState(false);
@@ -312,6 +397,7 @@ function KanbanColumn({
               task={task}
               isDragTarget={dragTaskId === task.id && !acceptsDrop}
               onDragStart={onDragStart}
+              agentsById={agentsById}
             />
           ))
         )}
@@ -339,18 +425,24 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [assignee, setAssignee] = useState("");
-  const [priority, setPriority] = useState("");
-  const [timeoutSecs, setTimeoutSecs] = useState("");
+  const [priority, setPriority] = useState(0);
+  // Kept as a string so the field can be genuinely empty ("inherit the global
+  // TTL"), which `0` cannot express — `0` means "never reclaim".
+  const [timeout, setTimeout] = useState("");
+
+  const timeoutSecs = timeout.trim() === "" ? undefined : Number(timeout);
+  const timeoutInvalid =
+    timeoutSecs !== undefined && (!Number.isInteger(timeoutSecs) || timeoutSecs < 0);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!title.trim() || !description.trim()) return;
+    if (!title.trim() || !description.trim() || timeoutInvalid) return;
     createMutation.mutate({
       title: title.trim(),
       description: description.trim(),
-      ...(assignee.trim() ? { assigned_to: assignee.trim() } : {}),
-      ...(priority.trim() ? { priority: Number(priority) } : {}),
-      ...(timeoutSecs.trim() ? { timeout_secs: Number(timeoutSecs) } : {}),
+      ...(assignee ? { assigned_to: assignee } : {}),
+      ...(priority !== 0 ? { priority } : {}),
+      ...(timeoutSecs !== undefined ? { timeout_secs: timeoutSecs } : {}),
     });
   }
 
@@ -363,8 +455,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
       setTitle("");
       setDescription("");
       setAssignee("");
-      setPriority("");
-      setTimeoutSecs("");
+      setPriority(0);
+      setTimeout("");
     }
   }, [isOpen]);
 
@@ -392,14 +484,17 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
           <label className="block text-xs font-semibold text-text-dim mb-1.5">
             {t("tasks.field_description")} <span className="text-error">*</span>
           </label>
+          {/* The agent reads this verbatim, so it is where the operator puts
+              the actual brief — resizable and roomy rather than a 3-line slot. */}
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder={t("tasks.field_description_placeholder")}
             required
-            rows={3}
-            className={`${INPUT_CLASS} resize-none`}
+            rows={8}
+            className={`${INPUT_CLASS} resize-y min-h-[8rem] font-mono text-[13px] leading-relaxed`}
           />
+          <p className="mt-1 text-[10px] text-text-dim/50">{t("tasks.field_description_hint")}</p>
         </div>
 
         <div>
@@ -432,31 +527,37 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
           </datalist>
         </div>
 
-        <div className="flex gap-3">
-          <div className="flex-1">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
             <label className="block text-xs font-semibold text-text-dim mb-1.5">
               {t("tasks.field_priority")}
             </label>
-            <input
-              type="number"
+            <select
               value={priority}
-              onChange={(e) => setPriority(e.target.value)}
-              placeholder={t("tasks.field_priority_placeholder")}
+              onChange={(e) => setPriority(Number(e.target.value))}
               className={INPUT_CLASS}
-            />
+            >
+              {PRIORITY_LEVELS.map((p) => (
+                <option key={p.value} value={p.value}>{t(p.labelKey)}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-[10px] text-text-dim/50">{t("tasks.field_priority_hint")}</p>
           </div>
-          <div className="flex-1">
+
+          <div>
             <label className="block text-xs font-semibold text-text-dim mb-1.5">
               {t("tasks.field_timeout")}
             </label>
             <input
               type="number"
               min={0}
-              value={timeoutSecs}
-              onChange={(e) => setTimeoutSecs(e.target.value)}
+              step={1}
+              value={timeout}
+              onChange={(e) => setTimeout(e.target.value)}
               placeholder={t("tasks.field_timeout_placeholder")}
-              className={INPUT_CLASS}
+              className={`${INPUT_CLASS} ${timeoutInvalid ? "border-error" : ""}`}
             />
+            <p className="mt-1 text-[10px] text-text-dim/50">{t("tasks.field_timeout_hint")}</p>
           </div>
         </div>
 
@@ -485,7 +586,9 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
             size="md"
             className="flex-1"
             isLoading={createMutation.isPending}
-            disabled={!title.trim() || !description.trim() || createMutation.isPending}
+            disabled={
+              !title.trim() || !description.trim() || timeoutInvalid || createMutation.isPending
+            }
           >
             {t("tasks.submit")}
           </Button>
@@ -523,16 +626,16 @@ export function TasksPage() {
     (task): task is TaskQueueItem & { id: string } => typeof task.id === "string" && task.id.length > 0,
   );
 
-  // The filter dropdown still derives from the tasks themselves: filtering
-  // by a historical assignee whose agent has since been deleted is a read,
-  // not a write — those rows are still there and still filterable.
-  const agentNames = Array.from(
-    new Set(
-      validTasks
-        .map((t) => t.assigned_to)
-        .filter((a): a is string => typeof a === "string" && a.length > 0),
-    ),
-  ).sort();
+  // The agent registry is the source of truth for who can hold a task. The
+  // previous list was derived from the `assigned_to` of tasks that already
+  // existed, which meant a new agent was unreachable until someone had already
+  // assigned it something, a deleted agent lingered forever, and an empty
+  // board offered no picker at all.
+  const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
+  const agentsById = useMemo(
+    () => new Map(agents.map((a) => [a.id, a])),
+    [agents],
+  );
 
   const registryAgentNames = Array.from(
     new Set(
@@ -544,8 +647,8 @@ export function TasksPage() {
 
   // Apply agent filter
   const filteredTasks = agentFilter
-    ? validTasks.filter((t) => t.assigned_to === agentFilter)
-    : validTasks;
+    ? allTasks.filter((t) => taskMatchesAgent(t, agentFilter, agentsById))
+    : allTasks;
 
   // Group by status
   function getColumnTasks(statuses: string[]): TaskQueueItem[] {
@@ -624,8 +727,8 @@ export function TasksPage() {
               className="rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs focus:border-brand focus:ring-1 focus:ring-brand/10 outline-none"
             >
               <option value="">{t("tasks.all_agents")}</option>
-              {agentNames.map((a) => (
-                <option key={a} value={a}>{a}</option>
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>{a.name}</option>
               ))}
             </select>
 
@@ -692,6 +795,7 @@ export function TasksPage() {
                 dragTaskId={dragTaskId}
                 onDragStart={handleDragStart}
                 onDropRequeue={handleDropRequeue}
+                agentsById={agentsById}
               />
             );
           })}

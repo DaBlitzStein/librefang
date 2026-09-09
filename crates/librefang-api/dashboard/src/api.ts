@@ -624,10 +624,19 @@ export interface WorkflowLastRunSummary {
   completed_at: string | null;
 }
 
+export interface WorkflowInputParam {
+  name: string;
+  param_type?: string;
+  required?: boolean;
+  description?: string;
+  default?: unknown;
+}
+
 export interface WorkflowItem {
   id: string;
   name: string;
   description?: string;
+  input_schema?: WorkflowInputParam[];
   steps?: number | WorkflowStep[];
   created_at?: string;
   layout?: unknown;
@@ -3055,6 +3064,7 @@ export interface WorkflowStepResult {
   duration_ms: number;
   /** Step-level failure message; present on the step that failed. */
   error?: string;
+  variables?: Record<string, string>;
 }
 
 /** Full detail for a single workflow run. */
@@ -3069,6 +3079,8 @@ export interface WorkflowRunDetail {
   started_at: string;
   completed_at?: string | null;
   step_results: WorkflowStepResult[];
+  total_steps?: number;
+  current_step_index?: number;
 }
 
 /** Per-step preview returned by dry-run. */
@@ -3451,7 +3463,7 @@ export interface TaskQueueItem {
   result?: string;
   claimed_at?: string;
   priority?: number;
-  timeout_secs?: number;
+  timeout_secs?: number | null;
   [key: string]: unknown;
 }
 
