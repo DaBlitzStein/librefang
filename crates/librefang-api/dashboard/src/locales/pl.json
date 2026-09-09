@@ -872,7 +872,7 @@
       "events_tail": "zdarzenia · tail",
       "no_logs": "Nie zarejestrowano jeszcze żadnych tur dla tego agenta.",
       "crashed_title": "{{name}} jest w stanie błędu",
-"edit_full_manifest": "Edytuj pełną konfigurację",
+      "edit_full_manifest": "Edytuj pełną konfigurację",
       "edit_full_manifest_hint": "Wszystkie pola manifestu — zasoby, uprawnienia, autonomia, format odpowiedzi i więcej.",
       "description": "Opis",
       "description_placeholder": "Nie ustawiono opisu.",

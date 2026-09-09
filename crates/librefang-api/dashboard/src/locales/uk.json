@@ -872,7 +872,7 @@
       "tools_remove_group": "Видалити всю групу",
       "tools_reset_to_all": "Скинути до використання всіх інструментів",
       "tools_saved": "Збережено в agent.toml",
-"edit_full_manifest": "Редагувати повну конфігурацію",
+      "edit_full_manifest": "Редагувати повну конфігурацію",
       "edit_full_manifest_hint": "Усі поля маніфесту — ресурси, можливості, автономність, формат відповіді тощо.",
       "description": "Опис",
       "description_placeholder": "Опис не встановлено.",

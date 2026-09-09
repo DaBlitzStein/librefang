@@ -870,7 +870,7 @@
       "events_tail": "事件 · 尾部",
       "no_logs": "此智能体还没有记录的轮次。",
       "crashed_title": "{{name}} 处于错误状态",
-"edit_full_manifest": "编辑完整配置",
+      "edit_full_manifest": "编辑完整配置",
       "edit_full_manifest_hint": "所有清单字段——资源、能力、自主性、响应格式等。",
       "description": "描述",
       "description_placeholder": "尚未设置描述。",
