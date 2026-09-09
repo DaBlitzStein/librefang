@@ -2428,7 +2428,7 @@
       }
     },
     "CapabilityRouting": {
-      "description": "The `[capabilities]` block — one target per media capability.\n\nExists twice, with the *same* shape: kernel-global in `config.toml` and per-agent in `agent.toml`. Resolution is agent > global > the historical auto-detection, and inheriting is simply leaving the key out (see [`CapabilityRouting::merged_over`]).\n\nField names match [`MediaCapability`]'s serde spellings so the dashboard, the TUI, and the provider registry all label the same capability the same way. `vision` / `transcription` are accepted as aliases because those are the words operators actually use.",
+      "description": "The `[capabilities]` block — one target per media capability.\n\nExists twice, with the *same* shape: kernel-global in `config.toml` and per-agent in `agent.toml`. Resolution is agent > global > the historical auto-detection, and inheriting is simply leaving the key out. It is applied by folding each level onto a [`MediaConfig`] in turn — global at boot, agent at turn time — via [`MediaConfig::with_capability_routing`]; there is no separate routing-over-routing merge, so that is the one place the precedence lives.\n\nField names match [`MediaCapability`]'s serde spellings so the dashboard, the TUI, and the provider registry all label the same capability the same way. `vision` / `transcription` are accepted as aliases because those are the words operators actually use.",
       "type": "object",
       "properties": {
         "image_generation": {
@@ -2500,7 +2500,7 @@
       }
     },
     "CapabilityTarget": {
-      "description": "Which provider (and optionally which model) services one media capability.\n\nAccepts three TOML spellings so the same value can be typed into a single text input on the dashboard / TUI and still round-trip:\n\n```toml image_understanding = \"openai/gpt-4o\"                          # provider/model speech_to_text      = \"groq\"                                   # provider only image_generation    = { provider = \"openai\", model = \"gpt-image-1\" } ```\n\nBoth fields are independently optional so a per-agent override can change only the model and inherit the globally configured provider (see [`CapabilityTarget::merged_over`]).",
+      "description": "Which provider (and optionally which model) services one media capability.\n\nAccepts three TOML spellings so the same value can be typed into a single text input on the dashboard / TUI and still round-trip:\n\n```toml image_understanding = \"openai/gpt-4o\"                          # provider/model speech_to_text      = \"groq\"                                   # provider only image_generation    = { provider = \"openai\", model = \"gpt-image-1\" } ```\n\nBoth fields are independently optional so a per-agent override can change only the model and inherit the globally configured provider (see [`MediaConfig::with_capability_routing`], which is where resolution actually happens).",
       "type": "object",
       "properties": {
         "model": {
