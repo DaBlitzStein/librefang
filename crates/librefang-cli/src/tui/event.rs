@@ -5354,7 +5354,13 @@ path = "shared/library"
     fn workspace_rows_normalize_the_canonical_api_spelling_too() {
         // This is what `GET /api/agents/{id}/manifest` actually serializes —
         // `WorkspaceMode`'s aliases are deserialize-only, so the live wire
-        // format never contains `r` / `rw`.
+        // format never contains `r` / `rw`. NOT evidence of the alias fix by
+        // itself: the pre-fix code (`as_str().unwrap_or("rw")`) already
+        // passed a canonical `"readonly"` through unchanged, so this only
+        // guards against a future normalization step mishandling the
+        // canonical case. `workspace_rows_skip_mount_declarations` and
+        // `workspace_rows_default_mode_to_readwrite` are what demonstrate
+        // the fix — they fail against the pre-fix code.
         let manifest: toml::Value = toml::from_str(
             r#"
 [workspaces.library]
