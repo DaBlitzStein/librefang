@@ -2242,6 +2242,15 @@ pub async fn comms_task(
         return ApiErrorResponse::bad_request("Title is required").into_json_tuple();
     }
 
+    // The same per-task controls `task_queue_post_root` honours. Hardcoding
+    // the defaults here made this route answer 201 while silently discarding
+    // a caller's `priority` / `timeout_secs`, which is the one outcome that
+    // leaves the caller unable to tell (#7974 review).
+    let opts = librefang_kernel_handle::TaskPostOptions {
+        priority: req.priority.unwrap_or(0),
+        timeout_secs: req.timeout_secs,
+    };
+
     match state
         .kernel
         .task_post(
@@ -2249,7 +2258,7 @@ pub async fn comms_task(
             &req.description,
             req.assigned_to.as_deref(),
             Some("ui-user"),
-            &librefang_kernel_handle::TaskPostOptions::default(),
+            &opts,
         )
         .await
     {
