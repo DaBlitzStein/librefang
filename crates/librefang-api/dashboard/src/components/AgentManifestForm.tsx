@@ -285,7 +285,10 @@ export function AgentManifestForm({
         */}
         <p className="text-[11px] text-text-dim">{t("agents.form.preferences_hint")}</p>
         <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.form.temperature")}>
+          <Field
+            label={t("agents.form.temperature")}
+            invalid={invalidFields.has("model.temperature")}
+          >
             <input
               type="number"
               step="0.05"
@@ -304,6 +307,7 @@ export function AgentManifestForm({
           <Field
             label={t("agents.form.top_p")}
             hint={t("agents.form.sampling_provider_hint")}
+            invalid={invalidFields.has("model.top_p")}
           >
             <input
               type="number"
@@ -323,6 +327,7 @@ export function AgentManifestForm({
           <Field
             label={t("agents.form.frequency_penalty")}
             hint={t("agents.form.sampling_provider_hint")}
+            invalid={invalidFields.has("model.frequency_penalty")}
           >
             <input
               type="number"
@@ -342,6 +347,7 @@ export function AgentManifestForm({
           <Field
             label={t("agents.form.presence_penalty")}
             hint={t("agents.form.sampling_provider_hint")}
+            invalid={invalidFields.has("model.presence_penalty")}
           >
             <input
               type="number"

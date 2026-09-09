@@ -101,19 +101,48 @@ describe("agentManifest serializer", () => {
     expect(toml).not.toContain("max_tokens =");
   });
 
-  it("clamps sampling fields to their provider ranges instead of emitting out-of-range values", () => {
+  it("serializes out-of-range sampling values unclamped, for the validator to catch", () => {
+    // Clamping used to rewrite `5` to `1` here — a number the operator never
+    // chose, reaching the TOML silently. `PATCH /api/agents/{id}/model`
+    // rejects the same out-of-range values with an explicit 400, so the
+    // editor now reports the same conflict via `validateManifestForm`
+    // instead (#8112).
     const form = emptyManifestForm();
     form.name = "agent";
     form.model.provider = "openai";
     form.model.model = "gpt-4o";
+    form.model.temperature = "9";
     form.model.top_p = "5";
     form.model.frequency_penalty = "9";
     form.model.presence_penalty = "-9";
 
     const toml = serializeManifestForm(form);
-    expect(toml).toContain("top_p = 1");
-    expect(toml).toContain("frequency_penalty = 2");
-    expect(toml).toContain("presence_penalty = -2");
+    expect(toml).toContain("temperature = 9");
+    expect(toml).toContain("top_p = 5");
+    expect(toml).toContain("frequency_penalty = 9");
+    expect(toml).toContain("presence_penalty = -9");
+
+    const errors = validateManifestForm(form);
+    expect(errors).toContain("model.temperature");
+    expect(errors).toContain("model.top_p");
+    expect(errors).toContain("model.frequency_penalty");
+    expect(errors).toContain("model.presence_penalty");
+  });
+
+  it("serializes a negative top_p unclamped rather than dropping it to inherit", () => {
+    // `parseFloatish` rejects negatives outright (it backs the cost/quota
+    // fields, which are never negative), so routing `top_p` through it made
+    // "-0.5" parse to `null` and the field silently revert to "inherit"
+    // instead of surfacing as the out-of-range value it is (#8112).
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.top_p = "-0.5";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("top_p = -0.5");
+    expect(validateManifestForm(form)).toContain("model.top_p");
   });
 
   it("omits sampling fields when empty or garbage", () => {
@@ -240,6 +269,59 @@ describe("agentManifest validator", () => {
       expect(validateManifestForm(form)).toContain("schedule.check_interval_secs");
     },
   );
+
+  // Ranges mirror `PATCH /api/agents/{id}/model`
+  // (crates/librefang-api/src/routes/agents/config.rs): temperature 0..2,
+  // top_p 0..1, frequency_penalty and presence_penalty -2..2.
+  const outOfRangeForm = (field: "temperature" | "top_p" | "frequency_penalty" | "presence_penalty", badValue: string) => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model[field] = badValue;
+    return form;
+  };
+
+  it("flags an out-of-range model.temperature above the max", () => {
+    expect(validateManifestForm(outOfRangeForm("temperature", "9"))).toContain("model.temperature");
+  });
+
+  it("flags an out-of-range model.temperature below the min", () => {
+    expect(validateManifestForm(outOfRangeForm("temperature", "-1"))).toContain("model.temperature");
+  });
+
+  it("flags an out-of-range model.top_p above the max", () => {
+    expect(validateManifestForm(outOfRangeForm("top_p", "5"))).toContain("model.top_p");
+  });
+
+  it("flags an out-of-range model.top_p below the min", () => {
+    expect(validateManifestForm(outOfRangeForm("top_p", "-0.5"))).toContain("model.top_p");
+  });
+
+  it("flags an out-of-range model.frequency_penalty", () => {
+    expect(validateManifestForm(outOfRangeForm("frequency_penalty", "9"))).toContain(
+      "model.frequency_penalty",
+    );
+  });
+
+  it("flags an out-of-range model.presence_penalty", () => {
+    expect(validateManifestForm(outOfRangeForm("presence_penalty", "-9"))).toContain(
+      "model.presence_penalty",
+    );
+  });
+
+  it("accepts sampling values at the edge of their range, and empty as inherit", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.temperature = "2";
+    form.model.top_p = "0";
+    form.model.frequency_penalty = "-2";
+    form.model.presence_penalty = "2";
+
+    expect(validateManifestForm(form)).toEqual([]);
+  });
 
   it("accepts the largest TOML integer for a continuous schedule", () => {
     const form = emptyManifestForm();
