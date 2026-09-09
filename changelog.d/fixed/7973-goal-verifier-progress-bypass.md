@@ -1,3 +1,4 @@
-A goal with loop engineering enabled could no longer be closed out by the worker's own unverified progress claim.
-A rejected iteration's `GOAL_PROGRESS: 100` was written to the goal document uncapped, so the next iteration's plain "is this goal at 100%" check ended the run as finished even though the verifier had rejected every attempt — the exact bypass the verifier gate exists to prevent.
-A rejected iteration's progress is now clamped below the completion threshold. (#7973) (@DaBlitzStein)
+A goal with loop engineering enabled could still be closed out through the worker's own progress claim even after the verifier rejected every attempt.
+The top-of-loop completion check read bare `goal.progress >= 100` / `status == Completed` regardless of whether a verifier was configured, and `goal_update` (a tool the agent's own system prompt tells it to call) writes those same fields directly, bypassing the marker parser the verifier gate actually inspects.
+The completion check now only accepts bare progress/status as done when no verifier is configured; a rejected iteration's progress is additionally clamped below the completion threshold as defense in depth.
+Converges with the equivalent fix in PR #7785, which found and closed the same second-writer bypass first. (#7973) (@DaBlitzStein)
