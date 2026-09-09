@@ -497,7 +497,6 @@
       "duplicate_folder_name": "Name is required, must be unique, and may contain only letters, numbers, '-', and '_'.",
       "folder_path_invalid": "Path is required and must be relative to workspaces_dir without '..'.",
       "name_placeholder": "e.g. my-agent",
-      "name_locked_hint": "Identified by the URL, not this field — renaming here has no effect.",
       "module_placeholder": "e.g. default",
       "model_id_placeholder": "e.g. gpt-4o",
       "max_tokens_placeholder": "4096",
@@ -4356,6 +4355,7 @@
     "go_to_overview": "Go to Overview"
   },
   "agentTypes": {
+    "name_locked_hint": "Identified by the URL, not this field — renaming here has no effect.",
     "confirm_delete": "Delete the agent type '{{name}}'? Agents already spawned from it are not affected.",
     "create_title": "New agent type",
     "created": "Agent type created",

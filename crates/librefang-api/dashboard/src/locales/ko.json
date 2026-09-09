@@ -497,7 +497,6 @@
       "duplicate_folder_name": "폴더 이름은 고유해야 합니다.",
       "folder_path_invalid": "경로는 workspaces_dir 기준의 상대 경로여야 하며 '..'를 포함할 수 없습니다.",
       "name_placeholder": "예를 들어 내 에이전트",
-      "name_locked_hint": "URL로 식별되며 이 필드가 아닙니다 — 여기서 이름을 바꿔도 적용되지 않습니다.",
       "module_placeholder": "예를 들어 기본",
       "model_id_placeholder": "예를 들어 gpt-4o",
       "max_tokens_placeholder": "4096",
@@ -4355,6 +4354,7 @@
     "go_to_overview": "개요로 이동"
   },
   "agentTypes": {
+    "name_locked_hint": "URL로 식별되며 이 필드가 아닙니다 — 여기서 이름을 바꿔도 적용되지 않습니다.",
     "confirm_delete": "에이전트 타입 '{{name}}'을(를) 삭제할까요? 이미 스폰된 에이전트에는 영향이 없습니다.",
     "create_title": "새 에이전트 타입",
     "created": "에이전트 타입을 만들었습니다",

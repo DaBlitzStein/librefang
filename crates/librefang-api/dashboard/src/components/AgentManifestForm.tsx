@@ -128,6 +128,14 @@ interface AgentManifestFormProps {
    *   which one wins.
    */
   nameField?: "editable" | "readonly" | "hidden";
+  /**
+   * Overrides the hint shown under a `"readonly"` name field.
+   * Where the identity actually lives differs per caller — a URL path segment
+   * for the agent-type editor, the agent header for the running-agent editor —
+   * so the sentence telling the operator where to rename instead cannot be
+   * shared. Defaults to the running-agent wording.
+   */
+  nameLockedHint?: string;
 }
 
 export function AgentManifestForm({
@@ -141,6 +149,7 @@ export function AgentManifestForm({
   toolCatalog,
   mcpCatalog,
   nameField = "editable",
+  nameLockedHint,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -229,7 +238,11 @@ export function AgentManifestForm({
             label={t("agents.form.name")}
             required
             invalid={invalidFields.has("name")}
-            hint={nameField === "readonly" ? t("agents.form.name_locked_hint") : undefined}
+            hint={
+              nameField === "readonly"
+                ? (nameLockedHint ?? t("agents.form.name_locked_hint"))
+                : undefined
+            }
           >
             <input
               type="text"

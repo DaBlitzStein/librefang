@@ -497,7 +497,6 @@
       "duplicate_folder_name": "文件夹名称必须唯一。",
       "folder_path_invalid": "路径必须是相对于 workspaces_dir 的相对路径，且不能包含 '..'。",
       "name_placeholder": "例如 my-agent",
-      "name_locked_hint": "由 URL 决定，而非此字段——在此重命名不会生效。",
       "module_placeholder": "例如 default",
       "model_id_placeholder": "例如 gpt-4o",
       "max_tokens_placeholder": "4096",
@@ -4356,6 +4355,7 @@
     "go_to_overview": "前往概览"
   },
   "agentTypes": {
+    "name_locked_hint": "由 URL 决定，而非此字段——在此重命名不会生效。",
     "confirm_delete": "删除智能体类型 '{{name}}'？已据此创建的智能体不受影响。",
     "create_title": "新建智能体类型",
     "created": "已创建智能体类型",

@@ -233,6 +233,7 @@ function AgentTypeEditor({
             toolCatalog={toolCatalog}
             mcpCatalog={mcpCatalog}
             nameField={isCreate ? "hidden" : "readonly"}
+            nameLockedHint={t("agentTypes.name_locked_hint")}
           />
 
           <div className="flex justify-end gap-2 pt-1">

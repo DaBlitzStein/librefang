@@ -497,7 +497,6 @@
       "duplicate_folder_name": "Назви папок мають бути унікальними.",
       "folder_path_invalid": "Шлях має бути відносним до workspaces_dir і не може містити '..'.",
       "name_placeholder": "наприклад, my-agent",
-      "name_locked_hint": "Визначається URL-адресою, а не цим полем — перейменування тут не матиме ефекту.",
       "module_placeholder": "наприклад, default",
       "model_id_placeholder": "наприклад, gpt-4o",
       "max_tokens_placeholder": "4096",
@@ -4368,6 +4367,7 @@
     "go_to_overview": "Перейти до огляду"
   },
   "agentTypes": {
+    "name_locked_hint": "Визначається URL-адресою, а не цим полем — перейменування тут не матиме ефекту.",
     "confirm_delete": "Видалити тип агента '{{name}}'? Уже створених із нього агентів це не торкнеться.",
     "create_title": "Новий тип агента",
     "created": "Тип агента створено",
