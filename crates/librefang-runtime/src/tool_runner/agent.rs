@@ -348,12 +348,22 @@ fn gate_spawn_profile(
     if let Some(override_) = parent_override {
         check_profile_against_parent(kh, &profile, override_)?;
     }
+    // `InvalidParameter`, not `Upstream` (#7789 review): `upstream_msg` builds
+    // `Upstream { source: None }`, which the `From<ToolError>` bridge lifts to
+    // `ToolExecution { tool_id: "unknown", … }` — the 5xx-class result an
+    // operator's own configuration must not be reported as. A provider with no
+    // key is not a downstream outage and does not become true on retry, so
+    // reporting it as one hands retry-on-5xx logic a call that can never
+    // succeed and counts a config gap as a provider failure in telemetry. Same
+    // reasoning as `unknown_profile_error` above: the caller named a profile
+    // whose provider is unusable, and the name is what must change.
     kh.check_provider_credentials(&profile.provider)
-        .map_err(|reason| {
-            ToolError::upstream_msg(format!(
+        .map_err(|reason| ToolError::InvalidParameter {
+            name: "profile",
+            reason: format!(
                 "Cannot pin agent to model profile '{name}': {reason}.",
                 name = profile.name,
-            ))
+            ),
         })?;
     Ok(profile)
 }
@@ -714,13 +724,33 @@ async fn tool_agent_spawn_ephemeral(
             });
         } else {
             match parent_override.as_ref() {
-                Some(override_) if override_.fixed || override_.cost_budget.is_some() => {
+                // `allowed_profiles` is the third cap this override carries and
+                // binds in its own right — `AgentRouterOverride::permits`
+                // rejects a profile outside the list independently of
+                // `cost_budget` (model_profile.rs). Without it, a parent capped
+                // by `allowed_profiles = ["quick"]` and nothing else has
+                // `profile: "architect"` refused by `check_profile_against_parent`
+                // while an explicit `model` override naming the same expensive
+                // model runs — the exact bypass this arm exists to close, one
+                // field short (#7789 review).
+                Some(override_)
+                    if override_.fixed
+                        || override_.cost_budget.is_some()
+                        || !override_.allowed_profiles.is_empty() =>
+                {
                     let cap = if override_.fixed {
                         "`fixed = true`".to_string()
+                    } else if let Some(budget) = override_.cost_budget {
+                        format!("`cost_budget = \"{}\"`", budget.as_str())
                     } else {
                         format!(
-                            "`cost_budget = \"{}\"`",
-                            override_.cost_budget.unwrap().as_str()
+                            "`allowed_profiles = [{}]`",
+                            override_
+                                .allowed_profiles
+                                .iter()
+                                .map(|p| format!("\"{p}\""))
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         )
                     };
                     return Err(ToolError::PermissionDenied(format!(

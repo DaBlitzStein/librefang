@@ -99,22 +99,69 @@ impl kernel_handle::CatalogQuery for LibreFangKernel {
         .clone();
         // Resolve catalog aliases ("haiku" -> "claude-haiku-4-5-…") so the
         // builtin profiles do not pin dated model snapshots.
+        //
+        // Provider-scoped, not the global alias map (#7789 review). `aliases`
+        // is one flat table keyed by lowercase alias with first-writer-wins, so
+        // resolving the model half of a `(provider, model)` pair through it
+        // answers from whichever provider registered the name first. Only
+        // `anthropic.toml` claims bare `haiku` / `sonnet` / `opus` today, so
+        // nothing collides yet — but it would the moment an operator adds a
+        // second provider that also claims one. `find_model_for_manifest` tries
+        // the provider-scoped lookups first; its documented last resort is the
+        // same provider-blind `find_model`, which this call does not want, so
+        // the hit only counts when it landed on this provider's own entry.
         let model_catalog = self.model_catalog_ref().load();
-        if let Some(resolved) = model_catalog.resolve_alias(&profile.model) {
-            profile.model = resolved.to_string();
+        match model_catalog
+            .find_model_for_manifest(&profile.provider, &profile.model)
+            .filter(|entry| entry.provider.eq_ignore_ascii_case(&profile.provider))
+        {
+            Some(entry) => profile.model = entry.id.clone(),
+            // A miss used to be silent, which is the original failure in its
+            // narrower form: the unresolved alias is written into a durable
+            // manifest and the agent fails on every turn, while the spawn
+            // reports success. It stays a `WARN` rather than a refusal because,
+            // unlike a missing credential, an unresolved id is not provably
+            // wrong — a home dir whose `providers/` sync has not run knows no
+            // ids at all, and a custom endpoint may well accept one the catalog
+            // never listed. Refusing would turn a spawn that probably works
+            // into one that certainly does not, on exactly the deployments
+            // least able to absorb it.
+            None => {
+                tracing::warn!(
+                    profile = %profile.name,
+                    provider = %profile.provider,
+                    model = %profile.model,
+                    "Model profile names a model id the catalog cannot resolve for its provider — \
+                     spawning with the id as written; if the provider rejects it, sync the model \
+                     registry or correct the profile"
+                );
+            }
         }
         Some(profile)
     }
 
     /// Whether `provider` has credentials the kernel can see (#7789 review).
     ///
-    /// The same guard `route_to_profile` applies per turn — local provider,
-    /// credential pool, or the env var the kernel resolves for the provider
-    /// (operator pin, catalog `api_key_env`, or the `<PROVIDER>_API_KEY`
-    /// convention). `route_to_profile`'s fallback for a miss is "skip the
-    /// profile for this turn"; on the spawn path a wrong provider is
-    /// persisted into a manifest, so the miss is refused instead, with the
-    /// env var named so the operator can fix it.
+    /// Accepts on any of: a local provider, a credential pool, a catalog
+    /// `key_required = false` declaration, `[default_model] api_key_env` when
+    /// this is the default provider, or the env var the kernel resolves for the
+    /// provider (operator pin, catalog `api_key_env`, or the
+    /// `<PROVIDER>_API_KEY` convention).
+    ///
+    /// Two deliberate differences from the credential check in
+    /// `route_to_profile`, which this otherwise mirrors:
+    ///
+    /// - **A miss refuses rather than skips.** The router's fallback is "keep
+    ///   the agent's own model for this turn"; here the wrong provider is
+    ///   persisted into a manifest and would be wrong on every subsequent turn,
+    ///   so the spawn is refused with the env var named.
+    /// - **It runs unconditionally.** The router skips the check entirely when
+    ///   the profile's provider is the one the agent already uses, since that
+    ///   provider is demonstrably working. The spawn path has no such evidence:
+    ///   the manifest it writes outlives the parent, so the provider is checked
+    ///   on its own merits. That makes this the stricter of the two, which is
+    ///   why the keyless and `[default_model]` cases above are checked here and
+    ///   not there — those are the false refusals the wider scope exposes.
     fn check_provider_credentials(&self, provider: &str) -> Result<(), String> {
         if librefang_runtime::provider_health::is_local_provider(provider) {
             return Ok(());
@@ -122,7 +169,42 @@ impl kernel_handle::CatalogQuery for LibreFangKernel {
         if self.llm.credential_pools.contains_key(provider) {
             return Ok(());
         }
+        // Providers the catalog declares keyless authenticate out of band and
+        // have no key to find (#7789 review). `resolve_non_default_api_key_env`
+        // answers "what would the variable be called", never "is one needed":
+        // for `claude-code` the catalog carries `api_key_env = ""` /
+        // `key_required = false`, so the catalog lookup declines and the
+        // convention fallback invents `CLAUDE_CODE_API_KEY` — a variable that
+        // provider never reads. Refusing on it made `profile` unusable on a
+        // stock subscription install, where `[default_model] provider =
+        // "claude-code"` with `cli_profile_dirs` runs every turn the daemon
+        // takes, with an error no operator could satisfy. Same for
+        // `gemini-cli`, `codex-cli` and every other `key_required = false`
+        // entry. A provider absent from the catalog is left to the key check
+        // below: `key_required` defaults to `true`, so an unknown provider is
+        // still treated as needing one.
+        if self
+            .model_catalog_ref()
+            .load()
+            .get_provider(provider)
+            .is_some_and(|p| !p.key_required)
+        {
+            return Ok(());
+        }
         let cfg = self.config.load();
+        // `[default_model] api_key_env` is where an operator whose single
+        // provider deviates from the convention pins their key, and the driver
+        // resolver reads it (`llm_drivers.rs`, the `agent_provider ==
+        // default_provider` arm) while `KernelConfig::resolve_api_key_env` does
+        // not. Without this the guard refused the provider every agent on the
+        // install is already running on (#7789 review).
+        let default_key_env = cfg.default_model.api_key_env.trim();
+        if provider == cfg.default_model.provider
+            && !default_key_env.is_empty()
+            && std::env::var(default_key_env).is_ok()
+        {
+            return Ok(());
+        }
         let key_env = self.resolve_non_default_api_key_env(&cfg, provider);
         if std::env::var(&key_env).is_ok() {
             return Ok(());
