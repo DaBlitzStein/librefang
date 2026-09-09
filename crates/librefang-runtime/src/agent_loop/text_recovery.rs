@@ -7,6 +7,7 @@
 //! [TOOL_CALL]...[/TOOL_CALL] blocks (JSON + arrow syntax), <tool_call>JSON</tool_call>
 //! (Qwen3), <function name="..." parameters="..." />, and a bare-JSON fallback.
 
+use librefang_types::message::StopReason;
 use librefang_types::tool::{ToolCall, ToolDefinition};
 use tracing::{info, warn};
 
@@ -180,6 +181,30 @@ pub(super) fn user_message_has_action_intent(user_message: &str) -> bool {
     })
 }
 
+/// Whether `recover_text_tool_calls` should even be attempted for this
+/// turn's response — shared by the non-streaming and streaming loops so the
+/// gate can't drift between them (#8236).
+///
+/// `forced_tools_stripped_this_turn` must be `false`: the block-stall
+/// degrade (#5979) strips `tools` from the *request* for exactly one turn so
+/// the model is forced to answer in prose instead of re-issuing the call the
+/// loop guard keeps blocking. If recovery still promotes markup text back
+/// into a `ToolCall` on that same turn, the degrade never actually breaks
+/// the loop — the model calls the tool via text instead of the API field,
+/// recovery undoes the degrade, the guard blocks it again next iteration,
+/// and the cycle repeats to `max_iterations`. The turn offered no tools, so
+/// text that merely resembles a call this turn is not a call the model was
+/// invited to make.
+pub(super) fn should_attempt_text_recovery(
+    forced_tools_stripped_this_turn: bool,
+    stop_reason: StopReason,
+    tool_calls_empty: bool,
+) -> bool {
+    !forced_tools_stripped_this_turn
+        && matches!(stop_reason, StopReason::EndTurn | StopReason::StopSequence)
+        && tool_calls_empty
+}
+
 /// Recover tool calls that LLMs output as plain text instead of the proper
 /// `tool_calls` API field. Covers Groq/Llama, DeepSeek, Qwen, and Ollama models.
 ///
@@ -238,7 +263,10 @@ pub(super) fn recover_text_tool_calls(
         // a sequence of <parameter=NAME>value</parameter> pairs (#8235).
         let input: serde_json::Value = match serde_json::from_str(json_body) {
             Ok(v) => v,
-            Err(e) => match parse_parameter_style_body(json_body) {
+            Err(e) => match parse_parameter_style_body(
+                json_body,
+                tool_input_schema(tool_name, available_tools),
+            ) {
                 Some(v) => v,
                 None => {
                     warn!(tool = tool_name, error = %e, "Failed to parse text-based tool call JSON — skipping");
@@ -305,7 +333,10 @@ pub(super) fn recover_text_tool_calls(
         // body is not a JSON object (#8235).
         let input: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => match parse_parameter_style_body(body) {
+            Err(e) => match parse_parameter_style_body(
+                body,
+                tool_input_schema(tool_name, available_tools),
+            ) {
                 Some(v) => v,
                 None => {
                     warn!(tool = tool_name, error = %e, "Failed to parse text-based tool call JSON (variant 2) — skipping");
@@ -653,22 +684,41 @@ const HONEST_UNRECOVERABLE_REPLY: &str = "I tried to call a tool, but the call c
 /// through untouched, even when it contains markup further in.
 pub(super) fn replace_unrecoverable_tool_call_reply(text: &str) -> std::borrow::Cow<'_, str> {
     let trimmed = text.trim_start();
-    const OPENERS: &[&str] = &[
-        "<function=",
-        "<function>",
-        "<tool>",
-        "[TOOL_CALL]",
-        "<tool_call>",
-        "<|tool_call|>",
-    ];
-    if !OPENERS.iter().any(|o| trimmed.starts_with(o)) {
+    if !TOOL_CALL_OPENERS.iter().any(|o| trimmed.starts_with(o)) {
         return std::borrow::Cow::Borrowed(text);
     }
     if strip_tool_call_spans(trimmed).trim().is_empty() {
-        std::borrow::Cow::Borrowed(HONEST_UNRECOVERABLE_REPLY)
+        std::borrow::Cow::Owned(HONEST_UNRECOVERABLE_REPLY.to_string())
     } else {
         std::borrow::Cow::Borrowed(text)
     }
+}
+
+/// Tool-call markup openers recognized by [`replace_unrecoverable_tool_call_reply`]
+/// and, incrementally, by the streaming withholding buffer in
+/// `retry::stream_with_retry` (#8236) — shared so both places agree on what
+/// counts as "this might be a call".
+pub(super) const TOOL_CALL_OPENERS: &[&str] = &[
+    "<function=",
+    "<function>",
+    "<tool>",
+    "[TOOL_CALL]",
+    "<tool_call>",
+    "<|tool_call|>",
+];
+
+/// Whether `text` (assumed already left-trimmed) either already is, or with
+/// more characters still to arrive could become, one of [`TOOL_CALL_OPENERS`].
+/// Used by the streaming buffer to decide whether a delta whose opener is
+/// arriving one token at a time must keep being withheld rather than being
+/// ruled out on a partial prefix (#8236).
+pub(super) fn could_be_tool_call_opener(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    TOOL_CALL_OPENERS
+        .iter()
+        .any(|o| o.starts_with(text) || text.starts_with(o))
 }
 
 /// Remove every recognized tool-call markup span from `text`, keeping the
@@ -680,7 +730,7 @@ fn strip_tool_call_spans(text: &str) -> String {
         ("<function>", "</function>"),
         ("<tool>", "</tool>"),
         ("[TOOL_CALL]", "[/TOOL_CALL]"),
-        ("<tool_call>", "```"),
+        ("<tool_call>", "</tool_call>"),
         ("<|tool_call|>", "<|/tool_call|>"),
     ];
     let mut out = String::with_capacity(text.len());
@@ -695,7 +745,10 @@ fn strip_tool_call_spans(text: &str) -> String {
                 }
             }
         }
+        // No further opener — whatever remains is prose that was never part
+        // of a call and must be kept, not silently dropped (#8236).
         let Some((pos, (open, close))) = earliest else {
+            out.push_str(rest);
             break 'outer;
         };
         out.push_str(&rest[..pos]);
@@ -717,8 +770,18 @@ fn strip_tool_call_spans(text: &str) -> String {
 /// function tags: a sequence of `<parameter=NAME>value</parameter>` pairs
 /// instead of a JSON object (#8235). Values are free text — a `command`
 /// parameter routinely spans several lines — and the parser takes each value
-/// verbatim up to the first closing tag.
-fn parse_parameter_style_body(body: &str) -> Option<serde_json::Value> {
+/// verbatim, less the single newline the markup convention places right
+/// after `>` and right before `</parameter>` (#8236) — a full `.trim()`
+/// would also eat a deliberate trailing newline or leading indentation on a
+/// content-bearing parameter (`content` for a file-writing tool, say).
+///
+/// `schema` is the tool's `input_schema` (when the tool is known), consulted
+/// so numeric-looking values are only coerced to a number/bool when the
+/// schema actually declares that parameter as one — see `coerce_scalar`.
+fn parse_parameter_style_body(
+    body: &str,
+    schema: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
     let mut map = serde_json::Map::new();
     let mut search_from = 0;
     let mut saw_any = false;
@@ -732,13 +795,16 @@ fn parse_parameter_style_body(body: &str) -> Option<serde_json::Value> {
         let Some(close_rel) = body[value_start..].find("</parameter>") else {
             break;
         };
-        let value = body[value_start..value_start + close_rel].trim();
+        let value = strip_single_markup_newline(&body[value_start..value_start + close_rel]);
         search_from = value_start + close_rel + "</parameter>".len();
         if name.is_empty() {
             continue;
         }
         saw_any = true;
-        map.insert(name.to_string(), coerce_scalar(value));
+        map.insert(
+            name.to_string(),
+            coerce_scalar(value, schema_property_type(schema, name)),
+        );
     }
     if !saw_any {
         return None;
@@ -746,24 +812,74 @@ fn parse_parameter_style_body(body: &str) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(map))
 }
 
-/// Type a raw parameter value the way the tool's input schema expects:
-/// integers, floats and booleans keep their JSON type, everything else is a
-/// string. A stringified `"180"` would be rejected downstream where the tool
-/// deserializes its arguments, so numeric recognition matters. `NaN`/`inf`
-/// parse as floats in Rust but have no JSON form, so they stay strings.
-fn coerce_scalar(raw: &str) -> serde_json::Value {
-    if let Ok(v) = raw.parse::<i64>() {
-        return v.into();
+/// Strip exactly one leading and one trailing newline (`\n` or `\r\n`) —
+/// the whitespace the parameter markup convention itself introduces around
+/// `>value</parameter>` — leaving every other character, including
+/// deliberate indentation or a trailing blank line, untouched (#8236).
+fn strip_single_markup_newline(raw: &str) -> &str {
+    let raw = raw
+        .strip_prefix("\r\n")
+        .or_else(|| raw.strip_prefix('\n'))
+        .unwrap_or(raw);
+    raw.strip_suffix("\r\n")
+        .or_else(|| raw.strip_suffix('\n'))
+        .unwrap_or(raw)
+}
+
+/// Look up `properties.<name>.type` in a tool's JSON `input_schema`, when
+/// both the schema and that property are declared.
+fn schema_property_type<'a>(schema: Option<&'a serde_json::Value>, name: &str) -> Option<&'a str> {
+    schema?.get("properties")?.get(name)?.get("type")?.as_str()
+}
+
+/// Find `tool_name`'s `input_schema` among the tools offered this turn. The
+/// caller has already checked the name is in `available_tools` before
+/// calling this, so the lookup is just borrowing the matching definition.
+fn tool_input_schema<'a>(
+    tool_name: &str,
+    available_tools: &'a [ToolDefinition],
+) -> Option<&'a serde_json::Value> {
+    available_tools
+        .iter()
+        .find(|t| t.name == tool_name)
+        .map(|t| &t.input_schema)
+}
+
+/// Type a raw parameter value the way the tool's input schema says to:
+/// numbers and booleans are coerced only when `schema_type` says so;
+/// everything else — including a `string`-typed property, and any
+/// parameter the schema doesn't describe — stays a string (#8236).
+///
+/// Guessing the type from the value alone (the pre-#8236 behavior) silently
+/// corrupted string parameters that happen to look numeric: a `chat_id`
+/// like `"-1001234567890"` became a JSON integer and failed `serde`
+/// deserialization on the other side (`invalid type: integer, expected a
+/// string`); a `code` of `"01234"` lost its leading zeros; a 19+ digit id
+/// lost precision by falling through to `f64`. `NaN`/`inf` parse as `f64` in
+/// Rust but have no JSON form, so a `number`-typed property containing them
+/// still falls back to a string rather than panicking or dropping the value.
+fn coerce_scalar(raw: &str, schema_type: Option<&str>) -> serde_json::Value {
+    match schema_type {
+        Some("integer") => raw
+            .parse::<i64>()
+            .map_or_else(|_| serde_json::Value::String(raw.to_string()), Into::into),
+        Some("number") => raw
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map_or_else(
+                || serde_json::Value::String(raw.to_string()),
+                serde_json::Value::Number,
+            ),
+        Some("boolean") => match raw {
+            "true" => serde_json::Value::Bool(true),
+            "false" => serde_json::Value::Bool(false),
+            _ => serde_json::Value::String(raw.to_string()),
+        },
+        // "string", "array", "object", "null", any other schema type, or no
+        // schema at all — verbatim string.
+        _ => serde_json::Value::String(raw.to_string()),
     }
-    if raw == "true" || raw == "false" {
-        return serde_json::Value::Bool(raw == "true");
-    }
-    if let Ok(v) = raw.parse::<f64>() {
-        if let Some(n) = serde_json::Number::from_f64(v) {
-            return serde_json::Value::Number(n);
-        }
-    }
-    serde_json::Value::String(raw.to_string())
 }
 
 /// Parse a JSON object that represents a tool call.

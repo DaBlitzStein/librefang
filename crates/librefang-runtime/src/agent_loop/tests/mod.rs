@@ -7,7 +7,8 @@ use super::model::needs_qualified_model_id;
 use super::retry::{BASE_RETRY_DELAY_MS, MAX_RETRIES};
 use super::text_recovery::{
     looks_like_hallucinated_action, parse_dash_dash_args, parse_json_tool_call_object,
-    replace_unrecoverable_tool_call_reply, user_message_has_action_intent,
+    replace_unrecoverable_tool_call_reply, should_attempt_text_recovery,
+    user_message_has_action_intent,
 };
 use super::tool_call::{
     failure_type_label, finalize_tool_use_results, record_tool_call_metric,
@@ -30,6 +31,51 @@ fn test_max_iterations_constant() {
         MAX_ITERATIONS,
         librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS
     );
+}
+
+// #8236: text-based tool-call recovery must not run on the turn the
+// block-stall degrade (#5979) forced tools-stripped, or a markup call
+// promoted back from text re-arms the very loop the degrade exists to
+// break. See `should_attempt_text_recovery`'s doc-comment for the full
+// mechanism.
+#[test]
+fn test_should_attempt_text_recovery_skips_forced_tools_stripped_turn() {
+    assert!(!should_attempt_text_recovery(
+        true, // forced_tools_stripped_this_turn
+        StopReason::EndTurn,
+        true, // tool_calls_empty
+    ));
+    assert!(!should_attempt_text_recovery(
+        true,
+        StopReason::StopSequence,
+        true,
+    ));
+}
+
+#[test]
+fn test_should_attempt_text_recovery_runs_on_a_normal_turn() {
+    assert!(should_attempt_text_recovery(
+        false, // forced_tools_stripped_this_turn
+        StopReason::EndTurn,
+        true, // tool_calls_empty
+    ));
+}
+
+#[test]
+fn test_should_attempt_text_recovery_requires_empty_tool_calls_and_end_turn() {
+    // Unrelated to the forced-tools-stripped gate: recovery is still scoped
+    // to EndTurn/StopSequence turns with no native tool_calls, exactly as
+    // before #8236.
+    assert!(!should_attempt_text_recovery(
+        false,
+        StopReason::ToolUse,
+        true
+    ));
+    assert!(!should_attempt_text_recovery(
+        false,
+        StopReason::EndTurn,
+        false
+    ));
 }
 
 #[test]

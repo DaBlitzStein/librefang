@@ -1350,6 +1350,11 @@ async fn run_agent_loop_inner(
         };
         // The stripped-tools request has been built; restore tools for any
         // subsequent iteration (the degrade is a single forced prose turn).
+        // Capture this turn's value before resetting — recovery below must
+        // not re-arm the #5979 block-stall loop by promoting text-based
+        // markup back into a tool call on the very turn that was forced
+        // tools-stripped so the model would answer in prose (#8236).
+        let forced_tools_stripped_this_turn = force_tools_stripped;
         force_tools_stripped = false;
 
         // Notify phase: Thinking
@@ -1414,11 +1419,11 @@ async fn run_agent_loop_inner(
         // Recover tool calls output as text by models that don't use the tool_calls API field
         // (e.g. Groq/Llama, DeepSeek emit `<function=name>{json}</function>` in text)
         let mut tools_recovered_from_text = false;
-        if matches!(
+        if text_recovery::should_attempt_text_recovery(
+            forced_tools_stripped_this_turn,
             response.stop_reason,
-            StopReason::EndTurn | StopReason::StopSequence
-        ) && response.tool_calls.is_empty()
-        {
+            response.tool_calls.is_empty(),
+        ) {
             let recovered = recover_text_tool_calls(&response.text(), available_tools);
             if !recovered.is_empty() {
                 info!(
@@ -1441,19 +1446,6 @@ async fn run_agent_loop_inner(
                 let (cleaned_text, parsed_directives) =
                     crate::reply_directives::parse_directives(&text);
                 let text = cleaned_text;
-
-                // #8235: a reply that is nothing but tool-call markup the
-                // recovery could not parse must not reach the channel as raw
-                // syntax — say something honest instead. When recovery did
-                // promote a call, the markup is already gone from the text.
-                let text = if tools_recovered_from_text {
-                    text
-                } else {
-                    match replace_unrecoverable_tool_call_reply(&text) {
-                        std::borrow::Cow::Borrowed(_) => text,
-                        std::borrow::Cow::Owned(replacement) => replacement,
-                    }
-                };
 
                 // NO_REPLY: agent intentionally chose not to reply
                 if is_no_reply(&text) || parsed_directives.silent {
@@ -1495,10 +1487,7 @@ async fn run_agent_loop_inner(
                 // gateway envelopes) into the reply text. This is almost
                 // always recall-regurgitation rather than user-facing content
                 // (see is_cascade_leak doc-comment). Drop as silent.
-                if response.tool_calls.is_empty()
-                    && !tools_recovered_from_text
-                    && is_cascade_leak(&text)
-                {
+                if response.tool_calls.is_empty() && is_cascade_leak(&text) {
                     warn!(
                         agent = %manifest.name,
                         text_excerpt = %text.chars().take(120).collect::<String>(),
@@ -1530,10 +1519,7 @@ async fn run_agent_loop_inner(
                 // tool call that preamble was introducing. Surfacing this
                 // to the channel reads as nonsense; drop as silent and let
                 // the operator retrigger.
-                if response.tool_calls.is_empty()
-                    && !tools_recovered_from_text
-                    && is_progress_text_leak(&text)
-                {
+                if response.tool_calls.is_empty() && is_progress_text_leak(&text) {
                     warn!(
                         agent = %manifest.name,
                         text_excerpt = %text.chars().take(80).collect::<String>(),
@@ -1618,6 +1604,23 @@ async fn run_agent_loop_inner(
                     }
                     None => {}
                 }
+
+                // #8235: a reply that is nothing but tool-call markup the
+                // recovery could not parse must not reach the channel as raw
+                // syntax — say something honest instead. Applied here,
+                // immediately before delivery, and not earlier: the retry
+                // classification above must see the model's real text (a
+                // `HallucinatedAction`/`ActionIntent` retry pushes `text`
+                // into history to nudge the *next* turn — pushing the
+                // apology sentence instead would fabricate a turn the model
+                // never produced). `tools_recovered_from_text` is always
+                // false on this arm — promoting a call switches
+                // `response.stop_reason` to `ToolUse`, which this match arm
+                // never sees — so the guard always runs.
+                let text = match replace_unrecoverable_tool_call_reply(&text) {
+                    std::borrow::Cow::Borrowed(_) => text,
+                    std::borrow::Cow::Owned(replacement) => replacement,
+                };
 
                 let text = finalize_end_turn_text(
                     text,
@@ -2086,6 +2089,16 @@ async fn run_agent_loop_inner(
                     let (cleaned_text, parsed_directives) =
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
+                    // #8236: the token cap can cut a tool-call markup span
+                    // off mid-call, leaving it permanently unterminated —
+                    // exactly the case this guard exists for. Without this,
+                    // the raw `<function=...>` syntax reaches the channel
+                    // verbatim on every pure-text overflow that happened to
+                    // start with one.
+                    let text = match replace_unrecoverable_tool_call_reply(&text) {
+                        std::borrow::Cow::Borrowed(_) => text,
+                        std::borrow::Cow::Owned(replacement) => replacement,
+                    };
                     session.push_message(Message::assistant(&text));
                     if !opts.is_fork && !opts.incognito {
                         if let Err(e) = memory.save_session_async(session).await {
