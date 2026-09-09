@@ -1085,7 +1085,8 @@ pub fn is_image_description_text(text: &str) -> bool {
 ///
 /// Both fields are independently optional so a per-agent override can change
 /// only the model and inherit the globally configured provider (see
-/// [`CapabilityTarget::merged_over`]).
+/// [`MediaConfig::with_capability_routing`], which is where resolution
+/// actually happens).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct CapabilityTarget {
     /// Provider id as registered in the provider registry (`openai`, `groq`,
@@ -1116,17 +1117,6 @@ impl CapabilityTarget {
                 provider: non_empty(spec),
                 model: None,
             },
-        }
-    }
-
-    /// Field-by-field override: `self` wins where it is `Some`, `base` fills
-    /// the rest. This is what makes inheritance the *absence* of a value rather
-    /// than a separate sentinel — an agent that sets only `model` keeps the
-    /// globally configured `provider`.
-    pub fn merged_over(&self, base: &CapabilityTarget) -> CapabilityTarget {
-        CapabilityTarget {
-            provider: self.provider.clone().or_else(|| base.provider.clone()),
-            model: self.model.clone().or_else(|| base.model.clone()),
         }
     }
 
@@ -1197,8 +1187,11 @@ impl<'de> Deserialize<'de> for CapabilityTarget {
 ///
 /// Exists twice, with the *same* shape: kernel-global in `config.toml` and
 /// per-agent in `agent.toml`. Resolution is agent > global > the historical
-/// auto-detection, and inheriting is simply leaving the key out (see
-/// [`CapabilityRouting::merged_over`]).
+/// auto-detection, and inheriting is simply leaving the key out.
+/// It is applied by folding each level onto a [`MediaConfig`] in turn — global
+/// at boot, agent at turn time — via
+/// [`MediaConfig::with_capability_routing`]; there is no separate
+/// routing-over-routing merge, so that is the one place the precedence lives.
 ///
 /// Field names match [`MediaCapability`]'s serde spellings so the dashboard,
 /// the TUI, and the provider registry all label the same capability the same
@@ -1268,24 +1261,6 @@ impl CapabilityRouting {
         }
     }
 
-    /// Resolve this (more specific) block over `base`.
-    ///
-    /// Per capability: an absent key inherits `base` wholesale; a present key
-    /// merges field-by-field via [`CapabilityTarget::merged_over`].
-    pub fn merged_over(&self, base: &CapabilityRouting) -> CapabilityRouting {
-        let mut out = CapabilityRouting::default();
-        for cap in Self::ALL {
-            let merged = match (self.get(cap), base.get(cap)) {
-                (Some(mine), Some(theirs)) => Some(mine.merged_over(theirs)),
-                (Some(mine), None) => Some(mine.clone()),
-                (None, Some(theirs)) => Some(theirs.clone()),
-                (None, None) => None,
-            };
-            out.set(cap, merged);
-        }
-        out
-    }
-
     /// `true` when no capability is routed — the caller keeps its historical
     /// auto-detection path and pays nothing.
     pub fn is_empty(&self) -> bool {
@@ -1303,22 +1278,41 @@ impl MediaConfig {
     /// *both* are silent does the engine fall back to env-var auto-detection.
     pub fn with_capability_routing(mut self, routing: &CapabilityRouting) -> Self {
         if let Some(t) = routing.get(MediaCapability::ImageUnderstanding) {
-            if let Some(p) = &t.provider {
-                self.image_provider = Some(p.clone());
-            }
-            if let Some(m) = &t.model {
-                self.image_model = Some(m.clone());
-            }
+            fold_capability_target(t, &mut self.image_provider, &mut self.image_model);
         }
         if let Some(t) = routing.get(MediaCapability::SpeechToText) {
-            if let Some(p) = &t.provider {
-                self.audio_provider = Some(p.clone());
-            }
-            if let Some(m) = &t.model {
-                self.audio_model = Some(m.clone());
-            }
+            fold_capability_target(t, &mut self.audio_provider, &mut self.audio_model);
         }
         self
+    }
+}
+
+/// Fold one capability target onto a `[media]` provider / model pair.
+///
+/// A target that names a provider but no model **clears** the inherited model
+/// rather than keeping it, because a model id is only meaningful at the
+/// provider that serves it.
+/// The fold is applied twice — the kernel-global `[capabilities]` block at
+/// boot, then the agent's on top — so the documented "just switch the
+/// provider" spelling (`image_understanding = "gemini"` over a global
+/// `"openai/gpt-4o"`) would otherwise resolve to `gemini` + `gpt-4o`, a pair
+/// that does not exist, and 404 into `[Image description unavailable]` with
+/// nothing saying the model id came from a different provider.
+/// Cleared means absent, which is what makes the engine fall back to that
+/// provider's own default model.
+fn fold_capability_target(
+    target: &CapabilityTarget,
+    provider: &mut Option<String>,
+    model: &mut Option<String>,
+) {
+    if let Some(p) = &target.provider {
+        if provider.as_deref() != Some(p.as_str()) {
+            *model = None;
+        }
+        *provider = Some(p.clone());
+    }
+    if let Some(m) = &target.model {
+        *model = Some(m.clone());
     }
 }
 
@@ -1938,37 +1932,78 @@ image_generation = "openai"
         );
     }
 
+    /// Two-level resolution as it actually ships: global folded at boot, agent
+    /// folded on top of the result. An agent that overrides only the *model*
+    /// keeps the globally configured provider, and a capability it says
+    /// nothing about is untouched.
     #[test]
-    fn capability_routing_absent_key_inherits_and_present_key_merges_per_field() {
+    fn agent_routing_folded_over_global_inherits_the_provider_for_a_model_only_override() {
         let global: CapabilityRouting = toml::from_str(
             "image_understanding = \"openai/gpt-4o\"\nspeech_to_text = \"groq/whisper-large-v3\"\n",
         )
         .expect("parse global");
-        // The agent overrides only the vision *model* and says nothing about
-        // transcription: inheriting is the absence of the key.
         let agent: CapabilityRouting =
             toml::from_str("image_understanding = { model = \"gpt-4o-mini\" }\n")
                 .expect("parse agent");
 
-        let resolved = agent.merged_over(&global);
-        let vision = resolved.get(MediaCapability::ImageUnderstanding).unwrap();
+        let resolved = MediaConfig::default()
+            .with_capability_routing(&global)
+            .with_capability_routing(&agent);
+
         assert_eq!(
-            vision.provider.as_deref(),
+            resolved.image_provider.as_deref(),
             Some("openai"),
             "provider inherited"
         );
         assert_eq!(
-            vision.model.as_deref(),
+            resolved.image_model.as_deref(),
             Some("gpt-4o-mini"),
             "model overridden"
         );
-
-        let stt = resolved.get(MediaCapability::SpeechToText).unwrap();
-        assert_eq!(stt.provider.as_deref(), Some("groq"));
-        assert_eq!(stt.model.as_deref(), Some("whisper-large-v3"));
+        assert_eq!(resolved.audio_provider.as_deref(), Some("groq"));
+        assert_eq!(resolved.audio_model.as_deref(), Some("whisper-large-v3"));
 
         assert!(CapabilityRouting::default().is_empty());
-        assert!(!resolved.is_empty());
+        assert!(!agent.is_empty());
+    }
+
+    /// The documented "just switch the provider" spelling. Keeping the
+    /// inherited `gpt-4o` here would dispatch it at Gemini, 404, and degrade
+    /// to `[Image description unavailable]` with nothing naming the cause.
+    #[test]
+    fn a_provider_only_override_does_not_inherit_the_previous_providers_model() {
+        let global: CapabilityRouting =
+            toml::from_str("image_understanding = \"openai/gpt-4o\"\n").expect("parse global");
+        let agent: CapabilityRouting =
+            toml::from_str("image_understanding = \"gemini\"\n").expect("parse agent");
+
+        let resolved = MediaConfig::default()
+            .with_capability_routing(&global)
+            .with_capability_routing(&agent);
+
+        assert_eq!(resolved.image_provider.as_deref(), Some("gemini"));
+        assert_eq!(
+            resolved.image_model, None,
+            "a model id belongs to the provider that serves it; cleared means \
+             the engine picks gemini's own default"
+        );
+    }
+
+    /// The other half of the same rule: re-nominating the *same* provider is
+    /// not a switch, so an inherited model must survive it.
+    #[test]
+    fn re_nominating_the_same_provider_keeps_the_inherited_model() {
+        let global: CapabilityRouting =
+            toml::from_str("image_understanding = \"openai/gpt-4o\"\n").expect("parse global");
+        let agent: CapabilityRouting =
+            toml::from_str("image_understanding = \"openai\"\n").expect("parse agent");
+
+        let resolved = MediaConfig::default()
+            .with_capability_routing(&global)
+            .with_capability_routing(&agent);
+
+        assert_eq!(resolved.image_provider.as_deref(), Some("openai"));
+        assert_eq!(resolved.image_model.as_deref(), Some("gpt-4o"));
     }
 
     #[test]
