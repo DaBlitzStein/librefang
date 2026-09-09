@@ -200,11 +200,17 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// becomes the scope), `Some(<sender.platform_id>)` otherwise — the same
     /// pair the channel resolver uses to derive
     /// [`librefang_types::agent::SessionId::for_channel`] for inbound traffic.
+    /// `is_internal_system` decides how a reserved channel name resolves:
+    /// external traffic is `ext-`-scoped by `session_scope`, internal
+    /// traffic addresses the system session directly. It is a parameter, not
+    /// an adapter-side assumption, so a future internal caller states what
+    /// it means instead of inheriting `false` silently (#7701 review).
     async fn reset_channel_session(
         &self,
         _agent_id: AgentId,
         _channel: &str,
         _chat_id: Option<&str>,
+        _is_internal_system: bool,
     ) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
@@ -216,6 +222,7 @@ pub trait ChannelBridgeHandle: Send + Sync {
         _agent_id: AgentId,
         _channel: &str,
         _chat_id: Option<&str>,
+        _is_internal_system: bool,
     ) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
@@ -228,6 +235,7 @@ pub trait ChannelBridgeHandle: Send + Sync {
         _agent_id: AgentId,
         _channel: &str,
         _chat_id: Option<&str>,
+        _is_internal_system: bool,
     ) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
@@ -6984,23 +6992,24 @@ async fn apply_channel_reset(
     targets: &[AgentId],
     channel: &str,
     chat_id: Option<&str>,
+    is_internal_system: bool,
 ) -> String {
     let mut replies: Vec<String> = Vec::new();
     for agent_id in targets {
         let reply = match kind {
             ChannelResetKind::New => {
                 handle
-                    .reset_channel_session(*agent_id, channel, chat_id)
+                    .reset_channel_session(*agent_id, channel, chat_id, is_internal_system)
                     .await
             }
             ChannelResetKind::Reboot => {
                 handle
-                    .reboot_channel_session(*agent_id, channel, chat_id)
+                    .reboot_channel_session(*agent_id, channel, chat_id, is_internal_system)
                     .await
             }
             ChannelResetKind::Compact => {
                 handle
-                    .compact_channel_session(*agent_id, channel, chat_id)
+                    .compact_channel_session(*agent_id, channel, chat_id, is_internal_system)
                     .await
             }
         }
@@ -7200,6 +7209,10 @@ async fn handle_command(
                 &targets,
                 &ch,
                 chat.as_deref(),
+                // Channel commands are external ingress by construction: a
+                // reserved-looking name here is already `ext-`-scoped by
+                // `session_scope`, never the internal system session.
+                false,
             )
             .await
         }
@@ -7215,6 +7228,10 @@ async fn handle_command(
                 &targets,
                 &ch,
                 chat.as_deref(),
+                // Channel commands are external ingress by construction: a
+                // reserved-looking name here is already `ext-`-scoped by
+                // `session_scope`, never the internal system session.
+                false,
             )
             .await
         }
@@ -7230,6 +7247,10 @@ async fn handle_command(
                 &targets,
                 &ch,
                 chat.as_deref(),
+                // Channel commands are external ingress by construction: a
+                // reserved-looking name here is already `ext-`-scoped by
+                // `session_scope`, never the internal system session.
+                false,
             )
             .await
         }
@@ -7868,6 +7889,7 @@ mod tests {
             agent_id: AgentId,
             channel: &str,
             chat_id: Option<&str>,
+            _is_internal_system: bool,
         ) -> Result<String, String> {
             self.resets.lock().unwrap().push((
                 agent_id,
@@ -7883,6 +7905,7 @@ mod tests {
             agent_id: AgentId,
             channel: &str,
             chat_id: Option<&str>,
+            _is_internal_system: bool,
         ) -> Result<String, String> {
             self.reboots.lock().unwrap().push((
                 agent_id,
@@ -7898,6 +7921,7 @@ mod tests {
             agent_id: AgentId,
             channel: &str,
             chat_id: Option<&str>,
+            _is_internal_system: bool,
         ) -> Result<String, String> {
             self.compacts.lock().unwrap().push((
                 agent_id,

@@ -285,6 +285,7 @@ use librefang_kernel::config::load_config as kernel_load_config;
 use librefang_kernel::llm_driver::StreamEvent;
 use librefang_kernel::DeliveryTracker;
 use librefang_kernel::KernelApi;
+use librefang_kernel::LibreFangKernel;
 use librefang_types::agent::{AgentId, ResetScope, SessionId};
 use std::sync::Arc;
 use std::time::Instant;
@@ -747,6 +748,35 @@ impl KernelBridgeAdapter {
                 None
             }
         }
+    }
+
+    /// The session a `/new` / `/reboot` / `/compact` in this chat must address.
+    ///
+    /// Delegates to the kernel's `channel_session_id`, which is the same function every dispatch resolver takes for channel traffic, so the reset lands on the session the conversation actually resolved to instead of re-deriving an id that can drift from it (#7701).
+    ///
+    /// `is_internal_system` arrives through the trait, so the caller states
+    /// it instead of the adapter assuming it — these handlers are methods on
+    /// a public trait, and "reachable only from external ingress" is true
+    /// today and invisible to the compiler (#7701 review).
+    fn channel_session(
+        &self,
+        agent_id: AgentId,
+        channel: &str,
+        chat_id: Option<&str>,
+        is_internal_system: bool,
+    ) -> SessionId {
+        LibreFangKernel::channel_session_id(agent_id, channel, chat_id, is_internal_system)
+    }
+
+    /// The agent's manifest name, for acks that must be self-identifying in a
+    /// broadcast (`/new` fans out to several agents; without the name, a
+    /// per-agent count cannot be told apart between the replies).
+    fn agent_display_name(&self, agent_id: AgentId) -> String {
+        self.kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|e| e.manifest.name.clone())
+            .unwrap_or_else(|| agent_id.to_string())
     }
 }
 
@@ -1911,14 +1941,28 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         agent_id: AgentId,
         channel: &str,
         chat_id: Option<&str>,
+        is_internal_system: bool,
     ) -> Result<String, String> {
-        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
-        self.kernel
+        let sid = self.channel_session(agent_id, channel, chat_id, is_internal_system);
+        // The count comes from the reset itself: read under the same agent
+        // and session lock the delete takes — an inbound turn cannot make
+        // the ack under-report — and taken from the pre-wipe row rather than
+        // a second read, before `inject_reset_prompt` can add anything to
+        // the fresh session. A second `/new` with a configured reset prompt
+        // reports 0, not the injected messages (#7701 review).
+        let cleared = self
+            .kernel
             .reset_session(agent_id, ResetScope::Session(sid))
             .await
             .map_err(|e| format!("{e}"))?;
+        let message = if cleared == 1 { "message" } else { "messages" };
+        // The agent name makes a broadcast `/new` self-identifying: the ack
+        // dedup one level up only collapses byte-identical replies, and a
+        // per-agent count makes every line differ — without a name the user
+        // cannot tell which agent a number belongs to (#7701 review).
+        let agent_name = self.agent_display_name(agent_id);
         Ok(format!(
-            "Session reset for this {channel} chat. Other surfaces untouched."
+            "Session reset for this {channel} chat ({agent_name}, {cleared} {message} cleared). Other surfaces untouched."
         ))
     }
 
@@ -1927,8 +1971,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         agent_id: AgentId,
         channel: &str,
         chat_id: Option<&str>,
+        is_internal_system: bool,
     ) -> Result<String, String> {
-        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
+        let sid = self.channel_session(agent_id, channel, chat_id, is_internal_system);
         self.kernel
             .reboot_session(agent_id, ResetScope::Session(sid))
             .await
@@ -1943,8 +1988,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         agent_id: AgentId,
         channel: &str,
         chat_id: Option<&str>,
+        is_internal_system: bool,
     ) -> Result<String, String> {
-        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
+        let sid = self.channel_session(agent_id, channel, chat_id, is_internal_system);
         self.kernel
             .compact_agent_session_with_id(agent_id, Some(sid), true)
             .await
@@ -3619,6 +3665,217 @@ mod tests {
             .seed_instance_default("ghost-bot", "does-not-exist")
             .unwrap();
         assert_eq!(adapter.resolve_instance_default("ghost-bot").await, None);
+
+        kernel.shutdown();
+    }
+
+    /// Seed the canonical/derived pair the #7701 divergence is about, so a test
+    /// can tell which of the two a channel command actually addressed.
+    ///
+    /// The canonical session (`entry.session_id`) is the one the WebUI chat
+    /// writes to; the derived one is where a `telegram:chat-42` turn lands.
+    fn seed_canonical_and_derived_sessions(
+        kernel: &Arc<librefang_kernel::LibreFangKernel>,
+    ) -> (AgentId, SessionId, SessionId) {
+        use librefang_types::message::Message;
+
+        let assistant = kernel
+            .agent_registry()
+            .find_by_name("assistant")
+            .expect("default assistant agent should exist after boot")
+            .id;
+        let canonical = kernel
+            .agent_registry()
+            .get(assistant)
+            .expect("assistant entry")
+            .session_id;
+        let derived =
+            LibreFangKernel::channel_session_id(assistant, "telegram", Some("chat-42"), false);
+        assert_ne!(canonical, derived, "test premise: sids must differ");
+
+        let substrate = kernel.memory_substrate();
+        let mut c = substrate
+            .create_session(assistant)
+            .expect("create canonical seed");
+        c.id = canonical;
+        c.messages = vec![Message::user("webui history")];
+        substrate.save_session(&c).expect("save canonical seed");
+        let mut d = substrate
+            .create_session(assistant)
+            .expect("create derived seed");
+        d.id = derived;
+        d.messages = vec![Message::user("derived history")];
+        substrate.save_session(&d).expect("save derived seed");
+
+        (assistant, canonical, derived)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reset_channel_session_leaves_the_canonical_session_untouched() {
+        // #7701 review, blocking 1: the canonical session is not a dead session
+        // — it is the one the WebUI chat is using. A `/new` typed in Telegram
+        // must clear the session this conversation resolved to and nothing
+        // else, or the ack's "Other surfaces untouched." is a lie in exactly
+        // the case the fix was written for.
+        use librefang_testing::MockKernelBuilder;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        let (assistant, canonical, derived) = seed_canonical_and_derived_sessions(&kernel);
+        let substrate = kernel.memory_substrate();
+
+        let adapter = KernelBridgeAdapter::new(kernel.clone());
+        let reply = adapter
+            .reset_channel_session(assistant, "telegram", Some("chat-42"), false)
+            .await
+            .expect("reset must succeed");
+        assert!(
+            reply.contains("1 message cleared"),
+            "ack must report only the messages of the session this chat owns, singular for 1, got: {reply}"
+        );
+        assert!(
+            reply.contains("assistant"),
+            "ack carries the agent name so a broadcast reply is self-identifying, got: {reply}"
+        );
+
+        let c_after = substrate
+            .get_session(canonical)
+            .expect("lookup canonical")
+            .expect("canonical session must still exist");
+        assert_eq!(
+            c_after.messages.len(),
+            1,
+            "a channel /new must not clear the WebUI conversation"
+        );
+        let d_after = substrate
+            .get_session(derived)
+            .expect("lookup derived")
+            .expect("derived session must still exist (empty)");
+        assert!(
+            d_after.messages.is_empty(),
+            "the session this chat resolved to must be cleared"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reset_channel_session_scopes_a_reserved_name_away_from_the_internal_session() {
+        // #7701 review: "telegram" is not a reserved name, so the sid the
+        // other tests assert held before this change as well. The only input
+        // class whose resolved id this diff changes is a reserved channel
+        // name — external "cron" must resolve through the adapter to the
+        // `ext-cron` scope, never to the internal system session.
+        use librefang_testing::MockKernelBuilder;
+        use librefang_types::agent::SessionId;
+        use librefang_types::message::Message;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        let assistant = kernel
+            .agent_registry()
+            .find_by_name("assistant")
+            .expect("default assistant agent should exist after boot")
+            .id;
+        let external =
+            LibreFangKernel::channel_session_id(assistant, "cron", Some("chat-7"), false);
+        assert_ne!(
+            external,
+            SessionId::for_channel(assistant, "cron"),
+            "test premise: external 'cron' must be ext-scoped, not the internal session id"
+        );
+
+        let substrate = kernel.memory_substrate();
+        let mut ext = substrate
+            .create_session(assistant)
+            .expect("create ext seed");
+        ext.id = external;
+        ext.messages = vec![Message::user("external cron chat history")];
+        substrate.save_session(&ext).expect("save ext seed");
+        let mut internal = substrate
+            .create_session(assistant)
+            .expect("create internal seed");
+        internal.id = SessionId::for_channel(assistant, "cron");
+        internal.messages = vec![Message::user("internal system session history")];
+        substrate
+            .save_session(&internal)
+            .expect("save internal seed");
+
+        let adapter = KernelBridgeAdapter::new(kernel.clone());
+        let reply = adapter
+            .reset_channel_session(assistant, "cron", Some("chat-7"), false)
+            .await
+            .expect("reset must succeed");
+        assert!(
+            reply.contains("1 message cleared"),
+            "external ext-cron chat had one message; the reset ack must say so, got: {reply}"
+        );
+
+        let ext_after = substrate
+            .get_session(external)
+            .expect("lookup ext")
+            .expect("ext session must still exist (empty)");
+        assert!(
+            ext_after.messages.is_empty(),
+            "the external ext-cron chat is the session this reset belongs to"
+        );
+        let internal_after = substrate
+            .get_session(SessionId::for_channel(assistant, "cron"))
+            .expect("lookup internal")
+            .expect("internal cron session must still exist");
+        assert_eq!(
+            internal_after.messages.len(),
+            1,
+            "an external /new on a reserved-named channel must never reach the internal system session"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reboot_and_compact_channel_session_leave_the_canonical_session_untouched() {
+        // #7701 review, blocking 2 and 3. Blast radius: /reboot and /compact
+        // carried the same collateral damage as /new with no wording change at
+        // all. And blocking 3 — a `?` on a secondary target aborting the
+        // primary before it ran — cannot recur while there is exactly one
+        // target per command, which is what this asserts.
+        use librefang_testing::MockKernelBuilder;
+
+        let (kernel, _tmp) = MockKernelBuilder::new().build();
+        let (assistant, canonical, _derived) = seed_canonical_and_derived_sessions(&kernel);
+        let substrate = kernel.memory_substrate();
+
+        let adapter = KernelBridgeAdapter::new(kernel.clone());
+        adapter
+            .reboot_channel_session(assistant, "telegram", Some("chat-42"), false)
+            .await
+            .expect("reboot must succeed");
+        assert_eq!(
+            substrate
+                .get_session(canonical)
+                .expect("lookup canonical")
+                .expect("canonical session must still exist")
+                .messages
+                .len(),
+            1,
+            "a channel /reboot must not clear the WebUI conversation"
+        );
+
+        // `/compact` runs with force = true and needs a live provider to
+        // summarise, which the mock kernel has none of. Whether it succeeds is
+        // beside the point here — what must hold either way is that it never
+        // reaches the canonical session.
+        let _ = adapter
+            .compact_channel_session(assistant, "telegram", Some("chat-42"), false)
+            .await;
+        assert_eq!(
+            substrate
+                .get_session(canonical)
+                .expect("lookup canonical")
+                .expect("canonical session must still exist")
+                .messages
+                .len(),
+            1,
+            "a channel /compact must not rewrite the WebUI conversation"
+        );
 
         kernel.shutdown();
     }

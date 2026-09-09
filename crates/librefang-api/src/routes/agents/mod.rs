@@ -422,7 +422,11 @@ pub(crate) fn merge_agent_identity(
 
 /// Resolve the session id the attachment blocks should be written to,
 /// mirroring the resolver used by `send_message_*` in
-/// `kernel::messaging`. Pure function (no I/O, no kernel reads) so it can
+/// `kernel::messaging`. The channel branch delegates to
+/// `LibreFangKernel::channel_session_id` — the single resolver every
+/// dispatch path names (#7701 review: this used to be the fourth inline
+/// `for_sender_scope` mirror, and without the reserved-name guard it could
+/// drift from the other three). Pure function (no I/O, no kernel reads) so it can
 /// be unit-tested directly and so call sites can assert which session id
 /// the attachment landed in.
 ///
@@ -453,10 +457,15 @@ pub(crate) fn resolve_attachment_session_id(
     }
     if let Some(ctx) = sender_context {
         if !ctx.channel.is_empty() && !ctx.use_canonical_session {
-            return librefang_types::agent::SessionId::for_sender_scope(
+            // The channel branch now goes through the kernel's centralized
+            // resolver, not an inline `for_sender_scope`: the reserved-name
+            // guard (`resolve_scope_channel`) lives in one place, so this
+            // fourth site cannot drift from the other three (#7701 review).
+            return librefang_kernel::LibreFangKernel::channel_session_id(
                 agent_id,
                 &ctx.channel,
                 ctx.chat_id.as_deref(),
+                ctx.is_internal_system,
             );
         }
     }
@@ -1985,6 +1994,38 @@ mod tests {
             resolved, registry_default,
             "registry default is the very bug being fixed — must not be used \
              when sender_context has a non-empty channel"
+        );
+    }
+
+    /// The reserved-name guard applies at the attachment site too. An
+    /// external sender whose channel happens to carry a reserved system
+    /// name ("cron") must not land on the internal system session id —
+    /// before the migration to `LibreFangKernel::channel_session_id` this
+    /// was the fourth inline `for_sender_scope` mirror, and the only one
+    /// of the four without the guard (#7701 review).
+    #[test]
+    fn resolve_attachment_session_id_guards_reserved_channel_names() {
+        use librefang_channels::types::SenderContext;
+        use librefang_types::agent::SessionId;
+        let agent_id = AgentId::new();
+        let registry_default = SessionId::new();
+        let sender = SenderContext {
+            channel: "cron".to_string(),
+            user_id: "user-1".to_string(),
+            chat_id: Some("chat-XYZ".to_string()),
+            display_name: "Alice".to_string(),
+            use_canonical_session: false,
+            is_internal_system: false,
+            ..Default::default()
+        };
+        let resolved =
+            resolve_attachment_session_id(agent_id, Some(&sender), None, registry_default);
+        let unguarded =
+            SessionId::for_sender_scope(agent_id, &sender.channel, sender.chat_id.as_deref());
+        assert_ne!(
+            resolved, unguarded,
+            "an external 'cron' channel must be remapped by the reserved-name \
+             guard instead of colliding with the internal system session id"
         );
     }
 
