@@ -1526,3 +1526,131 @@ async fn deleting_a_goal_stops_its_active_run() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(run["running"], false);
 }
+
+/// Start a run, then `PUT` the goal to `status`, and assert the run was
+/// stopped through the same interlock `delete_goal` uses.
+///
+/// The second `POST /stop` is the mechanism-precise assertion: `GoalRunner`'s
+/// stop removes the registry entry synchronously during the `PUT`, so a
+/// follow-up stop finds nothing left. Without the wiring the entry is still
+/// there and that call reports `true` — the shape
+/// `goal_run_start_then_stop_with_agent` already relies on.
+async fn assert_terminal_status_stops_the_run(payload: serde_json::Value, status_value: &str) {
+    let h = boot().await;
+    // A syntactically valid agent id; the run never completes a real agent
+    // turn, so no provider is needed.
+    let goal = create_goal(&h, payload).await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (start_status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(start_status, StatusCode::OK, "start failed: {body:?}");
+
+    let (put_status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"status": status_value})),
+    )
+    .await;
+    assert_eq!(put_status, StatusCode::OK, "got: {body:?}");
+
+    let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    assert_eq!(
+        run["running"], false,
+        "marking a goal {status_value} must stop its run"
+    );
+    let (_, stop) = json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
+    assert_eq!(
+        stop["stopped"].as_bool(),
+        Some(false),
+        "the run entry must already be gone, not merely reported as not running"
+    );
+
+    // And the operator's choice is what the goal reads back as.
+    let (_, goal) = json_request(&h, Method::GET, &format!("/api/goals/{id}"), None).await;
+    assert_eq!(goal["status"].as_str(), Some(status_value));
+}
+
+/// #7785 re-review: `update_goal_by_id` never called `stop_goal_run`, so an
+/// operator marking a goal done had no connection to the run's lifecycle —
+/// the runner only noticed by re-reading the goal document on its next tick,
+/// a read that cannot tell an operator from the `goal_update` tool.
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_a_goal_to_completed_stops_its_active_run() {
+    assert_terminal_status_stops_the_run(
+        serde_json::json!({
+            "title": "Completed by the operator",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+        }),
+        "completed",
+    )
+    .await;
+}
+
+/// Cancelling is the same lifecycle boundary and goes through the same call.
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_a_goal_to_cancelled_stops_its_active_run() {
+    assert_terminal_status_stops_the_run(
+        serde_json::json!({
+            "title": "Cancelled by the operator",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+        }),
+        "cancelled",
+    )
+    .await;
+}
+
+/// The reported case: with a verifier configured the runner deliberately
+/// stops treating a bare `status: completed` as a completion signal, so this
+/// is the path where the operator had no way to end the run at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_a_verified_goal_to_completed_stops_its_active_run() {
+    assert_terminal_status_stops_the_run(
+        serde_json::json!({
+            "title": "Gated on a verifier",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+            "loop_engineering": true,
+            "verify_agent_id": "22222222-2222-2222-2222-222222222222",
+        }),
+        "completed",
+    )
+    .await;
+}
+
+/// The other half of the contract, and what stops the interlock from being
+/// wired unconditionally: a non-terminal update is an edit, not an operator
+/// ending the run. Without this the three tests above all pass against a
+/// `stop_goal_run` called on every `PUT`.
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_a_goal_without_a_terminal_status_leaves_its_run_alone() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({
+            "title": "Still going",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+        }),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(status, StatusCode::OK, "start failed: {body:?}");
+
+    // A title edit, and a status the operator has not finished with.
+    for payload in [
+        serde_json::json!({"title": "Renamed mid-run"}),
+        serde_json::json!({"status": "in_progress"}),
+    ] {
+        let (put_status, body) =
+            json_request(&h, Method::PUT, &format!("/api/goals/{id}"), Some(payload)).await;
+        assert_eq!(put_status, StatusCode::OK, "got: {body:?}");
+        let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+        assert_eq!(
+            run["running"], true,
+            "an ordinary edit must not stop the run"
+        );
+    }
+}
