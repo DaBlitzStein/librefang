@@ -183,11 +183,38 @@ pub fn select_native_tools(all: &[ToolDefinition]) -> Vec<ToolDefinition> {
     let found_names: std::collections::HashSet<&str> =
         found.iter().map(|t| t.name.as_str()).collect();
     for &name in ALWAYS_NATIVE_TOOLS.iter() {
-        if !found_names.contains(name) {
-            tracing::warn!("native tool {name:?} missing from definitions");
+        if found_names.contains(name) {
+            continue;
+        }
+        // `all` is the set granted to one agent, not the global registry, so a
+        // name can be absent here for two very different reasons. Saying
+        // "missing from definitions" for both sent a production investigation
+        // after the tool registry when the real answer was an agent type that
+        // simply does not declare the tool (#8225).
+        if builtin_tool_names().contains(name) {
+            tracing::debug!(
+                "native tool {name:?} is not in this agent's granted set, so lazy mode will not ship it"
+            );
+        } else {
+            tracing::warn!("native tool {name:?} has no entry in builtin_tool_definitions()");
         }
     }
     found
+}
+
+/// Names of every built-in tool, memoized.
+///
+/// Only the names are kept: `builtin_tool_definitions()` hands back a clone of
+/// the whole catalog, schemas included, which is far too much to rebuild just
+/// to answer whether one name exists.
+fn builtin_tool_names() -> &'static std::collections::HashSet<String> {
+    static NAMES: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        builtin_tool_definitions()
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    })
 }
 
 /// Get definitions for all built-in tools.
