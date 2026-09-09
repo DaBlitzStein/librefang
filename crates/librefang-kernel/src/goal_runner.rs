@@ -818,9 +818,18 @@ impl GoalRunner {
         let had_checkpoint = match self.substrate.as_ref() {
             Some(substrate) => {
                 let existed = load_pause_checkpoint(substrate, goal_id).is_some();
-                if existed {
-                    clear_pause_checkpoint(substrate, goal_id);
-                }
+                // Delete unconditionally, and use the read only for the return
+                // value. `load_pause_checkpoint` reports `None` both for "no
+                // checkpoint" and for a row it could not read — a substrate
+                // error is swallowed by its `.ok().flatten()?`, and a row whose
+                // `agent_id` is missing or unparseable exits the same way.
+                // Gating the delete on that `None` left the row behind in
+                // exactly those cases, which is the outcome the comment above
+                // says cancel exists to prevent.
+                //
+                // Costs nothing: `clear_pause_checkpoint` is already a no-op on
+                // a missing key, logging only a genuine delete failure.
+                clear_pause_checkpoint(substrate, goal_id);
                 existed
             }
             None => false,
@@ -3850,6 +3859,82 @@ mod tests {
         );
         assert!(load_pause_checkpoint(&substrate, goal_id).is_none());
         assert!(runner.state(goal_id).is_none());
+    }
+
+    /// Cancel must remove the checkpoint row even when it cannot be read.
+    ///
+    /// `load_pause_checkpoint` answers `None` for two different things: "no
+    /// checkpoint", and "there is a row but I could not turn it into a
+    /// `ResumePoint`". A substrate read error takes the second path through its
+    /// `.ok().flatten()?`, and so does a row whose `agent_id` is missing or not
+    /// a UUID. `stop_locked` used to gate the delete on that `None`, so in
+    /// those cases it skipped the delete and left the row behind — the exact
+    /// outcome the comment above the delete says cancel exists to prevent.
+    ///
+    /// The read error itself is not reachable from a healthy
+    /// `MemorySubstrate::open_in_memory`, so this drives the other input that
+    /// produces the same `None` over a row that exists. Same branch, same
+    /// defect.
+    ///
+    /// Note the assertion is on the RAW key, not on `load_pause_checkpoint`:
+    /// the neighbouring test can assert the latter because its checkpoint is
+    /// readable, but here it is `None` before and after the delete, so it
+    /// cannot tell the fix from the bug.
+    #[tokio::test]
+    async fn stop_discards_a_checkpoint_it_cannot_read() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let goal = test_goal(AgentId::new());
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
+        let key = goal_pause_key(goal_id);
+
+        // Every other field intact; `agent_id` is not a UUID, which is the `?`
+        // that makes `load_pause_checkpoint` bail.
+        substrate
+            .structured_set(
+                goals_storage_agent_id(),
+                &key,
+                serde_json::json!({
+                    "agent_id": "not-a-uuid",
+                    "iteration": 7,
+                    "max_iterations": 25,
+                    "last_progress": 65,
+                    "paused_at": Utc::now().to_rfc3339(),
+                }),
+            )
+            .unwrap();
+
+        // The fixture must actually reach the branch under test: unreadable,
+        // but present. Without both halves this test would pass vacuously.
+        assert!(
+            load_pause_checkpoint(&substrate, goal_id).is_none(),
+            "fixture must be unreadable, or it exercises the readable path instead"
+        );
+        assert!(
+            substrate
+                .structured_get(goals_storage_agent_id(), &key)
+                .unwrap()
+                .is_some(),
+            "fixture must leave a row behind, or there is nothing for cancel to delete"
+        );
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store, substrate.clone());
+
+        // `false` is correct and deliberately unchanged: the return value still
+        // reports whether a resume point was readable, and this one was not.
+        // Only the delete stopped depending on it.
+        assert!(!runner.stop(goal_id));
+
+        assert!(
+            substrate
+                .structured_get(goals_storage_agent_id(), &key)
+                .unwrap()
+                .is_none(),
+            "cancel must delete the checkpoint row it could not read, or the next start \
+             resumes a run the operator cancelled"
+        );
     }
 
     /// Seed a checkpoint for a run that began `started_at` and paused later,
