@@ -19,6 +19,7 @@ api-error-template-parse-failed = 解析模板失败：{ $error }
 api-error-template-required = 必须提供 'manifest_toml' 或 'template'
 api-error-template-invalid-manifest = 无效的模板清单
 api-error-template-read-failed = 读取模板失败
+api-error-template-snapshot-failed = 无法保存当前智能体类型的快照，因此已取消恢复，未覆盖任何内容。请重试。
 api-error-template-promote-no-token = 未配置 GitHub 令牌。请在设置中连接 GitHub，或设置 GITHUB_TOKEN。
 api-error-template-promote-review-required = 该模板仍包含发布前必须移除的私密信息。请检查发现项并编辑清单。
 api-error-template-promote-render-failed = 无法将清理后的清单渲染为 TOML：{ $error }

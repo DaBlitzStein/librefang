@@ -32,6 +32,7 @@ api-error-template-parse-failed = Nie udało się przeanalizować szablonu: { $e
 api-error-template-required = Wymagane jest 'manifest_toml' lub 'template'
 api-error-template-invalid-manifest = Nieprawidłowy manifest szablonu
 api-error-template-read-failed = Nie udało się odczytać szablonu
+api-error-template-snapshot-failed = Nie udało się zapisać migawki bieżącego typu agenta, więc przywracanie zostało anulowane i nic nie zostało nadpisane. Spróbuj ponownie.
 api-error-template-promote-no-token = Nie skonfigurowano tokena GitHub. Połącz GitHub w ustawieniach lub ustaw GITHUB_TOKEN.
 api-error-template-promote-review-required = Ten szablon nadal zawiera prywatne dane, które należy usunąć przed publikacją. Przejrzyj wyniki i edytuj manifest.
 api-error-template-promote-render-failed = Nie można wyrenderować oczyszczonego manifestu jako TOML: { $error }
