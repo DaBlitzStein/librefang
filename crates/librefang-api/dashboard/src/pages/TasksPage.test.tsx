@@ -380,12 +380,16 @@ describe("TasksPage", () => {
       });
     });
 
-    it("does not render malformed task records without an id", () => {
+    it("does not render malformed task records without an id, and the total tile agrees", () => {
       useTaskQueueMock.mockReturnValue(
         makeQuery({ tasks: [{ status: "pending", title: "Missing id" }], total: 1 }),
       );
       renderPage();
       expect(screen.queryByText("Missing id")).not.toBeInTheDocument();
+      // The counters must derive from the same filtered list as the cards —
+      // an id-less row that renders no card must not be counted either.
+      const totalLabel = screen.getByText("tasks.status_total");
+      expect(totalLabel.previousElementSibling).toHaveTextContent("0");
     });
 
     it("shows Delete button for completed tasks and calls deleteTask mutation", async () => {
