@@ -12720,6 +12720,7 @@
           "system"
         ],
         "summary": "GET /api/templates/:name/registry-diff — Compare local agent type with its registry original.",
+        "description": "Scoped to `TemplateSource::AgentType` like `restore_from_registry` — a name that only resolves\nthrough a live agent's own workspace manifest has nothing `restore` can ever act on, so a diff\noffered for it is a comparison for a control that cannot succeed (#8042).",
         "operationId": "get_agent_type_registry_diff",
         "parameters": [
           {
@@ -12738,6 +12739,9 @@
           },
           "404": {
             "description": "Agent type or registry version not found"
+          },
+          "409": {
+            "description": "The name belongs to a live agent"
           }
         }
       }
@@ -12748,7 +12752,7 @@
           "system"
         ],
         "summary": "POST /api/templates/:name/restore — Overwrite local agent type with the registry version.",
-        "description": "Snapshots the result into the version history like every other write path, because this one destroys the local copy by design.\nA manifest whose current content came from a hand-edit of the file has no snapshot anywhere, so without the record here a restore leaves nothing to go back to, and `GET /api/templates/{name}/history` keeps reporting the previous dashboard save as current while the file on disk is the registry copy.",
+        "description": "Records two snapshots, because this write destroys the local copy by design.\nA manifest whose current content came from a hand-edit of the file has no snapshot anywhere, so the pre-restore content is recorded first (`pre-registry-restore`) — otherwise, after the overwrite, that content is gone from disk and was never in history either, leaving nothing to go back to.\nThe post-restore content is then recorded too (`registry-restore`), so `GET /api/templates/{name}/history` reports the registry copy as current rather than the previous dashboard save.",
         "operationId": "restore_agent_type_from_registry",
         "parameters": [
           {
