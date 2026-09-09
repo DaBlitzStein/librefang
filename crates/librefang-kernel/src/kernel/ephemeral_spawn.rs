@@ -266,12 +266,7 @@ impl LibreFangKernel {
             manifest.model.system_prompt = prompt.to_string();
         }
         if let Some(over) = request.model.as_ref() {
-            if let Some(provider) = over.provider.as_deref() {
-                manifest.model.provider = provider.to_string();
-            }
-            if let Some(model) = over.model.as_deref() {
-                manifest.model.model = model.to_string();
-            }
+            apply_model_override(&mut manifest.model, over);
         }
 
         // ── System prompt ───────────────────────────────────────────────────
@@ -660,5 +655,155 @@ impl LibreFangKernel {
         librefang_memory::EphemeralRunStore::new(self.memory.substrate.pool())
             .rollup_for_parent(&parent_id.0.to_string())
             .map_err(KernelError::LibreFang)
+    }
+}
+
+/// Apply an `EphemeralModelOverride` to the worker's model config.
+///
+/// With no `agent_type` the worker manifest is `parent.manifest.clone()`, so
+/// `context_window`, `api_key_env` and `base_url` arrive describing the
+/// **parent's** model. None of them travels with an override, and the permanent
+/// spawn path never carries them because it builds a fresh manifest from the
+/// profile (#7789 review).
+fn apply_model_override(
+    model: &mut librefang_types::agent::ModelConfig,
+    over: &librefang_types::ephemeral::EphemeralModelOverride,
+) {
+    let provider_changed = over
+        .provider
+        .as_deref()
+        .is_some_and(|p| !p.eq_ignore_ascii_case(&model.provider));
+    let model_changed = over.model.as_deref().is_some_and(|m| m != model.model);
+
+    // `context_window` is written for one model, and `resolve_context_window`
+    // ranks the manifest's own value above the catalog — so a parent pinned by
+    // `architect` at 1M tokens spawning a `quick` worker budgeted claude-haiku at
+    // 1M: compaction never fires and the provider rejects the oversized request.
+    // Cleared on a model change and not only a provider change, because that case
+    // stays inside `anthropic` and is the one an operator actually hits.
+    if provider_changed || model_changed {
+        model.context_window = None;
+    }
+    // `api_key_env` / `base_url` are keyed to the provider. Left in place they
+    // send the new provider's requests to the parent's endpoint with the parent's
+    // key — note `check_provider_credentials` has just asserted that the
+    // *profile's* provider has a key, which is then not the one used. A
+    // model-only override stays inside the provider they were written for, so it
+    // keeps them.
+    if provider_changed {
+        model.api_key_env = None;
+        model.base_url = None;
+    }
+
+    if let Some(provider) = over.provider.as_deref() {
+        model.provider = provider.to_string();
+    }
+    if let Some(m) = over.model.as_deref() {
+        model.model = m.to_string();
+    }
+}
+
+#[cfg(test)]
+mod model_override_tests {
+    use super::apply_model_override;
+    use librefang_types::agent::ModelConfig;
+    use librefang_types::ephemeral::EphemeralModelOverride;
+
+    /// A parent pinned to a custom OpenAI-compatible proxy, at a large window.
+    fn parent_pinned_to_a_proxy() -> ModelConfig {
+        ModelConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            api_key_env: Some("MY_PROXY_KEY".to_string()),
+            base_url: Some("https://proxy.internal/v1".to_string()),
+            context_window: Some(1_000_000),
+            ..Default::default()
+        }
+    }
+
+    fn over(provider: Option<&str>, model: Option<&str>) -> EphemeralModelOverride {
+        EphemeralModelOverride {
+            provider: provider.map(str::to_string),
+            model: model.map(str::to_string),
+        }
+    }
+
+    /// The credential half: a cross-provider override that keeps the parent's
+    /// `base_url` / `api_key_env` posts anthropic-shaped requests to the parent's
+    /// proxy with the parent's key — while `check_provider_credentials` has just
+    /// asserted that *anthropic* has a key, which is not the one that would be used.
+    #[test]
+    fn a_provider_change_drops_the_parents_endpoint_and_key() {
+        let mut model = parent_pinned_to_a_proxy();
+
+        apply_model_override(
+            &mut model,
+            &over(Some("anthropic"), Some("claude-haiku-4-5")),
+        );
+
+        assert_eq!(model.provider, "anthropic");
+        assert_eq!(model.model, "claude-haiku-4-5");
+        assert_eq!(
+            model.api_key_env, None,
+            "the parent's key names a credential for the parent's provider"
+        );
+        assert_eq!(
+            model.base_url, None,
+            "the parent's endpoint speaks the parent's provider's wire format"
+        );
+    }
+
+    /// The budget half, and the case a provider-only guard would miss: `architect`
+    /// and `quick` are both `anthropic`, so the provider never changes and only a
+    /// model-keyed clear saves the worker from being budgeted at the parent's window.
+    #[test]
+    fn a_model_change_within_one_provider_still_drops_the_window() {
+        let mut model = ModelConfig {
+            provider: "anthropic".to_string(),
+            model: "claude-opus-4-1".to_string(),
+            context_window: Some(1_000_000),
+            ..Default::default()
+        };
+
+        apply_model_override(&mut model, &over(None, Some("claude-haiku-4-5")));
+
+        assert_eq!(model.model, "claude-haiku-4-5");
+        assert_eq!(
+            model.context_window, None,
+            "a 1M-token budget on a Haiku worker never compacts and is rejected by the provider"
+        );
+    }
+
+    /// The clears are scoped to what actually changed: an override naming the
+    /// values already in place is not a reason to discard an operator's pinning.
+    #[test]
+    fn an_override_that_changes_nothing_keeps_the_parents_pinning() {
+        let mut model = parent_pinned_to_a_proxy();
+
+        apply_model_override(&mut model, &over(Some("OpenAI"), Some("gpt-4o")));
+
+        assert_eq!(
+            model.api_key_env.as_deref(),
+            Some("MY_PROXY_KEY"),
+            "provider compared case-insensitively; nothing moved, nothing to clear"
+        );
+        assert_eq!(model.base_url.as_deref(), Some("https://proxy.internal/v1"));
+        assert_eq!(model.context_window, Some(1_000_000));
+    }
+
+    /// A model-only override stays inside the provider the endpoint and key were
+    /// written for, so those two must survive it.
+    #[test]
+    fn a_model_only_override_keeps_the_providers_endpoint_and_key() {
+        let mut model = parent_pinned_to_a_proxy();
+
+        apply_model_override(&mut model, &over(None, Some("gpt-4o-mini")));
+
+        assert_eq!(model.api_key_env.as_deref(), Some("MY_PROXY_KEY"));
+        assert_eq!(model.base_url.as_deref(), Some("https://proxy.internal/v1"));
+        assert_eq!(
+            model.context_window, None,
+            "the window was written for gpt-4o"
+        );
     }
 }
