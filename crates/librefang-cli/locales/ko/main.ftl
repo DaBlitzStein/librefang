@@ -1390,6 +1390,7 @@ chat-runner-agent-killed = 에이전트 "{ $name }"을(를) 종료했습니다.
 chat-runner-failed-kill-agent = 에이전트 "{ $name }"을(를) 종료하지 못했습니다.
 chat-runner-kill-failed = 종료 실패: { $error }
 chat-runner-no-backend-connected = 연결된 백엔드가 없습니다.
+chat-runner-goal-daemon-unsupported = 데몬에 연결된 상태에서는 /goal을 아직 사용할 수 없습니다 — 대시보드에서 목표를 생성하고 시작하세요.
 chat-runner-no-models-available = 사용 가능한 모델이 없습니다.
 chat-runner-switched-model = { $model }(으)로 전환했습니다
 chat-runner-failed-switch-model = { $model }(으)로 전환하지 못했습니다
