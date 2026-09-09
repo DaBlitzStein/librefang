@@ -334,6 +334,10 @@ cost_budget = "medium"
                 provider: "provider".into(),
                 model: "model".into(),
                 context_window: None,
+                // `permits` reads only `name` and `cost_tier`; `None` matches the
+                // sibling `context_window: None` and keeps the helper honest about
+                // what the test actually exercises.
+                max_output_tokens: None,
                 cost_tier: tier,
                 priority: 0,
                 max_complexity: 1.0,
