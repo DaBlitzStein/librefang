@@ -893,6 +893,7 @@ fn spawn_test_profile(
         provider: provider.to_string(),
         model: model.to_string(),
         context_window,
+        max_output_tokens: None,
         cost_tier: librefang_types::model_profile::CostTier::Cheap,
         priority: 0,
         max_complexity: 1.0,
