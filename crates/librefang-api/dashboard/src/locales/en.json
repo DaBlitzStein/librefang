@@ -4293,6 +4293,7 @@
     "tools_hint": "Picked from the tools this daemon exposes; unknown identifiers can still be typed.",
     "tools_search": "Search tools…",
     "promote": "Promote to registry",
+    "promote_preview": "Promotion preview",
     "confirm_promote": "Promote the agent type '{{name}}' to the public registry? The manifest will be sanitized for publication and submitted as a GitHub pull request.",
     "promoted": "Registry PR opened",
     "promote_failed": "Could not promote the agent type",

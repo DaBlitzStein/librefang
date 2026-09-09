@@ -4305,6 +4305,7 @@
     "tools_hint": "Wybierane z narzędzi udostępnianych przez tego demona; nieznane identyfikatory można wpisać ręcznie.",
     "tools_search": "Szukaj narzędzi…",
     "promote": "Opublikuj w rejestrze",
+    "promote_preview": "Podgląd promocji",
     "confirm_promote": "Opublikować typ agenta '{{name}}' w publicznym rejestrze? Manifest zostanie oczyszczony i przesłany jako pull request na GitHubie.",
     "promoted": "PR w rejestrze utworzony",
     "promote_failed": "Nie udało się opublikować typu agenta",
