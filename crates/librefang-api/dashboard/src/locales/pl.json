@@ -2930,7 +2930,6 @@
     "run_start": "Uruchom autonomicznie",
     "run_stop": "Zatrzymaj autonomiczne uruchomienie",
     "run_needs_agent": "Przypisz agenta, aby uruchomić ten cel autonomicznie",
-    "run_active": "Działa · iteracja {{iteration}}/{{max}}",
     "run_phase_running": "Działa",
     "run_phase_paused": "Wstrzymano",
     "run_phase_finished": "Zakończono",
