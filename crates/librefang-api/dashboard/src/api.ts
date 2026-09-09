@@ -1743,11 +1743,18 @@ export async function setAgentSkills(
   );
 }
 
+// Every caller of `listAgents` (dashboard nav, assignee pickers) wants "the
+// whole registry", not a page of it, and none of them paginate — so this is
+// a ceiling, not a page size. An install past this many registered agents
+// silently drops the tail rather than erroring; there is no signal today
+// that would tell an operator it happened.
+const AGENT_LIST_LIMIT = 500;
+
 export async function listAgents(
   opts: { includeHands?: boolean } = {},
 ): Promise<AgentItem[]> {
   const params = new URLSearchParams({
-    limit: "500",
+    limit: String(AGENT_LIST_LIMIT),
     sort: "last_active",
     order: "desc",
   });

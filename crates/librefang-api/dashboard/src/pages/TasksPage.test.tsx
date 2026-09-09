@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TasksPage } from "./TasksPage";
 import { useTaskQueue, useTaskQueueStatus } from "../lib/queries/runtime";
+import { useAgents } from "../lib/queries/agents";
 import {
   useCreateTask,
   useUpdateTaskStatus,
@@ -15,6 +16,10 @@ import {
 vi.mock("../lib/queries/runtime", () => ({
   useTaskQueue: vi.fn(),
   useTaskQueueStatus: vi.fn(),
+}));
+
+vi.mock("../lib/queries/agents", () => ({
+  useAgents: vi.fn(),
 }));
 
 vi.mock("../lib/mutations/runtime", () => ({
@@ -40,6 +45,7 @@ const m = <T,>(fn: T) => fn as unknown as ReturnType<typeof vi.fn>;
 
 const useTaskQueueMock       = m(useTaskQueue);
 const useTaskQueueStatusMock = m(useTaskQueueStatus);
+const useAgentsMock          = m(useAgents);
 const useCreateTaskMock      = m(useCreateTask);
 const useUpdateTaskStatusMock = m(useUpdateTaskStatus);
 const useDeleteTaskMock      = m(useDeleteTask);
@@ -118,6 +124,7 @@ const SAMPLE_STATUS = { total: 4, pending: 1, in_progress: 1, completed: 1, fail
 function setQueryDefaults() {
   useTaskQueueMock.mockReturnValue(makeQuery({ tasks: SAMPLE_TASKS, total: SAMPLE_TASKS.length }));
   useTaskQueueStatusMock.mockReturnValue(makeQuery(SAMPLE_STATUS));
+  useAgentsMock.mockReturnValue(makeQuery([]));
 }
 
 function setMutationDefaults() {
@@ -131,11 +138,23 @@ function renderPage() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const utils = render(
     <QueryClientProvider client={qc}>
       <TasksPage />
     </QueryClientProvider>,
   );
+  return {
+    ...utils,
+    // Re-render the same tree after changing a mock's return value, so a
+    // test can simulate a query resolving mid-interaction without
+    // remounting (and so losing) component state.
+    rerenderSameTree: () =>
+      utils.rerender(
+        <QueryClientProvider client={qc}>
+          <TasksPage />
+        </QueryClientProvider>,
+      ),
+  };
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -399,6 +418,47 @@ describe("TasksPage", () => {
       const payload = mutate.mock.calls[0][0];
       expect(payload).not.toHaveProperty("priority");
       expect(payload).not.toHaveProperty("timeout_secs");
+    });
+
+    it("keeps a typed assignee once the agent registry loads instead of losing it to a widget swap", async () => {
+      const mutate = vi.fn();
+      useCreateTaskMock.mockReturnValue(makeMutation({ mutate }));
+
+      // Registry still loading: no suggestions yet.
+      useAgentsMock.mockReturnValue(makeQuery(undefined, { isLoading: true, isSuccess: false }));
+      const { rerenderSameTree } = renderPage();
+      fireEvent.click(screen.getByRole("button", { name: /tasks.new_task/i }));
+
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_title_placeholder"), {
+        target: { value: "For a hand agent" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_description_placeholder"), {
+        target: { value: "Not in the registry list yet" },
+      });
+      const assigneeInput = screen.getByPlaceholderText("tasks.field_assignee_placeholder");
+      fireEvent.change(assigneeInput, { target: { value: "hand-agent-x" } });
+
+      // Registry finishes loading with a list that does not contain
+      // "hand-agent-x" (e.g. it is a hand agent, or owned by someone else).
+      useAgentsMock.mockReturnValue(
+        makeQuery([
+          { id: "a1", name: "agent-alpha" },
+          { id: "a2", name: "agent-beta" },
+        ]),
+      );
+      rerenderSameTree();
+
+      // The typed value must still be there, and still submittable, rather
+      // than silently cleared or orphaned by a control that swapped under it.
+      expect(screen.getByPlaceholderText("tasks.field_assignee_placeholder")).toHaveValue("hand-agent-x");
+
+      fireEvent.click(screen.getByRole("button", { name: "tasks.submit" }));
+
+      await waitFor(() => {
+        expect(mutate).toHaveBeenCalledWith(
+          expect.objectContaining({ assigned_to: "hand-agent-x" }),
+        );
+      });
     });
 
     it("disables the submit button when title or description is empty", () => {
