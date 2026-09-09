@@ -14,6 +14,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_types::agent::AgentManifest;
+use librefang_types::error::LibreFangResult;
 use librefang_types::i18n::ErrorTranslator;
 use std::sync::Arc;
 
@@ -573,7 +574,8 @@ pub async fn create_agent_type(
 
     match store_create(&name, spec) {
         Ok(created) => {
-            record_template_version(&state, &created.name, &created.manifest_toml, "create");
+            let _ =
+                record_template_version(&state, &created.name, &created.manifest_toml, "create");
             (
                 StatusCode::CREATED,
                 Json(agent_type_detail(
@@ -672,7 +674,7 @@ pub async fn update_agent_type(
 
     match persist_agent_type(&name, &manifest) {
         Ok(rendered) => {
-            record_template_version(&state, &name, &rendered, "dashboard");
+            let _ = record_template_version(&state, &name, &rendered, "dashboard");
             (
                 StatusCode::OK,
                 Json(agent_type_detail(
@@ -1016,7 +1018,9 @@ pub async fn get_registry_diff(
 ///
 /// Records two snapshots, because this write destroys the local copy by design.
 /// A manifest whose current content came from a hand-edit of the file has no snapshot anywhere, so the pre-restore content is recorded first (`pre-registry-restore`) — otherwise, after the overwrite, that content is gone from disk and was never in history either, leaving nothing to go back to.
+/// That first snapshot is a precondition, not a courtesy: if it fails the route answers 500 and writes nothing, because proceeding would destroy the only copy of the content it just failed to save.
 /// The post-restore content is then recorded too (`registry-restore`), so `GET /api/templates/{name}/history` reports the registry copy as current rather than the previous dashboard save.
+/// That second one is best-effort — losing it costs a history row, not the manifest.
 #[utoipa::path(
     post,
     path = "/api/templates/{name}/restore",
@@ -1027,6 +1031,7 @@ pub async fn get_registry_diff(
         (status = 200, description = "Agent type restored from registry"),
         (status = 404, description = "Agent type or registry version not found"),
         (status = 409, description = "The name belongs to a live agent"),
+        (status = 500, description = "The pre-restore snapshot could not be recorded; nothing was overwritten"),
     )
 )]
 pub async fn restore_from_registry(
@@ -1036,11 +1041,12 @@ pub async fn restore_from_registry(
 ) -> impl IntoResponse {
     let lang = super::resolve_lang(lang.as_ref());
     let (not_found, invalid_manifest, read_failed) = template_error_messages(lang, &name);
-    let (registry_not_found, managed_elsewhere) = {
+    let (registry_not_found, managed_elsewhere, snapshot_failed) = {
         let t = ErrorTranslator::new(lang);
         (
             t.t_args("api-error-registry-type-not-found", &[("name", &name)]),
             t.t_args("api-error-agent-type-not-editable", &[("name", &name)]),
+            t.t("api-error-template-snapshot-failed"),
         )
     };
 
@@ -1098,12 +1104,25 @@ pub async fn restore_from_registry(
 
     // Snapshot the content this call is about to destroy, before it is gone from disk
     // and was never recorded anywhere else either.
-    record_template_version(&state, &name, &pre_restore_content, "pre-registry-restore");
+    //
+    // This is the one snapshot in this file that is not best-effort, because it is the only copy of the content the `persist_agent_type` below overwrites.
+    // An operator who hand-edited `agent.toml` has no history row for what is on disk, so a swallowed failure here — `SQLITE_BUSY` under a concurrent write is the realistic one — destroys that content and still answers 200.
+    // Refusing the restore leaves both copies intact and costs the operator a retry.
+    if let Err(e) =
+        record_template_version(&state, &name, &pre_restore_content, "pre-registry-restore")
+    {
+        tracing::error!(
+            template = %name,
+            error = %e,
+            "Refusing to restore from registry: the pre-restore snapshot failed, so overwriting would destroy the only copy of the current content"
+        );
+        return ApiErrorResponse::internal(snapshot_failed).into_json_tuple();
+    }
 
     // Write via the shared persist path (atomic rename).
     match persist_agent_type(&name, &manifest) {
         Ok(rendered) => {
-            record_template_version(&state, &name, &rendered, "registry-restore");
+            let _ = record_template_version(&state, &name, &rendered, "registry-restore");
             (
                 StatusCode::OK,
                 Json(agent_type_detail(
@@ -1277,17 +1296,25 @@ pub async fn promote_agent_type(
 // Template version history
 // ---------------------------------------------------------------------------
 
-/// Best-effort version snapshot — a recording failure must not block the
-/// create/update that triggered it.
-fn record_template_version(state: &AppState, name: &str, toml: &str, source: &str) {
+/// Record one version snapshot, warning on failure and returning it.
+///
+/// The failure is returned as well as logged because it is not equally harmless at every call site.
+/// A snapshot taken *after* a write costs one history row when it fails, and the content it describes is still on disk — those callers discard the `Result` on purpose.
+/// The `pre-registry-restore` snapshot in [`restore_from_registry`] is the opposite case: it is the only copy of content the very next line overwrites, so it has to be able to refuse.
+fn record_template_version(
+    state: &AppState,
+    name: &str,
+    toml: &str,
+    source: &str,
+) -> LibreFangResult<()> {
     let store = librefang_memory::TemplateVersionStore::new(state.kernel.memory_substrate().pool());
-    if let Err(e) = store.record_version(name, toml, source) {
+    store.record_version(name, toml, source).inspect_err(|e| {
         tracing::warn!(
             template = %name,
             error = %e,
             "Failed to record template version snapshot"
         );
-    }
+    })
 }
 
 /// GET /api/templates/{name}/history — how this template's config changed over time.
@@ -1424,7 +1451,7 @@ pub async fn restore_template_version(
 
     match persist_agent_type(&name, &manifest) {
         Ok(rendered) => {
-            record_template_version(&state, &name, &rendered, "restore");
+            let _ = record_template_version(&state, &name, &rendered, "restore");
             (
                 StatusCode::OK,
                 Json(agent_type_detail(

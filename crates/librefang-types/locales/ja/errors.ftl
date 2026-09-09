@@ -32,6 +32,7 @@ api-error-template-parse-failed = テンプレートの解析に失敗しまし�
 api-error-template-required = 'manifest_toml' または 'template' が必要です
 api-error-template-invalid-manifest = 無効なテンプレートマニフェスト
 api-error-template-read-failed = テンプレートの読み込みに失敗しました
+api-error-template-snapshot-failed = 現在のエージェントタイプのスナップショットを保存できなかったため、復元を中止し、何も上書きしていません。もう一度お試しください。
 api-error-template-promote-no-token = GitHubトークンが設定されていません。設定でGitHubを接続するか、GITHUB_TOKENを設定してください。
 api-error-template-promote-review-required = このテンプレートには、公開前に削除する必要があるプライベート情報がまだ含まれています。検出結果を確認してマニフェストを編集してください。
 api-error-template-promote-render-failed = サニタイズ済みマニフェストをTOMLとしてレンダリングできません: { $error }

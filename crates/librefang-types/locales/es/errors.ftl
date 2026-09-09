@@ -19,6 +19,7 @@ api-error-template-parse-failed = Error al analizar la plantilla: { $error }
 api-error-template-required = Se requiere 'manifest_toml' o 'template'
 api-error-template-invalid-manifest = Manifiesto de plantilla no válido
 api-error-template-read-failed = Error al leer la plantilla
+api-error-template-snapshot-failed = No se pudo guardar una instantánea del tipo de agente actual, así que la restauración se canceló y no se sobrescribió nada. Inténtelo de nuevo.
 api-error-template-promote-no-token = No hay token de GitHub configurado. Conecte GitHub en Ajustes o defina GITHUB_TOKEN.
 api-error-template-promote-review-required = Esta plantilla todavía contiene datos privados que deben eliminarse antes de publicarla. Revise los hallazgos y edite el manifiesto.
 api-error-template-promote-render-failed = No se puede renderizar el manifiesto saneado como TOML: { $error }

@@ -19,6 +19,7 @@ api-error-template-parse-failed = Échec de l'analyse du modèle : { $error }
 api-error-template-required = 'manifest_toml' ou 'template' est requis
 api-error-template-invalid-manifest = Manifeste de modèle non valide
 api-error-template-read-failed = Échec de la lecture du modèle
+api-error-template-snapshot-failed = Impossible d'enregistrer un instantané du type d'agent actuel : la restauration a été annulée et rien n'a été écrasé. Réessayez.
 api-error-template-promote-no-token = Aucun jeton GitHub configuré. Connectez GitHub dans les paramètres ou définissez GITHUB_TOKEN.
 api-error-template-promote-review-required = Ce modèle contient encore des données privées à supprimer avant publication. Examinez les résultats et modifiez le manifeste.
 api-error-template-promote-render-failed = Impossible de rendre le manifeste assaini en TOML : { $error }

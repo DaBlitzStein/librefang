@@ -1151,6 +1151,52 @@ async fn restore_from_registry_records_a_recoverable_pre_restore_snapshot() {
     cleanup(name);
 }
 
+/// A pre-restore snapshot that cannot be recorded has to abort the restore, not proceed without it.
+///
+/// The snapshot is best-effort at every other call site in the handler, and correctly so: those run *after* the write, so losing one costs a history row while the content is still on disk.
+/// Here the ordering inverts it. The content on disk may have come from a hand-edit and exist nowhere else, and the very next statement overwrites it, so a swallowed snapshot failure destroys the operator's configuration and still answers 200.
+///
+/// Dropping `template_versions` is the deterministic stand-in for the failure that actually happens — a `SQLITE_BUSY` from a concurrent writer — and reaches `record_version` as the same `LibreFangError::Memory`.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_refuses_to_overwrite_when_the_pre_restore_snapshot_fails() {
+    let _g = lock().lock().await;
+    let name = "at_registry_restore_snapshot_failure";
+    cleanup(name);
+    let hand_edited = registry_manifest_body(name, "hand edited on disk", 42);
+    write_agent_type(name, &hand_edited);
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
+
+    let h = boot().await;
+
+    // Break the snapshot store through the pool the substrate already exposes — the same
+    // route `goals_routes_integration.rs` uses to make a substrate read fail from out here.
+    h.state
+        .kernel
+        .memory_substrate()
+        .pool()
+        .get()
+        .expect("pool connection")
+        .execute("DROP TABLE template_versions", [])
+        .expect("drop template_versions");
+
+    let (status, body) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a restore that could not snapshot the current content must fail, not answer 200: {body}"
+    );
+
+    // The assertion the finding is about: the operator's content survived.
+    let on_disk = std::fs::read_to_string(agent_type_file(name)).expect("agent type still on disk");
+    assert_eq!(
+        on_disk, hand_edited,
+        "the hand-edited manifest must still be on disk — it was the only copy, and the \
+         snapshot meant to preserve it never landed"
+    );
+
+    cleanup(name);
+}
+
 /// Restoring must pin the manifest's own `name` field to the URL path
 /// segment, the same way `update_agent_type` already does — otherwise a
 /// registry document whose declared `name` disagrees with its directory

@@ -19,6 +19,7 @@ api-error-template-parse-failed = Vorlage konnte nicht analysiert werden: { $err
 api-error-template-required = 'manifest_toml' oder 'template' ist erforderlich
 api-error-template-invalid-manifest = Ungueltiges Vorlagenmanifest
 api-error-template-read-failed = Vorlage konnte nicht gelesen werden
+api-error-template-snapshot-failed = Es konnte kein Snapshot des aktuellen Agententyps gespeichert werden, daher wurde die Wiederherstellung abgebrochen und nichts überschrieben. Bitte erneut versuchen.
 api-error-template-promote-no-token = Kein GitHub-Token konfiguriert. Verbinden Sie GitHub in den Einstellungen oder setzen Sie GITHUB_TOKEN.
 api-error-template-promote-review-required = Diese Vorlage enthaelt noch private Details, die vor der Veroeffentlichung entfernt werden muessen. Pruefen Sie die Befunde und bearbeiten Sie das Manifest.
 api-error-template-promote-render-failed = Das bereinigte Manifest kann nicht als TOML gerendert werden: { $error }
