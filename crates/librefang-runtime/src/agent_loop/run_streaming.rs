@@ -1656,6 +1656,22 @@ async fn run_agent_loop_streaming_inner(
                     let (cleaned_text, parsed_directives) =
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
+                    // #8236: same guard as the non-streaming mirror in
+                    // `mod.rs` — the token cap can cut a tool-call markup
+                    // span off mid-call, leaving it permanently unterminated.
+                    let text = match replace_unrecoverable_tool_call_reply(&text) {
+                        std::borrow::Cow::Borrowed(_) => text,
+                        std::borrow::Cow::Owned(replacement) => replacement,
+                    };
+                    // …and the same catch-up send as the EndTurn arm below:
+                    // a reply that opened with a candidate opener was withheld
+                    // delta by delta, so without this the client gets no delta
+                    // at all for this turn.
+                    if stream_result.withheld_markup.is_some() {
+                        let _ = stream_tx
+                            .send(StreamEvent::TextDelta { text: text.clone() })
+                            .await;
+                    }
                     session.push_message(Message::assistant(&text));
                     if !opts.is_fork && !opts.incognito {
                         if let Err(e) = memory.save_session_async(session).await {

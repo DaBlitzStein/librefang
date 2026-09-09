@@ -408,17 +408,22 @@ pub(super) async fn stream_with_retry(
                                 markup_buffer = None;
                                 continue;
                             }
-                            if !text.is_empty() {
-                                content_emitted = true;
-                                text_emitted = true;
-                            }
-
                             // #8236: append to the candidate buffer if one is
                             // already open, else open one when this delta's
                             // text could be the start of a known opener.
+                            //
+                            // The buffer is anchored to the *first* text of the
+                            // attempt (`!text_emitted`). Opening one later would
+                            // withhold a suffix of a reply whose earlier deltas
+                            // already went out, and the caller's catch-up send
+                            // re-emits the whole text — delivering the opening
+                            // prose twice. It would also be pointless: the
+                            // honest-reply guard only ever replaces a reply that
+                            // is markup end to end, which this one is not.
                             if let Some(buf) = markup_buffer.as_mut() {
                                 buf.push_str(text);
                             } else if !text.is_empty()
+                                && !text_emitted
                                 && text_recovery::could_be_tool_call_opener(text.trim_start())
                             {
                                 markup_buffer = Some(text.clone());
@@ -428,6 +433,17 @@ pub(super) async fn stream_with_retry(
                                 let _ = outer_tx
                                     .send(StreamEvent::TextDelta { text: text.clone() })
                                     .await;
+                                // Both flags mean "bytes the caller has already
+                                // seen": they gate the no-retry-after-content
+                                // guard and the timed-out partial-text replay,
+                                // and a retry/replay only duplicates output that
+                                // actually reached `tx`. Marking a *withheld*
+                                // delta suppressed both for a turn where nothing
+                                // had been emitted at all.
+                                if !text.is_empty() {
+                                    content_emitted = true;
+                                    text_emitted = true;
+                                }
                             }
 
                             // Re-evaluate every time the buffer changes (also
@@ -450,9 +466,14 @@ pub(super) async fn stream_with_retry(
                                     );
                                 if ruled_out || resolved_with_content {
                                     let flushed = markup_buffer.take().unwrap_or_default();
+                                    let flushed_empty = flushed.is_empty();
                                     let _ = outer_tx
                                         .send(StreamEvent::TextDelta { text: flushed })
                                         .await;
+                                    if !flushed_empty {
+                                        content_emitted = true;
+                                        text_emitted = true;
+                                    }
                                 }
                             }
                         }
@@ -853,6 +874,89 @@ mod tests {
         assert!(
             result.withheld_markup.is_none(),
             "nothing should be left withheld once it resolved and was flushed"
+        );
+    }
+
+    /// A driver whose first attempt withholds everything it emits (a bare
+    /// opener) and then fails retryably; the second attempt answers normally.
+    struct WithheldMarkupThenOverloaded {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmDriver for WithheldMarkupThenOverloaded {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            unreachable!("this mock is only exercised through stream()")
+        }
+
+        async fn stream(
+            &self,
+            _req: CompletionRequest,
+            tx: mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                // `could_be_tool_call_opener` accepts this prefix, so the
+                // forwarding task withholds it — nothing reaches `tx`.
+                tx.send(StreamEvent::TextDelta {
+                    text: "<function=shell_exec".to_string(),
+                })
+                .await
+                .unwrap();
+                return Err(LlmError::Overloaded { retry_after_ms: 0 });
+            }
+            tx.send(StreamEvent::TextDelta {
+                text: "Recovered answer.".to_string(),
+            })
+            .await
+            .unwrap();
+            Ok(CompletionResponse {
+                content: vec![librefang_types::message::ContentBlock::Text {
+                    text: "Recovered answer.".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+                actual_provider: None,
+                actual_model: None,
+            })
+        }
+    }
+
+    /// Regression (#8236 review M4): the no-retry-after-content guard exists
+    /// because a retry re-streams a second response onto the same `tx`. A
+    /// delta the #8236 buffer *withheld* never reached `tx`, so it cannot be
+    /// duplicated — but the flags were set before the withhold/forward
+    /// decision, so any reply starting with a candidate opener (including a
+    /// bare `<` or a leading newline) turned an ordinary Overloaded into a
+    /// hard error instead of a retry.
+    #[tokio::test]
+    async fn retries_after_a_retryable_error_when_every_delta_was_withheld() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let driver = WithheldMarkupThenOverloaded {
+            attempts: attempts.clone(),
+        };
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = stream_with_retry(&driver, CompletionRequest::default(), tx, None, None)
+            .await
+            .expect("a retryable error with nothing on the wire must be retried, not surfaced");
+
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "the driver must have been called a second time"
+        );
+        assert_eq!(result.response.text(), "Recovered answer.");
+
+        let mut forwarded = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let StreamEvent::TextDelta { text } = event {
+                forwarded.push_str(&text);
+            }
+        }
+        assert_eq!(
+            forwarded, "Recovered answer.",
+            "the abandoned attempt's withheld markup must not reach the wire either"
         );
     }
 

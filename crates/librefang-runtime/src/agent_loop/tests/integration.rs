@@ -2625,6 +2625,173 @@ async fn test_streaming_markup_with_trailing_prose_reaches_the_wire_unchanged() 
     assert_eq!(result.response, full_text);
 }
 
+/// A streaming driver that emits the given chunks as separate `TextDelta`s
+/// before reporting `stop_reason` — the shape a real provider streams in,
+/// and the only way to exercise a withholding decision that is made *after*
+/// earlier deltas already went out.
+struct ChunkedDeltasDriver {
+    chunks: &'static [&'static str],
+    stop_reason: StopReason,
+}
+
+#[async_trait]
+impl LlmDriver for ChunkedDeltasDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Ok(CompletionResponse {
+            content: vec![ContentBlock::Text {
+                text: self.chunks.concat(),
+                provider_metadata: None,
+            }],
+            stop_reason: self.stop_reason,
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+            actual_provider: None,
+            actual_model: None,
+        })
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<CompletionResponse, LlmError> {
+        for chunk in self.chunks {
+            tx.send(StreamEvent::TextDelta {
+                text: (*chunk).to_string(),
+            })
+            .await
+            .map_err(|_| LlmError::Http("stream receiver dropped".to_string()))?;
+        }
+        let response = CompletionResponse {
+            content: vec![ContentBlock::Text {
+                text: self.chunks.concat(),
+                provider_metadata: None,
+            }],
+            stop_reason: self.stop_reason,
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+            actual_provider: None,
+            actual_model: None,
+        };
+        tx.send(StreamEvent::ContentComplete {
+            stop_reason: response.stop_reason,
+            usage: response.usage,
+        })
+        .await
+        .map_err(|_| LlmError::Http("stream receiver dropped".to_string()))?;
+        Ok(response)
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_prose_then_markup_is_not_delivered_twice() {
+    // Regression (#8236 review G1): the withholding buffer was re-evaluated on
+    // every delta instead of being anchored to the first one, so a reply whose
+    // *later* delta happened to start with a known opener opened a buffer even
+    // though earlier prose had already gone out on the wire. The stream then
+    // ended with `withheld_markup = Some(..)`, and the catch-up send in
+    // `run_streaming.rs` re-sent the *whole* text — delivering the opening
+    // prose to the client a second time. The honest-reply guard cannot rescue
+    // it either: the full text starts with prose, so it is not a pure-markup
+    // reply and is returned borrowed, unchanged.
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let chunks: &[&str] = &[
+        "Hello there.\n",
+        "<function=nonexistent_tool><parameter=a>1</parameter></function>",
+    ];
+    let full_text = chunks.concat();
+    let driver: Arc<dyn LlmDriver> = Arc::new(ChunkedDeltasDriver {
+        chunks,
+        stop_reason: StopReason::EndTurn,
+    });
+    let (tx, mut rx) = mpsc::channel(64);
+
+    let result = run_streaming_for_test(
+        &manifest,
+        "Say hello",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        tx,
+        &LoopOptions::default(),
+    )
+    .await
+    .expect("Streaming loop should complete without error");
+
+    let mut delta_texts = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let StreamEvent::TextDelta { text } = event {
+            delta_texts.push(text);
+        }
+    }
+    let all_deltas = delta_texts.join("");
+    assert_eq!(
+        all_deltas, full_text,
+        "every byte of the reply must reach the wire exactly once, got deltas: {delta_texts:?}"
+    );
+    assert_eq!(
+        result.response, full_text,
+        "the final response is unchanged — a reply that opens with real prose is not \
+         a pure-markup reply the honest-reply guard replaces"
+    );
+}
+
+#[tokio::test]
+async fn test_streaming_max_tokens_pure_markup_overflow_replaced_with_honest_reply() {
+    // Regression (#8236 review M3): the token-cap counterpart of
+    // `test_max_tokens_pure_markup_overflow_replaced_with_honest_reply`. The
+    // honest-reply guard was added to the non-streaming `MaxTokens` arm only,
+    // so a truncated `<function=...>` still reached the channel verbatim on
+    // the streaming path — the one the dashboard and every channel bridge
+    // take. The withheld first delta also has to be released here: without a
+    // catch-up send this turn delivers no delta at all.
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
+        text: "<function=shell_exec><parameter=command>ls -la /very/long/path/that/got/cut/off",
+        stop_reason: StopReason::MaxTokens,
+    });
+    let (tx, mut rx) = mpsc::channel(64);
+
+    let result = run_streaming_for_test(
+        &manifest,
+        "Run something",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        tx,
+        &LoopOptions::default(),
+    )
+    .await
+    .expect("Streaming loop should complete without error");
+
+    let mut delta_texts = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let StreamEvent::TextDelta { text } = event {
+            delta_texts.push(text);
+        }
+    }
+    let all_deltas = delta_texts.join("");
+    assert!(
+        !result.response.contains("<function="),
+        "raw tool-call markup must never reach the channel, got: {:?}",
+        result.response
+    );
+    assert!(
+        !all_deltas.contains("<function="),
+        "raw tool-call markup must never reach the wire, got deltas: {delta_texts:?}"
+    );
+    assert_eq!(
+        all_deltas, result.response,
+        "the corrected text must be delivered as the one delta of this turn, not swallowed"
+    );
+}
+
 // --- Parallel tool-dispatch integration (#3129 PR-4) -------------------
 //
 // These exercise the real `run_agent_loop` ToolUse branch end to end with
