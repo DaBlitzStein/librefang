@@ -851,11 +851,23 @@ impl LibreFangKernel {
                     .await
                 {
                     Ok(reset) if !reset.is_empty() => {
+                        // `global_ttl_secs`, not `ttl_secs`: since
+                        // `task_reset_stuck` resolves the deadline per row via
+                        // `COALESCE(timeout_secs, ?1)`, this number is the
+                        // global fallback and not necessarily the deadline any
+                        // of these rows was swept on. The degenerate case this
+                        // PR deliberately enables is `claim_ttl_secs = 0` with
+                        // a task carrying `timeout_secs = 300`: a name of
+                        // `ttl_secs` would print `0` next to a reclaim that
+                        // happened at 300s, pointing the operator at the one
+                        // knob their config says is switched off.
                         warn!(
                             count = reset.len(),
-                            ttl_secs,
+                            global_ttl_secs = ttl_secs,
                             task_ids = ?reset,
-                            "Auto-reset stuck in_progress tasks past claim TTL (issue #2923)"
+                            "Auto-reset stuck in_progress tasks past their claim deadline — \
+                             per-task `timeout_secs` where set, otherwise the global TTL \
+                             reported here (issue #2923)"
                         );
                     }
                     Ok(_) => {}
