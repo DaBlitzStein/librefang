@@ -99,6 +99,63 @@ const MAX_RATE_LIMIT_STREAK: u32 = 3;
 /// toward this one.
 const MAX_ERROR_STREAK: u32 = 5;
 
+/// Consecutive dispatch failures on one leg of the verifier gate, split by
+/// kind the same way the generator's own `rate_limit_streak` / `error_streak`
+/// pair is.
+///
+/// Two things this deliberately does NOT do, each because the obvious
+/// shortcut produces a counter that can never trip (#7785 re-review):
+///
+/// - It is not shared between the verdict leg and the rework leg. A verdict
+///   dispatch that succeeds is no evidence the rework dispatch works, so a
+///   shared counter would be reset by the other leg's success on every
+///   iteration — the same trap that kept the generator's `error_streak` from
+///   ever noticing a dead verifier.
+/// - It is not the generator's `error_streak`, even for the rework turn,
+///   which is a generator dispatch. That counter is reset at the top of every
+///   successful iteration (`error_streak = 0`) and is only *checked* inside
+///   the arm where the opening turn failed, so a rework that fails every
+///   iteration while the opening turn keeps succeeding would increment
+///   nothing that is ever read.
+#[derive(Default)]
+struct GateStreak {
+    rate_limits: u32,
+    errors: u32,
+}
+
+impl GateStreak {
+    /// Record one dispatch failure. Returns the phase the run should end in
+    /// once this leg has failed too many times in a row, `None` while it is
+    /// still under the threshold.
+    ///
+    /// A throttled dependency is busy, not broken: routing the error through
+    /// `classify_tick_error` first is what lets a rate-limited verifier end
+    /// the run as `RateLimited` — the phase the dashboard renders as the
+    /// retry-later signal — instead of being reported as unreachable and
+    /// sending the operator looking for an agent that was never deleted.
+    fn record(&mut self, error: &str) -> Option<GoalRunPhase> {
+        match classify_tick_error(error) {
+            TickOutcome::RateLimited => {
+                self.rate_limits = self.rate_limits.saturating_add(1);
+                (self.rate_limits >= MAX_RATE_LIMIT_STREAK).then_some(GoalRunPhase::RateLimited)
+            }
+            TickOutcome::Ok => {
+                self.errors = self.errors.saturating_add(1);
+                (self.errors >= MAX_ERROR_STREAK).then_some(GoalRunPhase::Stopped)
+            }
+        }
+    }
+
+    /// A dispatch that got a reply — whatever the reply said — means this leg
+    /// is up. Only *consecutive* failures indicate a dead dependency; a flaky
+    /// one that recovers between rejections must not have its errors
+    /// accumulate across iterations toward a trip it never earned.
+    fn reset(&mut self) {
+        self.rate_limits = 0;
+        self.errors = 0;
+    }
+}
+
 /// Marker prefix for a reusable lesson the agent wants to keep.
 const LEARNED_MARKER: &str = "GOAL_LEARNED:";
 
@@ -942,12 +999,15 @@ async fn run_loop<F, Fut, L, E, Efut>(
     let mut error_streak: u32 = 0;
     // #7785 review: the generator's streak resets on every successful tick,
     // so a dead verifier (deleted agent, revoked key) never trips it — the
-    // generator keeps succeeding while the gate stays open. The verifier
-    // carries its own streak so a permanently unreachable one stops the run
-    // in Stopped with the cause on last_error, instead of paying for every
+    // generator keeps succeeding while the gate stays open. Each leg of the
+    // gate carries its own streak so a permanently unreachable one ends the
+    // run with the cause on last_error, instead of paying for every
     // remaining iteration plus a dead dispatch per rework round.
-    let mut verifier_error_streak: u32 = 0;
-    let mut dead_verifier_cause: Option<String> = None;
+    let mut verdict_streak = GateStreak::default();
+    let mut rework_streak = GateStreak::default();
+    // Set once a gate leg has failed often enough to end the run, and read
+    // after this iteration's bookkeeping has landed.
+    let mut gate_break: Option<GoalRunPhase> = None;
     // Lessons captured via `GOAL_LEARNED:` across the whole run. Replayed into
     // each iteration's prompt and handed to `on_learnings_captured` at the end.
     let mut learnings: Vec<String> = Vec::new();
@@ -1010,9 +1070,17 @@ async fn run_loop<F, Fut, L, E, Efut>(
                 error_streak = 0;
                 let mut output = reply;
                 let mut parsed = parse_tick(&output);
-                if loop_engineering {
-                    learnings.append(&mut parsed.learnings);
-                }
+                // #7785 re-review: this iteration's lessons are held aside and
+                // REPLACED by each rework round, exactly like `parsed` itself
+                // (`:1095`), because the rework prompt promises the agent that
+                // "the reworked reply replaces the rejected one". Appending
+                // straight into `learnings` here instead stored the rejected
+                // draft's lesson AND the corrected one — up to
+                // `verify_max_retries` copies of a single lesson, which then
+                // crowd genuinely distinct earlier ones out of the 6-entry
+                // `LEARNINGS_IN_PROMPT` replay window and pad the numbered
+                // list a human reads in `librefang skill pending show`.
+                let mut iteration_learnings = std::mem::take(&mut parsed.learnings);
 
                 // Verifier gate. Each rejection sends the work back to the
                 // generator WITH the verifier's reason: re-asking the same
@@ -1032,14 +1100,7 @@ async fn run_loop<F, Fut, L, E, Efut>(
                         .await
                         {
                             Ok(v) => {
-                                // A dispatch that got a reply — pass or fail
-                                // verdict, doesn't matter here — means the
-                                // verifier is up. Only *consecutive* failures
-                                // indicate a dead one; a flaky verifier that
-                                // recovers between rejections must not have
-                                // its errors accumulate across iterations
-                                // toward a trip it never earned.
-                                verifier_error_streak = 0;
+                                verdict_streak.reset();
                                 v
                             }
                             Err(e) => {
@@ -1054,18 +1115,14 @@ async fn run_loop<F, Fut, L, E, Efut>(
                                 // does not regenerate is not a retry) says
                                 // this arm is waste, not recovery. One
                                 // dispatch failure rejects the iteration, and
-                                // the streak counter below decides whether a
-                                // permanently dead verifier ends the run
-                                // (#7785 review).
+                                // `GateStreak` decides whether a permanently
+                                // failing verifier ends the run (#7785 review).
                                 warn!(goal_id = %goal_id, verifier = %verifier, error = %e,
                                       "Goal run: verifier call failed; treating as a rejection");
-                                verifier_error_streak = verifier_error_streak.saturating_add(1);
-                                if verifier_error_streak >= MAX_ERROR_STREAK {
-                                    dead_verifier_cause =
-                                        Some(format!("verifier unreachable: {e}"));
-                                    warn!(goal_id = %goal_id, verifier = %verifier,
-                                          consecutive_verifier_errors = verifier_error_streak,
-                                          "Goal run: verifier unreachable across iterations; stopping the run");
+                                if let Some(phase) = verdict_streak.record(&e) {
+                                    warn!(goal_id = %goal_id, verifier = %verifier, %phase,
+                                          "Goal run: verifier failing across iterations; ending the run");
+                                    gate_break = Some(phase);
                                 }
                                 verified = false;
                                 rejection = Some(format!("verifier unreachable: {e}"));
@@ -1090,19 +1147,51 @@ async fn run_loop<F, Fut, L, E, Efut>(
                               verdict = %verdict.trim(), "Goal run: verifier rejected; reworking");
                         match send_message(agent_id, build_rework_prompt(&goal, &verdict)).await {
                             Ok(reworked) => {
+                                rework_streak.reset();
                                 output = reworked;
                                 parsed = parse_tick(&output);
-                                if loop_engineering {
-                                    learnings.append(&mut parsed.learnings);
-                                }
+                                iteration_learnings = std::mem::take(&mut parsed.learnings);
                             }
                             Err(e) => {
+                                // #7785 re-review: the third leg of the loop
+                                // needs its own breaker for the same reason
+                                // the other two have one. The rework prompt
+                                // is dispatched into a session one turn longer
+                                // than the opening one that just succeeded, so
+                                // a context-length or request-size rejection
+                                // surfaces here first and then repeats every
+                                // iteration while the shorter opening prompt
+                                // keeps succeeding — burning the whole budget
+                                // and ending in `MaxIterationsReached` with no
+                                // cause attributed.
                                 warn!(goal_id = %goal_id, error = %e,
                                       "Goal run: rework turn failed; keeping the rejected output");
+                                if let Some(phase) = rework_streak.record(&e) {
+                                    warn!(goal_id = %goal_id, %phase,
+                                          "Goal run: rework turn failing across iterations; ending the run");
+                                    gate_break = Some(phase);
+                                }
                                 verified = false;
                                 rejection = Some(format!("rework turn failed: {e}"));
                                 break;
                             }
+                        }
+                    }
+                }
+
+                // Fold this iteration's surviving lessons into the run's list,
+                // skipping any text already captured. Deliberately NOT gated
+                // on `verified`, for the same reason `GOAL_BLOCKED` below is
+                // not: `GOAL_LEARNED` closes nothing and asserts nothing about
+                // the work the verifier grades, so it cannot cross the
+                // boundary the gate on `done` exists to protect — and a lesson
+                // drawn from an attempt that did not land is exactly the kind
+                // a human reviewing the draft skill wants to see.
+                // Linear scan: the list is bounded by iterations × retries.
+                if loop_engineering {
+                    for lesson in iteration_learnings {
+                        if !learnings.iter().any(|k| k == &lesson) {
+                            learnings.push(lesson);
                         }
                     }
                 }
@@ -1160,7 +1249,22 @@ async fn run_loop<F, Fut, L, E, Efut>(
                 } else {
                     parsed.progress.map(|p| p.min(99))
                 };
-                patch_goal(&substrate, goal_id, new_progress, new_status);
+                // #7785 re-review: an operator's `PUT /api/goals/{id}` that
+                // sets a terminal status now raises this run's stop flag
+                // (`routes/goals.rs`, the interlock `delete_goal` already
+                // had). Writing the run's own status on top of that would
+                // revert the operator's choice — this iteration's
+                // `new_status` is `InProgress` whenever the work was not
+                // passed, which is exactly the case an operator marking the
+                // goal `completed` is overriding. Once the run is stopped the
+                // goal document belongs to whoever stopped it. The run row
+                // below is still persisted either way: those turns were paid
+                // for, and hiding them would leave the run API reporting a
+                // stale iteration count.
+                let stopped_externally = stop.load(Ordering::SeqCst);
+                if !stopped_externally {
+                    patch_goal(&substrate, goal_id, new_progress, new_status);
+                }
 
                 // Release before persist_run: state()'s try_lock returns None (→ running:false) while held.
                 let snapshot = {
@@ -1183,13 +1287,13 @@ async fn run_loop<F, Fut, L, E, Efut>(
                 // crash before the next tick still leaves a recoverable row.
                 persist_run(&store, &snapshot);
 
-                // A permanently dead verifier stops the run here, AFTER the
+                // A permanently failing gate leg ends the run here, AFTER the
                 // same bookkeeping every other outcome gets above (iteration
                 // count, progress, the persisted row) — breaking before it
                 // left the run API reporting a stale iteration count for
                 // turns the daemon had already paid for (#7785 review).
-                if dead_verifier_cause.is_some() {
-                    break GoalRunPhase::Stopped;
+                if let Some(phase) = gate_break {
+                    break phase;
                 }
                 if done {
                     break GoalRunPhase::Finished;
@@ -3427,6 +3531,290 @@ mod tests {
         assert_eq!(
             s.iteration, MAX_ERROR_STREAK,
             "the recorded iteration count must match the turns actually paid for"
+        );
+    }
+
+    /// #7785 re-review: gating `Completed` on `verify_agent_id.is_none()`
+    /// closed the `goal_update` tool's bypass but also took away the only
+    /// path by which an OPERATOR's completion ended a gated run — and the
+    /// iteration already in flight then wrote the operator's `completed`
+    /// back to `in_progress`, leaving the incoherent `progress: 100` +
+    /// `status: in_progress` pair and buying the rest of the budget.
+    ///
+    /// The fix is not to guess which writer produced the value: it is to
+    /// give the operator the run's real control channel (`stop_goal_run`,
+    /// now called by `update_goal_by_id` the way `delete_goal` always has)
+    /// and to stop the run overwriting a document it no longer owns. This
+    /// simulates the operator's `PUT` landing mid-iteration, which is the
+    /// window the clobber lived in.
+    #[tokio::test(start_paused = true)]
+    async fn an_operator_stop_landing_mid_iteration_keeps_the_status_it_wrote() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let verifier = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_verified_state(goal.id, agent_id, verifier, 25, 1);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let sub = substrate.clone();
+        let stop_flag = stop.clone();
+        let goal_id = goal.id;
+        let send = move |target: AgentId, _p: String| {
+            let sub = sub.clone();
+            let stop_flag = stop_flag.clone();
+            async move {
+                if target == verifier {
+                    // The work is not passed, so the runner's own
+                    // `new_status` for this iteration is `InProgress` — the
+                    // value that used to clobber the operator's choice.
+                    return Ok::<String, String>("VERDICT: FAIL\nREASON: not yet".to_string());
+                }
+                // The operator's `PUT /api/goals/{id}` landing while the
+                // generator turn is in flight: the document is written and
+                // the run's stop flag goes up, both before this iteration's
+                // bookkeeping runs.
+                patch_goal(&sub, goal_id, Some(100), Some(GoalStatus::Completed));
+                stop_flag.store(true, Ordering::SeqCst);
+                Ok("still working".to_string())
+            }
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            25,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            true,
+            state.clone(),
+            stop,
+            rx,
+            None,
+        )
+        .await;
+
+        let stored = load_goal(&substrate, goal.id).expect("goal must still exist");
+        assert_eq!(
+            stored.status,
+            GoalStatus::Completed,
+            "the run must not write its own status over the one an operator chose"
+        );
+        assert_eq!(
+            stored.progress, 100,
+            "nor its own progress, which would leave the 100/in_progress pair incoherent"
+        );
+        assert_eq!(state.lock().await.phase, GoalRunPhase::Stopped);
+        assert_eq!(
+            state.lock().await.iteration,
+            1,
+            "the turn was paid for, so the run row still records it"
+        );
+    }
+
+    /// #7785 re-review: a verifier dispatch failure never reached
+    /// `classify_tick_error`, so a THROTTLED verifier was counted as a DEAD
+    /// one. The operator was told the verifier did not exist when it was
+    /// only busy, and `RateLimited` — the phase the dashboard renders as the
+    /// retry-later signal — never fired for the verifier leg.
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limited_verifier_ends_the_run_as_rate_limited_not_unreachable() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let verifier = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_verified_state(goal.id, agent_id, verifier, 100, 1);
+
+        let verifier_calls = Arc::new(AtomicU64::new(0));
+        let vc = verifier_calls.clone();
+        let send = move |target: AgentId, _p: String| {
+            let vc = vc.clone();
+            async move {
+                if target == verifier {
+                    vc.fetch_add(1, Ordering::SeqCst);
+                    Err::<String, String>(format!(
+                        "provider throttled {} 30000",
+                        librefang_channels::message_journal::RATE_LIMIT_DEFER_MARKER
+                    ))
+                } else {
+                    Ok("still working".to_string())
+                }
+            }
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            100,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        let s = state.lock().await;
+        assert_eq!(
+            s.phase,
+            GoalRunPhase::RateLimited,
+            "a throttled verifier is busy, not missing"
+        );
+        assert_eq!(
+            verifier_calls.load(Ordering::SeqCst) as u32,
+            MAX_RATE_LIMIT_STREAK,
+            "and it must trip the rate-limit breaker's shorter streak, not the error one"
+        );
+    }
+
+    /// #7785 re-review: the rework turn's failure fed no streak counter, so
+    /// it was the one leg of the loop that could still burn the whole
+    /// iteration budget on a permanently failing dispatch — the
+    /// "healthy-looking exhausted budget" the two sibling breakers exist to
+    /// remove.
+    ///
+    /// It cannot be counted toward the generator's `error_streak`, which is
+    /// reset at the top of every successful iteration and only *checked* in
+    /// the arm where the opening turn failed: the opening turn keeps
+    /// succeeding here, so that counter would be zeroed every iteration and
+    /// never read. Hence the rework leg's own `GateStreak`.
+    #[tokio::test(start_paused = true)]
+    async fn a_rework_turn_that_always_fails_stops_the_run_before_the_iteration_cap() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let verifier = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        // Two rework rounds allowed, so a FAIL verdict dispatches a rework
+        // turn rather than rejecting the iteration outright.
+        let state = mk_verified_state(goal.id, agent_id, verifier, 100, 2);
+
+        let rework_calls = Arc::new(AtomicU64::new(0));
+        let rc = rework_calls.clone();
+        let send = move |target: AgentId, prompt: String| {
+            let rc = rc.clone();
+            async move {
+                if target == verifier {
+                    return Ok::<String, String>("VERDICT: FAIL\nREASON: not yet".to_string());
+                }
+                if prompt.starts_with("[GOAL REWORK]") {
+                    // The longer prompt is the one the provider rejects —
+                    // a context-length or request-size limit the shorter
+                    // opening prompt stays under.
+                    rc.fetch_add(1, Ordering::SeqCst);
+                    return Err("request too large for the model's context".to_string());
+                }
+                Ok("still working".to_string())
+            }
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            100,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        let s = state.lock().await;
+        assert_eq!(
+            s.phase,
+            GoalRunPhase::Stopped,
+            "a permanently failing rework dispatch must end the run, not exhaust the budget"
+        );
+        assert_eq!(
+            rework_calls.load(Ordering::SeqCst) as u32,
+            MAX_ERROR_STREAK,
+            "the breaker must fire at the streak limit, not at the iteration cap"
+        );
+        assert_eq!(
+            s.last_error.as_deref(),
+            Some(
+                "Iteration 5 did not pass verification: rework turn failed: \
+                 request too large for the model's context"
+            ),
+            "and the cause must be attributed rather than left blank"
+        );
+    }
+
+    /// #7785 re-review: learnings were appended before the gate and again per
+    /// rework round with no dedup at any layer, so one lesson re-stated in
+    /// the corrected reply was stored once per round. Those copies filled the
+    /// 6-entry `LEARNINGS_IN_PROMPT` replay window and padded the numbered
+    /// list a human reads in `librefang skill pending show`, pushing
+    /// genuinely distinct earlier lessons out.
+    ///
+    /// `parsed` is already REPLACED by each rework round because the rework
+    /// prompt promises "the reworked reply replaces the rejected one";
+    /// learnings now follow the same rule, and the run-level list refuses a
+    /// text it already holds.
+    #[tokio::test(start_paused = true)]
+    async fn a_lesson_restated_in_the_reworked_reply_is_stored_once() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let verifier = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_verified_state(goal.id, agent_id, verifier, 1, 2);
+
+        let send = move |target: AgentId, prompt: String| async move {
+            if target == verifier {
+                return Ok::<String, String>("VERDICT: FAIL\nREASON: not yet".to_string());
+            }
+            if prompt.starts_with("[GOAL REWORK]") {
+                // The corrected reply restates the same lesson and adds one.
+                return Ok("GOAL_LEARNED: Backoff beats retrying immediately\n\
+                           GOAL_LEARNED: Read the quota header first"
+                    .to_string());
+            }
+            Ok("GOAL_LEARNED: Backoff beats retrying immediately".to_string())
+        };
+        let (tx_hook, rx_hook) = std::sync::mpsc::channel::<Vec<String>>();
+
+        run_loop(
+            goal.id,
+            agent_id,
+            1,
+            substrate.clone(),
+            send,
+            move |l: Vec<String>| {
+                let _ = tx_hook.send(l);
+            },
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            rx_hook.try_recv().unwrap(),
+            vec![
+                "Backoff beats retrying immediately".to_string(),
+                "Read the quota header first".to_string(),
+            ],
+            "the restated lesson must be kept once, and the new one must survive with it"
         );
     }
 

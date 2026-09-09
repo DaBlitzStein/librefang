@@ -1128,6 +1128,85 @@ async fn goals_update_blank_verify_agent_id_clears_assignment() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
 }
 
+/// #7785 re-review: nothing rejected `verify_agent_id == agent_id`, so the
+/// gate could be configured wide open. With both ids equal the verdict prompt
+/// goes to the same persistent session that produced the output one turn
+/// earlier, so `VERDICT: PASS` is the expected reply — while the run API and
+/// the dashboard's `loop_engineering` badge both report a verifier that is
+/// not verifying.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_rejects_an_agent_verifying_its_own_work() {
+    let h = boot().await;
+    let agent = uuid::Uuid::new_v4().to_string();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({
+            "title": "Self-graded",
+            "agent_id": agent,
+            "verify_agent_id": agent,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
+/// Same rule on update, checked against the EFFECTIVE post-update pair: either
+/// id can be absent from a partial update, so assigning a verifier that
+/// happens to equal the goal's existing agent is the same self-grading
+/// configuration as sending both at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_rejects_an_agent_verifying_its_own_work() {
+    let h = boot().await;
+    let agent = uuid::Uuid::new_v4().to_string();
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "Assigned", "agent_id": agent}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    // Only the verifier is sent; `agent_id` comes from the stored document.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"verify_agent_id": agent})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+
+    // And the rejected write left nothing behind.
+    let (status, body) = json_request(&h, Method::GET, &format!("/api/goals/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert!(
+        body.get("verify_agent_id").is_none(),
+        "a rejected update must not have persisted the verifier: {body:?}"
+    );
+}
+
+/// #7785 re-review: create stored a blank `evaluator_model` as `""` while
+/// update treats the identical payload as the clear signal and removes the
+/// key, so a created goal round-tripped differently from an updated one and
+/// `GET /api/goals` handed the dashboard a value no update would ever write.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_treats_blank_evaluator_model_as_absent() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({"title": "No evaluator", "evaluator_model": "   "})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
+    assert!(
+        body.get("evaluator_model").is_none(),
+        "blank evaluator_model must not be persisted: {body:?}"
+    );
+}
+
 /// #6562: create / update now reject a non-UUID `agent_id`, but goals written
 /// before that fix still carry junk.
 /// Reporting those as unassigned points the operator at a field that already looks filled in, so the two cases get distinct messages.
