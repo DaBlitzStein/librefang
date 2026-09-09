@@ -2414,7 +2414,6 @@ tui-wizard-status-saved = Конфігурацію збережено — { $pro
 tui-wizard-status-save-fail = Не вдалося зберегти конфігурацію: { $error }
 tui-wizard-status-continuing = Продовження...
 tui-event-manifest-history-fetch-failed = Не вдалося завантажити історію конфігурації агента
-tui-event-manifest-history-daemon-only = Історію конфігурації записує демон; запустіть його та підключіться знову.
 tui-event-model-params-fetch-failed = Не вдалося завантажити параметри моделі агента
 tui-event-model-params-update-failed = Не вдалося зберегти параметри моделі
 tui-event-model-params-daemon-only = Параметри моделі редагуються через демон; запустіть його та підключіться знову.

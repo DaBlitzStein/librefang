@@ -117,6 +117,12 @@ pub struct AgentSelectState {
     /// A fetch is in flight. Distinguishes "still loading" from "this agent has
     /// no recorded history", which would otherwise render the same empty pane.
     pub manifest_history_loading: bool,
+    /// Why the last history fetch produced nothing, when it failed.
+    ///
+    /// Its own field rather than the shared `status_msg`: that one collects every
+    /// agent-tab message, so a skills or channels error arriving while a history
+    /// fetch is outstanding would otherwise be rendered as this fetch's reason.
+    pub manifest_history_error: Option<String>,
 
     // Result
     pub spawned_toml: Option<String>,
@@ -256,6 +262,7 @@ impl AgentSelectState {
             manifest_history: Vec::new(),
             manifest_history_list: ListState::default(),
             manifest_history_loading: false,
+            manifest_history_error: None,
             available_skills: Vec::new(),
             skill_cursor: 0,
             available_mcp: Vec::new(),
@@ -287,6 +294,7 @@ impl AgentSelectState {
         self.manifest_history.clear();
         self.manifest_history_list.select(None);
         self.manifest_history_loading = false;
+        self.manifest_history_error = None;
         self.spawned_toml = None;
         self.status_msg.clear();
         self.search_active = false;
@@ -635,9 +643,9 @@ impl AgentSelectState {
                     self.manifest_history.clear();
                     self.manifest_history_list.select(None);
                     self.manifest_history_loading = true;
-                    // Cleared so any message the pane finds afterwards belongs
-                    // to this fetch and not to some earlier action.
-                    self.status_msg.clear();
+                    // Cleared so any reason the pane shows afterwards belongs to
+                    // this fetch and not to an earlier one.
+                    self.manifest_history_error = None;
                     self.sub = AgentSubScreen::ManifestHistory;
                     return AgentAction::FetchManifestHistory(id);
                 }
@@ -675,9 +683,26 @@ impl AgentSelectState {
     /// Record the snapshots a fetch returned and put the cursor on the newest.
     pub fn set_manifest_history(&mut self, versions: Vec<ManifestVersion>) {
         self.manifest_history_loading = false;
+        self.manifest_history_error = None;
         self.manifest_history_list
             .select((!versions.is_empty()).then_some(0));
         self.manifest_history = versions;
+    }
+
+    /// Record why a history fetch produced nothing, so the pane says that rather
+    /// than reporting the agent has no recorded history.
+    pub fn set_manifest_history_error(&mut self, message: String) {
+        self.manifest_history_loading = false;
+        self.manifest_history_error = Some(message);
+    }
+
+    /// Whether a history response for `agent_id` belongs to the agent now open.
+    ///
+    /// A slow response for agent A can land after the operator has moved to agent
+    /// B and asked for its history; this pane renders a whole `agent.toml`, so
+    /// showing A's under B's header actively misleads rather than merely lagging.
+    pub fn manifest_history_is_for(&self, agent_id: &str) -> bool {
+        self.detail.as_ref().is_some_and(|d| d.id == agent_id)
     }
 
     /// Key handling for the inference-parameter editor.
@@ -1940,13 +1965,14 @@ fn draw_manifest_history(f: &mut Frame, area: Rect, state: &mut AgentSelectState
     let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(inner);
 
     if state.manifest_history.is_empty() {
-        // A failed fetch writes `status_msg` and clears the loading flag, so
-        // the pane says why it is empty instead of claiming the agent has no
-        // recorded history.
+        // A failed fetch writes `manifest_history_error` and clears the loading
+        // flag, so the pane says why it is empty instead of claiming the agent has
+        // no recorded history. Reading the shared `status_msg` here instead would
+        // show whatever unrelated agent-tab message happened to arrive first.
         let message = if state.manifest_history_loading {
             crate::i18n::t("tui-agents-label-manifest-history-loading")
-        } else if !state.status_msg.is_empty() {
-            state.status_msg.clone()
+        } else if let Some(reason) = state.manifest_history_error.clone() {
+            reason
         } else {
             crate::i18n::t("tui-agents-label-manifest-history-empty")
         };
@@ -2097,15 +2123,21 @@ mod tests {
             ..Default::default()
         });
         state.status_msg = "stale message".to_string();
+        state.manifest_history_error = Some("an earlier fetch failed".to_string());
 
         let action = state.handle_key(press(KeyCode::Char('h')));
 
         assert!(state.sub == AgentSubScreen::ManifestHistory);
         assert!(state.manifest_history_loading);
-        assert!(
-            state.status_msg.is_empty(),
+        assert_eq!(
+            state.manifest_history_error, None,
             "an earlier status must not be mistaken for this fetch's error"
         );
+        // `status_msg` is deliberately left alone: it is the agent list's message
+        // line, not this pane's, and the pane no longer reads it. Clearing it here
+        // would silently drop an unrelated agent-tab message the operator has not
+        // seen yet.
+        assert_eq!(state.status_msg, "stale message");
         match action {
             AgentAction::FetchManifestHistory(id) => {
                 assert_eq!(id, "11111111-2222-3333-4444-555555555555");
@@ -2203,14 +2235,13 @@ mod tests {
     }
 
     /// A rejected id (400 for a non-UUID, 404 for one the registry does not
-    /// know) arrives as a status message; the pane must show it instead of the
+    /// know) arrives as a history failure; the pane must show it instead of the
     /// "no changes recorded" line, which would be a different and wrong answer.
     #[test]
     fn a_rejected_agent_id_shows_the_daemons_reason_not_the_empty_state() {
         let mut state = AgentSelectState::new();
         state.sub = AgentSubScreen::ManifestHistory;
-        state.manifest_history_loading = false;
-        state.status_msg = "Agent not found".to_string();
+        state.set_manifest_history_error("Agent not found".to_string());
 
         let rendered = render(&mut state);
 
@@ -2221,6 +2252,29 @@ mod tests {
         assert!(
             !rendered.contains(&crate::i18n::t("tui-agents-label-manifest-history-empty")),
             "a failed fetch must not read as an agent with no history:\n{rendered}"
+        );
+    }
+
+    /// `status_msg` collects every agent-tab message. A skills or channels error
+    /// arriving while a history fetch is outstanding used to be rendered here as
+    /// this fetch's reason, so an operator read an unrelated failure where "no
+    /// configuration changes recorded" belonged.
+    #[test]
+    fn an_unrelated_agent_tab_error_is_not_shown_as_the_history_fetchs_reason() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(Vec::new());
+        state.status_msg = "Failed to save skills".to_string();
+
+        let rendered = render(&mut state);
+
+        assert!(
+            !rendered.contains("Failed to save skills"),
+            "an unrelated agent-tab error must not stand in for the history fetch's reason:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(&crate::i18n::t("tui-agents-label-manifest-history-empty")),
+            "an agent with no recorded history must still say so:\n{rendered}"
         );
     }
 
