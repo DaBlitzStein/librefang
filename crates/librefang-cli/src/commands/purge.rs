@@ -18,7 +18,13 @@ use std::path::Path;
 /// fires — the substrate just requires one.
 const PURGE_DECAY_RATE: f32 = 0.01;
 
-pub(crate) fn cmd_purge(config: Option<&Path>, agent: &str, yes: bool, dry_run: bool) -> i32 {
+pub(crate) fn cmd_purge(
+    config: Option<&Path>,
+    agent: &str,
+    yes: bool,
+    dry_run: bool,
+    force: bool,
+) -> i32 {
     let config = match resolve_config(config) {
         Ok(c) => c,
         Err(e) => {
@@ -27,7 +33,27 @@ pub(crate) fn cmd_purge(config: Option<&Path>, agent: &str, yes: bool, dry_run: 
         }
     };
     let home = config.home_dir.clone();
-    let db = home.join("data").join("librefang.db");
+
+    // A running daemon keeps this agent alive in memory: it re-persists a
+    // resurrected roster entry on its next save, and a later respawn can
+    // land on a different UUID once the identity record is gone too. Only
+    // the destructive path needs the daemon gone — a dry run touches
+    // nothing the daemon could race against, and `--force` is the explicit
+    // override for an operator who has already stopped the daemon by other
+    // means (or knows `daemon.json` is stale).
+    if let Some(base) = daemon_running_guard(
+        crate::commands::common::find_daemon_in_home(&home).as_deref(),
+        dry_run,
+        force,
+    ) {
+        eprintln!(
+            "{}",
+            i18n::t_args("purge-failed-daemon-running", &[("url", &base)])
+        );
+        return 1;
+    }
+
+    let db = purge_db_path(&config);
     if !db.exists() {
         eprintln!(
             "{}",
@@ -56,6 +82,39 @@ pub(crate) fn cmd_purge(config: Option<&Path>, agent: &str, yes: bool, dry_run: 
         // for.
         yes || prompt_yes_no(&i18n::t("label-confirm-prompt"), false)
     })
+}
+
+/// Where the purge target's SQLite database lives.
+///
+/// Mirrors the resolution `monitoring::cmd_audit_reset` already uses:
+/// `[memory] sqlite_path` wins outright, falling back to
+/// `data_dir/librefang.db`. Hardcoding `<home>/data/librefang.db` instead
+/// would, for an install with a custom `data_dir` or `sqlite_path`, either
+/// miss the live database (exit 1) or silently open a stale one at the
+/// default path and report success while the live rows survive untouched.
+fn purge_db_path(config: &KernelConfig) -> std::path::PathBuf {
+    config
+        .memory
+        .sqlite_path
+        .clone()
+        .unwrap_or_else(|| config.data_dir.join("librefang.db"))
+}
+
+/// Whether the destructive path must refuse to run because a daemon
+/// (`daemon_base_url`) is holding this home directory.
+///
+/// A dry run and an explicit `--force` both bypass the refusal — a dry run
+/// touches nothing the daemon could race against, and `force` is the
+/// operator's explicit override.
+fn daemon_running_guard(
+    daemon_base_url: Option<&str>,
+    dry_run: bool,
+    force: bool,
+) -> Option<String> {
+    if dry_run || force {
+        return None;
+    }
+    daemon_base_url.map(str::to_string)
 }
 
 /// Resolve the configuration that names the purge target, refusing to guess.
@@ -154,14 +213,20 @@ fn purge_with(
 /// ("about to purge") or the real ("purged") heading; returns the process exit
 /// code (0 clean, 1 on any failure).
 fn print_outcome(agent: &str, report: &PurgeReport, failures: &[String], header: &str) -> i32 {
-    if report.is_empty() && failures.is_empty() {
+    // `workspace_shared` and `other_orphans_present` are caveats, not
+    // removals, so `PurgeReport::is_empty()` deliberately excludes them —
+    // but that means a report with nothing to *remove* can still have
+    // something worth telling the operator, and the "nothing to purge"
+    // fast path must not swallow it.
+    let has_caveats = report.workspace_shared || report.other_orphans_present;
+    if report.is_empty() && !has_caveats && failures.is_empty() {
         println!(
             "{}",
             i18n::t_args("purge-nothing-to-purge", &[("agent", agent)])
         );
         return 0;
     }
-    if !report.is_empty() {
+    if !report.is_empty() || has_caveats {
         println!("{}", i18n::t_args(header, &[("agent", agent)]));
         if report.roster_entry_removed {
             println!("{}", i18n::t("purge-removed-roster-entry"));
@@ -178,8 +243,23 @@ fn print_outcome(agent: &str, report: &PurgeReport, failures: &[String], header:
         if report.workspace_unresolved {
             println!("{}", i18n::t("purge-workspace-unresolved"));
         }
+        if report.workspace_shared {
+            println!("{}", i18n::t("purge-workspace-shared"));
+        }
         if report.agent_type_removed {
             println!("{}", i18n::t("purge-removed-agent-type"));
+        }
+        if report.cron_jobs_removed {
+            println!("{}", i18n::t("purge-removed-cron-jobs"));
+        }
+        if report.trigger_jobs_removed {
+            println!("{}", i18n::t("purge-removed-trigger-jobs"));
+        }
+        if report.channel_bindings_removed {
+            println!("{}", i18n::t("purge-removed-channel-bindings"));
+        }
+        if report.other_orphans_present {
+            println!("{}", i18n::t("purge-other-orphans-present"));
         }
     }
     for f in failures {
@@ -202,6 +282,69 @@ mod tests {
             home_dir: home.path().to_path_buf(),
             ..KernelConfig::default()
         }
+    }
+
+    /// The old code joined `home_dir` and `"data"` directly, ignoring both
+    /// `data_dir` and `[memory] sqlite_path`. An installation whose
+    /// `data_dir` was moved elsewhere in `config.toml` would then have
+    /// purge look at (or create) an empty database at the default path
+    /// while the live one, with the agent's actual rows, sat untouched.
+    #[test]
+    fn db_path_follows_configured_data_dir_not_a_hardcoded_home_join() {
+        let cfg = KernelConfig {
+            home_dir: std::path::PathBuf::from("/home-dir-is-irrelevant-here"),
+            data_dir: std::path::PathBuf::from("/configured/elsewhere"),
+            ..KernelConfig::default()
+        };
+        assert_eq!(
+            purge_db_path(&cfg),
+            std::path::PathBuf::from("/configured/elsewhere/librefang.db")
+        );
+    }
+
+    /// `[memory] sqlite_path` is the most specific setting and must win
+    /// outright over `data_dir`, matching `monitoring::cmd_audit_reset`.
+    #[test]
+    fn db_path_prefers_explicit_sqlite_path_over_data_dir() {
+        let mut cfg = KernelConfig {
+            home_dir: std::path::PathBuf::from("/home"),
+            data_dir: std::path::PathBuf::from("/home/data"),
+            ..KernelConfig::default()
+        };
+        cfg.memory.sqlite_path = Some(std::path::PathBuf::from("/custom/db/path.sqlite"));
+        assert_eq!(
+            purge_db_path(&cfg),
+            std::path::PathBuf::from("/custom/db/path.sqlite")
+        );
+    }
+
+    #[test]
+    fn daemon_running_guard_refuses_the_destructive_path_when_a_daemon_is_up() {
+        assert_eq!(
+            daemon_running_guard(Some("http://127.0.0.1:4545"), false, false),
+            Some("http://127.0.0.1:4545".to_string())
+        );
+    }
+
+    #[test]
+    fn daemon_running_guard_allows_a_dry_run_regardless() {
+        assert_eq!(
+            daemon_running_guard(Some("http://127.0.0.1:4545"), true, false),
+            None
+        );
+    }
+
+    #[test]
+    fn daemon_running_guard_allows_an_explicit_force_override() {
+        assert_eq!(
+            daemon_running_guard(Some("http://127.0.0.1:4545"), false, true),
+            None
+        );
+    }
+
+    #[test]
+    fn daemon_running_guard_is_a_noop_when_no_daemon_is_up() {
+        assert_eq!(daemon_running_guard(None, false, false), None);
     }
 
     /// The destructive path asks the operator about a plan, so a purge that
@@ -304,7 +447,7 @@ mod tests {
         std::fs::write(&broken_config, "this is not = = valid toml").unwrap();
 
         let code = with_librefang_home(default_home.path(), || {
-            cmd_purge(Some(&broken_config), "worker", true, false)
+            cmd_purge(Some(&broken_config), "worker", true, false, false)
         });
 
         assert_eq!(code, 1, "an unloadable config must fail the command");
@@ -328,7 +471,7 @@ mod tests {
         let absent = elsewhere.path().join("never-written.toml");
 
         let code = with_librefang_home(default_home.path(), || {
-            cmd_purge(Some(&absent), "worker", true, false)
+            cmd_purge(Some(&absent), "worker", true, false, false)
         });
 
         assert_eq!(code, 1, "a config that is not there must fail the command");
@@ -349,7 +492,7 @@ mod tests {
         let agent_type = default_installation_with(default_home.path(), "worker");
 
         let code = with_librefang_home(default_home.path(), || {
-            cmd_purge(None, "worker", true, false)
+            cmd_purge(None, "worker", true, false, false)
         });
 
         assert_eq!(code, 0, "a config-less installation is still purgeable");

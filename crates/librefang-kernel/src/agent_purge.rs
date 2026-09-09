@@ -12,12 +12,15 @@
 //! this off the kernel would force it to boot one.
 
 use crate::agent_identity_registry::AgentIdentityRegistry;
+use crate::cron::CronScheduler;
 use crate::kernel::workspace_setup::resolved_workspace_dir;
+use crate::triggers::TriggerEngine;
 use librefang_memory::agent_tables::AGENT_SCOPED_TABLES;
 use librefang_memory::MemorySubstrate;
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentEntry, AgentId};
 use librefang_types::agent_type_store::{agent_type_path_in, validate_agent_type_name};
 use librefang_types::config::KernelConfig;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
@@ -49,8 +52,45 @@ pub struct PurgeReport {
     /// and "it had one somewhere we cannot see" are consistent with what
     /// survives — and this flag says so instead of picking the flattering one.
     pub workspace_unresolved: bool,
+    /// The manifest names a workspace directory that was deliberately left
+    /// alone because deleting it would destroy more than this agent: either
+    /// it resolves to the workspaces root itself (`workspace = "."`), or
+    /// another still-registered agent's manifest resolves to the same
+    /// directory (two agents sharing a named workspace by design).
+    /// "no workspace was removed" must not be read as "there was nothing to
+    /// remove" — there was, and it was left standing on purpose.
+    pub workspace_shared: bool,
     /// An agent-type template of the same name was deleted.
     pub agent_type_removed: bool,
+    /// Cron jobs owned by the purged agent id(s) were removed from
+    /// `<home>/data/cron_jobs.json`.
+    ///
+    /// Jobs are keyed by `AgentId`, and the default id is derived
+    /// deterministically from the agent's name — so without this, a new
+    /// agent later spawned under the purged name would inherit the old
+    /// agent's cron schedule outright.
+    pub cron_jobs_removed: bool,
+    /// Event triggers owned by the purged agent id(s) were removed from
+    /// `<home>/trigger_jobs.json`, for the same name-collision reason as
+    /// [`Self::cron_jobs_removed`].
+    pub trigger_jobs_removed: bool,
+    /// Channel routing rows (`channel_instance_defaults`,
+    /// `conversation_bindings`) naming this agent were removed.
+    ///
+    /// Both tables key on the agent's *name*, not its id, so this runs
+    /// whenever the name matches — regardless of whether a roster entry or
+    /// orphaned rows were found for it — for the same reason cron/trigger
+    /// residue matters: a new agent spawned under the purged name would
+    /// otherwise inherit its channel/conversation routing.
+    pub channel_bindings_removed: bool,
+    /// Rows exist in agent-scoped tables under an id that is neither a live
+    /// roster entry nor attributable to any name this purge recovered —
+    /// most likely a child or ephemeral agent (`AgentId::new()`, never
+    /// registered) whose roster row is already gone. Purge cannot safely
+    /// guess which name they belonged to, so nothing was deleted for them;
+    /// this only says they are there, the same honesty
+    /// [`Self::workspace_unresolved`] already gives for an unresolved path.
+    pub other_orphans_present: bool,
 }
 
 impl PurgeReport {
@@ -61,7 +101,10 @@ impl PurgeReport {
             || self.orphaned_data_removed
             || self.identity_record_removed
             || self.workspace_removed
-            || self.agent_type_removed)
+            || self.agent_type_removed
+            || self.cron_jobs_removed
+            || self.trigger_jobs_removed
+            || self.channel_bindings_removed)
     }
 }
 
@@ -133,6 +176,24 @@ pub fn plan_purge(substrate: &MemorySubstrate, cfg: &KernelConfig, agent_name: &
         }
     };
 
+    // `entries` hydrates every roster row through manifest deserialization,
+    // and drops the row on an unparseable UUID, a manifest that fails to
+    // deserialize, or a duplicate lowercased name — exactly the damaged-row
+    // situations that lead an operator to purge in the first place. A live
+    // agent caught by one of those drops must still count as live for the
+    // orphan guard below, so that guard reads ids straight from the table
+    // instead of through the lossy loader.
+    let live_ids: HashSet<String> = match substrate.list_agents() {
+        Ok(rows) => rows.into_iter().map(|(id, _, _)| id).collect(),
+        Err(e) => {
+            failures.push(format!("read agent ids: {e}"));
+            return PurgePlan {
+                failures,
+                ..PurgePlan::default()
+            };
+        }
+    };
+
     let registry = AgentIdentityRegistry::load(home);
     let registry_record = registry.get(agent_name).is_some();
 
@@ -141,66 +202,73 @@ pub fn plan_purge(substrate: &MemorySubstrate, cfg: &KernelConfig, agent_name: &
     let mut orphan_agent_ids = Vec::new();
 
     let roster_entry = entries.iter().find(|e| e.name == agent_name);
-    match roster_entry {
-        Some(entry) => {
-            preview.roster_entry_removed = true;
-            roster_agent_id = Some(entry.id);
+    if let Some(entry) = roster_entry {
+        preview.roster_entry_removed = true;
+        roster_agent_id = Some(entry.id);
+    }
+
+    // Recover orphan candidates for this name whether or not a live roster
+    // entry currently holds it: residue from an earlier incarnation of the
+    // same name (recreated under a different id since) survives a purge
+    // that only ever considered the current id. Two sources: the
+    // canonical-UUID registry (agents spawned with a random id) and the
+    // deterministic name-derived UUID. A candidate any live agent's id
+    // matches is never touched — its data belongs to a running agent.
+    let mut candidates: Vec<AgentId> = Vec::new();
+    if let Some(id) = registry.get(agent_name) {
+        candidates.push(id);
+    }
+    let derived = AgentId::from_name(agent_name);
+    if !candidates.contains(&derived) {
+        candidates.push(derived);
+    }
+    for id in candidates {
+        if live_ids.contains(&id.0.to_string()) {
+            continue;
         }
-        None => {
-            // Orphan path — the whole reason this module exists: the roster
-            // entry is gone but its rows are not. Recover the agent id from
-            // its name. Two sources: the canonical-UUID registry (covers
-            // agents spawned with a random id) and the deterministic
-            // name-derived UUID. A candidate that any live roster entry
-            // holds (an agent renamed since spawn, keeping its id) is never
-            // touched — its data belongs to a running agent.
-            let mut candidates: Vec<AgentId> = Vec::new();
-            if let Some(id) = registry.get(agent_name) {
-                candidates.push(id);
+        match has_agent_rows(substrate, &id) {
+            Ok(true) => {
+                preview.orphaned_data_removed = true;
+                orphan_agent_ids.push(id);
             }
-            let derived = AgentId::from_name(agent_name);
-            if !candidates.contains(&derived) {
-                candidates.push(derived);
-            }
-            for id in candidates {
-                if entries.iter().any(|e| e.id == id) {
-                    continue;
-                }
-                match has_agent_rows(substrate, &id) {
-                    Ok(true) => {
-                        preview.orphaned_data_removed = true;
-                        orphan_agent_ids.push(id);
-                    }
-                    Ok(false) => {}
-                    Err(e) => {
-                        // Cannot verify this candidate is safe to cascade;
-                        // stop rather than purge on a guess.
-                        failures.push(e);
-                        break;
-                    }
-                }
+            Ok(false) => {}
+            Err(e) => {
+                // Cannot verify this candidate is safe to cascade;
+                // stop rather than purge on a guess.
+                failures.push(e);
+                break;
             }
         }
     }
     preview.identity_record_removed = registry_record;
 
+    // Rows can exist under an id this purge could not attribute to any name
+    // at all — a child or ephemeral agent (`AgentId::new()`, a random id)
+    // whose roster row is already gone and was never recorded in the
+    // identity registry either. There is no name to recover those under,
+    // so they are reported rather than guessed at: a candidate this purge
+    // did not derive from `agent_name` might just as well belong to some
+    // other name entirely, and deleting it on a guess is the wrong
+    // direction to err in.
+    if failures.is_empty() {
+        match other_orphan_ids_exist(substrate, &orphan_agent_ids) {
+            Ok(present) => preview.other_orphans_present = present,
+            Err(e) => failures.push(e),
+        }
+    }
+
     // The workspaces root is configurable (`workspaces_dir`) and an agent can
     // carry its own `workspace` override, so neither the root nor the leaf is
     // safe to spell out here: both come from the same helpers spawn used to
     // create the directory in the first place.
-    let workspaces_root = cfg.effective_agent_workspaces_dir();
-    let (workspace, workspace_unresolved) = match roster_entry {
-        Some(entry) => match resolved_workspace_dir(
-            &workspaces_root,
-            entry.manifest.workspace.clone(),
-            agent_name,
-            entry.id,
-        ) {
-            Ok(dir) => (dir.is_dir().then_some(dir), false),
+    let agent_workspaces_root = cfg.effective_agent_workspaces_dir();
+    let (mut workspace, mut workspace_unresolved) = match roster_entry {
+        Some(entry) => match entry_workspace_dir(cfg, entry) {
+            Some(dir) => (dir.is_dir().then_some(dir), false),
             // The manifest names a workspace the resolver refuses (outside the
             // root, or with `..` in it). The agent has a workspace and we
             // cannot say where — report that rather than "there was none".
-            Err(_) => (None, true),
+            None => (None, true),
         },
         None => {
             // No roster entry means no manifest, so a `workspace` override is
@@ -212,7 +280,7 @@ pub fn plan_purge(substrate: &MemorySubstrate, cfg: &KernelConfig, agent_name: &
                 .copied()
                 .or_else(|| registry.get(agent_name))
                 .unwrap_or_else(|| AgentId::from_name(agent_name));
-            let dir = resolved_workspace_dir(&workspaces_root, None, agent_name, id)
+            let dir = resolved_workspace_dir(&agent_workspaces_root, None, agent_name, id)
                 .ok()
                 .filter(|d| d.is_dir());
             // An orphan whose default directory is empty is ambiguous: it
@@ -222,10 +290,67 @@ pub fn plan_purge(substrate: &MemorySubstrate, cfg: &KernelConfig, agent_name: &
             (dir, unresolved)
         }
     };
+
+    // Never plan to delete the workspaces root itself — `workspace = "."`
+    // joins onto it unchanged — or a directory another still-registered
+    // agent's manifest also resolves to (two agents can share a named
+    // workspace by design). Either would wipe out data this purge has no
+    // business touching.
+    let mut workspace_shared = false;
+    if let Some(dir) = &workspace {
+        let this_id = roster_agent_id.or_else(|| orphan_agent_ids.first().copied());
+        let is_a_root = *dir == agent_workspaces_root || *dir == cfg.effective_workspaces_dir();
+        let shared_with_another_agent = entries.iter().any(|other| {
+            Some(other.id) != this_id
+                && entry_workspace_dir(cfg, other).as_deref() == Some(dir.as_path())
+        });
+        if is_a_root || shared_with_another_agent {
+            workspace_shared = true;
+            workspace = None;
+            workspace_unresolved = false;
+        }
+    }
     if workspace.is_some() {
         preview.workspace_removed = true;
     }
     preview.workspace_unresolved = workspace_unresolved;
+    preview.workspace_shared = workspace_shared;
+
+    // Preview cron/trigger/channel residue too. `.load()` only reads, and
+    // this preview never calls `.persist()`, so nothing on disk changes —
+    // these are throwaway engine instances discarded at the end of the
+    // function.
+    let purge_ids: Vec<AgentId> = roster_agent_id
+        .into_iter()
+        .chain(orphan_agent_ids.iter().copied())
+        .collect();
+    if !purge_ids.is_empty() {
+        let cron = CronScheduler::new(home, cfg.max_cron_jobs);
+        match cron.load() {
+            Ok(_) => {
+                preview.cron_jobs_removed =
+                    purge_ids.iter().any(|id| !cron.list_jobs(*id).is_empty());
+            }
+            Err(e) => failures.push(format!("read cron jobs: {e}")),
+        }
+
+        let triggers = TriggerEngine::with_config(&cfg.triggers, home);
+        match triggers.load() {
+            Ok(_) => {
+                preview.trigger_jobs_removed = purge_ids
+                    .iter()
+                    .any(|id| !triggers.list_agent_triggers(*id).is_empty());
+            }
+            Err(e) => failures.push(format!("read trigger jobs: {e}")),
+        }
+    }
+
+    // Channel routing rows key on the agent's *name*, not id, so this scan
+    // does not depend on `purge_ids` at all.
+    match count_channel_bindings_for_agent(substrate, agent_name) {
+        Ok(count) => preview.channel_bindings_removed = count > 0,
+        Err(e) => failures.push(e),
+    }
 
     // `validate_agent_type_name` governs filenames in the agent-type store, so
     // a name it rejects cannot name a file there. That is not a purge failure:
@@ -279,9 +404,11 @@ pub fn purge_agent(
     }
 
     let mut report = PurgeReport {
-        // Not a removal, but the same caveat holds whether or not the run is a
-        // dry one, so it travels with the report the caller prints.
+        // Not removals, but the same caveats hold whether or not the run is
+        // a dry one, so they travel with the report the caller prints.
         workspace_unresolved: plan.preview.workspace_unresolved,
+        workspace_shared: plan.preview.workspace_shared,
+        other_orphans_present: plan.preview.other_orphans_present,
         ..PurgeReport::default()
     };
     let mut failures = Vec::new();
@@ -301,14 +428,81 @@ pub fn purge_agent(
         }
     }
 
+    // Cron/trigger residue: both stores key on `AgentId`, and the default
+    // id is derived deterministically from the agent's name, so leaving
+    // these behind means a new agent later spawned under the purged name
+    // inherits the old agent's cron schedule and event wiring outright.
+    let purge_ids: Vec<AgentId> = plan
+        .roster_agent_id
+        .into_iter()
+        .chain(plan.orphan_agent_ids.iter().copied())
+        .collect();
+    if !purge_ids.is_empty() {
+        let cron = CronScheduler::new(home, cfg.max_cron_jobs);
+        match cron.load() {
+            Ok(_) => {
+                let removed: usize = purge_ids.iter().map(|id| cron.remove_agent_jobs(*id)).sum();
+                if removed > 0 {
+                    match cron.persist() {
+                        Ok(()) => report.cron_jobs_removed = true,
+                        Err(e) => failures.push(format!(
+                            "persist cron jobs after removing {agent_name}'s: {e}"
+                        )),
+                    }
+                }
+            }
+            Err(e) => failures.push(format!("load cron jobs: {e}")),
+        }
+
+        let triggers = TriggerEngine::with_config(&cfg.triggers, home);
+        match triggers.load() {
+            Ok(_) => {
+                let had_any = purge_ids
+                    .iter()
+                    .any(|id| !triggers.list_agent_triggers(*id).is_empty());
+                for id in &purge_ids {
+                    triggers.remove_agent_triggers(*id);
+                }
+                if had_any {
+                    match triggers.persist() {
+                        Ok(()) => report.trigger_jobs_removed = true,
+                        Err(e) => failures.push(format!(
+                            "persist trigger jobs after removing {agent_name}'s: {e}"
+                        )),
+                    }
+                }
+            }
+            Err(e) => failures.push(format!("load trigger jobs: {e}")),
+        }
+    }
+
+    // Channel routing rows key on the agent's *name*, not id, so this runs
+    // unconditionally rather than only alongside a roster or orphan hit —
+    // otherwise a new agent spawned under the purged name would inherit
+    // its channel/conversation routing.
+    match remove_channel_bindings_for_agent(substrate, agent_name) {
+        Ok(removed) if removed > 0 => report.channel_bindings_removed = true,
+        Ok(_) => {}
+        Err(e) => failures.push(e),
+    }
+
     // Drop the name → UUID binding last-but-not-unconditionally: the kernel
     // skips it when the roster row could not be removed (#5117) so the next
     // boot never loads a roster row whose name the registry no longer knows.
-    // Same rule here: only unbind when every cascade above succeeded.
+    // Same rule here: only unbind when every cascade above succeeded, and
+    // only report it removed once it is actually durable on disk —
+    // `AgentIdentityRegistry::purge` itself only warns on a persist
+    // failure, so re-checking the result here is what turns a read-only
+    // home directory into a reported failure instead of a silent no-op.
     if plan.registry_record && failures.is_empty() {
         let registry = AgentIdentityRegistry::load(home);
         if registry.purge(agent_name).is_some() {
-            report.identity_record_removed = true;
+            match registry.persist() {
+                Ok(()) => report.identity_record_removed = true,
+                Err(e) => failures.push(format!(
+                    "persist agent_identities.toml after removing {agent_name}: {e}"
+                )),
+            }
         }
     }
 
@@ -380,6 +574,121 @@ fn has_agent_rows(substrate: &MemorySubstrate, id: &AgentId) -> Result<bool, Str
         }
     }
     Ok(false)
+}
+
+/// Whether `AGENT_SCOPED_TABLES` holds a row under an id that has no roster
+/// entry and is not in `attributed` — the ids this purge already recovered
+/// for `agent_name`.
+///
+/// Existence only: an id like this cannot be traced back to any name (a
+/// child or ephemeral agent's `AgentId::new()` is neither name-derived nor
+/// ever recorded in the identity registry), so nothing here is safe to
+/// delete on this purge's behalf — it may belong to a different name
+/// entirely. This only makes the operator aware the residue exists, the way
+/// [`PurgeReport::workspace_unresolved`] does for an unlocatable directory.
+fn other_orphan_ids_exist(
+    substrate: &MemorySubstrate,
+    attributed: &[AgentId],
+) -> Result<bool, String> {
+    let conn = substrate
+        .pool()
+        .get()
+        .map_err(|e| format!("acquire database connection: {e}"))?;
+    let attributed: Vec<String> = attributed.iter().map(|id| id.0.to_string()).collect();
+    for (_, table, column) in AGENT_SCOPED_TABLES {
+        if *table == "agents" {
+            continue; // the roster itself — every row here is a live agent.
+        }
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT DISTINCT {column} FROM {table} WHERE {column} NOT IN (SELECT id FROM agents)"
+            ))
+            .map_err(|e| format!("prepare orphan scan on {table}: {e}"))?;
+        let ids: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("scan {table} for orphan ids: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("read orphan ids from {table}: {e}"))?;
+        if ids.iter().any(|id| !attributed.contains(id)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Where `entry`'s workspace directory resolves to, following the same rule
+/// spawn used when it created it.
+///
+/// A relative `workspace` override (or none at all) joins under
+/// `<workspaces>/agents/`. An absolute one is validated against the whole
+/// workspaces root instead: spawn rewrites a hand agent's `workspace` to the
+/// absolute, already-resolved `<workspaces>/hands/<hand>/<role>` (see
+/// `backfill_workspace_dir`), and validating that against the `agents/`
+/// root alone fails `starts_with` even though the manifest and roster entry
+/// are both alive.
+fn entry_workspace_dir(cfg: &KernelConfig, entry: &AgentEntry) -> Option<PathBuf> {
+    let root = match &entry.manifest.workspace {
+        Some(p) if p.is_absolute() => cfg.effective_workspaces_dir(),
+        _ => cfg.effective_agent_workspaces_dir(),
+    };
+    resolved_workspace_dir(
+        &root,
+        entry.manifest.workspace.clone(),
+        &entry.name,
+        entry.id,
+    )
+    .ok()
+}
+
+/// Count of channel routing rows (`channel_instance_defaults`,
+/// `conversation_bindings`) naming `agent_name`. Both tables store the
+/// agent's name rather than its `AgentId`
+/// (see `librefang_memory::channel_binding_store`), so this is a name
+/// lookup rather than an id-scoped one like [`has_agent_rows`].
+fn count_channel_bindings_for_agent(
+    substrate: &MemorySubstrate,
+    agent_name: &str,
+) -> Result<usize, String> {
+    let conn = substrate
+        .pool()
+        .get()
+        .map_err(|e| format!("acquire database connection: {e}"))?;
+    let mut total = 0usize;
+    for table in ["channel_instance_defaults", "conversation_bindings"] {
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE agent_name = ?1"),
+                rusqlite::params![agent_name],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("count {table} rows for {agent_name}: {e}"))?;
+        total += count as usize;
+    }
+    Ok(total)
+}
+
+/// Delete channel routing rows naming `agent_name`. Returns the number of
+/// rows removed. See [`count_channel_bindings_for_agent`] for why this is a
+/// name lookup, not an id-scoped one.
+fn remove_channel_bindings_for_agent(
+    substrate: &MemorySubstrate,
+    agent_name: &str,
+) -> Result<usize, String> {
+    let conn = substrate
+        .pool()
+        .get()
+        .map_err(|e| format!("acquire database connection: {e}"))?;
+    let mut total = 0usize;
+    for table in ["channel_instance_defaults", "conversation_bindings"] {
+        let removed = conn
+            .execute(
+                &format!("DELETE FROM {table} WHERE agent_name = ?1"),
+                rusqlite::params![agent_name],
+            )
+            .map_err(|e| format!("remove {table} rows for {agent_name}: {e}"))?;
+        total += removed;
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -798,5 +1107,399 @@ mod tests {
         let quiet = purge_agent(&substrate, &cfg_for(&home), "nobody");
         assert!(!quiet.report.workspace_unresolved);
         assert!(quiet.report.is_empty());
+    }
+
+    /// THE stale-name headline case: the name is live again under a fresh
+    /// id, but rows an *earlier* incarnation of the same name left behind
+    /// (roster gone, rows not) sit under a different id. Purging the
+    /// live name must still find and remove that older residue, not just
+    /// the current holder's own data.
+    #[test]
+    fn stale_orphans_from_an_earlier_incarnation_are_found_even_when_the_name_is_live_again() {
+        let home = home_with(&[]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let old_id = AgentId::from_name("alpha");
+        seed_agent_rows(&substrate, "alpha", old_id);
+        delete_roster_row_only(&substrate, old_id);
+        assert!(orphan_row_count(&substrate, old_id) > 0, "seed failed");
+
+        let new_id = AgentId::new();
+        substrate
+            .save_agent(&AgentEntry {
+                id: new_id,
+                name: "alpha".to_string(),
+                state: AgentState::Running,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(outcome.report.roster_entry_removed);
+        assert!(
+            outcome.report.orphaned_data_removed,
+            "the earlier incarnation's rows, left under a different id, must be found too"
+        );
+        assert_eq!(
+            orphan_row_count(&substrate, old_id),
+            0,
+            "stale rows from the earlier incarnation survived"
+        );
+    }
+
+    /// `load_all_agents` drops a row whose manifest blob fails to
+    /// deserialize — exactly the damaged-row situation that leads an
+    /// operator to run purge. The live-agent guard must read ids straight
+    /// from the table, or a purge for some other name that happens to
+    /// derive the same id cascades the still-running agent's rows away.
+    #[test]
+    fn a_live_agent_with_a_corrupt_manifest_is_never_treated_as_an_orphan() {
+        let home = home_with(&[]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        // Purging "alpha" derives exactly this id; the rows actually live
+        // under the current name "beta" (renamed since spawn, same id).
+        let id = AgentId::from_name("alpha");
+        seed_agent_rows(&substrate, "beta", id);
+
+        {
+            let conn = substrate.pool().get().unwrap();
+            conn.execute(
+                "UPDATE agents SET manifest = ?1 WHERE id = ?2",
+                rusqlite::params![b"not valid msgpack".to_vec(), id.0.to_string()],
+            )
+            .unwrap();
+        } // drop the pooled connection before the calls below acquire their own —
+          // the in-memory substrate's pool is sized for one connection at a time.
+          // Confirm the corruption actually reproduces the gap this fix
+          // closes: the hydrating loader drops the row, the raw table still
+          // has it.
+        assert!(!substrate
+            .load_all_agents()
+            .unwrap()
+            .iter()
+            .any(|e| e.id == id));
+        assert!(substrate
+            .list_agents()
+            .unwrap()
+            .iter()
+            .any(|(row_id, _, _)| *row_id == id.0.to_string()));
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(
+            !outcome.report.orphaned_data_removed,
+            "a live agent's rows must never be cascaded"
+        );
+        assert_eq!(
+            orphan_row_count(&substrate, id),
+            3,
+            "the live agent's rows must survive"
+        );
+    }
+
+    /// An id with rows in agent-scoped tables but no roster entry and no
+    /// name this purge can derive it from (a child/ephemeral agent's
+    /// random `AgentId::new()`, never registered) cannot be safely
+    /// attributed to `agent_name`. It must be reported, not deleted — it
+    /// might belong to a completely different name.
+    #[test]
+    fn unattributable_orphan_rows_are_reported_but_never_touched() {
+        let home = home_with(&[]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let orphan_id = AgentId::new();
+        seed_agent_rows(&substrate, "irrelevant", orphan_id);
+        delete_roster_row_only(&substrate, orphan_id);
+        assert!(orphan_row_count(&substrate, orphan_id) > 0, "seed failed");
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(
+            outcome.report.is_empty(),
+            "nothing attributable to 'alpha' exists"
+        );
+        assert!(
+            outcome.report.other_orphans_present,
+            "an orphan id this purge could not attribute to any name must be surfaced"
+        );
+        assert_eq!(
+            orphan_row_count(&substrate, orphan_id),
+            3,
+            "an id this purge cannot attribute to a name must never be deleted"
+        );
+    }
+
+    /// `workspace = "."` joins onto the workspaces root unchanged.
+    /// Honouring it would delete every agent's workspace directory.
+    #[test]
+    fn a_workspace_override_pointing_at_the_root_itself_is_never_deleted() {
+        let home = home_with(&[]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let id = AgentId::from_name("alpha");
+        let mut entry = AgentEntry {
+            id,
+            name: "alpha".to_string(),
+            state: AgentState::Running,
+            ..Default::default()
+        };
+        entry.manifest.workspace = Some(PathBuf::from("."));
+        substrate.save_agent(&entry).unwrap();
+        let root = home.path().join("workspaces").join("agents");
+        // Proof that honouring "." would take out another agent's data too.
+        seed_workspace(&root.join("someone-else"));
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(
+            !outcome.report.workspace_removed,
+            "the workspaces root must never be deleted"
+        );
+        assert!(
+            outcome.report.workspace_shared,
+            "the collision must be reported, not silently skipped"
+        );
+        assert!(
+            root.join("someone-else").exists(),
+            "another agent's workspace must survive"
+        );
+    }
+
+    /// Two agents can share a named workspace by design (`workspace =
+    /// "shared/team"` on both manifests). Purging one must not delete the
+    /// directory a still-registered agent is also pointed at.
+    #[test]
+    fn a_workspace_shared_with_another_live_agent_is_never_deleted() {
+        let home = home_with(&[]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let shared = PathBuf::from("shared/team");
+        for (id, name) in [
+            (AgentId::from_name("alpha"), "alpha"),
+            (AgentId::from_name("beta"), "beta"),
+        ] {
+            let mut entry = AgentEntry {
+                id,
+                name: name.to_string(),
+                state: AgentState::Running,
+                ..Default::default()
+            };
+            entry.manifest.workspace = Some(shared.clone());
+            substrate.save_agent(&entry).unwrap();
+        }
+        let workspace = home.path().join("workspaces/agents/shared/team");
+        seed_workspace(&workspace);
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(outcome.report.roster_entry_removed);
+        assert!(
+            !outcome.report.workspace_removed,
+            "a workspace shared with a live agent must never be deleted"
+        );
+        assert!(outcome.report.workspace_shared);
+        assert!(
+            workspace.exists(),
+            "beta's still-live shared workspace must survive"
+        );
+    }
+
+    /// Spawn rewrites a hand agent's `workspace` to the absolute,
+    /// already-resolved `<workspaces>/hands/<hand>/<role>` path. Validating
+    /// that against the `agents/` root alone (rather than the whole
+    /// workspaces root) used to fail `starts_with` and report "no manifest
+    /// survives" for a hand agent whose manifest and roster entry are both
+    /// alive.
+    #[test]
+    fn a_hand_agents_absolute_workspace_override_is_resolved_not_reported_missing() {
+        let home = home_with(&[]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let id = AgentId::from_name("researcher");
+        let hand_workspace = home.path().join("workspaces/hands/team-a/researcher");
+        let mut entry = AgentEntry {
+            id,
+            name: "researcher".to_string(),
+            state: AgentState::Running,
+            ..Default::default()
+        };
+        entry.manifest.workspace = Some(hand_workspace.clone());
+        substrate.save_agent(&entry).unwrap();
+        seed_workspace(&hand_workspace);
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "researcher");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(
+            outcome.report.workspace_removed,
+            "a hand agent's absolute workspace path must resolve"
+        );
+        assert!(!outcome.report.workspace_unresolved);
+        assert!(!hand_workspace.exists());
+    }
+
+    /// Cron jobs and event triggers key on `AgentId`, and the default id is
+    /// derived deterministically from the agent's name — so leaving them
+    /// behind means a new agent later spawned under the purged name
+    /// inherits the old agent's schedule and event wiring outright.
+    #[test]
+    fn cron_and_trigger_residue_is_removed_so_a_recreated_agent_does_not_inherit_it() {
+        let home = home_with(&["alpha"]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let id = AgentId::from_name("alpha");
+        seed_agent_rows(&substrate, "alpha", id);
+        let cfg = cfg_for(&home);
+
+        let cron = CronScheduler::new(home.path(), cfg.max_cron_jobs);
+        cron.add_job(
+            librefang_types::scheduler::CronJob {
+                id: librefang_types::scheduler::CronJobId::new(),
+                agent_id: id,
+                name: "test-job".into(),
+                enabled: true,
+                schedule: librefang_types::scheduler::CronSchedule::Every { every_secs: 3600 },
+                action: librefang_types::scheduler::CronAction::SystemEvent {
+                    text: "ping".into(),
+                },
+                delivery: librefang_types::scheduler::CronDelivery::None,
+                delivery_targets: Vec::new(),
+                peer_id: None,
+                session_mode: None,
+                created_at: chrono::Utc::now(),
+                last_run: None,
+                next_run: None,
+                owner: None,
+            },
+            false,
+        )
+        .unwrap();
+        cron.persist().unwrap();
+
+        let triggers = TriggerEngine::with_config(&cfg.triggers, home.path());
+        triggers
+            .register(
+                id,
+                crate::triggers::TriggerPattern::System,
+                "wake up".into(),
+                0,
+            )
+            .unwrap();
+        triggers.persist().unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg, "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(
+            outcome.report.cron_jobs_removed,
+            "cron residue must be reported removed"
+        );
+        assert!(
+            outcome.report.trigger_jobs_removed,
+            "trigger residue must be reported removed"
+        );
+
+        let reloaded_cron = CronScheduler::new(home.path(), cfg.max_cron_jobs);
+        reloaded_cron.load().unwrap();
+        assert!(
+            reloaded_cron.list_jobs(id).is_empty(),
+            "a recreated 'alpha' must not inherit the purged agent's cron jobs"
+        );
+
+        let reloaded_triggers = TriggerEngine::with_config(&cfg.triggers, home.path());
+        reloaded_triggers.load().unwrap();
+        assert!(
+            reloaded_triggers.list_agent_triggers(id).is_empty(),
+            "a recreated 'alpha' must not inherit the purged agent's triggers"
+        );
+    }
+
+    /// `channel_instance_defaults` / `conversation_bindings` key on the
+    /// agent's *name*, so a re-created agent under the purged name would
+    /// otherwise inherit its channel/conversation routing.
+    #[test]
+    fn channel_binding_residue_is_removed_by_name() {
+        let home = home_with(&[]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        substrate
+            .channel_bindings()
+            .seed_instance_default("tg-bot", "alpha")
+            .unwrap();
+        substrate
+            .channel_bindings()
+            .set_conversation_binding("tg-bot", "peer-1", "alpha", "user:admin")
+            .unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(outcome.report.channel_bindings_removed);
+        assert_eq!(
+            substrate
+                .channel_bindings()
+                .instance_default("tg-bot")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            substrate
+                .channel_bindings()
+                .conversation_binding("tg-bot", "peer-1")
+                .unwrap(),
+            None
+        );
+    }
+
+    /// `AgentIdentityRegistry::purge` itself only warns on a persist
+    /// failure and still returns `Some` — this pins that `purge_agent`
+    /// re-checks the persist result itself, rather than trusting that
+    /// return value, so a write failure is a reported failure and
+    /// `identity_record_removed` stays false instead of claiming success.
+    #[cfg(unix)]
+    #[test]
+    fn identity_persist_failure_is_reported_not_silently_swallowed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = home_with(&[]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let id = AgentId::new();
+        substrate
+            .save_agent(&AgentEntry {
+                id,
+                name: "alpha".to_string(),
+                state: AgentState::Running,
+                ..Default::default()
+            })
+            .unwrap();
+        AgentIdentityRegistry::load(home.path()).register_if_absent("alpha", id);
+        assert!(
+            AgentIdentityRegistry::load(home.path())
+                .get("alpha")
+                .is_some(),
+            "seed failed"
+        );
+
+        // Strip write permission on the home directory so persist()'s
+        // tmp-file create (or the rename) fails, while the read that
+        // `plan_purge` performs a moment later still succeeds — reading an
+        // existing file by name needs no write permission on its parent.
+        let original_perms = std::fs::metadata(home.path()).unwrap().permissions();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg_for(&home), "alpha");
+
+        // Restore before any assertion can panic and skip cleanup.
+        std::fs::set_permissions(home.path(), original_perms).unwrap();
+
+        assert!(
+            !outcome.failures.is_empty(),
+            "a persist failure must be surfaced, not swallowed"
+        );
+        assert!(!outcome.report.identity_record_removed);
+        assert_eq!(
+            AgentIdentityRegistry::load(home.path()).get("alpha"),
+            Some(id),
+            "the on-disk record must survive an unpersisted purge"
+        );
     }
 }
