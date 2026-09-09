@@ -968,6 +968,16 @@ export const preservedWorkspaceNamesFromExtras = (extras: ManifestExtras): strin
 };
 
 // Form-validation errors. Returns an empty array when submittable.
+//
+// `model.provider` / `model.model` are deliberately NOT required here even
+// though the form marks them `required` visually: a blank value is the
+// documented way an agent inherits the daemon's configured default (the
+// `provider_hint` / hint text the form shows next to them says exactly
+// this), and `ModelConfig`'s own `""` is written through verbatim by both
+// `AgentTypeSpec::apply_to` and `into_new_manifest`. Treating blank as an
+// error here made Save silently no-op on every agent (type) that was ever
+// created without a pinned provider — there was no toast, just two red
+// borders that may be scrolled out of view.
 export const validateManifestForm = (
   form: ManifestFormState,
   // Names already present as preserved declarations (e.g. mount-based
@@ -976,8 +986,6 @@ export const validateManifestForm = (
 ): string[] => {
   const errors: string[] = [];
   if (!form.name.trim()) errors.push("name");
-  if (!form.model.provider.trim()) errors.push("model.provider");
-  if (!form.model.model.trim()) errors.push("model.model");
   if (form.schedule.mode === "periodic" && !form.schedule.cron.trim()) {
     errors.push("schedule.cron");
   }
