@@ -28,7 +28,9 @@ use super::screens::{
     peers::PeerInfo,
     security::SecurityFeature,
     sessions::SessionInfo,
-    settings::{BackupInfo, ModelInfo, ProviderInfo, TestResult, ToolInfo},
+    settings::{
+        BackupInfo, ModelInfo, ProviderInfo, TestResult, ToolInfo, VaultKeyInfo, VaultKeySource,
+    },
     skills::{ClawHubResult, McpServerInfo, SkillInfo},
     templates::{self, ProviderAuth, TemplateInfo, TemplateSource},
     triggers::TriggerInfo,
@@ -273,6 +275,17 @@ pub enum AppEvent {
     ProviderKeyDeleted(String),
     /// Provider test result.
     ProviderTestResult(TestResult),
+    /// Writable vault keys, whether each is in the vault, and where the daemon
+    /// resolves it from (#8164).
+    VaultKeysLoaded(Vec<VaultKeyInfo>),
+    /// A vault key was stored; carries the key name and the source the daemon
+    /// resolves it from *after* the write, never the value. The source is what
+    /// stops the confirmation from claiming success on a host whose environment
+    /// overrides the key and makes the stored value inert.
+    VaultKeySaved(String, VaultKeySource),
+    /// A vault key was cleared; carries the key name and the source that remains.
+    /// `Environment` means the clear revoked nothing the daemon actually uses.
+    VaultKeyDeleted(String, VaultKeySource),
     /// Model catalogue loaded for the Models screen (refs #7774).
     ModelCatalogLoaded(Vec<ModelRow>),
     /// One model's operator capacity limits were persisted; carries the
@@ -4355,7 +4368,7 @@ pub fn spawn_fetch_tools(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 pub fn spawn_save_provider_key(
     backend: BackendRef,
     name: String,
-    api_key: String,
+    api_key: zeroize::Zeroizing<String>,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
@@ -4367,7 +4380,7 @@ pub fn spawn_save_provider_key(
             let outcome = daemon_response(
                 client
                     .post(format!("{base_url}/api/providers/{name}/key"))
-                    .json(&serde_json::json!({"key": api_key}))
+                    .json(&serde_json::json!({"key": api_key.as_str()}))
                     .send(),
                 || crate::i18n::t_args("tui-event-provider-save-key-failed", &[("name", &name)]),
             );
@@ -4411,6 +4424,123 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
                 "tui-event-provider-key-management-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Fetch the writable vault keys, whether each is in the vault, and where the
+/// daemon resolves it from (#8164).
+///
+/// The response carries names, a boolean and a source; there is no read-back
+/// endpoint, so nothing here can ever receive a stored value to leak.
+pub fn spawn_fetch_vault_keys(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let keys = match client.get(format!("{base_url}/api/vault/keys")).send() {
+                Ok(resp) => match resp.json::<serde_json::Value>() {
+                    Ok(body) => body["keys"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|entry| VaultKeyInfo {
+                                    key: entry["key"].as_str().unwrap_or("").to_string(),
+                                    set: entry["set"].as_bool().unwrap_or(false),
+                                    source: VaultKeySource::from_wire(
+                                        entry["source"].as_str().unwrap_or_default(),
+                                    ),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                },
+                Err(_) => Vec::new(),
+            };
+            let _ = tx.send(AppEvent::VaultKeysLoaded(keys));
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-vault-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// The `source` a vault write response reports, defaulting to `Unset` when the
+/// body cannot be read.
+///
+/// A body that will not parse is not evidence of an environment override, and
+/// claiming one would be its own wrong answer; the subsequent list refresh is
+/// what corrects the pane either way.
+fn response_source(resp: reqwest::blocking::Response) -> VaultKeySource {
+    resp.json::<serde_json::Value>()
+        .ok()
+        .and_then(|body| body["source"].as_str().map(VaultKeySource::from_wire))
+        .unwrap_or_default()
+}
+
+/// Store a secret under a writable vault key.
+///
+/// `value` is moved into the request body and dropped with the closure; it is
+/// never logged, and the success event carries only the key name.
+pub fn spawn_set_vault_key(
+    backend: BackendRef,
+    key: String,
+    value: zeroize::Zeroizing<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let outcome = daemon_response(
+                client
+                    .put(format!("{base_url}/api/vault/keys/{key}"))
+                    .json(&serde_json::json!({ "value": value.as_str() }))
+                    .send(),
+                || crate::i18n::t_args("tui-event-vault-save-failed", &[("key", &key)]),
+            );
+            match outcome {
+                Ok(resp) => {
+                    let _ = tx.send(AppEvent::VaultKeySaved(key, response_source(resp)));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-vault-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Clear a writable vault key.
+pub fn spawn_delete_vault_key(backend: BackendRef, key: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let outcome = daemon_response(
+                client
+                    .delete(format!("{base_url}/api/vault/keys/{key}"))
+                    .send(),
+                || crate::i18n::t_args("tui-event-vault-delete-failed", &[("key", &key)]),
+            );
+            match outcome {
+                Ok(resp) => {
+                    let _ = tx.send(AppEvent::VaultKeyDeleted(key, response_source(resp)));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-vault-not-available-in-process",
             )));
         }
     });
