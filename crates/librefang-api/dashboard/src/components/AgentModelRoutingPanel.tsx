@@ -141,6 +141,21 @@ export function AgentModelRoutingPanel({ agent }: { agent: AgentDetail }) {
         )}
       </div>
 
+      {/* #7781 review: `fixed` (the per-agent router opt-out) now survives a
+          save instead of getting cleared, so it can persist silently with
+          nothing else in the panel naming the reason routing never fires. */}
+      {saved?.fixed && (
+        <div className="flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 p-3 text-xs text-warning">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <p>
+            {t("agents.routing.fixedOptOut", {
+              defaultValue:
+                "This agent is opted out of routing (fixed) — the allowlist and budget below have no effect until it's cleared.",
+            })}
+          </p>
+        </div>
+      )}
+
       {/* Mode */}
       <div className="space-y-2">
         <span className="text-xs font-medium uppercase tracking-wide text-muted">

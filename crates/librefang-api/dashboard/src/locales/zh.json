@@ -886,6 +886,7 @@
       "title": "模型路由",
       "description": "选择该智能体是始终使用自己的模型，还是由路由器根据任务复杂度为每个任务挑选模型。",
       "disabledKernelWide": "config.toml 中路由器已关闭",
+      "fixedOptOut": "该智能体已从路由中退出（fixed）— 在清除该选项之前，下方的允许列表和预算不会生效。",
       "mode": "模式",
       "modeFixed": "固定模型",
       "modeFlexible": "由路由器选择",

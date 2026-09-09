@@ -2169,6 +2169,10 @@ export interface AgentModelRouting {
   allowed_profiles: string[];
   cost_budget?: CostTier | null;
   default_profile?: string | null;
+  /// Per-agent router opt-out (#7781 review). `true` means the router never
+  /// touches this agent even in `flexible` mode — surfaced so the panel can
+  /// warn an operator their allowlist/budget edits have no effect.
+  fixed?: boolean;
 }
 
 export async function getAgentModelRouting(agentId: string): Promise<AgentModelRouting> {

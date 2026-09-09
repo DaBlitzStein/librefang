@@ -886,6 +886,7 @@
       "title": "Model routing",
       "description": "Choose whether this agent always uses its own model, or lets the router pick one per task based on the work's complexity.",
       "disabledKernelWide": "Router off in config.toml",
+      "fixedOptOut": "This agent is opted out of routing (fixed) — the allowlist and budget below have no effect until it's cleared.",
       "mode": "Mode",
       "modeFixed": "Fixed model",
       "modeFlexible": "Router chooses",

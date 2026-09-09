@@ -1251,10 +1251,10 @@ pub(crate) enum AgentCommands {
         /// "fixed" (use the agent's own model) or "flexible" (let the router pick).
         #[arg(long, default_value = "flexible")]
         mode: String,
-        /// Comma-separated profile names the router may pick. Omit for any profile.
+        /// Comma-separated profile names the router may pick. Omit to leave the stored allowlist unchanged; pass an empty string to allow any profile.
         #[arg(long)]
         profiles: Option<String>,
-        /// Highest cost tier the router may pick: cheap, medium or expensive. Omit for no cap.
+        /// Highest cost tier the router may pick: cheap, medium or expensive. Omit to leave the stored budget unchanged; pass an empty string to clear it (no cap).
         #[arg(long)]
         budget: Option<String>,
         /// Profile to use when nothing matches the task.

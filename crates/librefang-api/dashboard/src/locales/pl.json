@@ -888,6 +888,7 @@
       "title": "Routing modeli",
       "description": "Zdecyduj, czy ten agent zawsze używa własnego modelu, czy router dobiera model do każdego zadania na podstawie jego złożoności.",
       "disabledKernelWide": "Router wyłączony w config.toml",
+      "fixedOptOut": "Ten agent jest wyłączony z routingu (fixed) — lista dozwolonych profili i budżet poniżej nie działają, dopóki nie zostanie to wyczyszczone.",
       "mode": "Tryb",
       "modeFixed": "Stały model",
       "modeFlexible": "Router wybiera",
