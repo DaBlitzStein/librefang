@@ -42,7 +42,6 @@ class LibreFang {
     this.hands = new HandsResource(this);
     this.inbox = new InboxResource(this);
     this.mcp = new McpResource(this);
-    this.media = new MediaResource(this);
     this.memory = new MemoryResource(this);
     this.models = new ModelsResource(this);
     this.network = new NetworkResource(this);
@@ -71,14 +70,21 @@ class LibreFang {
     return path + (path.includes("?") ? "&" : "?") + q;
   }
 
-  // `contentType` sends `body` as-is (Buffer / Uint8Array / Blob) instead of JSON.
-  async _request(method, path, body, query, contentType) {
+  // `rawBody` / `contentType` bypass JSON encoding — for the few endpoints
+  // (raw-TOML saves, file upload) whose OpenAPI requestBody isn't
+  // `application/json`, the caller already has the exact string to send and
+  // `JSON.stringify`-ing it would produce a body the server's extractor
+  // can't parse.
+  async _request(method, path, body, query, rawBody, contentType) {
     const url = this.baseUrl + this._withQuery(path, query);
-    const headers = contentType
-      ? Object.assign({}, this._headers, { "Content-Type": contentType })
-      : this._headers;
+    const headers = Object.assign({}, this._headers);
     const opts = { method, headers };
-    if (body !== undefined && body !== null) opts.body = contentType ? body : JSON.stringify(body);
+    if (rawBody !== undefined) {
+      if (contentType) headers["Content-Type"] = contentType;
+      opts.body = rawBody;
+    } else if (body !== undefined && body !== null) {
+      opts.body = JSON.stringify(body);
+    }
     const res = await fetch(url, opts);
     const text = await res.text();
     if (!res.ok) throw new LibreFangError(`HTTP ${res.status}: ${text}`, res.status, text);
@@ -304,14 +310,6 @@ class AgentsResource {
     return this._c._request("PUT", `/api/agents/${id}/model`, data, undefined);
   }
 
-  async getAgentModelRouting(id) {
-    return this._c._request("GET", `/api/agents/${id}/model_routing`);
-  }
-
-  async setAgentModelRouting(id, data) {
-    return this._c._request("PUT", `/api/agents/${id}/model_routing`, data, undefined);
-  }
-
   async pushMessage(id, data) {
     return this._c._request("POST", `/api/agents/${id}/push`, data, undefined);
   }
@@ -412,8 +410,8 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/traces`);
   }
 
-  async uploadFile(id, body, contentType) {
-    return this._c._request("POST", `/api/agents/${id}/upload`, body, undefined, contentType || "application/octet-stream");
+  async uploadFile(id, body) {
+    return this._c._request("POST", `/api/agents/${id}/upload`, undefined, undefined, body, "application/octet-stream");
   }
 
   async serveUpload(file_id) {
@@ -911,40 +909,6 @@ class McpResource {
   }
 }
 
-// ── Media Resource
-
-class MediaResource {
-  constructor(client) { this._c = client; }
-
-  async generateImage(data) {
-    return this._c._request("POST", "/api/media/image", data, undefined);
-  }
-
-  async generateMusic(data) {
-    return this._c._request("POST", "/api/media/music", data, undefined);
-  }
-
-  async listMediaProviders() {
-    return this._c._request("GET", "/api/media/providers");
-  }
-
-  async synthesizeSpeech(data) {
-    return this._c._request("POST", "/api/media/speech", data, undefined);
-  }
-
-  async transcribeAudio(body, contentType) {
-    return this._c._request("POST", "/api/media/transcribe", body, undefined, contentType || "audio/webm");
-  }
-
-  async submitVideo(data) {
-    return this._c._request("POST", "/api/media/video", data, undefined);
-  }
-
-  async pollVideoTask(task_id, query) {
-    return this._c._request("GET", `/api/media/video/${task_id}`, undefined, query);
-  }
-}
-
 // ── Memory Resource
 
 class MemoryResource {
@@ -998,10 +962,6 @@ class ModelsResource {
 
   async listCredentialPools() {
     return this._c._request("GET", "/api/credential-pools");
-  }
-
-  async listModelRouterProfiles() {
-    return this._c._request("GET", "/api/model-router/profiles");
   }
 
   async listAllModels() {
@@ -1710,8 +1670,12 @@ class SystemResource {
     return this._c._request("GET", `/api/templates/${name}/toml`);
   }
 
-  async putAgentTemplateToml(name, data) {
-    return this._c._request("PUT", `/api/templates/${name}/toml`, data, undefined);
+  async putAgentTemplateToml(name, body) {
+    return this._c._request("PUT", `/api/templates/${name}/toml`, undefined, undefined, body, "text/plain");
+  }
+
+  async postAgentTemplateToml(name, body) {
+    return this._c._request("POST", `/api/templates/${name}/toml`, undefined, undefined, body, "text/plain");
   }
 
   async version() {

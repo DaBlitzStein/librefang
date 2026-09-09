@@ -45,7 +45,6 @@ type Client struct {
 	Hands *HandsResource
 	Inbox *InboxResource
 	Mcp *McpResource
-	Media *MediaResource
 	Memory *MemoryResource
 	Models *ModelsResource
 	Network *NetworkResource
@@ -83,7 +82,6 @@ func New(baseURL string) *Client {
 		c.Hands = &HandsResource{client: c}
 		c.Inbox = &InboxResource{client: c}
 		c.Mcp = &McpResource{client: c}
-		c.Media = &MediaResource{client: c}
 		c.Memory = &MemoryResource{client: c}
 		c.Models = &ModelsResource{client: c}
 		c.Network = &NetworkResource{client: c}
@@ -123,6 +121,7 @@ func (c *Client) withQuery(path string, query map[string]string) string {
 }
 
 func (c *Client) request(method, path string, body interface{}, query map[string]string) (interface{}, error) {
+	urlStr := c.BaseURL + c.withQuery(path, query)
 	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -131,18 +130,39 @@ func (c *Client) request(method, path string, body interface{}, query map[string
 		}
 		bodyBytes = b
 	}
-	return c.do(method, c.withQuery(path, query), bodyBytes, "")
-}
-
-// requestRaw sends body verbatim under contentType, for endpoints that read
-// the request body as bytes and reject application/json.
-func (c *Client) requestRaw(method, path string, body []byte, contentType string) (interface{}, error) {
-	return c.do(method, path, body, contentType)
-}
-
-func (c *Client) do(method, path string, bodyBytes []byte, contentType string) (interface{}, error) {
-	urlStr := c.BaseURL + path
 	req, err := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range c.Headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, &LibreFangError{Message: string(respBody), Status: resp.StatusCode, Body: string(respBody)}
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(respBody, &arr); err == nil {
+		return arr, nil
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return string(respBody), nil
+	}
+	return result, nil
+}
+
+// requestRaw sends body as-is instead of JSON-marshaling it — for the few
+// endpoints (raw-TOML saves, file upload) whose OpenAPI requestBody isn't
+// application/json, where the caller already has the exact bytes to send.
+func (c *Client) requestRaw(method, path string, body []byte, contentType string, query map[string]string) (interface{}, error) {
+	urlStr := c.BaseURL + c.withQuery(path, query)
+	req, err := http.NewRequest(method, urlStr, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -451,14 +471,6 @@ func (r *AgentsResource) SetModel(id string, data map[string]interface{}) (inter
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", id), data, nil)
 }
 
-func (r *AgentsResource) GetAgentModelRouting(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/model_routing", id), nil, nil)
-}
-
-func (r *AgentsResource) SetAgentModelRouting(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model_routing", id), data, nil)
-}
-
 func (r *AgentsResource) PushMessage(id string, data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/push", id), data, nil)
 }
@@ -559,12 +571,8 @@ func (r *AgentsResource) GetAgentTraces(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/traces", id), nil, nil)
 }
 
-// UploadFile sends a raw application/octet-stream body. An empty contentType defaults to it.
-func (r *AgentsResource) UploadFile(id string, body []byte, contentType string) (interface{}, error) {
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/upload", id), body, contentType)
+func (r *AgentsResource) UploadFile(id string, body string) (interface{}, error) {
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/upload", id), []byte(body), "application/octet-stream", nil)
 }
 
 func (r *AgentsResource) ServeUpload(file_id string) (interface{}, error) {
@@ -1039,42 +1047,6 @@ func (r *McpResource) ListMcpTaintRules() (interface{}, error) {
 	return r.client.request("GET", "/api/mcp/taint-rules", nil, nil)
 }
 
-// ── Media Resource
-
-type MediaResource struct{ client *Client }
-
-func (r *MediaResource) GenerateImage(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/media/image", data, nil)
-}
-
-func (r *MediaResource) GenerateMusic(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/media/music", data, nil)
-}
-
-func (r *MediaResource) ListMediaProviders() (interface{}, error) {
-	return r.client.request("GET", "/api/media/providers", nil, nil)
-}
-
-func (r *MediaResource) SynthesizeSpeech(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/media/speech", data, nil)
-}
-
-// TranscribeAudio sends a raw audio/webm body. An empty contentType defaults to it.
-func (r *MediaResource) TranscribeAudio(body []byte, contentType string) (interface{}, error) {
-	if contentType == "" {
-		contentType = "audio/webm"
-	}
-	return r.client.requestRaw("POST", "/api/media/transcribe", body, contentType)
-}
-
-func (r *MediaResource) SubmitVideo(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/media/video", data, nil)
-}
-
-func (r *MediaResource) PollVideoTask(task_id string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/media/video/%s", task_id), nil, query)
-}
-
 // ── Memory Resource
 
 type MemoryResource struct{ client *Client }
@@ -1125,10 +1097,6 @@ func (r *ModelsResource) CatalogUpdate() (interface{}, error) {
 
 func (r *ModelsResource) ListCredentialPools() (interface{}, error) {
 	return r.client.request("GET", "/api/credential-pools", nil, nil)
-}
-
-func (r *ModelsResource) ListModelRouterProfiles() (interface{}, error) {
-	return r.client.request("GET", "/api/model-router/profiles", nil, nil)
 }
 
 func (r *ModelsResource) ListAllModels() (interface{}, error) {
@@ -1823,8 +1791,12 @@ func (r *SystemResource) GetAgentTemplateToml(name string) (interface{}, error) 
 	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/toml", name), nil, nil)
 }
 
-func (r *SystemResource) PutAgentTemplateToml(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/templates/%s/toml", name), data, nil)
+func (r *SystemResource) PutAgentTemplateToml(name string, body string) (interface{}, error) {
+	return r.client.requestRaw("PUT", fmt.Sprintf("/api/templates/%s/toml", name), []byte(body), "text/plain", nil)
+}
+
+func (r *SystemResource) PostAgentTemplateToml(name string, body string) (interface{}, error) {
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/templates/%s/toml", name), []byte(body), "text/plain", nil)
 }
 
 func (r *SystemResource) Version() (interface{}, error) {

@@ -55,6 +55,26 @@ describe("agentManifest serializer", () => {
     expect(parsed.form.model.system_prompt).toBe(form.model.system_prompt);
   });
 
+  // #8028: `system_prompt` is not tri-state like the sampling knobs — a
+  // blank value means "this agent has no system prompt", not "no opinion".
+  // Routing it through the generic skip-if-empty writer dropped the key on
+  // an intentionally blank prompt, and the server's `#[serde(default)]`
+  // then filled the missing key with the canned default text on the very
+  // next save. The key must always be emitted, even empty, so a blank
+  // prompt round-trips as blank rather than acquiring text the operator
+  // never asked for.
+  it("writes system_prompt through even when blank, rather than omitting the key", () => {
+    const form = emptyManifestForm();
+    form.name = "blank-prompt";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.system_prompt = "";
+
+    const toml = serializeManifestForm(form);
+
+    expect(toml).toContain('system_prompt = ""');
+  });
+
   it("preserves Unicode scalars and replaces isolated UTF-16 surrogates", () => {
     const form = emptyManifestForm();
     form.name = "unicode-boundaries";
@@ -160,11 +180,24 @@ describe("agentManifest serializer", () => {
 });
 
 describe("agentManifest validator", () => {
-  it("flags missing name and model fields", () => {
+  it("flags a missing name", () => {
     const errors = validateManifestForm(emptyManifestForm());
     expect(errors).toContain("name");
-    expect(errors).toContain("model.provider");
-    expect(errors).toContain("model.model");
+  });
+
+  // #8028: a blank provider/model is the documented way an agent inherits
+  // the daemon's configured default (the form's own hint text next to
+  // these fields says so), and `ModelConfig`'s empty string is written
+  // through verbatim by both the flat editor's patch and its create path.
+  // Every agent (type) ever saved without a pinned provider had these two
+  // blank on disk, so requiring them here made Save silently no-op on all
+  // of them.
+  it("does not require provider/model — blank means inherit the daemon default", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    const errors = validateManifestForm(form);
+    expect(errors).not.toContain("model.provider");
+    expect(errors).not.toContain("model.model");
   });
 
   it("returns no errors when minimum fields are filled", () => {

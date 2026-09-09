@@ -4,7 +4,6 @@ import { Link } from "@tanstack/react-router";
 import { Edit2, ExternalLink, History, LayoutTemplate, Lock, Play, Plus, RotateCcw, Share2, ShieldCheck, Trash2 } from "lucide-react";
 import type {
   AgentTemplate,
-  AgentTypeSpec,
   SpawnEphemeralResult,
   TemplateVersionEntry,
 } from "../api";
@@ -15,12 +14,13 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useMcpServers } from "../lib/queries/mcp";
 import {
-  useCreateAgentType,
+  useCreateAgentTypeFromToml,
   useDeleteAgentType,
   usePromoteAgentType,
   useRestoreTemplateVersion,
   useSpawnEphemeral,
   useUpdateAgentTypeToml,
+  unknownKeysWarning,
 } from "../lib/mutations/agentTypes";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
@@ -81,7 +81,7 @@ function AgentTypeEditor({
   const isCreate = name === null;
 
   const detail = useAgentType(name ?? "", { enabled: !isCreate });
-  const createMutation = useCreateAgentType();
+  const createMutation = useCreateAgentTypeFromToml();
   const updateTomlMutation = useUpdateAgentTypeToml();
 
   const providersQuery = useProviders();
@@ -156,20 +156,22 @@ function AgentTypeEditor({
     if (errors.length > 0) return;
 
     try {
-      if (isCreate) {
-        const trimmed = newName.trim();
-        await createMutation.mutateAsync({
-          name: trimmed,
-          description: formState.description,
-        } as AgentTypeSpec);
-        const toml = serializeManifestForm(formState, formExtras);
-        await updateTomlMutation.mutateAsync({ name: trimmed, toml });
-        addToast(t("agentTypes.created"), "success");
-      } else {
-        const toml = serializeManifestForm(formState, formExtras);
-        await updateTomlMutation.mutateAsync({ name: name as string, toml });
-        addToast(t("agentTypes.saved"), "success");
+      const toml = serializeManifestForm(formState, formExtras);
+      // One write either way (#8028): a two-step create (POST the stub, then
+      // PUT the real manifest) leaves the stub on disk if the second call
+      // fails, with no way to retry short of closing and reopening the
+      // dialog. `createMutation` claims the name and writes the full
+      // manifest atomically, so a failure here leaves nothing behind and
+      // the same Save press can simply be retried.
+      const detail = isCreate
+        ? await createMutation.mutateAsync({ name: newName.trim(), toml })
+        : await updateTomlMutation.mutateAsync({ name: name as string, toml });
+
+      const dropped = unknownKeysWarning(detail);
+      if (dropped) {
+        addToast(t("agentTypes.unknown_keys_dropped", { keys: dropped }), "error");
       }
+      addToast(isCreate ? t("agentTypes.created") : t("agentTypes.saved"), "success");
       onClose();
     } catch (err) {
       addToast(toastErr(err, t("agentTypes.save_failed")), "error");
@@ -205,7 +207,16 @@ function AgentTypeEditor({
               <input
                 type="text"
                 value={newName}
-                onChange={(e) => setNewName(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setNewName(next);
+                  // `AgentManifestForm`'s own Name field is hidden in create
+                  // mode (there is exactly one Name input here, as the
+                  // editor this replaces had), but `validateManifestForm`
+                  // still checks `formState.name` — keep the two in step so
+                  // typing here doesn't leave that check permanently failing.
+                  setFormState((prev) => ({ ...prev, name: next }));
+                }}
                 placeholder={t("agentTypes.name_placeholder")}
                 className={inputClass}
                 autoFocus
@@ -223,6 +234,7 @@ function AgentTypeEditor({
             skillCatalog={skillCatalog}
             toolCatalog={toolCatalog}
             mcpCatalog={mcpCatalog}
+            nameField={isCreate ? "hidden" : "readonly"}
           />
 
           <div className="flex justify-end gap-2 pt-1">
