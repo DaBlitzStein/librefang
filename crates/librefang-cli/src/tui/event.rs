@@ -247,6 +247,8 @@ pub enum AppEvent {
     SettingsModelsLoaded(Vec<ModelInfo>),
     /// Settings tools loaded.
     SettingsToolsLoaded(Vec<ToolInfo>),
+    /// Settings auxiliary LLM chains loaded.
+    SettingsAuxiliaryLoaded(std::collections::BTreeMap<String, Vec<String>>),
     /// Provider key saved.
     ProviderKeySaved(String),
     /// Provider key deleted.
@@ -4338,6 +4340,173 @@ pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
                 "tui-event-backups-need-daemon",
+            )));
+        }
+    });
+}
+
+/// Fetch auxiliary LLM chains from `GET /api/config`.
+pub fn spawn_fetch_auxiliary(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            // `send()` returning `Ok` says nothing about status: a 401 or 500 body
+            // deserialises into `serde_json::Value` perfectly well, `llm.auxiliary`
+            // is then absent, and the pane renders every task as "(not configured)"
+            // — telling an operator with a rejected request that their chains are
+            // empty. And a transport error used to send no event at all, stranding
+            // the spinner `refresh_settings_auxiliary` had already armed. Both go
+            // through `daemon_response` like every sibling helper (#8059 review).
+            let outcome =
+                daemon_response(client.get(format!("{base_url}/api/config")).send(), || {
+                    crate::i18n::t("tui-event-aux-fetch-failed")
+                });
+            let resp = match outcome {
+                Ok(resp) => resp,
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                    return;
+                }
+            };
+            match resp.json::<serde_json::Value>() {
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(with_detail(
+                        crate::i18n::t("tui-event-aux-fetch-failed"),
+                        transport_detail(&e),
+                    )));
+                }
+                Ok(body) => {
+                    // Enumerate the task list from the kernel (#8059 review): the
+                    // config document only carries configured tasks, so a list
+                    // hand-maintained in event.rs would go stale when a new
+                    // `AuxTask` variant lands. The schema's `x-aux-tasks` is
+                    // compile-guarded by the `AuxTask::ALL` completeness test.
+                    // A failed or malformed schema fetch used to fall through to an
+                    // empty list in silence, leaving the operator looking at only the
+                    // tasks they had already configured with nothing to say a task is
+                    // missing rather than absent (same class of bug as #8144). Report
+                    // it and still render what the config document does carry.
+                    let known_tasks: Vec<String> = match client
+                        .get(format!("{base_url}/api/config/schema"))
+                        .send()
+                        .and_then(|r| r.json::<serde_json::Value>())
+                    {
+                        Ok(schema) => match schema.get("x-aux-tasks").and_then(|v| v.as_array()) {
+                            Some(a) => a
+                                .iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect(),
+                            None => {
+                                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                                    "tui-event-aux-tasks-schema-missing",
+                                )));
+                                Vec::new()
+                            }
+                        },
+                        Err(e) => {
+                            let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                                "tui-event-aux-tasks-fetch-failed",
+                                &[("error", &e.to_string())],
+                            )));
+                            Vec::new()
+                        }
+                    };
+                    let mut aux = std::collections::BTreeMap::new();
+                    if let Some(obj) = body
+                        .get("llm")
+                        .and_then(|l| l.get("auxiliary"))
+                        .and_then(|a| a.as_object())
+                    {
+                        for (task, chain) in obj {
+                            if let Some(arr) = chain.as_array() {
+                                let entries: Vec<String> = arr
+                                    .iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect();
+                                aux.insert(task.clone(), entries);
+                            }
+                        }
+                    }
+                    // Serve the kernel's task list: fill in every task the
+                    // schema enumerates but the operator has not configured,
+                    // so a new AuxTask variant appears without a code change
+                    // here (#8059 review).
+                    for task in known_tasks {
+                        aux.entry(task).or_default();
+                    }
+                    let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(aux));
+                }
+            }
+        }
+        BackendRef::InProcess(kernel) => {
+            let mut aux = std::collections::BTreeMap::new();
+            let config = kernel.config_ref();
+            for (task, chain) in &config.llm.auxiliary.tasks {
+                aux.insert(task.as_str().to_string(), chain.clone());
+            }
+            // Same enumeration source as the daemon path
+            // (schema `x-aux-tasks`): compile-guarded `AuxTask::ALL`.
+            for task in librefang_types::config::AuxTask::ALL {
+                aux.entry(task.as_str().to_string()).or_default();
+            }
+            let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(aux));
+        }
+    });
+}
+
+/// Save an auxiliary LLM chain via `POST /api/config/set`.
+pub fn spawn_save_aux_chain(
+    backend: BackendRef,
+    task: String,
+    chain: Vec<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon {
+            ref base_url,
+            ref api_key,
+        } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let body = serde_json::json!({
+                "path": format!("llm.auxiliary.{task}"),
+                "value": chain,
+            });
+            // `llm.auxiliary.<task>` has several legitimate rejections — 403 from
+            // `is_writable_config_path`, 400 when the chain does not deserialise,
+            // 409 on a corrupt config.toml, 423 under a managed config. Discarding
+            // the result and refetching re-rendered the old chain, so a refused
+            // save was indistinguishable from an edit that did not take
+            // (#8059 review).
+            let outcome = daemon_response(
+                client
+                    .post(format!("{base_url}/api/config/set"))
+                    .json(&body)
+                    .send(),
+                || crate::i18n::t_args("tui-event-aux-save-failed", &[("task", &task)]),
+            );
+            match outcome {
+                Ok(_) => {
+                    spawn_fetch_auxiliary(
+                        BackendRef::Daemon {
+                            base_url: base_url.clone(),
+                            api_key: api_key.clone(),
+                        },
+                        tx,
+                    );
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            // Reporting, not blanking: sending an empty map here made
+            // `SettingsAuxiliaryLoaded` rebuild `aux_tasks` from zero keys, so the
+            // pane replaced nine populated rows with "No auxiliary tasks
+            // configured." — a false statement about the operator's config, on top
+            // of silently dropping the edit (#8059 review).
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-aux-save-not-available-in-process",
             )));
         }
     });
