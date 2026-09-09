@@ -552,7 +552,11 @@ export function TasksPage() {
   // existed, which meant a new agent was unreachable until someone had already
   // assigned it something, a deleted agent lingered forever, and an empty
   // board offered no picker at all.
-  const agentsQuery = useAgents();
+  //
+  // `includeHands: true` because the kernel accepts hand agents as assignees
+  // too; the default-excluding list here would otherwise offer strictly less
+  // than what a claim can actually target.
+  const agentsQuery = useAgents({ includeHands: true });
   const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
   const agentsById = useMemo(
     () => new Map(agents.map((a) => [a.id, a])),
