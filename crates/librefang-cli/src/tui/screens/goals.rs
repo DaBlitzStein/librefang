@@ -10,6 +10,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, ListItem, Paragraph};
 use ratatui::Frame;
+use std::collections::BTreeMap;
 
 /// Create-wizard steps, in the order they are walked.
 ///
@@ -97,13 +98,27 @@ pub struct GoalsState {
     pub create_loop_engineering: bool,
     pub create_verify_agent_id: String,
     pub create_evaluator_model: String,
-    /// Verification-round budget sent with the next run this screen starts.
+    /// Verification-round budgets the `+` / `-` keys have set, by goal id.
     ///
     /// It is a property of the run request, not of the stored goal — the API
     /// takes it in the `POST /goals/{id}/start` body and the goal document has
-    /// no field for it — so it lives here rather than on [`GoalInfo`], and a
-    /// refresh legitimately resets it to the kernel's default.
-    pub verify_max_retries: u32,
+    /// no field for it — so it lives here rather than on [`GoalInfo`].
+    ///
+    /// Keyed by goal because the detail pane renders it among per-goal fields:
+    /// one screen-global number showed a budget edited on goal A as if it were
+    /// goal B's configuration, and then started B with it.
+    ///
+    /// An absent entry means the operator has not chosen a budget, and is the
+    /// reason this is a map of `u32` rather than a `u32` with a default: a
+    /// start with no entry sends no `verify_max_retries` at all and lets the
+    /// daemon apply its own default. Seeding it with the CLI's compiled
+    /// constant would pin every run to whatever value *this* binary was built
+    /// with, which is the wrong one whenever the CLI and the daemon differ in
+    /// version — and they are separate binaries talking over HTTP.
+    ///
+    /// Nothing resets this: it survives every refresh for the life of the
+    /// process, because only [`Self::adjust_verify_max_retries`] writes it.
+    pub pending_verify_max_retries: BTreeMap<String, u32>,
     pub status_msg: String,
     pub confirm_delete: bool,
 }
@@ -165,7 +180,7 @@ impl GoalsState {
             create_loop_engineering: false,
             create_verify_agent_id: String::new(),
             create_evaluator_model: String::new(),
-            verify_max_retries: librefang_kernel::goal_runner::DEFAULT_VERIFY_MAX_RETRIES,
+            pending_verify_max_retries: BTreeMap::new(),
             status_msg: String::new(),
             confirm_delete: false,
         }
@@ -235,16 +250,40 @@ impl GoalsState {
         } else {
             GoalsAction::StartRun {
                 goal_id: goal.id.clone(),
-                verify_max_retries: goal.loop_engineering.then_some(self.verify_max_retries),
+                // Only a budget the operator actually chose goes on the wire.
+                // With no entry the request body is omitted entirely and the
+                // daemon applies its own default, which is the only value that
+                // is right when the CLI and the daemon are different versions.
+                verify_max_retries: goal
+                    .loop_engineering
+                    .then(|| self.pending_verify_max_retries.get(&goal.id).copied())
+                    .flatten(),
             }
         }
     }
 
-    /// Move the pending verification-round budget by `delta`, staying inside
-    /// `1..=MAX_VERIFY_MAX_RETRIES`.
+    /// Move the open goal's pending verification-round budget by `delta`,
+    /// staying inside `1..=MAX_VERIFY_MAX_RETRIES`.
+    ///
+    /// The first press has to start somewhere. It starts from the budget the
+    /// pane is showing — the live run's, when there is one — so the number the
+    /// operator sees move is the number they were looking at. Only when there
+    /// is neither a pending edit nor a run does it fall back to this binary's
+    /// compiled default, and by then the operator is choosing the value
+    /// explicitly and can see it before `s` commits to it.
     fn adjust_verify_max_retries(&mut self, delta: i32) {
-        let next = self.verify_max_retries as i32 + delta;
-        self.verify_max_retries = next.clamp(1, MAX_VERIFY_MAX_RETRIES as i32) as u32;
+        let Some(goal) = self.selected_goal.and_then(|idx| self.goals.get(idx)) else {
+            return;
+        };
+        let id = goal.id.clone();
+        let base = self
+            .pending_verify_max_retries
+            .get(&id)
+            .copied()
+            .or(goal.run_verify_max_retries.filter(|&n| n > 0))
+            .unwrap_or(librefang_kernel::goal_runner::DEFAULT_VERIFY_MAX_RETRIES);
+        let next = (base as i32 + delta).clamp(1, MAX_VERIFY_MAX_RETRIES as i32) as u32;
+        self.pending_verify_max_retries.insert(id, next);
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> GoalsAction {
@@ -509,17 +548,35 @@ fn label_span(key: &str) -> Span<'static> {
     Span::styled(format!("  {} ", crate::i18n::t(key)), theme::dim_style())
 }
 
-/// The verification-round budget to show for `goal`.
+/// How the verification-round budget reads in the detail pane.
 ///
-/// The live run's own budget when there is one — that is what is actually in
-/// force — otherwise `pending`, the setting the `+` / `-` keys edit and the
-/// next run will be started with. A stored `0` is the kernel's encoding for a
-/// run that is not using loop engineering at all, not a budget of zero rounds,
-/// so it falls through to `pending` as well.
-fn displayed_verify_max_retries(goal: &GoalInfo, pending: u32) -> u32 {
-    goal.run_verify_max_retries
-        .filter(|&n| n > 0)
-        .unwrap_or(pending)
+/// The live run's own budget leads, because that is what is actually in force.
+/// A pending edit is shown next to it rather than instead of it: preferring
+/// the run's number outright left `+` / `-` looking inert on any goal that had
+/// ever run — the registry keeps a finished run, including the boot-recovery
+/// placeholder, so the number on screen never moved — and the next `s` then
+/// started with a budget the operator had no way to see beforehand.
+///
+/// With no run and no edit there is no number to report: the daemon picks the
+/// budget, and naming this binary's compiled constant here would claim a value
+/// the run may not use.
+///
+/// A stored `0` is the kernel's encoding for a run that is not using loop
+/// engineering at all, not a budget of zero rounds, so it is not a budget in
+/// force.
+fn displayed_verify_max_retries(goal: &GoalInfo, pending: Option<u32>) -> String {
+    match (goal.run_verify_max_retries.filter(|&n| n > 0), pending) {
+        (Some(in_force), Some(next)) if in_force != next => crate::i18n::t_args(
+            "tui-goals-verify-rounds-next",
+            &[
+                ("current", &in_force.to_string()),
+                ("next", &next.to_string()),
+            ],
+        ),
+        (Some(in_force), _) => in_force.to_string(),
+        (None, Some(next)) => next.to_string(),
+        (None, None) => crate::i18n::t("tui-goals-verify-rounds-default"),
+    }
 }
 
 fn draw_list_panel(f: &mut Frame, area: Rect, state: &mut GoalsState) {
@@ -610,14 +667,15 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
             return;
         }
     };
-    let pending_rounds = state.verify_max_retries;
     let g = &state.goals[idx];
+    let pending_rounds = state.pending_verify_max_retries.get(&g.id).copied();
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // title
         Constraint::Length(1), // separator
         Constraint::Min(3),    // body
-        Constraint::Length(1), // hints
+        // Two rows when the round-budget hint is shown, one otherwise.
+        Constraint::Length(if g.loop_engineering { 2 } else { 1 }), // hints
     ])
     .split(area);
 
@@ -681,30 +739,39 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
     if g.loop_engineering {
         let no_verifier = crate::i18n::t("tui-goals-verifier-none");
         let no_evaluator = crate::i18n::t("tui-goals-evaluator-none");
+        // A model id or a translated "none" phrase is easily longer than the
+        // half-screen this pane gets, and a `Span` past the edge is clipped
+        // mid-word with nothing to say it was cut — `title` and `description`
+        // above are budgeted for exactly this reason. Measure against the
+        // label actually in front of the value so a longer translated label
+        // does not push the value off on its own.
+        let value_width = |label_key: &str| {
+            (chunks[2].width as usize).saturating_sub(crate::i18n::t(label_key).chars().count() + 3)
+        };
         lines.push(Line::from(vec![
             label_span("tui-goals-label-verifier"),
             Span::styled(
-                g.verify_agent_id
-                    .as_deref()
-                    .unwrap_or(&no_verifier)
-                    .to_string(),
+                widgets::truncate(
+                    g.verify_agent_id.as_deref().unwrap_or(&no_verifier),
+                    value_width("tui-goals-label-verifier"),
+                ),
                 Style::default().fg(theme::CYAN),
             ),
         ]));
         lines.push(Line::from(vec![
             label_span("tui-goals-label-evaluator"),
             Span::styled(
-                g.evaluator_model
-                    .as_deref()
-                    .unwrap_or(&no_evaluator)
-                    .to_string(),
+                widgets::truncate(
+                    g.evaluator_model.as_deref().unwrap_or(&no_evaluator),
+                    value_width("tui-goals-label-evaluator"),
+                ),
                 Style::default().fg(theme::CYAN),
             ),
         ]));
         lines.push(Line::from(vec![
             label_span("tui-goals-label-verify-rounds"),
             Span::styled(
-                displayed_verify_max_retries(g, pending_rounds).to_string(),
+                displayed_verify_max_retries(g, pending_rounds),
                 Style::default().fg(theme::TEXT_SECONDARY),
             ),
         ]));
@@ -762,13 +829,23 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &mut GoalsState) {
     } else {
         crate::i18n::t("tui-goals-hint-start")
     };
-    let mut hint = crate::i18n::t_args("tui-goals-detail-hints", &[("run_hint", &run_hint)]);
-    // Only advertised where the keys do something — see `handle_detail_key`.
+    let mut hint_rows = vec![Line::from(Span::styled(
+        crate::i18n::t_args("tui-goals-detail-hints", &[("run_hint", &run_hint)]),
+        theme::hint_style(),
+    ))];
+    // Only advertised where the keys do something — see `handle_detail_key`,
+    // and on its own row rather than appended to the bar above: `hint_bar` is
+    // a bare `Paragraph` with no wrapping, and this pane is half the screen —
+    // 39 columns on an 80-column terminal — so an appended hint lands past the
+    // right edge and is clipped rather than wrapped. The one affordance this
+    // screen adds was never on screen at all.
     if g.loop_engineering {
-        hint.push_str("  ");
-        hint.push_str(&crate::i18n::t("tui-goals-hint-rounds"));
+        hint_rows.push(Line::from(Span::styled(
+            crate::i18n::t("tui-goals-hint-rounds"),
+            theme::hint_style(),
+        )));
     }
-    f.render_widget(widgets::hint_bar(&hint), chunks[3]);
+    f.render_widget(Paragraph::new(hint_rows), chunks[3]);
 }
 
 fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
@@ -1132,10 +1209,71 @@ mod tests {
             GoalsAction::StartRun {
                 verify_max_retries, ..
             } => assert_eq!(
-                verify_max_retries,
-                Some(librefang_kernel::goal_runner::DEFAULT_VERIFY_MAX_RETRIES),
-                "an unedited budget is the kernel's own default, not a local guess"
+                verify_max_retries, None,
+                "an untouched budget sends no field at all, so the daemon applies its own default \
+                 — stating this binary's compiled constant would pin the run to the CLI's version"
             ),
+            _ => panic!("s must start the run"),
+        }
+    }
+
+    /// The CLI and the daemon are separate binaries over HTTP and routinely
+    /// differ in version. Only a budget the operator actually chose may go on
+    /// the wire; anything else silently pins the run to the constant this
+    /// binary happened to be built with.
+    #[test]
+    fn start_states_a_budget_only_after_the_operator_sets_one() {
+        let mut engineered = goal("1", "a b", None);
+        engineered.loop_engineering = true;
+        let mut s = state_with(vec![engineered]);
+        s.selected_goal = Some(0);
+        s.detail_open = true;
+
+        s.handle_key(key(KeyCode::Char('+')));
+        let chosen = librefang_kernel::goal_runner::DEFAULT_VERIFY_MAX_RETRIES + 1;
+        match s.handle_key(key(KeyCode::Char('s'))) {
+            GoalsAction::StartRun {
+                verify_max_retries, ..
+            } => assert_eq!(verify_max_retries, Some(chosen)),
+            _ => panic!("s must start the run"),
+        }
+    }
+
+    /// The pane renders the budget among per-goal fields, so the value behind
+    /// it has to be per-goal too: one screen-global number showed an edit made
+    /// on A as if it were B's configuration, and then started B with it.
+    #[test]
+    fn a_budget_edited_on_one_goal_does_not_leak_into_another() {
+        let mut a = goal("1", "a b", None);
+        a.loop_engineering = true;
+        let mut b = goal("2", "c d", None);
+        b.loop_engineering = true;
+        let mut s = state_with(vec![a, b]);
+
+        s.detail_open = true;
+        s.selected_goal = Some(0);
+        s.handle_key(key(KeyCode::Char('+')));
+        s.handle_key(key(KeyCode::Char('+')));
+
+        // B has never been touched, so its pane shows no number of its own and
+        // its start states nothing.
+        s.selected_goal = Some(1);
+        assert_eq!(
+            displayed_verify_max_retries(
+                &s.goals[1],
+                s.pending_verify_max_retries.get("2").copied()
+            ),
+            crate::i18n::t("tui-goals-verify-rounds-default")
+        );
+        s.list_state.select(Some(1));
+        match s.handle_key(key(KeyCode::Char('s'))) {
+            GoalsAction::StartRun {
+                goal_id,
+                verify_max_retries,
+            } => {
+                assert_eq!(goal_id, "2");
+                assert_eq!(verify_max_retries, None, "B must not inherit A's budget");
+            }
             _ => panic!("s must start the run"),
         }
     }
@@ -1145,22 +1283,24 @@ mod tests {
         let mut engineered = goal("1", "a b", None);
         engineered.loop_engineering = true;
         let mut s = state_with(vec![engineered, goal("2", "c d", None)]);
-        let base = s.verify_max_retries;
+        let base = librefang_kernel::goal_runner::DEFAULT_VERIFY_MAX_RETRIES;
 
         // Detail pane on the loop-engineered goal.
         s.selected_goal = Some(0);
         s.detail_open = true;
         s.handle_key(key(KeyCode::Char('+')));
-        assert_eq!(s.verify_max_retries, base + 1);
+        assert_eq!(s.pending_verify_max_retries.get("1"), Some(&(base + 1)));
         s.handle_key(key(KeyCode::Char('-')));
         s.handle_key(key(KeyCode::Char('-')));
-        assert_eq!(s.verify_max_retries, base - 1);
+        assert_eq!(s.pending_verify_max_retries.get("1"), Some(&(base - 1)));
 
         // Same keys on a plain goal change nothing.
         s.selected_goal = Some(1);
-        let unchanged = s.verify_max_retries;
         s.handle_key(key(KeyCode::Char('+')));
-        assert_eq!(s.verify_max_retries, unchanged);
+        assert!(
+            !s.pending_verify_max_retries.contains_key("2"),
+            "a goal the budget never reaches must not gain one"
+        );
     }
 
     #[test]
@@ -1174,36 +1314,65 @@ mod tests {
         for _ in 0..MAX_VERIFY_MAX_RETRIES + 5 {
             s.handle_key(key(KeyCode::Char('+')));
         }
-        assert_eq!(s.verify_max_retries, MAX_VERIFY_MAX_RETRIES);
+        assert_eq!(
+            s.pending_verify_max_retries.get("1"),
+            Some(&MAX_VERIFY_MAX_RETRIES)
+        );
 
         for _ in 0..MAX_VERIFY_MAX_RETRIES + 5 {
             s.handle_key(key(KeyCode::Char('-')));
         }
-        assert_eq!(s.verify_max_retries, 1, "a run gets at least one round");
+        assert_eq!(
+            s.pending_verify_max_retries.get("1"),
+            Some(&1),
+            "a run gets at least one round"
+        );
     }
 
+    /// Preferring the run's own budget outright made `+` / `-` look inert on
+    /// every goal that had ever run — the registry keeps a finished run, so
+    /// the number on screen never moved while the next start used the edited
+    /// one. Both have to be visible for the keys to be honest.
     #[test]
-    fn the_displayed_budget_prefers_the_live_run_over_the_pending_setting() {
+    fn the_displayed_budget_shows_the_live_run_and_the_pending_edit_together() {
         let mut g = goal("1", "a b", None);
         g.loop_engineering = true;
 
         assert_eq!(
-            displayed_verify_max_retries(&g, 7),
-            7,
+            displayed_verify_max_retries(&g, None),
+            crate::i18n::t("tui-goals-verify-rounds-default"),
+            "with neither a run nor an edit, the daemon picks and the pane may not claim a number"
+        );
+        assert_eq!(
+            displayed_verify_max_retries(&g, Some(7)),
+            "7",
             "with no run, the pending setting is what the next start will send"
         );
 
         g.run_verify_max_retries = Some(2);
         assert_eq!(
-            displayed_verify_max_retries(&g, 7),
-            2,
+            displayed_verify_max_retries(&g, None),
+            "2",
             "a live run's own budget is what is actually in force"
+        );
+        assert_eq!(
+            displayed_verify_max_retries(&g, Some(8)),
+            crate::i18n::t_args(
+                "tui-goals-verify-rounds-next",
+                &[("current", "2"), ("next", "8")]
+            ),
+            "an edit against a live run must show what the next start will use"
+        );
+        assert_eq!(
+            displayed_verify_max_retries(&g, Some(2)),
+            "2",
+            "an edit back to the run's own budget is not a pending change"
         );
 
         // `0` is the kernel's "this run is not using loop engineering", not a
         // budget of zero rounds.
         g.run_verify_max_retries = Some(0);
-        assert_eq!(displayed_verify_max_retries(&g, 7), 7);
+        assert_eq!(displayed_verify_max_retries(&g, Some(7)), "7");
     }
 
     #[test]
