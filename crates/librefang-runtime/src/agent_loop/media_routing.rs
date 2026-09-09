@@ -30,15 +30,32 @@
 //! 2. **Once per turn.** The work happens before the loop, not inside it, so
 //!    a ten-iteration tool-use turn does not pay for ten descriptions.
 //! 3. **No double-describe.** An image the channel bridge already described
-//!    arrives carrying its description block, and is left alone.
-//! 4. **Never fatal.** A provider failure degrades to
-//!    `[Image description unavailable]` — which still tells the model it is
-//!    not looking at the image — rather than dropping the turn.
+//!    arrives carrying its description block in the slot immediately before
+//!    it, and is left alone — per image, so a mixed message still describes
+//!    the one that arrived bare.
+//! 4. **Never fatal.** A provider failure, or one that does not answer within
+//!    [`DESCRIPTION_TIMEOUT`], degrades to `[Image description unavailable]` —
+//!    which still tells the model it is not looking at the image — rather than
+//!    dropping the turn or holding the session open.
 
 use librefang_types::media::{
     image_description_block_text, is_image_description_text, IMAGE_DESCRIPTION_UNAVAILABLE,
 };
 use librefang_types::message::ContentBlock;
+
+/// Ceiling on a single description call, mirroring the channel bridge's
+/// `INBOUND_DESCRIPTION_TIMEOUT`.
+///
+/// Vision APIs answer in 2-8s, but the loop below is sequential and
+/// `MediaEngine::describe_image` waits on a semaphore permit *before* it
+/// issues a request whose own ceiling is 60s.
+/// Without a bound here, one hung provider plus a queue of other media work
+/// pins the turn — and the operator's message has not reached the agent's own
+/// model yet — so a six-image upload could hold a session for minutes.
+/// On elapse the call degrades through the same path as any other provider
+/// failure: the model is told the image is unavailable rather than left to
+/// invent it.
+pub(crate) const DESCRIPTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// An image block reduced to what a describer needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,17 +92,38 @@ pub(crate) trait ImageDescriber: Send + Sync {
     async fn describe(&self, image: ImageRef<'_>) -> Result<String, String>;
 }
 
-/// `true` when `blocks` already carries at least one description block.
+/// `true` when the image at `idx` already carries its description.
 ///
-/// Whole-message granularity on purpose: the channel bridge emits one
-/// description per image in arrival order, so a message that has any
-/// description block has been through that path already and re-describing it
-/// would double-bill for text that is already there.
+/// Adjacency, not "somewhere in the message": the channel bridge inserts each
+/// description in the slot immediately before the image it describes, so that
+/// slot is the only one that means anything.
+/// Scanning the whole message instead reads *user-controlled* text — a caption
+/// reading `[Image description: see attached]`, or a forwarded chat log that
+/// happens to quote the line — and would skip describing a picture nobody had
+/// described, putting the agent back to answering from a filename.
+/// It also mis-handles the mixed case, where one image arrived described and a
+/// second did not.
+fn image_at_is_already_described(blocks: &[ContentBlock], idx: usize) -> bool {
+    idx > 0
+        && matches!(
+            &blocks[idx - 1],
+            ContentBlock::Text { text, .. } if is_image_description_text(text)
+        )
+}
+
+/// `true` when every image in `blocks` already carries its description, so
+/// there is nothing for this hop to do and no provider call to pay for.
 pub(crate) fn blocks_already_describe_images(blocks: &[ContentBlock]) -> bool {
-    blocks.iter().any(|b| match b {
-        ContentBlock::Text { text, .. } => is_image_description_text(text),
-        _ => false,
-    })
+    let mut saw_image = false;
+    for (idx, block) in blocks.iter().enumerate() {
+        if ImageRef::from_block(block).is_some() {
+            saw_image = true;
+            if !image_at_is_already_described(blocks, idx) {
+                return false;
+            }
+        }
+    }
+    saw_image
 }
 
 /// `true` when `blocks` contains something a vision-less model cannot read.
@@ -106,10 +144,32 @@ pub(crate) async fn enrich_blocks_with_image_descriptions(
         return blocks;
     }
 
+    // Decided before the blocks are consumed, because the answer depends on
+    // the *neighbour* of each image and `out` no longer has those neighbours
+    // in their original positions once descriptions start being inserted.
+    let needs_description: Vec<bool> = blocks
+        .iter()
+        .enumerate()
+        .map(|(idx, b)| {
+            ImageRef::from_block(b).is_some() && !image_at_is_already_described(&blocks, idx)
+        })
+        .collect();
+
     let mut out = Vec::with_capacity(blocks.len() * 2);
-    for block in blocks {
-        if let Some(image) = ImageRef::from_block(&block) {
-            let text = match describer.describe(image).await {
+    for (idx, block) in blocks.into_iter().enumerate() {
+        // Per image, not per message: an image the bridge already described is
+        // left alone, and a second undescribed image in the same message is
+        // still described.
+        if let Some(image) = ImageRef::from_block(&block).filter(|_| needs_description[idx]) {
+            let described =
+                match tokio::time::timeout(DESCRIPTION_TIMEOUT, describer.describe(image)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(format!(
+                        "no answer within {}s",
+                        DESCRIPTION_TIMEOUT.as_secs()
+                    )),
+                };
+            let text = match described {
                 Ok(description) if !description.trim().is_empty() => {
                     image_description_block_text(&description)
                 }
@@ -454,6 +514,93 @@ mod tests {
             "must not double-bill for a description"
         );
         assert_eq!(texts(&out), texts(&blocks));
+    }
+
+    /// The dedupe sniff must not read text the *user* wrote. A caption that
+    /// happens to be shaped like a description block — typed, or quoted out of
+    /// a forwarded chat log — used to skip the whole message, leaving the
+    /// text-only model holding a filename again.
+    #[tokio::test]
+    async fn a_user_typed_caption_elsewhere_in_the_message_does_not_suppress_the_description() {
+        let stub = StubDescriber::ok("A signed contract, page 3.");
+        let out = enrich_blocks_with_image_descriptions(
+            vec![
+                text("[Image description: see attached]"),
+                text("what does it say?"),
+                image_file("/tmp/contract.png"),
+            ],
+            &stub,
+        )
+        .await;
+
+        assert_eq!(
+            stub.call_count(),
+            1,
+            "the image is undescribed — user text must not stand in for a real description"
+        );
+        assert!(
+            texts(&out)
+                .iter()
+                .any(|t| t == "[Image description: A signed contract, page 3.]"),
+            "expected the real description: {out:?}"
+        );
+    }
+
+    /// Mixed message: the bridge described the first image and the second
+    /// arrived bare. Whole-message granularity skipped both.
+    #[tokio::test]
+    async fn a_second_undescribed_image_is_still_described() {
+        let stub = StubDescriber::ok("the second picture");
+        let out = enrich_blocks_with_image_descriptions(
+            vec![
+                text("[Image description: the first picture]"),
+                image_file("/tmp/a.png"),
+                image_file("/tmp/b.png"),
+            ],
+            &stub,
+        )
+        .await;
+
+        assert_eq!(
+            stub.call_count(),
+            1,
+            "exactly the bare image is described, and the described one is not re-billed"
+        );
+        assert_eq!(
+            stub.calls.lock().unwrap().as_slice(),
+            ["/tmp/b.png"],
+            "the wrong image was sent for description"
+        );
+        assert_eq!(
+            texts(&out),
+            vec![
+                "[Image description: the first picture]",
+                "[Image description: the second picture]"
+            ]
+        );
+    }
+
+    /// A provider that never answers must not hold the turn open. Without the
+    /// `tokio::time::timeout`, this test hangs until the harness kills it.
+    #[tokio::test(start_paused = true)]
+    async fn a_provider_that_never_answers_degrades_to_the_unavailable_marker() {
+        struct HangingDescriber;
+        #[async_trait::async_trait]
+        impl ImageDescriber for HangingDescriber {
+            async fn describe(&self, _image: ImageRef<'_>) -> Result<String, String> {
+                // Longer than the ceiling by a margin the clock cannot round away.
+                tokio::time::sleep(DESCRIPTION_TIMEOUT * 4).await;
+                Ok("far too late".to_string())
+            }
+        }
+
+        let out = enrich_blocks_with_image_descriptions(
+            vec![image_file("/tmp/slow.png")],
+            &HangingDescriber,
+        )
+        .await;
+        assert_eq!(texts(&out), vec!["[Image description unavailable]"]);
+        assert_eq!(out.len(), 2, "the image block is still delivered");
     }
 
     #[tokio::test]
