@@ -23,10 +23,11 @@ Use `workflow_create` to write it, `workflow_describe` to check its parameter sh
 - `steps` (required, 1-50). Each step:
   - `name` — unique within the workflow.
   - `agent` — a bare string (agent name) or an object with exactly one routing key: `{name}`, `{id}`, or `{type}` (find-or-spawn).
-  - `prompt_template` — the step's task; reference previous outputs with `{{step_name}}` placeholders.
+  - `prompt_template` — the step's task. `{{input}}` is the previous step's output; `{{name}}` is a workflow input parameter or an earlier step's declared `output_var`.
+    A step name is not a placeholder: `{{step_name}}` resolves to nothing unless that step declared `output_var = "step_name"`.
   - `timeout_secs` — per-step wall-clock ceiling, at most 3600.
   - `error_mode` — how the step's failure affects the run: `"fail"` (default), `"skip"`, or `{"retry": {"max_retries": N}}`.
-  - `output_var` — the variable later steps read (defaults to the step name).
+  - `output_var` — the variable later steps read. There is no default: omit it and the step's output is unreachable by name, so declare it on every step another step quotes.
   - `depends_on` — explicit ordering when it differs from declaration order.
   - `inherit_context` / `session_mode` — advanced; leave unset unless the design needs them.
 - `input_schema` — declared parameters (`name`, `param_type`, `required`, `description`), so `workflow_describe` can tell callers what to pass.

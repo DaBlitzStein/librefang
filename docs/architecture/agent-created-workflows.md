@@ -5,7 +5,8 @@ This document covers the design, validation, persistence, and observability of t
 
 ## Tool surface
 
-`workflow_create` is registered in `ALWAYS_NATIVE_TOOLS`, so every agent has it without manifest configuration.
+`workflow_create` is part of the default tool catalogue, so an ordinary agent has it without manifest configuration and a `tool_blocklist` entry is what takes it away.
+It is *not* in `ALWAYS_NATIVE_TOOLS` — that array is the lazy-load shortlist, so an agent running with `lazy_tools = true` has to reach `workflow_create` (and `workflow_run`) through `tool_search` / `tool_load` rather than finding them already declared.
 It accepts `name`, `description`, `steps[]`, `input_schema[]`, and `total_timeout_secs` — the same shape the dashboard canvas and `POST /api/workflows` use.
 
 Each step carries `name`, `agent` (name or UUID), `prompt_template` (with `{{input}}` for previous-step output and `{{var}}` for named variables), optional `depends_on` (DAG execution), `output_var`, `mode`, `timeout_secs`, and `error_mode`.
@@ -29,7 +30,8 @@ A failed write never leaves a partial file on disk.
 
 ## Observability
 
-Workflow creation logs `workflow=<name> registered_id=<uuid>` at info.
+Workflow creation logs at info with the fields `workflow_id`, `workflow_name`, `caller_agent_id`, `owner` and `step_count`, under the message `Agent created a workflow`.
+`caller_agent_id` and `owner` are the two the line exists for: which agent turn assembled the spec, and which principal it was acting for (#7744).
 Workflow runs persist in SQLite via `WorkflowStore` with per-step results, timestamps, and terminal state.
 
 ## Dashboard integration
@@ -71,4 +73,7 @@ A run records its `owner_agent_id` (migration v48): the caller of `workflow_run`
 
 Agent types are templates: the canonical spelling is "agent type" everywhere, in prose and UI, though the API stays at `/api/templates` (there is deliberately no `/api/agent-types` alias, #7722; the TUI templates screen is titled "Agent types"). Agents can author types with the `agent_type_create` tool (same validation as the API), and ephemeral workers spawned from a type get a uid display name plus a transient mission workspace under `~/.librefang/transient/<name>` that is deleted when the run ends.
 
-An agent type carries the full manifest surface relevant to spawns: `name`, `description`, `system_prompt`, `provider`/`model` (spawn defaults), `tools`, `skills`, a `channels` allowlist (empty = all configured channels), and preferred-model tiers via `routing` (`simple_model` / `medium_model` / `complex_model` + thresholds — the `[routing]` block of the generated TOML). The dashboard editor exposes all of them with catalog-backed pickers (skills, tools, channels) mirroring the agent editor; the shared `AgentTypeSpec` / `AgentTypeSpec::apply_to` in `librefang-types` is the single source of truth for the API route and the tool, so the two authoring surfaces cannot drift.
+The editable agent-type surface is exactly seven fields: `name`, `description`, `system_prompt`, `provider`/`model` (spawn defaults), `tools` and `skills`.
+That is what `AgentTypeSpec` carries, what `agent_type_spec_of` projects out of a manifest, and — because the struct is `#[serde(deny_unknown_fields)]` — the complete set a `PUT` accepts back; anything else in the body is a 422 rather than a partial save.
+The dashboard editor exposes those seven with catalog-backed pickers for skills and tools, and the shared `AgentTypeSpec` / `AgentTypeSpec::apply_to` in `librefang-types` is the single source of truth for the API route and the tool, so the two authoring surfaces cannot drift.
+Everything else in a manifest — `channels`, the `[routing]` tiers, triggers, MCP servers, exec policy — starts at its default on a type and is edited on the manifest afterwards; `apply_to` leaves those fields untouched rather than resetting them.

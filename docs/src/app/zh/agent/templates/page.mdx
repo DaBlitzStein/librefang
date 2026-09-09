@@ -320,7 +320,8 @@ cache_context = true   # 默认 false（每回合重读）
 - **`tool_search(query)`** — 在 catalog（名 + 描述 + 提示）做关键字匹配。返回匹配的 tool 和它们的一行提示。
 - **`tool_load(name)`** — 取某个 tool 的完整 schema。该 tool 从下一回合开始可调（schema 被加入到之后的请求里）。
 
-完整 catalog 仍以"每行一个 tool 的提示"列表渲染进 system prompt，模型知道有哪些 tool 而不必为完整 schema 付费。**runtime 分类为 "always native" 的 tool**（file_read、shell_exec、cron tools 等）每回合都带完整 schema —— 没必要让模型 `tool_load` 它几乎肯定会用的东西。
+完整 catalog 仍以"每行一个 tool 的提示"列表渲染进 system prompt，模型知道有哪些 tool 而不必为完整 schema 付费。**runtime 分类为 "always native" 的 tool**（`tool_search` / `tool_load` 本身、`file_*` 与 `memory_*` 系列、`web_search`、`web_fetch`、`code_search`、`agent_send`、`agent_list`、`channel_send`、`notify_owner`、`read_artifact` 以及 `skill_evolve_*` 系列）每回合都带完整 schema —— 没必要让模型 `tool_load` 它几乎肯定会用的东西。
+`shell_exec` 和 cron tools **不在**该列表内；开启 `lazy_tools` 时，它们和 catalog 中其余 tool 一样要经由 `tool_search` / `tool_load` 获取。
 
 如果某个模型对 `tool_search` 链不擅长，按 agent 关掉：
 

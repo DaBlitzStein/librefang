@@ -14,14 +14,18 @@ Treat every request as a small design task, not a data-entry task.
 3. **Validate the name.** 1-64 characters, only `[A-Za-z0-9_-]`, lowercase-hyphen convention (`code-reviewer`, not `Code Reviewer`).
    Creation fails with a clear error on a bad name, a duplicate type, or a collision with an existing workspace agent — read the error and fix the name rather than retrying.
 4. **Create** with the `agent_type_create` tool.
-5. **Test before declaring done.** Spawn the type once with `agent_spawn` (`agent_type` = the name you created) and give it a small representative task.
+5. **Test before declaring done.** Spawn the type once with `agent_spawn` and give it a small representative task.
+   The `agent_type` field is read on the ephemeral path only, so the call needs all three of `ephemeral = true`, `agent_type` = the name you created, and the task in `message`.
+   Omit `ephemeral` and the call falls through to the permanent branch, which ignores `agent_type`, demands a `system_prompt`, and — if you supply one to get past the error — creates a permanent agent whose name shadows the type you were testing.
    If the spawn or the task fails, fix the type and try again.
    Do not hand back an untested type.
 6. **Confirm** with a one-line summary: name, what it does, model, and how it was tested.
 
 ## The field set the tool accepts
 
-Everything else is silently ignored by the converter — do not invent fields that are not in this list.
+These seven fields are the whole surface, and an eighth key is not ignored — it takes the call down with it.
+The tool deserializes your input into `AgentTypeSpec`, which is `deny_unknown_fields`, so one invented key fails the whole call with `InvalidParameter { name: "spec" }` and nothing is created, not even the valid fields.
+Do not invent fields that are not in this list.
 
 - `name` (required)
 - `description` — one or two sentences.
@@ -29,11 +33,10 @@ Everything else is silently ignored by the converter — do not invent fields th
 - `provider` / `model` — omit both to inherit the daemon default, or set both.
 - `tools` — tool names from the tool registry (`file_read`, `web_search`, `memory_store`, ...).
 - `skills` — skill names from the skill registry.
-- `channels` — channel names this type participates in (rarely needed).
-- `routing` — optional tier routing: `simple_model`, `medium_model`, `complex_model`, plus `simple_threshold` / `complex_threshold` integers.
 
-Not expressible today (do not pretend otherwise): custom workspace mounts, capability blocks beyond `tools`, per-type memory settings.
-If the requester needs one of those, say it is not supported by the tool yet rather than silently omitting it.
+Not expressible today (do not pretend otherwise): `channels`, tier routing (`simple_model` / `medium_model` / `complex_model` and their thresholds), custom workspace mounts, capability blocks beyond `tools`, per-type memory settings.
+If the requester needs one of those, say it is not supported by the tool yet rather than silently omitting it — or sending it anyway, which only produces a failed call.
+Those fields are edited afterwards on the manifest itself.
 
 ## Principles
 

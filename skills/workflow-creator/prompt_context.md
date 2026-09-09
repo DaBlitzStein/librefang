@@ -30,15 +30,17 @@ Each step needs:
 
 ### Execution modes
 
+Only the first three are bare strings. The rest carry data, so they take a tagged object — a bare `"conditional"` fails with `invalid type: string` and, because `mode` sits inside `steps`, that aborts the whole `workflow_create` call.
+
 | Mode | Use when |
 |------|----------|
-| `sequential` (default) | Steps run one after another |
-| `fan_out` | One step spawns multiple parallel instances |
-| `collect` | Gather results from fan_out into a single output |
-| `conditional` | Branch based on a condition in the previous output |
-| `loop` | Repeat a step until a condition is met |
-| `wait` | Pause for a fixed duration |
-| `approval` | Require human approval before continuing |
+| `"sequential"` (default) | Steps run one after another |
+| `"fan_out"` | One step spawns multiple parallel instances |
+| `"collect"` | Gather results from fan_out into a single output |
+| `{"conditional": {"condition": "APPROVED"}}` | Skip the step unless the previous output contains the condition (case-insensitive) |
+| `{"loop": {"max_iterations": 3, "until": "DONE"}}` | Repeat the step until the output contains `until`, or `max_iterations` is reached |
+| `{"wait": {"duration_secs": 60}}` | Pause for a fixed duration, burning no tokens |
+| `{"approval": {"recipients": ["ops"]}}` | Require human approval before continuing. `recipients` is required; `timeout_secs` is optional |
 
 ### Error handling
 
