@@ -134,6 +134,25 @@ impl GoalsState {
         self.tick = self.tick.wrapping_add(1);
     }
 
+    /// Replace the list, carrying forward run state already fetched for the goals still in it.
+    ///
+    /// `GET /api/goals` answers with stored goal documents, which never carry run state, so every row it produces has `run_phase: None`.
+    /// Assigning the vector wholesale therefore erased whatever [`Self::apply_run_state`] had written — and pause, resume, start and stop each fire a list refresh and a run-state refresh on independent threads, so whenever the list response landed second it wiped the phase the other had just fetched.
+    /// That left `p` reading `None` and going inert, which is precisely the state a paused run cannot be resumed from.
+    ///
+    /// A goal absent from the incoming list keeps nothing: its run state goes away with it rather than being re-attached to a later goal that happens to reuse the id.
+    pub fn replace_goals(&mut self, mut list: Vec<GoalInfo>) {
+        for fresh in &mut list {
+            if let Some(known) = self.goals.iter().find(|g| g.id == fresh.id) {
+                fresh.run_phase = known.run_phase.clone();
+                fresh.run_iteration = known.run_iteration;
+                fresh.run_max_iterations = known.run_max_iterations;
+            }
+        }
+        self.goals = list;
+        self.refilter();
+    }
+
     /// Merge a freshly fetched run state into the matching goal.
     pub fn apply_run_state(
         &mut self,
@@ -861,6 +880,48 @@ mod tests {
                 "phase {phase:?} must not produce a pause or resume"
             );
         }
+    }
+
+    /// Pause, resume, start and stop each fire a list refresh alongside the
+    /// run-state refresh, on independent threads. The list payload carries no
+    /// run state, so if it lands second it used to wipe the phase the other
+    /// fetch had just written — and `p` reading `None` is inert, which is the
+    /// one state a paused run cannot be resumed from. `r` did the same.
+    #[test]
+    fn a_list_reload_keeps_run_state_already_fetched_so_pause_stays_live() {
+        let mut s = state_with(vec![goal("1", "Ship the report", None)]);
+        s.apply_run_state("1", Some("paused".to_string()), Some(3), Some(25));
+
+        // Exactly what `spawn_fetch_goals` builds: every row `run_phase: None`.
+        s.replace_goals(vec![
+            goal("1", "Ship the report", None),
+            goal("2", "File the return", None),
+        ]);
+
+        assert_eq!(s.goals[0].run_phase.as_deref(), Some("paused"));
+        assert_eq!(s.goals[0].run_iteration, Some(3));
+        assert_eq!(s.goals[0].run_max_iterations, Some(25));
+        // A goal the reload brought in for the first time has nothing to carry.
+        assert!(s.goals[1].run_phase.is_none());
+
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Char('p'))),
+            GoalsAction::ResumeRun { ref goal_id } if goal_id == "1"
+        ));
+    }
+
+    /// A goal that has left the list takes its run state with it, rather than
+    /// having it re-attached to whatever later occupies the same position.
+    #[test]
+    fn a_goal_absent_from_the_reload_does_not_carry_its_run_state_over() {
+        let mut s = state_with(vec![goal("1", "Ship the report", None)]);
+        s.apply_run_state("1", Some("running".to_string()), Some(2), Some(10));
+
+        s.replace_goals(vec![goal("2", "File the return", None)]);
+
+        assert_eq!(s.goals.len(), 1);
+        assert_eq!(s.goals[0].id, "2");
+        assert!(s.goals[0].run_phase.is_none());
     }
 
     /// The detail pane binds the same key against the goal it has open, which
