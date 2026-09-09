@@ -299,6 +299,7 @@ pub async fn bulk_create_agents(
                     agent_id: None,
                     name: None,
                     error: Some(e.message),
+                    code: e.code,
                 });
             }
             Ok(resolved) => {
@@ -311,10 +312,20 @@ pub async fn bulk_create_agents(
                             agent_id: Some(id.to_string()),
                             name: Some(name),
                             error: None,
+                            code: None,
                         });
                     }
                     Err(e) => {
                         let t = ErrorTranslator::new(l);
+                        // Same code/error split as the single-spawn path
+                        // (`spawn_agent_inner`) so a bulk caller can branch on
+                        // `code` identically to a single `POST /api/agents`.
+                        let code = match &e {
+                            crate::error::KernelError::LibreFang(
+                                librefang_types::error::LibreFangError::AgentAlreadyExists(_),
+                            ) => "agent_already_exists",
+                            _ => "spawn_failed",
+                        };
                         results.push(BulkCreateResult {
                             index,
                             success: false,
@@ -324,6 +335,7 @@ pub async fn bulk_create_agents(
                                 "api-error-agent-clone-spawn-failed",
                                 &[("error", &e.to_string())],
                             )),
+                            code: Some(code),
                         });
                     }
                 }
