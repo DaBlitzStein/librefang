@@ -4191,6 +4191,7 @@
     "field_timeout_placeholder": "Overrides the global claim TTL, 0 = never reclaim",
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}s",
+    "timeout_badge_never": "TTL: never reclaimed",
     "submit": "Create Task",
     "cancel": "Cancel",
     "empty": "No tasks",

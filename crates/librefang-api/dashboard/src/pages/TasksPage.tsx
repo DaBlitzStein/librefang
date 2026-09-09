@@ -168,7 +168,9 @@ function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
         )}
         {task.timeout_secs != null && (
           <span className="text-[10px] text-text-dim/50 shrink-0">
-            {t("tasks.timeout_badge", { secs: task.timeout_secs })}
+            {task.timeout_secs === 0
+              ? t("tasks.timeout_badge_never")
+              : t("tasks.timeout_badge", { secs: task.timeout_secs })}
           </span>
         )}
         <span className="ml-auto flex items-center gap-1 text-[10px] text-text-dim/50 shrink-0">

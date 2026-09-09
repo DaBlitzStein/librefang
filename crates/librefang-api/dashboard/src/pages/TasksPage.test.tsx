@@ -175,6 +175,42 @@ describe("TasksPage", () => {
       expect(screen.getAllByText("agent-alpha").length).toBeGreaterThan(0);
     });
 
+    it("shows priority and timeout badges, and labels a zero timeout as never-reclaimed", () => {
+      useTaskQueueMock.mockReturnValue(
+        makeQuery({
+          tasks: [
+            ...SAMPLE_TASKS,
+            {
+              id: "task-priority-1",
+              status: "pending",
+              title: "Prioritized",
+              description: "Has a priority and a timeout",
+              priority: 3,
+              timeout_secs: 30,
+              created_at: new Date().toISOString(),
+            },
+            {
+              id: "task-timeout-never-1",
+              status: "pending",
+              title: "Never reclaimed",
+              description: "timeout_secs is explicitly 0",
+              timeout_secs: 0,
+              created_at: new Date().toISOString(),
+            },
+          ],
+          total: SAMPLE_TASKS.length + 2,
+        }),
+      );
+      renderPage();
+      expect(screen.getByText("tasks.priority_badge")).toBeInTheDocument();
+      expect(screen.getByText("tasks.timeout_badge")).toBeInTheDocument();
+      expect(screen.getByText("tasks.timeout_badge_never")).toBeInTheDocument();
+      // The default priority (0, unset) and absent timeout_secs on the
+      // sample tasks must not render either badge.
+      expect(screen.queryAllByText("tasks.priority_badge")).toHaveLength(1);
+      expect(screen.queryAllByText("tasks.timeout_badge")).toHaveLength(1);
+    });
+
     it("shows result preview for completed and failed tasks", () => {
       renderPage();
       expect(screen.getByText("Success output text")).toBeInTheDocument();
@@ -310,6 +346,59 @@ describe("TasksPage", () => {
           }),
         );
       });
+    });
+
+    it("includes priority and timeout_secs in the payload when set", async () => {
+      const mutate = vi.fn();
+      useCreateTaskMock.mockReturnValue(makeMutation({ mutate }));
+
+      renderPage();
+      fireEvent.click(screen.getByRole("button", { name: /tasks.new_task/i }));
+
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_title_placeholder"), {
+        target: { value: "Prioritized task" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_description_placeholder"), {
+        target: { value: "Needs a deadline" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_priority_placeholder"), {
+        target: { value: "3" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_timeout_placeholder"), {
+        target: { value: "30" },
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "tasks.submit" }));
+
+      await waitFor(() => {
+        expect(mutate).toHaveBeenCalledWith(
+          expect.objectContaining({ priority: 3, timeout_secs: 30 }),
+        );
+      });
+    });
+
+    it("omits priority and timeout_secs from the payload when left blank", async () => {
+      const mutate = vi.fn();
+      useCreateTaskMock.mockReturnValue(makeMutation({ mutate }));
+
+      renderPage();
+      fireEvent.click(screen.getByRole("button", { name: /tasks.new_task/i }));
+
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_title_placeholder"), {
+        target: { value: "Plain task" },
+      });
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_description_placeholder"), {
+        target: { value: "No overrides" },
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "tasks.submit" }));
+
+      await waitFor(() => {
+        expect(mutate).toHaveBeenCalled();
+      });
+      const payload = mutate.mock.calls[0][0];
+      expect(payload).not.toHaveProperty("priority");
+      expect(payload).not.toHaveProperty("timeout_secs");
     });
 
     it("disables the submit button when title or description is empty", () => {
