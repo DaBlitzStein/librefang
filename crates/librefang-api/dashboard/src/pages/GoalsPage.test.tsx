@@ -494,7 +494,7 @@ describe("GoalRunPhaseBadge", () => {
     render(
       <div>
         {API_PHASES.map((phase) => (
-          <GoalRunPhaseBadge key={phase} phase={phase} iteration={1} maxIterations={5} />
+          <GoalRunPhaseBadge key={phase} phase={phase} />
         ))}
       </div>,
     );
@@ -506,14 +506,116 @@ describe("GoalRunPhaseBadge", () => {
         ),
       ).toBeInTheDocument();
     }
-    // The parallel English-only `goals.phase_*` set from the first push is gone.
-    expect(screen.queryByText(/goals\.phase_/)).not.toBeInTheDocument();
   });
 
-  it("renders an unknown phase as the raw value under the neutral variant, not a confident Stopped", () => {
-    // "paused" is the phase #7973 will add later — the unknown-phase case the review said fires first.
-    render(<GoalRunPhaseBadge phase="paused" iteration={0} maxIterations={5} />);
-    expect(screen.getByText("paused")).toBeInTheDocument();
+  // `Badge` draws its own dot whenever `dot` is passed, so a known phase that
+  // also carried an icon showed a coloured dot AND a lucide glyph before its
+  // label. The two are mutually exclusive now: icon for a known phase, dot for
+  // the unknown one, which has nothing else to lead with.
+  it("leads a known phase with one glyph, not a dot and an icon", () => {
+    const { container } = render(<GoalRunPhaseBadge phase="running" />);
+    const badge = container.querySelector("span.inline-flex");
+    expect(badge).not.toBeNull();
+
+    // `Badge`'s dot is the only `aria-hidden` span it renders.
+    expect(badge!.querySelectorAll("span[aria-hidden='true']")).toHaveLength(0);
+    expect(badge!.querySelectorAll("svg")).toHaveLength(1);
+    // No `mr-*` on the icon: `Badge`'s own `gap-1.5` already spaces every child,
+    // and a second margin made the icon→label gap disagree with the dot→label one.
+    expect(badge!.querySelector("svg")!.getAttribute("class")).not.toMatch(/\bmr-/);
+  });
+
+  it("renders an unknown phase under the neutral variant with its own key, not a confident Stopped", () => {
+    // "paused" is the phase #7973 adds — the unknown-phase case that fires first here.
+    const { container } = render(<GoalRunPhaseBadge phase="paused" />);
+
+    // The label is asked of i18n by the phase's own key with the raw phase as
+    // the fallback, so a locale that gains `run_phase_paused` starts using it
+    // with no code change. The previous shape gated translation on a hardcoded
+    // `labelKey` per phase, so an unknown phase could never pick one up.
+    // (`t` is mocked here as `key:{options}`; in production this renders the
+    // translation when the key exists and "paused" when it does not.)
+    expect(
+      screen.getByText('goals.run_phase_paused:{"defaultValue":"paused"}'),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/goals\.run_phase_stopped/)).not.toBeInTheDocument();
+
+    // Assert the variant itself, not just the text: the classes `Badge` applies
+    // for `default` (Badge.tsx:13). Without this the test passed under any
+    // variant, including the `error` styling of a phase it does not know.
+    const badge = container.querySelector("span.inline-flex")!;
+    expect(badge.className).toContain("bg-main");
+    expect(badge.className).toContain("text-text-dim");
+    // The unknown branch is the one that keeps the dot, having no icon.
+    expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(1);
+    expect(badge.querySelectorAll("svg")).toHaveLength(0);
+  });
+});
+
+// The duplicate-badge regression the standalone suite above cannot reach: it
+// renders `GoalRunPhaseBadge` directly, while the bug was that the *page*
+// rendered the phase twice in one row — once in `GoalRunControl`'s action
+// cluster and once in `GoalRunInfo` below it. Only `renderPage()` sees both.
+describe("GoalsPage run phase is rendered once per row", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMutations();
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+  });
+
+  // `in_progress`, deliberately: `GoalRunControl` is gated on
+  // `status !== "completed"`, so a completed goal renders only one of the two
+  // sites and could never have caught this.
+  it("shows a running goal's phase exactly once, not once per render site", () => {
+    const runningGoal: GoalItem = { ...PARENT_GOAL, agent_id: "a1" };
+    useGoalsMock.mockReturnValue(makeQuery([runningGoal]));
+    useGoalRunMock.mockReturnValue(
+      makeQuery({
+        running: true,
+        run: {
+          goal_id: runningGoal.id,
+          agent_id: "a1",
+          phase: "running",
+          iteration: 3,
+          max_iterations: 10,
+          last_progress: 30,
+          started_at: "",
+          updated_at: "",
+        },
+      }),
+    );
+    renderPage();
+
+    expect(
+      screen.getAllByText('goals.run_phase_running:{"defaultValue":"running"}'),
+    ).toHaveLength(1);
+    // The iteration count has one home too — it used to appear in the badge and
+    // again in the info row.
+    expect(screen.getAllByText("3/10")).toHaveLength(1);
+  });
+
+  it("shows a stopped goal's phase exactly once", () => {
+    const stoppedGoal: GoalItem = { ...PARENT_GOAL, agent_id: "a1" };
+    useGoalsMock.mockReturnValue(makeQuery([stoppedGoal]));
+    useGoalRunMock.mockReturnValue(
+      makeQuery({
+        running: false,
+        run: {
+          goal_id: stoppedGoal.id,
+          agent_id: "a1",
+          phase: "stopped",
+          iteration: 4,
+          max_iterations: 10,
+          last_progress: 40,
+          started_at: "",
+          updated_at: "",
+        },
+      }),
+    );
+    renderPage();
+
+    expect(
+      screen.getAllByText('goals.run_phase_stopped:{"defaultValue":"stopped"}'),
+    ).toHaveLength(1);
   });
 });

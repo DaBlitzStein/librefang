@@ -14,10 +14,10 @@ import { ListSkeleton } from "../components/ui/Skeleton";
 import { ErrorState } from "../components/ui/ErrorState";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
-import { Badge } from "../components/ui/Badge";
+import { Badge, type BadgeVariant } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
-import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight, Zap, Ban } from "lucide-react";
+import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight, Zap, Ban, Activity } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -123,66 +123,55 @@ function GoalStatusIcon({ status }: { status: string }) {
   return <Clock className="h-4 w-4 text-text-dim/40" />;
 }
 
-// `phase` is typed from the wire contract rather than `string` so a caller cannot pass a typo'd literal.
-// The `default` arm stays regardless: `phase` crosses the network, so an unrecognised value has to render as something.
+// The page's only phase→appearance map, and the only place a run phase is turned into something visible.
+// `phase` is typed from the wire contract rather than `string` so a caller cannot pass a typo'd literal: a `case` naming a phase that does not exist is a compile error, which a `Record<string, …>` keyed map accepts silently.
+// The `default` arm stays regardless: `phase` crosses the network, so a phase this build predates has to render as something.
+//
+// It speaks `BadgeVariant` rather than raw Tailwind classes so `Badge` owns the padding, border, dot and spacing.
+// The colours are the ones this page already shipped in #8108; only the vocabulary changed.
 const goalRunPhaseBadge = (
   phase?: GoalRunState["phase"],
-): { bg: string; text: string; dot: string } => {
+): { variant: BadgeVariant; icon?: React.ComponentType<{ className?: string }> } => {
   switch (phase) {
-    case "running":                 return { bg: "bg-brand/10",   text: "text-brand",    dot: "bg-brand" };
-    case "finished":                return { bg: "bg-success/10", text: "text-success",  dot: "bg-success" };
-    case "stopped":                 return { bg: "bg-warning/10", text: "text-warning",  dot: "bg-warning" };
-    case "rate_limited":            return { bg: "bg-error/10",   text: "text-error",    dot: "bg-error" };
-    case "max_iterations_reached":  return { bg: "bg-warning/10", text: "text-warning",  dot: "bg-warning" };
-    default:                        return { bg: "bg-main",       text: "text-text-dim", dot: "bg-text-dim/40" };
+    case "running":                 return { variant: "brand",   icon: Activity };
+    case "finished":                return { variant: "success", icon: CheckCircle2 };
+    case "stopped":                 return { variant: "warning", icon: Ban };
+    case "rate_limited":            return { variant: "error",   icon: AlertTriangle };
+    case "max_iterations_reached":  return { variant: "warning", icon: Zap };
+    default:                        return { variant: "default" };
   }
 };
 
-function GoalRunInfo({ goal }: { goal: GoalItem }) {
+// `phase` stays `string` (not the wire union) so a phase the daemon adds before the dashboard knows about it still reaches the switch's `default` arm.
+//
+// `dot` is passed only when there is no icon. `Badge` renders its own dot, so a known phase carrying both would show a coloured dot AND a lucide glyph before the label; the unknown phase is the one case that has nothing else to lead with.
+// The icon carries no margin of its own either — `Badge`'s flex container already applies `gap-1.5` between every child, and an extra `mr-*` only makes the icon→label gap disagree with the dot→label one.
+export function GoalRunPhaseBadge({ phase }: { phase: string }) {
   const { t } = useTranslation();
+  const { variant, icon: Icon } = goalRunPhaseBadge(phase as GoalRunState["phase"]);
+  return (
+    <Badge variant={variant} dot={!Icon}>
+      {Icon && <Icon className={`h-3 w-3 ${phase === "running" ? "animate-pulse" : ""}`} />}
+      {t(`goals.run_phase_${phase}`, { defaultValue: phase.replace(/_/g, " ") })}
+    </Badge>
+  );
+}
+
+function GoalRunInfo({ goal }: { goal: GoalItem }) {
   const hasAgent = !!goal.agent_id;
   const runQuery = useGoalRun(goal.id, { enabled: hasAgent });
   const run = runQuery.data?.run;
   if (!run) return null;
 
-  const badge = goalRunPhaseBadge(run.phase);
-  const phaseLabel = t(`goals.run_phase_${run.phase}`, { defaultValue: run.phase.replace(/_/g, " ") });
-
+  // The phase belongs here rather than in `GoalRunControl`'s action cluster: this row already owns the run's iteration count and error, it is the only one that wraps (`flex-wrap`), and rendering the phase in both put the same word twice in the same row.
   return (
     <div className="mt-2 ml-[calc(1rem+4px)] flex flex-wrap items-center gap-2 text-xs">
-      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full ${badge.bg} ${badge.text} font-medium`}>
-        <span className={`w-1.5 h-1.5 rounded-full ${badge.dot} ${run.phase === "running" ? "animate-pulse" : ""}`} />
-        {phaseLabel}
-      </span>
+      <GoalRunPhaseBadge phase={run.phase} />
       <span className="text-text-dim font-mono">{run.iteration}/{run.max_iterations}</span>
       {run.last_error && (
         <span className="text-error truncate max-w-[200px]" title={run.last_error}>{run.last_error}</span>
       )}
     </div>
-  );
-}
-
-const RUN_PHASE_CONFIG: Record<string, { variant: "success" | "warning" | "error" | "info" | "default"; icon?: React.ComponentType<{ className?: string }>; labelKey?: string }> = {
-  running: { variant: "success", icon: Play, labelKey: "goals.run_phase_running" },
-  finished: { variant: "info", icon: CheckCircle2, labelKey: "goals.run_phase_finished" },
-  max_iterations_reached: { variant: "warning", icon: Zap, labelKey: "goals.run_phase_max_iterations_reached" },
-  rate_limited: { variant: "error", icon: AlertTriangle, labelKey: "goals.run_phase_rate_limited" },
-  stopped: { variant: "default", icon: Ban, labelKey: "goals.run_phase_stopped" },
-};
-
-// `phase` stays `string` (not the wire union) so an out-of-union value still reaches the fallback branch.
-export function GoalRunPhaseBadge({ phase, iteration, maxIterations }: { phase: string; iteration: number; maxIterations: number }) {
-  const { t } = useTranslation();
-  const cfg = RUN_PHASE_CONFIG[phase] ?? {};
-  const Icon = cfg.icon;
-  return (
-    <Badge variant={cfg.variant ?? "default"} dot>
-      {Icon && <Icon className="h-3 w-3 mr-0.5 inline-block" />}
-      {cfg.labelKey
-        ? t(cfg.labelKey, { defaultValue: phase.replace(/_/g, " ") })
-        : phase.replace(/_/g, " ")}
-      {phase === "running" && <span className="ml-1 font-mono text-[10px]">{iteration}/{maxIterations}</span>}
-    </Badge>
   );
 }
 
@@ -231,49 +220,40 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
     }
   };
 
-  if (isRunning && run) {
+  // No `&& run` guard: `isRunning` already requires `run?.phase === "running"`, and the daemon computes `running` as `run.phase == GoalRunPhase::Running` with no `run` field at all when there is no run, so the two cannot disagree. Written as a guard it would have rendered the *start* button for a live run — the opposite of safe for a state it implied it was handling.
+  if (isRunning) {
     return (
-      <>
-        <GoalRunPhaseBadge phase={run.phase} iteration={run.iteration} maxIterations={run.max_iterations} />
-        <button
-          type="button"
-          onClick={() => void onStop()}
-          disabled={stopMutation.isPending}
-          className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
-          title={t("goals.run_stop")}
-        >
-          {stopMutation.isPending ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Square className="h-3.5 w-3.5" />
-          )}
-        </button>
-      </>
+      <button
+        type="button"
+        onClick={() => void onStop()}
+        disabled={stopMutation.isPending}
+        className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
+        title={t("goals.run_stop")}
+      >
+        {stopMutation.isPending ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <Square className="h-3.5 w-3.5" />
+        )}
+      </button>
     );
   }
 
-  // Show phase badge for non-running terminal states too (finished, stopped, etc.)
-  const showTerminalBadge = run && run.phase !== "running";
-
+  // The phase is not rendered here. `Badge` is `whitespace-nowrap` and this cluster is `shrink-0`, so a badge in it takes its full width out of the `truncate`d title's budget on every narrow viewport — worst with the longest translations ("Обмеження швидкості" in uk, "Limit szybkości" in pl), which is where the title has least room to give. `GoalRunInfo` renders it on the wrapping row below instead.
   return (
-    <>
-      {showTerminalBadge && run && (
-        <GoalRunPhaseBadge phase={run.phase} iteration={run.iteration} maxIterations={run.max_iterations} />
+    <button
+      type="button"
+      onClick={() => void onStart()}
+      disabled={startMutation.isPending}
+      className="p-1.5 rounded-lg hover:bg-success/10 text-text-dim hover:text-success transition-colors"
+      title={t("goals.run_start")}
+    >
+      {startMutation.isPending ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <Play className="h-3.5 w-3.5" />
       )}
-      <button
-        type="button"
-        onClick={() => void onStart()}
-        disabled={startMutation.isPending}
-        className="p-1.5 rounded-lg hover:bg-success/10 text-text-dim hover:text-success transition-colors"
-        title={t("goals.run_start")}
-      >
-        {startMutation.isPending ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <Play className="h-3.5 w-3.5" />
-        )}
-      </button>
-    </>
+    </button>
   );
 }
 
