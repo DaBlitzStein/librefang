@@ -2930,7 +2930,6 @@
     "run_start": "Запустити автономно",
     "run_stop": "Зупинити автономний запуск",
     "run_needs_agent": "Призначте агента для автономного запуску цієї цілі",
-    "run_active": "Виконується · ітерація {{iteration}}/{{max}}",
     "run_phase_running": "Виконується",
     "run_phase_finished": "Завершено",
     "run_phase_stopped": "Зупинено",
