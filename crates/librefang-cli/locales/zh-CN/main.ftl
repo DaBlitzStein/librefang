@@ -1191,7 +1191,6 @@ tui-agents-title-custom-prompt = 自定义 — 系统提示词
 tui-agents-detail-tokens = 令牌占用（$ 刷新）
 tui-agents-detail-tokens-injected = 已注入
 tui-agents-token-usage-failed = 无法加载令牌占用
-tui-agents-token-usage-daemon-only = 令牌占用仅在守护进程模式下可用
 tui-agents-title-custom-tools = 自定义 — 工具
 tui-agents-title-custom-skills = 自定义 — Skill
 tui-agents-workspaces-help = a 添加 · d 删除 · Enter 编辑 · s 保存 · Esc 返回
@@ -1234,7 +1233,7 @@ tui-agents-opt-create-new = 创建新 Agent
 
 tui-agents-hints-filter =   [输入] 过滤  [Enter] 应用  [Esc] 取消搜索
 tui-agents-hints-list =   [↑↓] 导航  [Enter] 详情  [/] 搜索  [Esc] 返回
-tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [w] 共享文件夹  [p] 模型参数  [h] 配置历史  [c] 聊天  [k] 停止  [Esc] 返回
+tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [w] 共享文件夹  [p] 模型参数  [h] 配置历史  [$] 令牌  [c] 聊天  [k] 停止  [Esc] 返回
 tui-agents-title-manifest-history = 配置历史
 tui-agents-label-manifest-history-loading = 正在加载配置历史……
 tui-agents-label-manifest-history-empty = 该代理尚未记录任何配置变更。

@@ -2141,7 +2141,6 @@ tui-agents-title-custom-prompt = Custom — System Prompt
 tui-agents-detail-tokens = Token footprint  ($ to refresh)
 tui-agents-detail-tokens-injected = injected
 tui-agents-token-usage-failed = Could not load the token footprint
-tui-agents-token-usage-daemon-only = The token footprint is only available in daemon mode
 tui-agents-title-custom-tools = Custom — Tools
 tui-agents-title-custom-skills = Custom — Skills
 tui-agents-workspaces-help = a add · d delete · Enter edit · s save · Esc back
@@ -2184,7 +2183,7 @@ tui-agents-opt-create-new = Create new agent
 
 tui-agents-hints-filter =   [Type] Filter  [Enter] Accept  [Esc] Cancel search
 tui-agents-hints-list =   [↑↓] Navigate  [Enter] Detail  [/] Search  [Esc] Back
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [w] Shared folders  [p] Model params  [h] Config history  [c] Chat  [k] Kill  [Esc] Back
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [w] Shared folders  [p] Model params  [h] Config history  [$] Tokens  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-title-manifest-history = Configuration history
 tui-agents-label-manifest-history-loading = Loading configuration history...
 tui-agents-label-manifest-history-empty = No configuration changes recorded for this agent yet.

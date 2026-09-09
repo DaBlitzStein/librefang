@@ -2135,7 +2135,6 @@ tui-agents-title-custom-prompt = 사용자 지정 — 시스템 프롬프트
 tui-agents-detail-tokens = 토큰 사용량  ($ 새로고침)
 tui-agents-detail-tokens-injected = 주입됨
 tui-agents-token-usage-failed = 토큰 사용량을 불러올 수 없습니다
-tui-agents-token-usage-daemon-only = 토큰 사용량은 데몬 모드에서만 사용할 수 있습니다
 tui-agents-title-custom-tools = 사용자 지정 — 도구
 tui-agents-title-custom-skills = 사용자 지정 — 스킬
 tui-agents-workspaces-help = a 추가 · d 삭제 · Enter 편집 · s 저장 · Esc 뒤로
@@ -2178,7 +2177,7 @@ tui-agents-opt-create-new = 새 에이전트 생성
 
 tui-agents-hints-filter =   [입력] 필터  [Enter] 적용  [Esc] 검색 취소
 tui-agents-hints-list =   [↑↓] 탐색  [Enter] 상세  [/] 검색  [Esc] 뒤로
-tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [w] 공유 폴더  [p] 모델 파라미터  [h] 설정 기록  [c] 채팅  [k] 종료  [Esc] 뒤로
+tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [w] 공유 폴더  [p] 모델 파라미터  [h] 설정 기록  [$] 토큰  [c] 채팅  [k] 종료  [Esc] 뒤로
 tui-agents-title-manifest-history = 설정 기록
 tui-agents-label-manifest-history-loading = 설정 기록을 불러오는 중...
 tui-agents-label-manifest-history-empty = 이 에이전트에 기록된 설정 변경이 아직 없습니다.

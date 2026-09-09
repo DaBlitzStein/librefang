@@ -2156,7 +2156,6 @@ tui-agents-title-custom-prompt = Власний — Системний пром�
 tui-agents-detail-tokens = Обсяг токенів  ($ оновити)
 tui-agents-detail-tokens-injected = введено
 tui-agents-token-usage-failed = Не вдалося завантажити обсяг токенів
-tui-agents-token-usage-daemon-only = Обсяг токенів доступний лише в режимі демона
 tui-agents-title-custom-tools = Власний — Інструменти
 tui-agents-title-custom-skills = Власний — Скіли
 tui-agents-workspaces-help = a додати · d видалити · Enter редагувати · s зберегти · Esc назад
@@ -2199,7 +2198,7 @@ tui-agents-opt-create-new = Створити нового агента
 
 tui-agents-hints-filter =   [Введення] Фільтр  [Enter] Застосувати  [Esc] Скасувати пошук
 tui-agents-hints-list =   [↑↓] Навігація  [Enter] Деталі  [/] Пошук  [Esc] Назад
-tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [w] Спільні папки  [p] Параметри моделі  [h] Історія конфігурації  [c] Чат  [k] Зупинити  [Esc] Назад
+tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [w] Спільні папки  [p] Параметри моделі  [h] Історія конфігурації  [$] Токени  [c] Чат  [k] Зупинити  [Esc] Назад
 tui-agents-title-manifest-history = Історія конфігурації
 tui-agents-label-manifest-history-loading = Завантаження історії конфігурації...
 tui-agents-label-manifest-history-empty = Для цього агента ще не записано жодної зміни конфігурації.
