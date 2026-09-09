@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 56;
+const SCHEMA_VERSION: u32 = 57;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -287,6 +287,12 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // wrong for one of them. NULL keeps the global, which is what every
     // existing row means.
     run_step!(56, migrate_v56);
+
+    // v57 (#7752): add `sessions.parent_session_id` so a sub-agent run
+    // records which session spawned it. The parent can enumerate its
+    // children, and deleting the parent cascades. NULL on every ordinary
+    // session, which is almost all of them.
+    run_step!(57, migrate_v57);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1265,6 +1271,26 @@ fn migrate_v56(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (56, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v57 (#7752): session parentage — `sessions.parent_session_id`.
+fn migrate_v57(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "sessions", "parent_session_id")? {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id) WHERE parent_session_id IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (57, datetime('now'), 'Add sessions.parent_session_id for sub-agent run lineage (#7752)')",
         [],
     )?;
     Ok(())
@@ -4217,8 +4243,8 @@ mod tests {
         // If `parent_recorded` did not default to 0, every agent that predates v54 would start positively claiming to be a root agent — a more confident wrong answer than the `null` the bug already produced.
         //
         // Simulates a real pre-v54 database: build the v40-era `agents` table, insert a row, stamp `user_version = 50`, then let the ladder run.
-        // Steps 51-56 all fire from 50, so the fixture also needs the tables 51, 52 and 56 alter — `memories`, `group_roster` and `task_queue` — even though this test asserts nothing about them.
-        // Their absence is not a v54 bug; a real database at user_version 50 has all three (`task_queue` since `migrate_v1`).
+        // Steps 51-57 all fire from 50, so the fixture also needs the tables 51, 52, 56 and 57 alter — `memories`, `group_roster`, `task_queue` and `sessions` — even though this test asserts nothing about them.
+        // Their absence is not a v54 bug; a real database at user_version 50 has all four (`task_queue` and `sessions` since `migrate_v1`).
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
@@ -4252,6 +4278,15 @@ mod tests {
                 scheduled_at TEXT,
                 created_at TEXT NOT NULL,
                 completed_at TEXT
+            );
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                messages BLOB NOT NULL,
+                context_window_tokens INTEGER DEFAULT 0,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             CREATE TABLE migrations (
                 version INTEGER PRIMARY KEY,

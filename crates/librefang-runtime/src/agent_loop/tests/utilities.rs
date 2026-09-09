@@ -239,6 +239,7 @@ async fn test_tool_failure_allows_retry_on_next_iteration() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -303,6 +304,7 @@ async fn test_repeated_tool_failures_cap_exits_loop() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -366,6 +368,7 @@ async fn test_streaming_tool_failure_allows_retry() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -432,6 +435,7 @@ async fn test_streaming_repeated_tool_failures_cap_exits() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -631,6 +635,7 @@ fn fresh_session() -> librefang_memory::session::Session {
     librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1884,6 +1889,7 @@ async fn test_normal_turn_persists_session_as_incognito_control() {
     let mut session = librefang_memory::session::Session {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -1958,6 +1964,7 @@ async fn test_heartbeat_pruning_keeps_new_messages_start_on_current_turn() {
     let mut session = librefang_memory::session::Session {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages,
         context_window_tokens: 0,
         label: None,
@@ -2033,6 +2040,7 @@ async fn test_incognito_skips_session_save_on_end_turn() {
     let mut session = librefang_memory::session::Session {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -2114,6 +2122,7 @@ async fn test_incognito_skips_proactive_memory_auto_memorize() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
@@ -2196,6 +2205,7 @@ async fn test_normal_turn_auto_memorizes_proactive_memory_control() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
