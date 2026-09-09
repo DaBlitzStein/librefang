@@ -2230,7 +2230,8 @@ pub async fn comms_send(
     tag = "network",
     request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Post a task to the agent task queue", body = crate::types::JsonObject)
+        (status = 201, description = "Task enqueued", body = crate::types::JsonObject),
+        (status = 400, description = "Missing title, or an unknown assignee", body = crate::types::JsonObject),
     )
 )]
 pub async fn comms_task(
@@ -2248,6 +2249,7 @@ pub async fn comms_task(
             &req.description,
             req.assigned_to.as_deref(),
             Some("ui-user"),
+            &librefang_kernel_handle::TaskPostOptions::default(),
         )
         .await
     {
@@ -2256,6 +2258,15 @@ pub async fn comms_task(
             Json(serde_json::json!({
                 "ok": true,
                 "task_id": task_id,
+            })),
+        ),
+        // Mirrors `task_queue_post_root`: an unresolvable `assigned_to` is a
+        // bad request body, not a server failure, so it is reported as 400
+        // rather than falling through to the generic 500 scrub below.
+        Err(librefang_kernel_handle::KernelOpError::AgentNotFound(name)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("Field 'assigned_to' names no known agent: '{name}'")
             })),
         ),
         Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
