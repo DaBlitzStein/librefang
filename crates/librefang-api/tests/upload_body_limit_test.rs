@@ -52,6 +52,14 @@ async fn boot() -> Harness {
 }
 
 async fn boot_with_upload_cap(upload_cap: usize) -> Harness {
+    boot_with_caps(upload_cap, KernelConfig::default().max_concurrent_uploads).await
+}
+
+async fn boot_with_concurrency_cap(concurrency_cap: usize) -> Harness {
+    boot_with_caps(UPLOAD_BODY_CAP, concurrency_cap).await
+}
+
+async fn boot_with_caps(upload_cap: usize, concurrency_cap: usize) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     let config = KernelConfig {
@@ -60,6 +68,16 @@ async fn boot_with_upload_cap(upload_cap: usize) -> Harness {
         api_key: TEST_TOKEN.to_string(),
         max_request_body_bytes: GLOBAL_BODY_CAP,
         max_upload_size_bytes: upload_cap,
+        max_concurrent_uploads: concurrency_cap,
+        // Without this, `upload_file` resolves its destination via
+        // `effective_file_download_dir()`, whose fallback is
+        // `std::env::temp_dir().join("librefang_uploads")` — a directory shared by every test
+        // binary and never cleaned up. Every `201 CREATED` case below would otherwise leave a
+        // file plus a `.meta.json` sidecar there permanently, growing across CI runs.
+        channels: librefang_types::config::ChannelsConfig {
+            file_download_dir: Some(tmp.path().join("uploads").to_string_lossy().into_owned()),
+            ..Default::default()
+        },
         default_model: DefaultModelConfig {
             provider: "ollama".to_string(),
             model: "test-model".to_string(),
@@ -161,6 +179,50 @@ async fn upload_over_the_upload_cap_gets_a_413_naming_the_cap() {
     assert_eq!(
         json["max_upload_size_bytes"], UPLOAD_BODY_CAP,
         "the refusal must tell the client which cap it hit, so 'too large' is distinguishable from 'daemon unreachable': {json}"
+    );
+}
+
+/// `upload_file` extracts `axum::body::Bytes`, buffering the whole body into RAM before it runs,
+/// and nothing but `max_concurrent_uploads` bounds how many of those buffers can be resident at
+/// once — the per-request caps above don't help, an attacker just opens N connections at the cap.
+///
+/// `tokio::join!` drives all three requests inside this one test task without spawning, so the
+/// combinator polls them in submission order and only moves to the next arm once the current one
+/// returns `Poll::Pending`. The first two reach `upload_file`'s `tokio::fs::write` — a real
+/// `.await` point — and yield there, still holding their permit; only then does the combinator
+/// poll the third, whose `try_acquire` sees zero permits left before either of the first two has
+/// released one. That ordering is what makes the assertion deterministic rather than a race.
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_over_the_concurrency_cap_is_rejected_with_429() {
+    let harness = boot_with_concurrency_cap(2).await;
+    let app = &harness.app;
+
+    let (r1, r2, r3) = tokio::join!(
+        app.clone().oneshot(upload_request(BETWEEN_THE_CAPS)),
+        app.clone().oneshot(upload_request(BETWEEN_THE_CAPS)),
+        app.clone().oneshot(upload_request(BETWEEN_THE_CAPS)),
+    );
+    let statuses = [
+        r1.expect("router responds").status(),
+        r2.expect("router responds").status(),
+        r3.expect("router responds").status(),
+    ];
+
+    let accepted = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::CREATED)
+        .count();
+    let rejected = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::TOO_MANY_REQUESTS)
+        .count();
+    assert_eq!(
+        accepted, 2,
+        "exactly max_concurrent_uploads (2) requests may be mid-flight at once: {statuses:?}"
+    );
+    assert_eq!(
+        rejected, 1,
+        "the request over the concurrency cap must get 429, not queue or succeed: {statuses:?}"
     );
 }
 

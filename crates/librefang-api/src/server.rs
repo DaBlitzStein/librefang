@@ -1960,6 +1960,14 @@ pub async fn build_router(
     // place as defence-in-depth (and to surface a localised error
     // message instead of the framework-default 413).
     let upload_body_cap = kernel.config_ref().max_upload_size_bytes;
+    // `upload_file` buffers its whole body into RAM (`axum::body::Bytes`), so the per-request
+    // caps above don't bound total RSS on this route — only concurrency does. Sized once here
+    // (a restart, not a hot-reload knob: see `max_concurrent_uploads` in config_reload.rs) and
+    // shared by both aliases below so the two paths draw from the same pool rather than each
+    // getting their own `max_concurrent_uploads` allowance.
+    let upload_concurrency_permits = Arc::new(tokio::sync::Semaphore::new(
+        kernel.config_ref().max_concurrent_uploads,
+    ));
     let upload_routes = Router::new()
         .route(
             "/api/agents/{id}/upload",
@@ -1979,6 +1987,14 @@ pub async fn build_router(
         .layer(axum::middleware::from_fn_with_state(
             upload_body_cap,
             middleware::reject_oversized_upload,
+        ))
+        // Outermost of all: acquires before any of the above run, so a saturated pool gets
+        // rejected without spending even the Content-Length parse, and holds the permit across
+        // the whole request/response round trip — including the `Bytes` extraction the layers
+        // above cannot bound concurrency on.
+        .layer(axum::middleware::from_fn_with_state(
+            upload_concurrency_permits,
+            middleware::limit_concurrent_uploads,
         ));
 
     let app = Router::new()

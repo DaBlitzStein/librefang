@@ -1170,10 +1170,10 @@ pub const MAX_JSON_BODY_DEPTH: usize = 32;
 
 /// Answer an over-cap upload with a JSON 413 the client can render, and record it in the daemon log.
 ///
-/// `RequestBodyLimitLayer` alone cuts the request while the body is still being streamed, which reaches a browser as `NetworkError when attempting to fetch resource` — indistinguishable from an unreachable daemon — and leaves nothing whatsoever in the log, which is why #8181 went unnoticed until someone tried a PDF.
-/// Checking the declared `Content-Length` first lets the daemon refuse before a byte of body arrives, name the cap that was exceeded, and log the attempt.
+/// `RequestBodyLimitLayer` does NOT cut the request while the body is being streamed when `Content-Length` is present — tower-http 0.7's limit layer reads that header and, when the declared length is over the cap, returns a 413 immediately without ever touching the body (`limit/service.rs`). So on this exact case the layer already answers early; what it answers with is a bare `text/plain` 413 naming no cap and logging nothing, which reaches a browser as `NetworkError when attempting to fetch resource` — indistinguishable from an unreachable daemon — and is why #8181 went unnoticed until someone tried a PDF.
+/// Checking the declared `Content-Length` first lets the daemon answer that same early case with a JSON body naming the cap and a WARN log line instead.
 ///
-/// ponytail: only the declared length is checked. A client that streams without `Content-Length` still meets the limit layer mid-body and gets the framework's bare 413; catching that case means draining the body to keep the connection usable, which is a cost every legitimate upload would pay.
+/// ponytail: only the declared length is checked. A client that streams without `Content-Length` is the one case where the limit layer really does cut mid-body, and it still gets the framework's bare 413 there; catching that case too means draining the body to keep the connection usable, which is a cost every legitimate upload would pay.
 pub async fn reject_oversized_upload(
     axum::extract::State(cap_bytes): axum::extract::State<usize>,
     request: Request<Body>,
@@ -1209,6 +1209,48 @@ pub async fn reject_oversized_upload(
     }
 
     next.run(request).await
+}
+
+/// Cap how many `POST /api/agents/{id}/upload` requests may be mid-flight at once.
+///
+/// `upload_file` extracts `axum::body::Bytes`, buffering the whole body into RAM before the
+/// handler runs. Nothing bounds concurrency on that path otherwise: `RequestBodyLimitLayer` and
+/// `DefaultBodyLimit` are both per-request caps, so N parallel uploads at `max_upload_size_bytes`
+/// cost `N * max_upload_size_bytes` in RSS — 40 requests against a 100 MB cap is ~4 GB. Acquiring
+/// the permit here, before `next.run` reaches the extractor, is what makes the cap effective:
+/// gating inside the handler body would run after the buffering already happened.
+///
+/// A saturated pool gets a fast 429 rather than queueing, matching `try_acquire_comms_stream_permit`
+/// in `routes/network.rs` — an upload is retriable, and queuing would just hold the connection open
+/// for `max_upload_size_bytes` worth of the caller's stalled bytes on top of everyone ahead of it.
+pub async fn limit_concurrent_uploads(
+    axum::extract::State(permits): axum::extract::State<Arc<tokio::sync::Semaphore>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let permit = match permits.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            warn!(
+                path = %request.uri().path(),
+                "rejecting upload: max_concurrent_uploads reached"
+            );
+            return Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "error": "too many concurrent uploads in flight",
+                        "code": "upload_concurrency_limit",
+                    })
+                    .to_string(),
+                ))
+                .expect("static error response must build");
+        }
+    };
+    let response = next.run(request).await;
+    drop(permit);
+    response
 }
 
 /// Tower middleware that enforces [`MAX_JSON_BODY_DEPTH`] on every
