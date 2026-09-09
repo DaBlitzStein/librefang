@@ -734,6 +734,13 @@
       "format": "uint",
       "minimum": 0.0
     },
+    "max_concurrent_uploads": {
+      "description": "Maximum number of `POST /api/agents/{id}/upload` requests allowed to be mid-flight at once (default: 8). `upload_file` extracts `axum::body::Bytes`, buffering the whole body in RAM before the handler runs, so uncapped concurrency at `max_upload_size_bytes` costs `concurrent_requests * max_upload_size_bytes` in RSS. This bounds worst-case peak RAM from the upload path to `max_concurrent_uploads * max_upload_size_bytes`.",
+      "default": 8,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
     "max_cron_jobs": {
       "description": "Cron scheduler max total jobs across all agents. Default: 500.",
       "default": 500,
