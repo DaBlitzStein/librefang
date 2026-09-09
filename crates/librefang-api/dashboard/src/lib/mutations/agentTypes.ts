@@ -3,6 +3,7 @@ import {
   createAgentTypeFromToml,
   deleteAgentType,
   promoteAgentType,
+  restoreAgentTypeFromRegistry,
   restoreTemplateVersion,
   spawnEphemeral,
   putAgentTemplateToml,
@@ -42,6 +43,7 @@ export function useUpdateAgentTypeToml() {
       putAgentTemplateToml(name, toml),
     onSuccess: (_data, { name }) => {
       qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.registryDiff(name) });
       qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
     },
   });
@@ -52,6 +54,19 @@ export function useDeleteAgentType() {
   return useMutation({
     mutationFn: (name: string) => deleteAgentType(name),
     onSuccess: () => qc.invalidateQueries({ queryKey: agentTypeKeys.all }),
+  });
+}
+
+/** Overwrite a local agent type with its registry original. */
+export function useRestoreAgentType() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => restoreAgentTypeFromRegistry(name),
+    onSuccess: (_data, name) => {
+      qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.registryDiff(name) });
+      qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
+    },
   });
 }
 
