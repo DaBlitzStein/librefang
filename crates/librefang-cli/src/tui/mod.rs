@@ -544,6 +544,11 @@ impl App {
                     Tab::Extensions => self.extensions.status_msg = err,
                     Tab::Templates => self.templates.status_msg = err,
                     Tab::Settings => self.settings.status_msg = err,
+                    // Covers every failure the shared-folders editor can hit
+                    // (fetch, unreadable manifest, duplicate name on save) —
+                    // without this arm they fell into `_ => {}` and vanished
+                    // (#7835).
+                    Tab::Agents => self.agents.status_msg = err,
                     Tab::Channels => {
                         // `draw_list` renders its spinner unconditionally while
                         // `loading` is set, so a failed fetch that only wrote a
@@ -627,7 +632,15 @@ impl App {
                 self.memory.loading = false;
             }
             AppEvent::AgentWorkspacesLoaded(id, entries) => {
-                if self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id) {
+                // `!ws_loaded` accepts only the first response of the
+                // current edit session. `w` → `Esc` → `w` fires a second
+                // fetch for the same agent; without this, a late #1
+                // landing after #2 has already loaded (or after the
+                // operator has started editing) would replace the table
+                // out from under them and reset `ws_cursor` to 0.
+                if !self.agents.ws_loaded
+                    && self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id)
+                {
                     self.agents.workspaces = entries;
                     self.agents.ws_loaded = true;
                     if !self.agents.workspaces.is_empty() {
@@ -636,10 +649,15 @@ impl App {
                 }
             }
             AppEvent::AgentWorkspacesUpdated(id) => {
-                // Guard on both the agent id and the sub-screen, mirroring
-                // `AgentWorkspacesLoaded` above — the PATCH is a two-request
-                // round trip, so this can land after the operator has moved
-                // on to editing something else (or a different agent).
+                // Guard on both the agent id and the sub-screen. This is
+                // stricter than `AgentWorkspacesLoaded` above, which only
+                // checks the id: that arm just refreshes `workspaces` in
+                // place, harmless to apply even if the operator has moved
+                // to a different sub-screen, while this arm also moves
+                // `sub` — which would eject them from wherever they went.
+                // The PATCH is a two-request round trip, so this can land
+                // after the operator has moved on to editing something
+                // else (or a different agent).
                 if self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id.clone())
                     && matches!(self.agents.sub, agents::AgentSubScreen::EditWorkspaces)
                 {
@@ -3321,6 +3339,68 @@ mod agent_workspaces_event_tests {
         assert!(
             matches!(app.agents.sub, agents::AgentSubScreen::EditWorkspaces),
             "a save for a different agent than the one on screen must not move the operator"
+        );
+    }
+
+    /// `Tab::Agents` was missing from the `FetchError` routing match, so
+    /// every failure the shared-folders editor produces — failed GET,
+    /// unreadable manifest, duplicate-name rejection on save — fell into
+    /// `_ => {}` and vanished with no operator-visible trace (#7835).
+    #[test]
+    fn fetch_error_while_on_the_agents_tab_reaches_the_editor_status_msg() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.active_tab = Tab::Agents;
+
+        app.handle_event(AppEvent::FetchError("daemon unreachable".to_string()));
+
+        assert_eq!(app.agents.status_msg, "daemon unreachable");
+    }
+
+    /// `w` → `Esc` → `w` fires a second fetch for the same agent. A late
+    /// first response landing after the second has already loaded — or
+    /// after the operator has started editing — must not replace the
+    /// table out from under them.
+    #[test]
+    fn second_workspaces_loaded_response_does_not_clobber_the_first() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+
+        app.handle_event(AppEvent::AgentWorkspacesLoaded(
+            "agent-1".to_string(),
+            vec![(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readwrite".to_string(),
+            )],
+        ));
+        assert!(app.agents.ws_loaded);
+
+        // The operator moves the cursor / starts editing on the first
+        // response before a stale second response for the same agent
+        // arrives (e.g. a duplicate `w` fetch).
+        app.agents.ws_cursor = 0;
+
+        app.handle_event(AppEvent::AgentWorkspacesLoaded(
+            "agent-1".to_string(),
+            vec![
+                ("a".to_string(), "p".to_string(), "readwrite".to_string()),
+                ("b".to_string(), "q".to_string(), "readwrite".to_string()),
+            ],
+        ));
+
+        assert_eq!(
+            app.agents.workspaces,
+            vec![(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readwrite".to_string()
+            )],
+            "a second response for the same edit session must not replace the loaded table"
         );
     }
 }
