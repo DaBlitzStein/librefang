@@ -930,7 +930,10 @@
       "saved": "Zapisano routing modeli",
       "saveFailed": "Nie udało się zapisać routingu modeli",
       "loadFailed": "Nie udało się wczytać routingu modeli"
-    }
+    },
+    "token_usage_title": "Zużycie tokenów",
+    "token_injected_total": "Wstrzykiwane na żądanie",
+    "token_recent": "Ostatnie wywołania"
   },
   "providers": {
     "title": "Dostawcy",

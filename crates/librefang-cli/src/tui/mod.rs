@@ -544,6 +544,9 @@ impl App {
                     };
                 }
             }
+            AppEvent::AgentTokenUsageLoaded { agent_id, usage } => {
+                self.agents.apply_token_usage(&agent_id, usage);
+            }
             AppEvent::AgentModelParamsLoaded {
                 model,
                 context_cap,
@@ -1979,6 +1982,11 @@ impl App {
                 }
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_fetch_agent_channels(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::FetchAgentTokenUsage(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_token_usage(backend, id, self.event_tx.clone());
                 }
             }
             agents::AgentAction::UpdateChannels { id, channels } => {

@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cloneResultNotice, SystemPromptSection, DescriptionSection, ChannelsSection } from "./AgentsPage";
+import { cloneResultNotice, hasTokenFootprintData, SystemPromptSection, DescriptionSection, ChannelsSection } from "./AgentsPage";
 import { usePatchAgent, useSetAgentChannels } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
 import { usePromptVersions, useAgentChannels } from "../lib/queries/agents";
@@ -73,6 +73,21 @@ describe("cloneResultNotice", () => {
       partial: false,
       warnings: ["destination_workspace_missing"],
     }).partial).toBe(true);
+  });
+});
+
+describe("hasTokenFootprintData", () => {
+  it("treats a genuine zero footprint as data (tools-disabled agent, no system_prompt)", () => {
+    expect(hasTokenFootprintData(0)).toBe(true);
+  });
+
+  it("treats a non-zero footprint as data", () => {
+    expect(hasTokenFootprintData(1200)).toBe(true);
+  });
+
+  it("treats a missing field as no data", () => {
+    expect(hasTokenFootprintData(null)).toBe(false);
+    expect(hasTokenFootprintData(undefined)).toBe(false);
   });
 });
 
