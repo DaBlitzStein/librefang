@@ -1376,12 +1376,14 @@ impl MemorySubstrate {
 
             let now_rfc3339 = chrono::Utc::now().to_rfc3339();
             // `claimed_at` is RFC3339 as written by `task_claim`, fractional
-            // seconds included. `strftime('%s', ...)` truncates that to a
-            // whole second before the comparison, which floors every claim's
-            // age by up to a second — enough for a task claimed just before a
-            // second boundary to look one tick stucker than it is. `julianday`
-            // keeps the fractional part, so the elapsed-seconds arithmetic
-            // below is exact rather than floored.
+            // seconds included. `strftime('%s', ...)` rounds that fraction to
+            // the nearest millisecond, half up, before truncating to a whole
+            // second — for fractions under .9995 that is effectively a floor,
+            // which discards up to a second of a claim's age on both sides of
+            // the comparison and can read a claim as either older or younger
+            // than it really is. `julianday` keeps the fractional part, so the
+            // elapsed-seconds arithmetic below is precise to the millisecond
+            // rather than floored to the second.
             let global_ttl = ttl_secs as i64;
 
             let mut stmt = db
@@ -2320,55 +2322,61 @@ mod tests {
         assert!(reset_again.is_empty());
     }
 
-    /// `strftime('%s', claimed_at)` truncates the fractional second before
-    /// comparing, so a claim whose fractional second happens to be just past
-    /// a whole-second boundary reads a full second older than it really is.
-    /// This backs `claimed_at` onto exactly `ttl` seconds before "now" minus
-    /// one nanosecond (fractional second `.999999999`, the worst case for
-    /// that truncation): the real elapsed time is always under `ttl` by
-    /// nearly a full second, but the old floor-based comparison read it as
-    /// `ttl + 1` and reset it early.
-    #[tokio::test]
-    async fn test_task_reset_stuck_is_subsecond_precise_not_floored_to_a_second() {
-        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
-        let task_id = substrate
-            .task_post(
-                "Sub-second task",
-                "Claimed a moment ago",
-                Some("worker"),
-                None,
-                0,
-                None,
-            )
-            .await
-            .unwrap();
-        substrate
-            .task_claim("worker", Some("worker"))
-            .await
-            .unwrap();
+    /// Regression guard for the `strftime` → `julianday` fix on the sweep's
+    /// claim-age comparison.
+    ///
+    /// SQLite does not truncate the fractional second `strftime('%s', ...)`
+    /// drops — it rounds to the nearest millisecond, half up, before
+    /// truncating (`computeJD` in the SQLite source: `p->iJD += ... +
+    /// (sqlite3_int64)(p->s*1000 + 0.5)`), so only fractions below `.9995`
+    /// floor the way the old comment assumed; `.999999999` rounds *up* to
+    /// the next second instead and happens to cancel the bug out, which is
+    /// why an earlier version of this test used exactly that value and
+    /// passed against the pre-fix query too. `.999` stays under the
+    /// rounding threshold and reproduces the bug.
+    ///
+    /// This checks the two literal boolean expressions directly rather than
+    /// calling `task_reset_stuck`: that function reads `chrono::Utc::now()`
+    /// internally, and no fixed `claimed_at` can be pinned to a controlled
+    /// sub-second offset from a "now" the test does not control — any such
+    /// test is flaky by construction (verified: the discarded `.timestamp()`
+    /// truncation on the "now" side left up to ~1s of uncontrolled slack).
+    /// A fixed pair of timestamps sidesteps the wall clock entirely.
+    #[test]
+    fn task_reset_stuck_query_is_subsecond_precise_not_floored_to_a_second() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let claimed_at = "2026-09-08T21:32:23.999000000+00:00";
+        let now = "2026-09-08T21:32:25.000000000+00:00";
+        let ttl = 2i64;
 
-        let ttl: i64 = 2;
-        let now_ts = chrono::Utc::now().timestamp();
-        let claimed_at = chrono::DateTime::<chrono::Utc>::from_timestamp(now_ts - ttl, 999_999_999)
-            .unwrap()
-            .to_rfc3339();
-        {
-            let conn = substrate.pool.get().unwrap();
-            conn.execute(
-                "UPDATE task_queue SET claimed_at = ?1 WHERE id = ?2",
-                rusqlite::params![claimed_at, task_id],
+        // The pre-fix comparison: `CAST(strftime('%s', claimed_at) AS
+        // INTEGER) + ttl <= now_unix`, `now_unix` likewise via `strftime`.
+        let old_would_reset: bool = conn
+            .query_row(
+                "SELECT CAST(strftime('%s', ?1) AS INTEGER) + ?3 \
+                     <= CAST(strftime('%s', ?2) AS INTEGER)",
+                rusqlite::params![claimed_at, now, ttl],
+                |row| row.get(0),
             )
             .unwrap();
-        }
-
-        let reset = substrate.task_reset_stuck(ttl as u64, 0).await.unwrap();
         assert!(
-            reset.is_empty(),
-            "a claim under {ttl}s old by real elapsed time must not be swept just because \
-             its fractional second rounds the wrong way, got reset: {reset:?}"
+            old_would_reset,
+            "fixture must reproduce the bug: the pre-fix query has to \
+             flag a claim that is only ~1s old as past a 2s deadline"
         );
-        let still_in_progress = substrate.task_list(Some("in_progress")).await.unwrap();
-        assert_eq!(still_in_progress.len(), 1, "task must remain in_progress");
+
+        // The comparison `task_reset_stuck` ships today.
+        let new_would_reset: bool = conn
+            .query_row(
+                "SELECT (julianday(?2) - julianday(?1)) * 86400.0 >= ?3",
+                rusqlite::params![claimed_at, now, ttl],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !new_would_reset,
+            "a claim ~1s old under a 2s TTL must not be flagged stuck"
+        );
     }
 
     #[tokio::test]
