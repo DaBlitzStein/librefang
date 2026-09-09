@@ -1,5 +1,6 @@
 mod common;
 
+use librefang_runtime::kernel_handle::CatalogQuery;
 use librefang_types::{
     agent::{AgentManifest, ModelConfig, ModelMode},
     config::KernelConfig,
@@ -137,4 +138,77 @@ max_complexity = 1.0
     );
     let profile = result.unwrap();
     assert_eq!(profile.provider, "ollama");
+}
+
+/// `resolve_model_profile` must resolve the profile's `model` through the
+/// live catalog alias table the same way `route_to_profile` resolves it.
+/// Every builtin profile (`model_profiles.toml`) names an alias like
+/// `"haiku"` rather than a concrete model id, and an unresolved alias
+/// reaches the wire request verbatim — the spawned agent then fails auth on
+/// its first turn. Regression for the #7789 review (agent.rs:234).
+#[test]
+fn resolve_model_profile_resolves_catalog_alias() {
+    let (kernel, tmp) = common::boot_kernel();
+    let home = tmp.path();
+
+    kernel.model_catalog_update(|cat| {
+        cat.add_alias("quick-alias", "claude-haiku-4-5-canonical");
+    });
+
+    write_profiles(
+        home,
+        r#"
+[[profiles]]
+name = "quick"
+tags = ["quick"]
+provider = "anthropic"
+model = "quick-alias"
+cost_tier = "cheap"
+priority = 100
+max_complexity = 1.0
+"#,
+    );
+
+    let profile = kernel
+        .resolve_model_profile("quick")
+        .expect("profile 'quick' must resolve from the catalog");
+    assert_eq!(
+        profile.model, "claude-haiku-4-5-canonical",
+        "resolve_model_profile must resolve the profile's model through the \
+         catalog alias table, not hand back the alias verbatim"
+    );
+}
+
+/// `check_provider_credentials` must refuse a provider nobody configured a
+/// key for, naming the env var the operator would set — the same guard
+/// `route_to_profile` applies per turn, now available to gate `agent_spawn`
+/// before a child is born onto an unauthenticated provider. Regression for
+/// the #7789 review (agent.rs:233).
+#[test]
+fn check_provider_credentials_refuses_unconfigured_provider() {
+    let (kernel, _tmp) = common::boot_kernel();
+
+    // A synthetic provider id whose convention env var
+    // (`CHECK_TEST_PROVIDER_API_KEY`) nothing in a real environment sets, so
+    // the refusal is reached deterministically regardless of ambient
+    // developer credentials.
+    let err = kernel
+        .check_provider_credentials("check-test-provider")
+        .expect_err("an unconfigured, non-local provider must be refused");
+    assert!(
+        err.contains("CHECK_TEST_PROVIDER_API_KEY"),
+        "refusal must name the missing env var, got: {err}"
+    );
+}
+
+/// A local/keyless provider must never be refused for missing credentials —
+/// mirrors `keyless_local_provider_allows_routing` above, but through the
+/// new `check_provider_credentials` gate rather than `route_to_profile`.
+#[test]
+fn check_provider_credentials_allows_local_provider() {
+    let (kernel, _tmp) = common::boot_kernel();
+    assert!(
+        kernel.check_provider_credentials("ollama").is_ok(),
+        "a local/keyless provider must not be refused for missing credentials"
+    );
 }

@@ -69,4 +69,101 @@ impl kernel_handle::CatalogQuery for LibreFangKernel {
             .proactive_memory
             .resolve_extraction_model(&cfg.proactive_memory)
     }
+
+    /// Look a profile up in the resolved catalog — the builtin asset with
+    /// `~/.librefang/model_profiles.toml` merged over it.
+    ///
+    /// Deliberately **not** gated on `[model_router] enabled`. That switch
+    /// governs the *automatic* per-turn router, which picks a model nobody
+    /// asked for; naming a profile on an `agent_spawn` call is an explicit
+    /// choice by the parent agent, and silently ignoring an explicit
+    /// parameter is the exact failure this lookup exists to remove. It also
+    /// keeps the subagent case usable — spawning a cheap verifier does
+    /// not require switching every agent onto automatic routing.
+    ///
+    /// The profile's `model` is resolved through the live model catalog the
+    /// same way `route_to_profile` resolves it (#7789 review): every builtin
+    /// profile names a catalog alias (`"haiku"`, `"sonnet"`, …) and an
+    /// unresolved alias reaches the provider as a model id nobody accepts,
+    /// so the spawned agent would fail auth on its first turn.
+    fn resolve_model_profile(
+        &self,
+        name: &str,
+    ) -> Option<librefang_types::model_profile::ModelProfile> {
+        let cfg = self.config.load();
+        let mut profile = crate::model_router::ProfileCatalog::load_cached(
+            cfg.home_dir.as_path(),
+            &cfg.model_router,
+        )
+        .get(name)?
+        .clone();
+        // Resolve catalog aliases ("haiku" -> "claude-haiku-4-5-…") so the
+        // builtin profiles do not pin dated model snapshots.
+        let model_catalog = self.model_catalog_ref().load();
+        if let Some(resolved) = model_catalog.resolve_alias(&profile.model) {
+            profile.model = resolved.to_string();
+        }
+        Some(profile)
+    }
+
+    /// Whether `provider` has credentials the kernel can see (#7789 review).
+    ///
+    /// The same guard `route_to_profile` applies per turn — local provider,
+    /// credential pool, or the env var the kernel resolves for the provider
+    /// (operator pin, catalog `api_key_env`, or the `<PROVIDER>_API_KEY`
+    /// convention). `route_to_profile`'s fallback for a miss is "skip the
+    /// profile for this turn"; on the spawn path a wrong provider is
+    /// persisted into a manifest, so the miss is refused instead, with the
+    /// env var named so the operator can fix it.
+    fn check_provider_credentials(&self, provider: &str) -> Result<(), String> {
+        if librefang_runtime::provider_health::is_local_provider(provider) {
+            return Ok(());
+        }
+        if self.llm.credential_pools.contains_key(provider) {
+            return Ok(());
+        }
+        let cfg = self.config.load();
+        let key_env = self.resolve_non_default_api_key_env(&cfg, provider);
+        if std::env::var(&key_env).is_ok() {
+            return Ok(());
+        }
+        Err(format!(
+            "provider '{provider}' has no API key configured — set {key_env} \
+             or add a credential pool for it"
+        ))
+    }
+
+    /// Ordered by construction: `ProfileCatalog` name-sorts at load (#3298).
+    fn model_profile_names(&self) -> Vec<String> {
+        let cfg = self.config.load();
+        crate::model_router::ProfileCatalog::load_cached(cfg.home_dir.as_path(), &cfg.model_router)
+            .names()
+    }
+
+    /// The parent's `[model.router_override]`, read from its manifest in the
+    /// registry (#7789 review).
+    ///
+    /// Reads the same `manifest.model.router_override` the per-turn router
+    /// reads, from the same registry.
+    ///
+    /// Unlike `proactive_memory_extraction_model_for` above, a malformed UUID
+    /// or an agent missing from the registry is an `Err`, not a `None`: an
+    /// agent that is live enough to be calling `agent_spawn` always resolves
+    /// here, so a miss is a fault rather than evidence that the agent is
+    /// unconstrained. Reporting it as "no constraints" would fail open on a
+    /// spend cap.
+    fn model_router_override_for(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<librefang_types::model_profile::AgentRouterOverride>, String> {
+        use std::str::FromStr;
+        let aid = librefang_types::agent::AgentId::from_str(agent_id)
+            .map_err(|e| format!("agent id '{agent_id}' is not a valid agent UUID: {e}"))?;
+        let entry = self
+            .agents
+            .registry
+            .get_arc(aid)
+            .ok_or_else(|| format!("agent '{agent_id}' is not in the registry"))?;
+        Ok(entry.manifest.model.router_override.clone())
+    }
 }
