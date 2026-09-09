@@ -12794,6 +12794,53 @@
             "description": "Name belongs to a live agent"
           }
         }
+      },
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/{name}/toml — Create a new agent type from raw TOML, in one write (#8028).",
+        "description": "The dashboard's original create flow was `POST /api/templates` (name + description over a\ndefault manifest) followed immediately by `PUT /api/templates/{name}/toml` (the manifest the\noperator actually authored). That leaves a half-built stub on disk if the second call fails —\nwith no way to retry it, since a repeated `POST /api/templates` now answers 409 — and records\ntwo version-history snapshots for the one document the operator meant to create.\n\nThis endpoint takes the full manifest up front and claims the name atomically, the same claim\n[`create_agent_type`] uses for the flat-shape create, so the type exists in exactly one form\nfrom the first successful write and history carries exactly one snapshot for it.",
+        "operationId": "post_agent_template_toml",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Agent type created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid TOML or name"
+          },
+          "409": {
+            "description": "Name already taken by an agent type or a live agent"
+          }
+        }
       }
     },
     "/api/tools": {
