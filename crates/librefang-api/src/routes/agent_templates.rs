@@ -765,6 +765,7 @@ pub async fn delete_agent_type(
         (status = 401, description = "No GitHub token configured"),
         (status = 404, description = "Agent type not found"),
         (status = 409, description = "Manifest still contains private details that require review"),
+        (status = 500, description = "Invalid skills.promotion configuration"),
         (status = 502, description = "GitHub request failed")
     )
 )]
