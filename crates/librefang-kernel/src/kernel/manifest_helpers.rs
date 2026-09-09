@@ -167,6 +167,38 @@ pub(super) fn resolve_context_window(
         })
 }
 
+/// Resolve this turn's sampling preferences (`max_tokens`, `temperature`,
+/// `top_p`, `frequency_penalty`, `presence_penalty`) from the agent manifest
+/// and the per-model override that matches `model.provider`/`model.model`,
+/// and write the result back onto `model` — agent manifest > per-model
+/// override > system default (#8112; see
+/// `librefang_types::inference_params` for why that order runs this way).
+///
+/// Every dispatch path that reaches an LLM driver must call this exactly
+/// once, after the final provider/model is settled (post-routing, post
+/// session-model-override) and before the manifest is handed to the driver.
+/// Before this helper existed, only `execute_llm_agent`
+/// (`kernel::agent_execution`) called the two functions this wraps — the
+/// ephemeral `/btw` path and the streaming dispatch path in
+/// `kernel::messaging`, and the ephemeral worker spawn in
+/// `kernel::ephemeral_spawn`, built their `CompletionRequest` straight from
+/// the manifest's own typed fields. A `top_p` set as a per-model override in
+/// the catalog reached the wire on the path that called this and reached
+/// nothing at all on the paths that did not — same agent, same override,
+/// two different sampling configurations depending on which dispatcher
+/// served the turn.
+pub(super) fn apply_resolved_inference_params(
+    catalog: &librefang_runtime::model_catalog::ModelCatalog,
+    model: &mut librefang_types::agent::ModelConfig,
+) {
+    let override_key = format!("{}:{}", model.provider, model.model);
+    let resolved = librefang_types::inference_params::resolve_inference_params(
+        &*model,
+        catalog.get_overrides(&override_key),
+    );
+    resolved.apply_to(model);
+}
+
 /// Apply a per-call reasoning override to a manifest clone.
 ///
 /// This is the top rung of the #7946 resolution order — per-call > per-agent >
@@ -1210,6 +1242,97 @@ mod context_window_tests {
         assert_eq!(
             source_of(&cat, &model("anthropic", "claude-sonnet-4-6", None), None),
             Some(ContextWindowSource::Catalog),
+        );
+    }
+}
+
+#[cfg(test)]
+mod apply_resolved_inference_params_tests {
+    use super::apply_resolved_inference_params;
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::agent::ModelConfig;
+    use librefang_types::model_catalog::ModelOverrides;
+
+    fn catalog_with_top_p_override(top_p: f32) -> ModelCatalog {
+        let mut cat = ModelCatalog::from_entries(vec![], vec![]);
+        cat.set_overrides(
+            "openai:gpt-4o".to_string(),
+            ModelOverrides {
+                top_p: Some(top_p),
+                ..Default::default()
+            },
+        );
+        cat
+    }
+
+    /// Agent leaves `top_p` unset ("inherit") — the model-catalog override
+    /// must be the only source that can put a value on the wire.
+    fn inheriting_agent_model() -> ModelConfig {
+        ModelConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// #8112: before this helper existed, `execute_llm_agent`
+    /// (`kernel::agent_execution`) called `resolve_inference_params` +
+    /// `apply_to` inline, but `messaging::send_message_ephemeral` and
+    /// `messaging::send_message_streaming_with_sender_context_routing_thinking_and_session`
+    /// (plus `ephemeral_spawn`) built their manifest from a bare
+    /// `entry.manifest.clone()` and never called either. Two independently
+    /// built manifests (never derived from one another, matching how each
+    /// dispatcher clones `entry.manifest` on its own) must resolve to the
+    /// identical `top_p` once both go through the shared helper.
+    #[test]
+    fn two_independently_built_manifests_resolve_to_the_same_extra_params() {
+        let catalog = catalog_with_top_p_override(0.5);
+
+        let mut manifest_a = inheriting_agent_model(); // stands in for agent_execution's manifest
+        apply_resolved_inference_params(&catalog, &mut manifest_a);
+
+        let mut manifest_b = inheriting_agent_model(); // stands in for messaging/ephemeral's manifest
+        apply_resolved_inference_params(&catalog, &mut manifest_b);
+
+        assert_eq!(
+            manifest_a.extra_params.get("top_p"),
+            manifest_b.extra_params.get("top_p"),
+            "both dispatch paths must resolve the same model-catalog top_p override"
+        );
+        assert_eq!(
+            manifest_a.extra_params.get("top_p"),
+            Some(&serde_json::json!(0.5_f32))
+        );
+    }
+
+    /// The bug this fix closes, shown directly: a manifest that never runs
+    /// through `apply_resolved_inference_params` carries no `top_p` at all,
+    /// regardless of what the model catalog says — this was the observable
+    /// behaviour on every dispatch path except `execute_llm_agent` before #8112.
+    #[test]
+    fn skipping_the_resolution_step_drops_the_catalog_override() {
+        let unresolved = inheriting_agent_model();
+        assert!(
+            !unresolved.extra_params.contains_key("top_p"),
+            "a manifest that skipped apply_resolved_inference_params must not \
+             carry a top_p, even though the catalog has an override for it"
+        );
+    }
+
+    /// An explicit agent-level preference still wins over the catalog
+    /// override — the resolution order this helper exists to enforce, not
+    /// just "the catalog wins because it's the only source in the test above".
+    #[test]
+    fn explicit_agent_preference_beats_the_catalog_override() {
+        let catalog = catalog_with_top_p_override(0.5);
+        let mut model = inheriting_agent_model();
+        model.top_p = Some(0.1);
+
+        apply_resolved_inference_params(&catalog, &mut model);
+
+        assert_eq!(
+            model.extra_params.get("top_p"),
+            Some(&serde_json::json!(0.1_f32))
         );
     }
 }
