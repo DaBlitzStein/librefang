@@ -57,6 +57,11 @@ pub const AGENT_SCOPED_TABLES: &[(AgentTableGroup, &str, &str)] = &[
     // goal_runs (v42) persists per-agent goal-run state; purge it on agent
     // removal so deleting an agent doesn't orphan its runs.
     (AgentTableGroup::Structured, "goal_runs", "agent_id"),
+    // manifest_versions (v58) holds one row per recorded `agent.toml` persist.
+    // #8041 purged it inline in `execute_structured_agent_deletes`; that list
+    // has since moved here, so the entry belongs in the table group or the
+    // rows outlive the agent they describe.
+    (AgentTableGroup::Structured, "manifest_versions", "agent_id"),
     (AgentTableGroup::Structured, "agents", "id"),
     // `sessions` and `sessions_fts` MUST be cleared together — `search_sessions`
     // reads from `sessions_fts` without joining `sessions`, so an orphan FTS row
