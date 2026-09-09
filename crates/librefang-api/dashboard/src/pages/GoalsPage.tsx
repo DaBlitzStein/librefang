@@ -222,11 +222,7 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
         onClick={() => void onStop()}
         disabled={stopMutation.isPending}
         className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
-        title={
-          run
-            ? t("goals.run_active", { iteration: run.iteration, max: run.max_iterations })
-            : t("goals.run_stop")
-        }
+        title={t("goals.run_stop")}
       >
         {stopMutation.isPending ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
