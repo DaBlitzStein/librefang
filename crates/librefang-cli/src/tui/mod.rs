@@ -864,6 +864,17 @@ impl App {
                 }
                 self.settings.loading = false;
             }
+            AppEvent::SettingsAuxiliaryLoaded(aux) => {
+                self.settings.auxiliary = aux;
+                self.settings.aux_tasks = self.settings.auxiliary.keys().cloned().collect();
+                self.settings.aux_tasks.sort();
+                if !self.settings.aux_tasks.is_empty()
+                    && self.settings.aux_list.selected().is_none()
+                {
+                    self.settings.aux_list.select(Some(0));
+                }
+                self.settings.loading = false;
+            }
             AppEvent::ProviderKeySaved(name) => {
                 self.settings.status_msg =
                     crate::i18n::t_args("tui-mod-key-saved-for", &[("name", &name)]);
@@ -1690,6 +1701,13 @@ impl App {
         }
     }
 
+    fn refresh_settings_auxiliary(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.settings.loading = true;
+            event::spawn_fetch_auxiliary(backend, self.event_tx.clone());
+        }
+    }
+
     fn refresh_groups(&mut self) {
         if let Some(backend) = self.backend.to_ref() {
             self.groups.loading = true;
@@ -2430,6 +2448,7 @@ impl App {
             settings::SettingsAction::RefreshModels => self.refresh_settings_models(),
             settings::SettingsAction::RefreshTools => self.refresh_settings_tools(),
             settings::SettingsAction::RefreshBackups => self.refresh_settings_backups(),
+            settings::SettingsAction::RefreshAuxiliary => self.refresh_settings_auxiliary(),
             settings::SettingsAction::SaveProviderKey { name, key } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_save_provider_key(backend, name, key, self.event_tx.clone());
@@ -2458,6 +2477,11 @@ impl App {
             settings::SettingsAction::RestoreBackup(body) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_restore_backup(backend, body, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::SaveAuxChain { task, chain } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_save_aux_chain(backend, task, chain, self.event_tx.clone());
                 }
             }
         }
