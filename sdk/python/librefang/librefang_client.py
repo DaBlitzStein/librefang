@@ -1384,6 +1384,12 @@ class _SystemResource(_Resource):
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")
 
+    def put_agent_template_toml(self, name: str, body: bytes, content_type: str = "text/plain"):
+        return self._c._request("PUT", f"/api/templates/{name}/toml", body, content_type=content_type)
+
+    def post_agent_template_toml(self, name: str, body: bytes, content_type: str = "text/plain"):
+        return self._c._request("POST", f"/api/templates/{name}/toml", body, content_type=content_type)
+
     def version(self):
         return self._c._request("GET", "/api/version")
 

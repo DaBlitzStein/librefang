@@ -1827,6 +1827,22 @@ func (r *SystemResource) GetAgentTemplateToml(name string) (interface{}, error) 
 	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/toml", name), nil, nil)
 }
 
+// PutAgentTemplateToml sends a raw text/plain body. An empty contentType defaults to it.
+func (r *SystemResource) PutAgentTemplateToml(name string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "text/plain"
+	}
+	return r.client.requestRaw("PUT", fmt.Sprintf("/api/templates/%s/toml", name), body, contentType)
+}
+
+// PostAgentTemplateToml sends a raw text/plain body. An empty contentType defaults to it.
+func (r *SystemResource) PostAgentTemplateToml(name string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "text/plain"
+	}
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/templates/%s/toml", name), body, contentType)
+}
+
 func (r *SystemResource) Version() (interface{}, error) {
 	return r.client.request("GET", "/api/version", nil, nil)
 }

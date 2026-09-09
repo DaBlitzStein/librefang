@@ -5258,6 +5258,42 @@ impl SystemResource {
         .await
     }
 
+    /// Sends a raw `text/plain` body; `content_type` overrides that default.
+    pub async fn put_agent_template_toml(
+        &self,
+        name: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "templates", name, "toml"],
+            body,
+            content_type.unwrap_or("text/plain"),
+        )
+        .await
+    }
+
+    /// Sends a raw `text/plain` body; `content_type` overrides that default.
+    pub async fn post_agent_template_toml(
+        &self,
+        name: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "templates", name, "toml"],
+            body,
+            content_type.unwrap_or("text/plain"),
+        )
+        .await
+    }
+
     pub async fn version(&self) -> Result<Value> {
         do_req(
             &self.client,

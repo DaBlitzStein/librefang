@@ -1714,6 +1714,14 @@ class SystemResource {
     return this._c._request("GET", `/api/templates/${name}/toml`);
   }
 
+  async putAgentTemplateToml(name, body, contentType) {
+    return this._c._request("PUT", `/api/templates/${name}/toml`, body, undefined, contentType || "text/plain");
+  }
+
+  async postAgentTemplateToml(name, body, contentType) {
+    return this._c._request("POST", `/api/templates/${name}/toml`, body, undefined, contentType || "text/plain");
+  }
+
   async version() {
     return this._c._request("GET", "/api/version");
   }
