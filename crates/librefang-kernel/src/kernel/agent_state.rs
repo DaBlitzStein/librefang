@@ -202,6 +202,14 @@ impl LibreFangKernel {
             warn!(agent = %entry.name, "Failed to persist MCP servers to agent manifest: {error}");
         } else {
             debug!(agent = %entry.name, path = %toml_path.display(), "Persisted MCP servers to agent manifest");
+            // This path patches the `mcp_servers` array in the existing file rather
+            // than going through `persist_full_manifest_at`, so it has to record its
+            // own snapshot. Without it an MCP allowlist change leaves the newest
+            // recorded version disagreeing with what is on disk, and "what changed on
+            // this agent, and when" answers wrong rather than incompletely (#8231).
+            // The snapshot is `patched` — what the file now holds — not a re-serialized
+            // manifest, so history stays a record of the file.
+            self.record_manifest_version(&current_entry, &patched, "mcp-servers");
         }
     }
 
