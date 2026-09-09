@@ -3697,8 +3697,32 @@ pub fn spawn_fetch_auxiliary(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/config")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
+            // `send()` returning `Ok` says nothing about status: a 401 or 500 body
+            // deserialises into `serde_json::Value` perfectly well, `llm.auxiliary`
+            // is then absent, and the pane renders every task as "(not configured)"
+            // — telling an operator with a rejected request that their chains are
+            // empty. And a transport error used to send no event at all, stranding
+            // the spinner `refresh_settings_auxiliary` had already armed. Both go
+            // through `daemon_response` like every sibling helper (#8059 review).
+            let outcome =
+                daemon_response(client.get(format!("{base_url}/api/config")).send(), || {
+                    crate::i18n::t("tui-event-aux-fetch-failed")
+                });
+            let resp = match outcome {
+                Ok(resp) => resp,
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                    return;
+                }
+            };
+            match resp.json::<serde_json::Value>() {
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(with_detail(
+                        crate::i18n::t("tui-event-aux-fetch-failed"),
+                        transport_detail(&e),
+                    )));
+                }
+                Ok(body) => {
                     // Enumerate the task list from the kernel (#8059 review): the
                     // config document only carries configured tasks, so a list
                     // hand-maintained in event.rs would go stale when a new
@@ -3794,22 +3818,43 @@ pub fn spawn_save_aux_chain(
                 "path": format!("llm.auxiliary.{task}"),
                 "value": chain,
             });
-            let _ = client
-                .post(format!("{base_url}/api/config/set"))
-                .json(&body)
-                .send();
-            spawn_fetch_auxiliary(
-                BackendRef::Daemon {
-                    base_url: base_url.clone(),
-                    api_key: api_key.clone(),
-                },
-                tx,
+            // `llm.auxiliary.<task>` has several legitimate rejections — 403 from
+            // `is_writable_config_path`, 400 when the chain does not deserialise,
+            // 409 on a corrupt config.toml, 423 under a managed config. Discarding
+            // the result and refetching re-rendered the old chain, so a refused
+            // save was indistinguishable from an edit that did not take
+            // (#8059 review).
+            let outcome = daemon_response(
+                client
+                    .post(format!("{base_url}/api/config/set"))
+                    .json(&body)
+                    .send(),
+                || crate::i18n::t_args("tui-event-aux-save-failed", &[("task", &task)]),
             );
+            match outcome {
+                Ok(_) => {
+                    spawn_fetch_auxiliary(
+                        BackendRef::Daemon {
+                            base_url: base_url.clone(),
+                            api_key: api_key.clone(),
+                        },
+                        tx,
+                    );
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
         }
         BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(
-                std::collections::BTreeMap::new(),
-            ));
+            // Reporting, not blanking: sending an empty map here made
+            // `SettingsAuxiliaryLoaded` rebuild `aux_tasks` from zero keys, so the
+            // pane replaced nine populated rows with "No auxiliary tasks
+            // configured." — a false statement about the operator's config, on top
+            // of silently dropping the edit (#8059 review).
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-aux-save-not-available-in-process",
+            )));
         }
     });
 }

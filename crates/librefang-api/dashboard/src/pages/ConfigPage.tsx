@@ -658,6 +658,19 @@ function ConfigFieldInput({
 /*  Page component — one per category                                  */
 /* ------------------------------------------------------------------ */
 
+// Section fields that have a purpose-built editor elsewhere on this page and
+// must not also appear in the generic field grid.
+//
+// `llm.auxiliary` is writable and schema-typed as an object, so the grid renders
+// it as a `JsonEditor` whose edits are *staged* into `pendingChanges`, while
+// `AuxiliaryLlmSection` writes *immediately* through `useSetConfigValue`. Left
+// side by side, editing the JSON blob and then the chain panel makes "Save
+// changes" post the pre-edit object, silently reverting the chain that was
+// already written to disk (#8059 review).
+const SECTION_FIELDS_WITH_DEDICATED_EDITOR: Record<string, ReadonlySet<string>> = {
+  llm: new Set(["auxiliary"]),
+};
+
 export function ConfigPage({ category }: { category: string }) {
   const { t } = useTranslation();
 
@@ -710,7 +723,11 @@ export function ConfigPage({ category }: { category: string }) {
     const out: Record<string, Array<[string, FieldRender]>> = {};
     if (!schemaRoot) return out;
     for (const desc of schemaRoot["x-sections"] ?? []) {
-      out[desc.key] = resolveSectionFields(schemaRoot, desc);
+      const dedicated = SECTION_FIELDS_WITH_DEDICATED_EDITOR[desc.key];
+      const fields = resolveSectionFields(schemaRoot, desc);
+      // Filtered here rather than at the render, so the search index and the
+      // section's "Reset all" set agree with what is on screen.
+      out[desc.key] = dedicated ? fields.filter(([fKey]) => !dedicated.has(fKey)) : fields;
     }
     return out;
   }, [schemaRoot]);

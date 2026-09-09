@@ -543,7 +543,19 @@ impl App {
                     Tab::Hands => self.hands.status_msg = err,
                     Tab::Extensions => self.extensions.status_msg = err,
                     Tab::Templates => self.templates.status_msg = err,
-                    Tab::Settings => self.settings.status_msg = err,
+                    Tab::Settings => {
+                        // Same reason as `Tab::Channels` below: every Settings
+                        // pane draws its spinner on `state.loading` alone, and
+                        // `loading` is only cleared by a successful *Loaded
+                        // event. A fetch that fails after `refresh_settings_*`
+                        // set the flag would otherwise leave the pane spinning
+                        // forever, with the message underneath it invisible
+                        // behind the spinner (#8059 review). `loading` is shared
+                        // by all four panes, so this belongs here rather than in
+                        // any one fetch helper.
+                        self.settings.loading = false;
+                        self.settings.status_msg = err;
+                    }
                     Tab::Channels => {
                         // `draw_list` renders its spinner unconditionally while
                         // `loading` is set, so a failed fetch that only wrote a

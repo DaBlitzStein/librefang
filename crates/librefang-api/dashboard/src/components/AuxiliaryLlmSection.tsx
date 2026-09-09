@@ -13,6 +13,12 @@ import { toastErr } from "../lib/errors";
 /** Stable fallback so the loading state does not churn `useCallback` deps. */
 const EMPTY_CHAINS: Record<string, string[]> = {};
 
+const EMPTY_MODELS: NonNullable<ReturnType<typeof useModels>["data"]>["models"] = [];
+const EMPTY_PROVIDERS: NonNullable<ReturnType<typeof useProviders>["data"]> = [];
+
+/** One catalog for every chain input, rather than a full copy per row. */
+const AUX_CHAIN_SUGGESTIONS_ID = "aux-chain-suggestions";
+
 export function AuxiliaryLlmSection() {
   const { t } = useTranslation();
 
@@ -30,8 +36,11 @@ export function AuxiliaryLlmSection() {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState<string[]>([]);
 
-  const modelOptions = useModels().data?.models ?? [];
-  const registeredProviders = useProviders().data ?? [];
+  // Same reason as `EMPTY_CHAINS`: a fresh `[]` on every loading render is a new
+  // identity, which churns the `knownProviders` memo below and is what
+  // react-hooks/exhaustive-deps was warning about here.
+  const modelOptions = useModels().data?.models ?? EMPTY_MODELS;
+  const registeredProviders = useProviders().data ?? EMPTY_PROVIDERS;
 
   // Save-time validation (#8059 review): a typo'd `provider:model` entry used to save cleanly and then silently fall back to the primary model at resolution time.
   // Validated only when at least one provider is known, so a failed catalog query degrades to the historical accept-any behaviour instead of bricking the editor.
@@ -105,6 +114,22 @@ export function AuxiliaryLlmSection() {
           "Route internal side-tasks to cheaper models. Empty = uses primary model.",
         )}
       </p>
+      {/* One datalist for the whole section. It used to be re-emitted inside
+          every chain row, so an N-entry chain rendered N copies of the entire
+          model catalog — hundreds of options per row with the OpenRouter
+          snapshot loaded. The key is `provider:model` because `id` is only
+          unique per provider: `gpt-4o` exists under both `openai` and
+          `azure_openai`, and local slugs repeat across `ollama` / `lmstudio`.
+          Keying on `id` alone made React drop the duplicates, losing exactly the
+          entries whose `provider:model` spelling is the only correct one for
+          that provider (#8059 review, same reasoning as `ModelsPage.tsx:1197`). */}
+      <datalist id={AUX_CHAIN_SUGGESTIONS_ID}>
+        {modelOptions.map((m) => (
+          <option key={`${m.provider}:${m.id}`} value={`${m.provider}:${m.id}`}>
+            {m.display_name ?? m.id}
+          </option>
+        ))}
+      </datalist>
       <div className="divide-y divide-border-subtle/30">
         {auxTasks.map((task) => {
           const chain = auxiliary[task] ?? [];
@@ -146,16 +171,9 @@ export function AuxiliaryLlmSection() {
                           "config.auxiliary_chain_placeholder",
                           "provider:model",
                         )}
-                        list={`aux-chain-suggestions-${i}`}
+                        list={AUX_CHAIN_SUGGESTIONS_ID}
                         className="flex-1 rounded-lg border border-border-subtle bg-main px-2.5 py-1.5 text-xs font-mono outline-none focus:border-brand"
                       />
-                      <datalist id={`aux-chain-suggestions-${i}`}>
-                        {modelOptions.map((m) => (
-                          <option key={m.id} value={`${m.provider}:${m.id}`}>
-                            {m.display_name ?? m.id}
-                          </option>
-                        ))}
-                      </datalist>
                       <button
                         type="button"
                         onClick={() => setDraft(draft.filter((_, j) => j !== i))}

@@ -36,6 +36,15 @@ vi.mock("../lib/queries/models", () => ({
       models: [
         { id: "gpt-small", provider: "openai", display_name: "GPT Small" },
         { id: "big", provider: "groq", display_name: undefined },
+        // Same slug under a second provider. `id` is unique per provider, not
+        // globally — `gpt-4o` really does exist on both `openai` and
+        // `azure_openai`, and local slugs repeat across ollama/lmstudio
+        // (#8059 review).
+        {
+          id: "gpt-small",
+          provider: "azure_openai",
+          display_name: "GPT Small (Azure)",
+        },
       ],
     },
   }),
@@ -145,6 +154,57 @@ describe("AuxiliaryLlmSection", () => {
     const values = options.map((o) => o.getAttribute("value"));
     expect(values).toContain("openai:gpt-small");
     expect(values).toContain("groq:big");
+  });
+
+  it("keys suggestions by provider:model so a slug on two providers does not collide (#8059 review)", () => {
+    // `id` is unique per provider, not globally, so `key={m.id}` gives the two
+    // `gpt-small` entries the same key.
+    //
+    // The observable symptom is React's duplicate-key error, not a missing
+    // option: on a first mount React still renders both children, and only
+    // reconciliation on a later update drops one. Asserting on the rendered
+    // values alone therefore passes against the broken code — measured — so the
+    // warning is what this test watches.
+    const errors: unknown[][] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args) => {
+      errors.push(args);
+    });
+    try {
+      renderSection();
+      const row = screen.getByText("compression").closest("div");
+      fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Edit" }));
+
+      const values = Array.from(document.querySelectorAll("datalist option")).map((o) =>
+        o.getAttribute("value"),
+      );
+      expect(values).toContain("openai:gpt-small");
+      expect(values).toContain("azure_openai:gpt-small");
+      expect(values).toHaveLength(3);
+
+      const duplicateKeyErrors = errors.filter((args) =>
+        args.some((a) => typeof a === "string" && a.includes("same key")),
+      );
+      expect(duplicateKeyErrors).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("emits one shared suggestion list, not a copy per chain row (#8059 review)", () => {
+    // The datalist used to live inside `draft.map`, so an N-entry chain rendered N
+    // full copies of the model catalog — hundreds of options per row against the
+    // OpenRouter snapshot.
+    renderSection();
+    const row = screen.getByText("compression").closest("div");
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Edit" }));
+
+    const inputs = screen.getAllByPlaceholderText("provider:model");
+    expect(inputs).toHaveLength(4); // 3 stored entries + 1 empty draft row
+    expect(document.querySelectorAll("datalist")).toHaveLength(1);
+    // …and every row still points at it.
+    for (const input of inputs) {
+      expect(input).toHaveAttribute("list", "aux-chain-suggestions");
+    }
   });
 
   it("clears the editing row when Save succeeds", async () => {

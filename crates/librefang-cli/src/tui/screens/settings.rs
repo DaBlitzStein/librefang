@@ -1100,6 +1100,18 @@ fn draw_auxiliary(f: &mut Frame, area: Rect, state: &mut SettingsState) {
                 chunks[2],
             );
         }
+    } else if !state.status_msg.is_empty() {
+        // `draw` only routes `status_msg` to the hint bar for `SettingsSub::Backups`,
+        // so every other pane has to render it itself or the message is written and
+        // never seen — which is what happened to the two fetch failures this pane
+        // reports. Mirrors `draw_providers` (#8059 review).
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                format!("  {}", state.status_msg),
+                Style::default().fg(theme::GREEN),
+            )])),
+            chunks[2],
+        );
     }
 }
 
