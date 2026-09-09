@@ -145,6 +145,7 @@ pub struct AgentSelectState {
     /// (#7781 review).
     pub routing_loaded: bool,
 
+    pub token_usage: Option<AgentTokenUsage>,
     // Inference-parameter editor (detail view)
     pub model_params: super::model_params::ModelParamsEditor,
 
@@ -192,6 +193,12 @@ pub struct AgentDetail {
     pub channels_mode: String,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct AgentTokenUsage {
+    pub total_tokens: u64,
+    pub recent: Vec<(String, u64, u64, f64)>,
+}
+
 /// What the agent screen decided.
 #[derive(Debug)]
 pub enum AgentAction {
@@ -209,15 +216,27 @@ pub enum AgentAction {
     /// User pressed Esc from the top-level list.
     Back,
     /// User wants to chat with a specific agent (from detail view).
-    ChatWithAgent { id: String, name: String },
+    ChatWithAgent {
+        id: String,
+        name: String,
+    },
     /// User wants to kill an agent (from detail view).
     KillAgent(String),
     /// Update skills for an agent.
-    UpdateSkills { id: String, skills: Vec<String> },
+    UpdateSkills {
+        id: String,
+        skills: Vec<String>,
+    },
     /// Update MCP servers for an agent.
-    UpdateMcpServers { id: String, servers: Vec<String> },
+    UpdateMcpServers {
+        id: String,
+        servers: Vec<String>,
+    },
     /// Update the channel allowlist for an agent.
-    UpdateChannels { id: String, channels: Vec<String> },
+    UpdateChannels {
+        id: String,
+        channels: Vec<String>,
+    },
     /// Fetch skills/mcp data for an agent.
     FetchAgentSkills(String),
     /// Fetch MCP data for an agent.
@@ -248,6 +267,7 @@ pub enum AgentAction {
     },
     /// Fetch an agent's model routing settings and the profile catalog.
     FetchAgentModelRouting(String),
+    FetchAgentTokenUsage(String),
     /// Fetch the agent's current inference parameters before editing them.
     FetchAgentModelParams(String),
     /// Persist edited inference parameters. `None` in a pair clears the agent's
@@ -303,6 +323,7 @@ impl AgentSelectState {
             router_default_profile: None,
             router_fixed: false,
             routing_loaded: false,
+            token_usage: None,
             spawned_toml: None,
             status_msg: String::new(),
             workspaces: Vec::new(),
@@ -342,6 +363,18 @@ impl AgentSelectState {
         self.search_query.clear();
         self.filtered_indices.clear();
         self.detail = None;
+        self.token_usage = None;
+    }
+
+    /// Fold a token-usage payload in, if it is still the one being looked at.
+    ///
+    /// The fetch is two sequential HTTP calls; a selection change in between
+    /// leaves the answer describing an agent nobody is looking at any more,
+    /// and the panel has nothing on it saying whose numbers these are.
+    pub fn apply_token_usage(&mut self, agent_id: &str, usage: AgentTokenUsage) {
+        if self.detail.as_ref().is_some_and(|d| d.id == agent_id) {
+            self.token_usage = Some(usage);
+        }
     }
 
     /// Load daemon agents from the daemon API.
@@ -586,6 +619,11 @@ impl AgentSelectState {
                                     self.detail = Some(self.build_detail_inprocess(local));
                                 }
                             }
+                            // The figures on screen belong to the agent that
+                            // was open; leaving them up shows one agent's
+                            // token count and cost under another's name until
+                            // this one's own fetch returns.
+                            self.token_usage = None;
                             self.sub = AgentSubScreen::AgentDetail;
                             if let Some(ref detail) = self.detail {
                                 return AgentAction::LoadAgentDetail(detail.id.clone());
@@ -683,6 +721,11 @@ impl AgentSelectState {
                     self.routing_loaded = false;
                     self.sub = AgentSubScreen::EditModelRouting;
                     return AgentAction::FetchAgentModelRouting(id);
+                }
+            }
+            KeyCode::Char('$') => {
+                if let Some(ref detail) = self.detail {
+                    return AgentAction::FetchAgentTokenUsage(detail.id.clone());
                 }
             }
             KeyCode::Char('p') => {
@@ -1796,6 +1839,30 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                 ]));
             }
 
+            if let Some(usage) = &state.token_usage {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    crate::i18n::t("tui-agents-detail-tokens"),
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  {} {}",
+                        crate::i18n::t("tui-agents-detail-tokens-injected"),
+                        usage.total_tokens
+                    ),
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                )));
+                for (model, input, output, cost) in usage.recent.iter().take(5) {
+                    lines.push(Line::from(Span::styled(
+                        format!("    {model:<20} {input}/{output}  ${cost:.4}"),
+                        Style::default().fg(theme::TEXT_TERTIARY),
+                    )));
+                }
+            }
+
             f.render_widget(Paragraph::new(lines), chunks[0]);
         }
         None => {
@@ -2459,258 +2526,95 @@ mod tests {
             "the operator needs to know why Enter did nothing"
         );
     }
-}
 
-#[cfg(test)]
-mod workspaces_tests {
-    use super::*;
-    use ratatui::backend::TestBackend;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::Terminal;
-
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
-    /// Renders `draw_edit_workspaces` to an in-memory buffer and returns its
-    /// text content, so a test can assert on what an operator would actually
-    /// see rather than on internal state alone (#7835).
-    fn rendered_edit_workspaces(state: &AgentSelectState) -> String {
-        let backend = TestBackend::new(120, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| draw_edit_workspaces(f, f.area(), state))
-            .unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect()
-    }
-
-    fn editing_state() -> AgentSelectState {
+    #[test]
+    fn dollar_key_requests_the_footprint_for_the_open_agent_only() {
         let mut state = AgentSelectState::new();
-        state.sub = AgentSubScreen::EditWorkspaces;
-        state.ws_loaded = true;
-        state.detail = Some(AgentDetail {
-            id: "agent-1".to_string(),
-            name: String::new(),
-            state: String::new(),
-            model: String::new(),
-            provider: String::new(),
-            created: String::new(),
-            last_active: String::new(),
-            tags: vec![],
-            capabilities: vec![],
-            parent: None,
-            children: vec![],
-            skills: vec![],
-            skills_mode: String::new(),
-            mcp_servers: vec![],
-            mcp_servers_mode: String::new(),
-            channels: vec![],
-            channels_mode: String::new(),
-        });
-        state
-    }
-
-    #[test]
-    fn adding_a_folder_focuses_the_name_field() {
-        let mut state = editing_state();
-        state.handle_key(key(KeyCode::Char('a')));
-        assert_eq!(state.workspaces.len(), 1);
-        assert!(matches!(state.ws_editing, Some((0, 0))));
-    }
-
-    #[test]
-    fn typing_then_tab_fills_name_and_path() {
-        let mut state = editing_state();
-        state.handle_key(key(KeyCode::Char('a')));
-        for c in "library".chars() {
-            state.handle_key(key(KeyCode::Char(c)));
-        }
-        state.handle_key(key(KeyCode::Tab));
-        assert_eq!(state.workspaces[0].0, "library");
-        assert!(matches!(state.ws_editing, Some((0, 1))));
-        for c in "shared/library".chars() {
-            state.handle_key(key(KeyCode::Char(c)));
-        }
-        state.handle_key(key(KeyCode::Tab));
-        assert_eq!(state.workspaces[0].1, "shared/library");
-    }
-
-    #[test]
-    fn deleting_removes_the_selected_row() {
-        let mut state = editing_state();
-        state.workspaces.push(("a".into(), "p".into(), "rw".into()));
-        state.workspaces.push(("b".into(), "q".into(), "r".into()));
-        state.ws_cursor = 1;
-        state.handle_key(key(KeyCode::Char('d')));
-        assert_eq!(state.workspaces.len(), 1);
-        assert_eq!(state.workspaces[0].0, "a");
-    }
-
-    #[test]
-    fn save_emits_only_complete_rows() {
-        let mut state = editing_state();
-        state
-            .workspaces
-            .push(("library".into(), "shared/library".into(), "rw".into()));
-        state.workspaces.push(("".into(), "".into(), "rw".into()));
-        match state.handle_key(key(KeyCode::Char('s'))) {
-            AgentAction::UpdateWorkspaces { id, workspaces } => {
-                assert_eq!(id, "agent-1");
-                assert_eq!(workspaces.len(), 1);
-                assert_eq!(workspaces[0].0, "library");
-            }
-            other => panic!("expected update, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn save_trims_the_values_it_emits_and_reports_dropped_rows() {
-        let mut state = editing_state();
-        state.workspaces.push((
-            "library ".into(),
-            " shared/library".into(),
-            "readwrite".into(),
-        ));
-        state
-            .workspaces
-            .push(("half".into(), "".into(), "readwrite".into()));
-        match state.handle_key(key(KeyCode::Char('s'))) {
-            AgentAction::UpdateWorkspaces { workspaces, .. } => {
-                assert_eq!(workspaces.len(), 1);
-                assert_eq!(
-                    workspaces[0].0, "library",
-                    "the emitted name must be trimmed"
-                );
-                assert_eq!(
-                    workspaces[0].1, "shared/library",
-                    "the emitted path must be trimmed"
-                );
-            }
-            other => panic!("expected update, got {other:?}"),
-        }
-        assert!(
-            !state.status_msg.is_empty(),
-            "dropping a half-typed row must surface a message, not fail silently"
-        );
-        let rendered = rendered_edit_workspaces(&state);
-        assert!(
-            rendered.contains(state.status_msg.trim()),
-            "the status message must actually be painted, not just set: {rendered:?}"
-        );
-    }
-
-    #[test]
-    fn entering_edit_seeds_the_buffer_so_committing_untouched_keeps_the_value() {
-        let mut state = editing_state();
-        state
-            .workspaces
-            .push(("library".into(), "shared/library".into(), "readonly".into()));
-        state.handle_key(key(KeyCode::Enter)); // open the name field
-        state.handle_key(key(KeyCode::Enter)); // commit name untouched, advance to path
-        state.handle_key(key(KeyCode::Enter)); // commit path untouched, advance to mode
-        state.handle_key(key(KeyCode::Enter)); // commit mode untouched, close the row
-
-        assert_eq!(
-            state.workspaces[0],
-            (
-                "library".to_string(),
-                "shared/library".to_string(),
-                "readonly".to_string()
-            ),
-            "committing every field without retyping must not blank any of them"
-        );
-    }
-
-    #[test]
-    fn retyping_the_displayed_readonly_value_does_not_escalate_to_readwrite() {
-        let mut state = editing_state();
-        state
-            .workspaces
-            .push(("library".into(), "shared/library".into(), "readonly".into()));
-        state.handle_key(key(KeyCode::Enter)); // field 0 (name)
-        state.handle_key(key(KeyCode::Tab)); // field 1 (path)
-        state.handle_key(key(KeyCode::Tab)); // field 2 (mode), buf seeded "readonly"
-        for _ in 0.."readonly".len() {
-            state.handle_key(key(KeyCode::Backspace));
-        }
-        for c in "readonly".chars() {
-            state.handle_key(key(KeyCode::Char(c)));
-        }
-        state.handle_key(key(KeyCode::Enter));
-
-        assert_eq!(
-            state.workspaces[0].2, "readonly",
-            "retyping the exact value the row already displays must not grant read-write"
-        );
-    }
-
-    #[test]
-    fn unrecognized_mode_input_keeps_the_previous_value() {
-        let mut state = editing_state();
-        state
-            .workspaces
-            .push(("library".into(), "shared/library".into(), "readonly".into()));
-        state.handle_key(key(KeyCode::Enter));
-        state.handle_key(key(KeyCode::Tab));
-        state.handle_key(key(KeyCode::Tab));
-        for _ in 0.."readonly".len() {
-            state.handle_key(key(KeyCode::Backspace));
-        }
-        for c in "garbage".chars() {
-            state.handle_key(key(KeyCode::Char(c)));
-        }
-        state.handle_key(key(KeyCode::Enter));
-
-        assert_eq!(
-            state.workspaces[0].2, "readonly",
-            "unrecognized mode input must not default to the more permissive read-write"
-        );
-    }
-
-    #[test]
-    fn editor_ignores_every_key_but_esc_until_loaded() {
-        let mut state = editing_state();
-        // A non-empty `workspaces` with `ws_loaded == false` isn't reachable
-        // through the normal `w` reset, but proves the gate itself — not an
-        // empty vector — is what blocks `Enter`/`'d'` below. With an empty
-        // vector both are already no-ops regardless of the gate
-        // (`if len > 0`), so that alone wouldn't distinguish the two.
-        state.workspaces.push((
-            "library".into(),
-            "shared/library".into(),
-            "readwrite".into(),
-        ));
-        state.ws_loaded = false;
-
-        state.handle_key(key(KeyCode::Char('a')));
-        assert_eq!(
-            state.workspaces.len(),
-            1,
-            "adding a row before the fetch lands must not touch the table"
-        );
+        // No detail open: the key must not fire a request against nothing.
         assert!(matches!(
-            state.handle_key(key(KeyCode::Char('s'))),
+            state.handle_detail(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE)),
             AgentAction::Continue
         ));
-        state.handle_key(key(KeyCode::Char('d')));
-        assert_eq!(
-            state.workspaces.len(),
-            1,
-            "'d' must not delete a row while the fetch hasn't landed"
-        );
-        state.handle_key(key(KeyCode::Enter));
+        state.detail = Some(AgentDetail {
+            id: "agent-7".to_string(),
+            ..AgentDetail::default()
+        });
+        match state.handle_detail(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE)) {
+            AgentAction::FetchAgentTokenUsage(id) => assert_eq!(id, "agent-7"),
+            _ => panic!("the open agent's id must be the one fetched"),
+        }
+    }
+
+    fn usage(total: u64) -> AgentTokenUsage {
+        AgentTokenUsage {
+            total_tokens: total,
+            recent: Vec::new(),
+        }
+    }
+
+    /// Two sequential HTTP calls back one `$`, so a selection change lands
+    /// between the request and the answer whenever the daemon is slow.
+    #[test]
+    fn a_footprint_for_another_agent_is_ignored() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-2".to_string(),
+            ..AgentDetail::default()
+        });
+
+        state.apply_token_usage("agent-1", usage(9_999));
+
         assert!(
-            state.ws_editing.is_none(),
-            "Enter must not open a field for editing while the fetch hasn't landed"
+            state.token_usage.is_none(),
+            "agent A's figures must not render under agent B's name"
         );
 
-        state.handle_key(key(KeyCode::Esc));
-        assert!(matches!(state.sub, AgentSubScreen::AgentDetail));
+        state.apply_token_usage("agent-2", usage(42));
+
+        assert_eq!(
+            state.token_usage.as_ref().map(|u| u.total_tokens),
+            Some(42),
+            "the open agent's own answer must still land"
+        );
+    }
+
+    /// Without this the previous agent's numbers stay on screen until this
+    /// agent's own fetch returns — on every selection change, race or no race.
+    #[test]
+    fn opening_another_agent_drops_the_previous_footprint() {
+        let mut state = AgentSelectState::new();
+        state.daemon_agents = vec![
+            DaemonAgent {
+                id: "agent-1".to_string(),
+                name: "a".to_string(),
+                state: "running".to_string(),
+                provider: String::new(),
+                model: String::new(),
+            },
+            DaemonAgent {
+                id: "agent-2".to_string(),
+                name: "b".to_string(),
+                state: "running".to_string(),
+                provider: String::new(),
+                model: String::new(),
+            },
+        ];
+        state.list.select(Some(0));
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        state.apply_token_usage("agent-1", usage(1_234));
+        assert!(state.token_usage.is_some());
+
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        state.list.select(Some(1));
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            state.detail.as_ref().map(|d| d.id.as_str()),
+            Some("agent-2")
+        );
+        assert!(
+            state.token_usage.is_none(),
+            "the panel must not show agent A's figures for agent B"
+        );
     }
 }

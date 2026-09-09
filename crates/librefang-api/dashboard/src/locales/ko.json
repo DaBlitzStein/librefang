@@ -926,7 +926,10 @@
       "saved": "모델 라우팅이 저장되었습니다",
       "saveFailed": "모델 라우팅을 저장하지 못했습니다",
       "loadFailed": "모델 라우팅을 불러오지 못했습니다"
-    }
+    },
+    "token_usage_title": "토큰 사용량",
+    "token_injected_total": "요청당 주입량",
+    "token_recent": "최근 호출"
   },
   "providers": {
     "title": "공급자",

@@ -927,7 +927,10 @@
       "saved": "Model routing saved",
       "saveFailed": "Could not save model routing",
       "loadFailed": "Could not load model routing"
-    }
+    },
+    "token_usage_title": "Token footprint",
+    "token_injected_total": "Injected per request",
+    "token_recent": "Recent calls"
   },
   "providers": {
     "title": "Providers",

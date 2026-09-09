@@ -927,7 +927,10 @@
       "saved": "已保存模型路由",
       "saveFailed": "无法保存模型路由",
       "loadFailed": "无法加载模型路由"
-    }
+    },
+    "token_usage_title": "令牌占用",
+    "token_injected_total": "每次请求注入",
+    "token_recent": "最近调用"
   },
   "providers": {
     "title": "供应商",
