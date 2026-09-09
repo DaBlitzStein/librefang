@@ -302,6 +302,31 @@ async fn goals_create_treats_whitespace_parent_id_as_absent_6562() {
     assert!(body.get("parent_id").is_none(), "got: {body:?}");
 }
 
+/// #7973: a blank `verify_agent_id` used to 400 as "Invalid verify_agent_id"
+/// instead of being treated as "not set" the way `parent_id` / `agent_id`
+/// already are (#6562) — the create form clears the field to `""`, not
+/// `null`.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_treats_blank_verify_agent_id_as_absent_7973() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({
+            "title": "Blank verifier",
+            "loop_engineering": true,
+            "verify_agent_id": "",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
+    assert!(
+        body.get("verify_agent_id").is_none(),
+        "blank verify_agent_id must not be persisted: {body:?}"
+    );
+}
+
 /// A real parent id still resolves normally — the blank-handling must not weaken the existence check.
 #[tokio::test(flavor = "multi_thread")]
 async fn goals_create_with_real_parent_still_links_6562() {
@@ -1018,6 +1043,47 @@ async fn goal_run_start_rejects_invalid_iteration_limits() {
     assert_eq!(run["running"], false);
 }
 
+/// #7973: `verify_max_retries` reached the runner through a bare `.map(|n| n
+/// as u32)` with no range check and no 400 — an out-of-range value silently
+/// wrapped instead of being refused the same way `max_iterations` already is.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_rejects_invalid_verify_max_retries() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({
+            "title": "Verified",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+            "loop_engineering": true,
+        }),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap();
+
+    for verify_max_retries in [
+        serde_json::json!(0),
+        serde_json::json!("3"),
+        serde_json::json!(2.5),
+        serde_json::json!(u64::from(u32::MAX) + 1),
+    ] {
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            &format!("/api/goals/{id}/start"),
+            Some(serde_json::json!({"verify_max_retries": verify_max_retries})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "value {verify_max_retries}: {body:?}"
+        );
+    }
+
+    let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    assert_eq!(run["running"], false);
+}
+
 /// #6562: create / update now reject a non-UUID `agent_id`, but goals written
 /// before that fix still carry junk.
 /// Reporting those as unassigned points the operator at a field that already looks filled in, so the two cases get distinct messages.
@@ -1278,6 +1344,32 @@ async fn create_and_update_reject_a_non_uuid_verifier() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
 }
 
+/// #7973: an `evaluator_model` sent as `""` used to be stored verbatim as
+/// `Some("")`, instead of being treated as absent the way the field is
+/// documented to mean when no evaluator is configured — a blank string has
+/// no provider to ever resolve against, unlike a genuinely unresolvable
+/// model id (which is deliberately allowed to save and degrade at run time).
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_create_treats_blank_evaluator_model_as_absent_7973() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/goals",
+        Some(serde_json::json!({
+            "title": "Blank evaluator",
+            "loop_engineering": true,
+            "evaluator_model": "",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "got: {body:?}");
+    assert!(
+        body.get("evaluator_model").is_none(),
+        "blank evaluator_model must not be persisted: {body:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn goal_run_start_then_stop_with_agent() {
     let h = boot().await;
@@ -1518,6 +1610,69 @@ async fn goal_run_resume_rejects_an_invalid_iteration_cap() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
+/// #7973 review: a cap at or below the checkpoint's already-completed
+/// iteration count would resume, immediately trip the iteration-cap check
+/// with no turn run, and discard the checkpoint on the way out — for a
+/// request that could never have advanced the run in the first place.
+/// Refused rather than silently destroying the checkpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_resume_rejects_a_cap_at_or_below_the_checkpoints_iteration() {
+    let h = boot().await;
+    for cap in [10, 30] {
+        let id = paused_goal(&h).await;
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            &format!("/api/goals/{id}/resume"),
+            Some(serde_json::json!({"max_iterations": cap})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "cap {cap}: {body:?}");
+
+        // The checkpoint must survive the rejected request.
+        let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+        assert_eq!(
+            run["run"]["phase"].as_str(),
+            Some("paused"),
+            "cap {cap}: a rejected resume must not consume the checkpoint: {run:?}"
+        );
+    }
+}
+
+/// The same guard applies to `/start`, not just `/resume`: a paused goal's
+/// `/start` auto-resumes from its checkpoint too.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_on_a_paused_goal_rejects_a_cap_at_or_below_the_checkpoints_iteration() {
+    let h = boot().await;
+    let id = paused_goal(&h).await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/goals/{id}/start"),
+        Some(serde_json::json!({"max_iterations": 30})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
+/// A cap that leaves headroom past the checkpoint still resumes normally.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_resume_accepts_a_cap_above_the_checkpoints_iteration() {
+    let h = boot().await;
+    let id = paused_goal(&h).await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/goals/{id}/resume"),
+        Some(serde_json::json!({"max_iterations": 31})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert_eq!(body["run"]["max_iterations"].as_u64(), Some(31));
+
+    json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
 }
 
 /// A paused run's timestamps are facts about the run, not about the moment it was polled.
