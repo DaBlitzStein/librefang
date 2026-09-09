@@ -5,7 +5,8 @@
 //! That is deliberate: a hardcoded panel per setting would need a TUI change every time a field is added to `KernelConfig`, and the two surfaces would drift on which paths are writable — the server already resolves that question in `is_writable_config_path` and ships the answer as `x-non-writable`.
 //!
 //! Current values come from `GET /api/config`, which is redacted, so a secret-bearing field shows its redaction marker rather than the secret.
-//! Those fields are also in `x-non-writable`, so the editor renders them read-only and never offers to overwrite a redaction marker back onto the real value.
+//! Most such fields are also in `x-non-writable` and render read-only, but not all of them are: `vertex_ai.credentials_path` comes back as `"***"` or `"not set"` and `pairing.ntfy_url` as `https://***@host/…`, and both sit under writable section prefixes with a leaf name that is neither a scrub key nor an `_env` redirect.
+//! A redacted value cannot be round-tripped, so the editor opens those prompts empty instead of seeding the marker, and refuses an untouched submit rather than writing the marker back over the real value.
 
 use crate::tui::screens::settings::SettingsAction;
 use crate::tui::theme;
@@ -106,6 +107,50 @@ fn declared_type(resolved: &serde_json::Value) -> Option<&str> {
     }
 }
 
+/// The string choices of an enum whose *variants* carry doc comments.
+///
+/// schemars renders that enum as a `oneOf` of per-variant single-value string
+/// enums rather than one flat `{"type": "string", "enum": [...]}`, so it has no
+/// top-level `type` for [`declared_type`] to find:
+///
+/// ```json
+/// "KernelMode": {"oneOf": [
+///   {"description": "Conservative mode ...", "type": "string", "enum": ["stable"]},
+///   {"description": "Default balanced mode.", "type": "string", "enum": ["default"]}
+/// ]}
+/// ```
+///
+/// That is the shape most real `KernelConfig` enums have — 28 definitions in the
+/// schema against 7 flat ones — so reading it as [`FieldKind::Complex`] forced
+/// writable leaves such as `mode`, `reload.mode`, `privacy.mode`,
+/// `web.search_provider` and `docker.scope` into "edit config.toml directly",
+/// which is exactly the drift from the dashboard this editor exists to prevent.
+///
+/// Branch order is the schema's, so the option list is deterministic.
+fn variant_enum_options(resolved: &serde_json::Value) -> Option<Vec<String>> {
+    let branches = ["oneOf", "anyOf"]
+        .iter()
+        .find_map(|combinator| resolved.get(combinator)?.as_array())?;
+    let mut options: Vec<String> = Vec::new();
+    for branch in branches {
+        match branch.get("type").and_then(|t| t.as_str()) {
+            // The `null` half of an `Option<Enum>` carries no choices.
+            Some("null") => continue,
+            Some("string") => {}
+            // Any non-string branch means this is not a plain string enum, and
+            // guessing at it would offer choices the endpoint would reject.
+            _ => return None,
+        }
+        for choice in branch.get("enum")?.as_array()? {
+            let choice = choice.as_str()?.to_string();
+            if !options.contains(&choice) {
+                options.push(choice);
+            }
+        }
+    }
+    (!options.is_empty()).then_some(options)
+}
+
 fn field_kind(resolved: &serde_json::Value) -> FieldKind {
     match declared_type(resolved) {
         Some("boolean") => FieldKind::Bool,
@@ -114,6 +159,9 @@ fn field_kind(resolved: &serde_json::Value) -> FieldKind {
         // A schemars enum reaches here as a `"type": "string"` with an `enum`
         // list, and a plain `String` as the same type with no list.
         Some("string") => FieldKind::Text,
+        // A documented-variant enum declares no top-level type; its choices live
+        // in the `oneOf` branches. It is still a string field.
+        None if variant_enum_options(resolved).is_some() => FieldKind::Text,
         _ => FieldKind::Complex,
     }
 }
@@ -128,6 +176,7 @@ fn enum_options(resolved: &serde_json::Value) -> Vec<String> {
                 .filter_map(|c| c.as_str().map(str::to_string))
                 .collect()
         })
+        .or_else(|| variant_enum_options(resolved))
         .unwrap_or_default()
 }
 
@@ -258,11 +307,40 @@ pub fn parse_field_input(kind: FieldKind, raw: &str) -> Option<serde_json::Value
     }
     match kind {
         FieldKind::Integer => trimmed.parse::<i64>().ok().map(serde_json::Value::from),
-        FieldKind::Number => trimmed.parse::<f64>().ok().map(serde_json::Value::from),
+        // `"inf"`, `"-inf"` and `"nan"` all parse as `f64`, and `Value::from(f64)`
+        // maps a non-finite to `Value::Null` — which this function documents as
+        // "remove this key". Rejecting them here keeps the one input class the
+        // parser is meant to refuse from becoming a silent destructive write.
+        FieldKind::Number => trimmed
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(serde_json::Value::Number),
         FieldKind::Text => Some(serde_json::Value::from(trimmed)),
         // Booleans are toggled, not typed; complex values are edit-on-disk.
         FieldKind::Bool | FieldKind::Complex => None,
     }
+}
+
+/// Whether `GET /api/config` returned a redaction marker rather than the value.
+///
+/// The module's premise that every redacted field is also non-writable does not
+/// hold. `vertex_ai.credentials_path` is emitted as `"***"` or `"not set"`
+/// (`routes/config/manage.rs`) and is writable — `vertex_ai.` is a writable
+/// prefix and `credentials_path` is neither a scrub key nor an `_env` redirect.
+/// `pairing.ntfy_url` goes through `redact_url_credentials`, so
+/// `https://user:token@ntfy.sh/x` comes back as `https://***@ntfy.sh/x`.
+///
+/// Seeding the prompt with either and submitting it writes the marker: the
+/// Vertex driver ends up pointed at a file literally named `not set`, or the
+/// ntfy credentials are replaced by `***`, and the row redisplays identically
+/// so nothing on screen says what happened. A value that came back redacted is
+/// not a value this editor can round-trip.
+pub fn is_redacted_value(value: &serde_json::Value) -> bool {
+    let serde_json::Value::String(text) = value else {
+        return false;
+    };
+    text.contains("***") || text == "not set"
 }
 
 /// Render a value for the field list, and as the seed of the edit buffer.
@@ -479,6 +557,16 @@ impl ConfigEditorState {
                 value: serde_json::Value::Bool(flipped),
             };
         }
+        // A redacted value cannot be edited from what is on screen, so the prompt
+        // opens empty rather than seeded with the marker, and submitting it
+        // untouched is refused below instead of writing the marker back.
+        if is_redacted_value(&field.value) {
+            let message =
+                crate::i18n::t_args("tui-settings-config-redacted", &[("path", &field.path)]);
+            self.input = Some(String::new());
+            self.status_msg = message;
+            return SettingsAction::Continue;
+        }
         self.input = Some(render_value(&field.value));
         self.status_msg.clear();
         SettingsAction::Continue
@@ -498,6 +586,14 @@ impl ConfigEditorState {
                     return SettingsAction::Continue;
                 };
                 let path = field.path.clone();
+                // An empty buffer means "remove this key". On a redacted field the
+                // prompt starts empty, so submitting it untouched would clear a
+                // credential the operator only meant to look at.
+                if is_redacted_value(&field.value) && raw.trim().is_empty() {
+                    self.status_msg =
+                        crate::i18n::t_args("tui-settings-config-redacted", &[("path", &path)]);
+                    return SettingsAction::Continue;
+                }
                 match parse_field_input(field.kind, &raw) {
                     Some(value) => {
                         self.input = None;
@@ -715,26 +811,45 @@ mod tests {
     /// parser has to survive: a curated root-level group, a `$ref`'d struct
     /// section, an optional string rendered as a type union, an enum behind a
     /// `$ref`, an array leaf, and a populated `x-non-writable` list.
+    ///
+    /// `mode` is the shape schemars actually produces for an enum whose variants
+    /// carry doc comments — a `oneOf` of per-variant string enums, with no
+    /// top-level `type`. It is copied from `KernelMode` in
+    /// `crates/librefang-api/tests/fixtures/kernel_config_schema.golden.json`,
+    /// where 28 of the 35 enum definitions look like this and only 7 are flat.
+    /// The flat `LogLevel` below is kept alongside it because both shapes ship.
     fn schema() -> serde_json::Value {
         serde_json::json!({
             "properties": {
                 "log_level": {"allOf": [{"$ref": "#/definitions/LogLevel"}]},
+                "mode": {"allOf": [{"$ref": "#/definitions/KernelMode"}]},
                 "api_key": {"type": ["string", "null"]},
+                "credentials_path": {"type": ["string", "null"]},
                 "skills": {"$ref": "#/definitions/SkillsConfig"}
             },
             "definitions": {
                 "LogLevel": {"type": "string", "enum": ["debug", "info", "warn"]},
+                "KernelMode": {
+                    "description": "Kernel operating mode.",
+                    "oneOf": [
+                        {"description": "Conservative mode.", "type": "string", "enum": ["stable"]},
+                        {"description": "Default balanced mode.", "type": "string", "enum": ["default"]},
+                        {"description": "Developer mode.", "type": "string", "enum": ["dev"]}
+                    ]
+                },
                 "SkillsConfig": {
                     "properties": {
                         "registry_repo": {"type": ["string", "null"]},
                         "auto_update": {"type": "boolean"},
                         "max_concurrent": {"type": "integer"},
+                        "max_daily_usd": {"type": "number"},
                         "disabled": {"type": "array", "items": {"type": "string"}}
                     }
                 }
             },
             "x-sections": [
-                {"key": "general", "root_level": true, "fields": ["log_level", "api_key"]},
+                {"key": "general", "root_level": true,
+                 "fields": ["log_level", "mode", "api_key", "credentials_path"]},
                 {"key": "skills", "struct_field": "skills"}
             ],
             "x-non-writable": ["api_key"]
@@ -744,8 +859,17 @@ mod tests {
     fn values() -> serde_json::Value {
         serde_json::json!({
             "log_level": "info",
+            "mode": "default",
             "api_key": "***",
-            "skills": {"auto_update": false, "max_concurrent": 4, "disabled": ["noisy"]}
+            // What `GET /api/config` emits for `vertex_ai.credentials_path`: a
+            // marker, never the path. It is writable — not in `x-non-writable`.
+            "credentials_path": "not set",
+            "skills": {
+                "auto_update": false,
+                "max_concurrent": 4,
+                "max_daily_usd": 5.0,
+                "disabled": ["noisy"]
+            }
         })
     }
 
@@ -916,7 +1040,13 @@ mod tests {
         let names: Vec<&str> = skills.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["auto_update", "disabled", "max_concurrent", "registry_repo"]
+            vec![
+                "auto_update",
+                "disabled",
+                "max_concurrent",
+                "max_daily_usd",
+                "registry_repo"
+            ]
         );
     }
 
@@ -930,7 +1060,10 @@ mod tests {
             .find(|s| s.key == "general")
             .expect("the general section must be present");
         let names: Vec<&str> = general.fields.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, vec!["log_level", "api_key"]);
+        assert_eq!(
+            names,
+            vec!["log_level", "mode", "api_key", "credentials_path"]
+        );
     }
 
     #[test]
@@ -988,5 +1121,172 @@ mod tests {
         assert_eq!(humanize("registry_repo"), "Registry repo");
         assert_eq!(humanize("skills"), "Skills");
         assert_eq!(humanize("proactive_memory"), "Proactive memory");
+    }
+
+    /// `mode` is in `WRITABLE_EXACT_PATHS` and the dashboard renders a select for
+    /// it. Read as `Complex` it came back "holds a list or a table — edit
+    /// ~/.librefang/config.toml directly", which is precisely the drift from the
+    /// dashboard this editor exists to remove. Twenty-eight schema definitions
+    /// share the shape, so this is the common enum, not an edge case.
+    #[test]
+    fn a_documented_variant_enum_is_editable_and_offers_its_variant_choices() {
+        let state = loaded();
+        let mode = field(&state, "mode");
+
+        assert_eq!(
+            mode.kind,
+            FieldKind::Text,
+            "a oneOf-of-string-enums is a string field, not a table"
+        );
+        assert!(
+            mode.writable,
+            "mode is not in x-non-writable, so nothing may force it read-only"
+        );
+        assert_eq!(
+            mode.options,
+            vec![
+                "stable".to_string(),
+                "default".to_string(),
+                "dev".to_string()
+            ],
+            "the choices are the union of the oneOf branches, in schema order"
+        );
+    }
+
+    /// The flat shape must keep working — both ship, and the fixture used to
+    /// exercise only this one.
+    #[test]
+    fn a_flat_string_enum_still_resolves_to_its_choices() {
+        let state = loaded();
+        let level = field(&state, "log_level");
+        assert_eq!(level.kind, FieldKind::Text);
+        assert_eq!(level.options, vec!["debug", "info", "warn"]);
+    }
+
+    /// `"inf"`, `"-inf"` and `"nan"` parse as `f64`, and `Value::from(f64)` maps a
+    /// non-finite to `Null` — which the editor posts as "remove this key". Typing
+    /// `inf` therefore deleted the field, reset it to its compiled default, and
+    /// reported "Saved". Driven through the editor rather than the parser alone,
+    /// so removing the guard from the real Enter path fails the test.
+    #[test]
+    fn a_non_finite_number_is_refused_rather_than_clearing_the_key() {
+        for typed in ["inf", "-inf", "nan", "NaN", "infinity"] {
+            let mut state = loaded();
+            focus(&mut state, "skills.max_daily_usd");
+            assert!(matches!(
+                state.handle_key(key(KeyCode::Enter)),
+                SettingsAction::Continue
+            ));
+            // The prompt seeds from the current value; clear it so what is
+            // submitted is exactly `typed`.
+            for _ in 0..state.input.as_deref().unwrap_or_default().len() {
+                state.handle_key(key(KeyCode::Backspace));
+            }
+            for c in typed.chars() {
+                state.handle_key(key(KeyCode::Char(c)));
+            }
+
+            let action = state.handle_key(key(KeyCode::Enter));
+
+            assert!(
+                matches!(action, SettingsAction::Continue),
+                "{typed:?} must not reach POST /api/config/set at all"
+            );
+            assert_eq!(
+                state.input.as_deref(),
+                Some(typed),
+                "{typed:?} must stay in the prompt to be corrected"
+            );
+        }
+    }
+
+    /// A finite float still goes through, so the guard rejects only non-finites.
+    #[test]
+    fn a_finite_number_still_saves() {
+        let mut state = loaded();
+        focus(&mut state, "skills.max_daily_usd");
+        state.handle_key(key(KeyCode::Enter));
+        for _ in 0..state.input.as_deref().unwrap_or_default().len() {
+            state.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "12.5".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+
+        match state.handle_key(key(KeyCode::Enter)) {
+            SettingsAction::SaveConfigValue { path, value } => {
+                assert_eq!(path, "skills.max_daily_usd");
+                assert_eq!(value, serde_json::json!(12.5));
+            }
+            _ => panic!("a finite float must save"),
+        }
+    }
+
+    /// `GET /api/config` returns `"not set"` / `"***"` for redacted-but-writable
+    /// fields. Seeding the prompt with the marker and pressing Enter wrote it:
+    /// `credentials_path = "not set"` points the Vertex driver at a file of that
+    /// name, and the row redisplays identically so nothing says what happened.
+    #[test]
+    fn a_redacted_value_does_not_seed_the_prompt_with_its_marker() {
+        let mut state = loaded();
+        focus(&mut state, "credentials_path");
+
+        state.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            state.input.as_deref(),
+            Some(""),
+            "the prompt must not be seeded with a redaction marker"
+        );
+        assert!(
+            !state.status_msg.is_empty(),
+            "the operator must be told why the prompt is empty"
+        );
+    }
+
+    /// The prompt opens empty for a redacted field, and an empty submit means
+    /// "remove this key" — so an untouched Enter would clear the credential the
+    /// operator only meant to look at.
+    #[test]
+    fn an_untouched_prompt_over_a_redacted_value_is_refused_not_a_deletion() {
+        let mut state = loaded();
+        focus(&mut state, "credentials_path");
+        state.handle_key(key(KeyCode::Enter));
+
+        let action = state.handle_key(key(KeyCode::Enter));
+
+        assert!(
+            matches!(action, SettingsAction::Continue),
+            "an untouched redacted prompt must not post null"
+        );
+    }
+
+    /// Scoped to redacted values: an ordinary field still clears on empty Enter,
+    /// which is the only way to put an optional back to its compiled default.
+    #[test]
+    fn a_non_redacted_field_still_clears_on_an_empty_submit() {
+        let mut state = loaded();
+        focus(&mut state, "skills.registry_repo");
+        state.handle_key(key(KeyCode::Enter));
+
+        match state.handle_key(key(KeyCode::Enter)) {
+            SettingsAction::SaveConfigValue { path, value } => {
+                assert_eq!(path, "skills.registry_repo");
+                assert_eq!(value, serde_json::Value::Null);
+            }
+            _ => panic!("clearing an ordinary optional must still work"),
+        }
+    }
+
+    #[test]
+    fn only_marker_shaped_strings_count_as_redacted() {
+        assert!(is_redacted_value(&serde_json::json!("***")));
+        assert!(is_redacted_value(&serde_json::json!("not set")));
+        assert!(is_redacted_value(&serde_json::json!(
+            "https://***@ntfy.sh/topic"
+        )));
+        assert!(!is_redacted_value(&serde_json::json!("/etc/gcp/key.json")));
+        assert!(!is_redacted_value(&serde_json::json!(null)));
+        assert!(!is_redacted_value(&serde_json::json!(4)));
     }
 }
