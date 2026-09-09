@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -158,5 +159,25 @@ describe("DashboardApp authed bootstrap", () => {
     await waitFor(() =>
       expect(screen.getByText("nav.console")).toBeInTheDocument(),
     );
+  });
+
+  // `main.tsx` wraps the app in `<React.StrictMode>`, which in development
+  // mounts, unmounts and remounts every component once. The mounted-guard
+  // ref survives that simulated remount — it is the same fiber — so a
+  // cleanup that only ever sets it to `false` leaves it `false` for the rest
+  // of the session, and every `fetchAuthedBootstrap` continuation returns
+  // early. The avatar, the hostname and the terminal policy then stay on
+  // their placeholders: exactly the symptom this PR fixes, reappearing under
+  // `vite dev` while production (a single mount) looks fine.
+  it("still fills the avatar under StrictMode's double mount", async () => {
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+
+    await logIn();
+
+    await waitFor(() => expect(screen.getAllByText("DA").length).toBeGreaterThan(0));
   });
 });
