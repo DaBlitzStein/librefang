@@ -2230,7 +2230,8 @@ pub async fn comms_send(
     tag = "network",
     request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Post a task to the agent task queue", body = crate::types::JsonObject)
+        (status = 201, description = "Task enqueued", body = crate::types::JsonObject),
+        (status = 400, description = "Missing title, or an unknown assignee", body = crate::types::JsonObject),
     )
 )]
 pub async fn comms_task(
