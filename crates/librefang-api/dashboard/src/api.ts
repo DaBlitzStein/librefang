@@ -2490,8 +2490,10 @@ function sanitizeFilenameForHeader(name: string): string {
 
 // Upload a chat attachment for an agent. Body is the raw file bytes; backend
 // expects `Content-Type` to match the file MIME and `X-Filename` for the
-// original name. Server-side limits: 10MB and an exact MIME allowlist
-// (image/audio/text/pdf) — callers should still pre-validate to fail fast.
+// original name. Server-side limits: the operator-configurable
+// `max_upload_size_bytes` (10MB default, read via `GET /api/config`) and an
+// exact MIME allowlist (image/audio/text/pdf) — callers should still
+// pre-validate to fail fast.
 export async function uploadAgentFile(agentId: string, file: File): Promise<AgentFileUploadResult> {
   const response = await fetchWithTimeout(
     `/api/agents/${encodeURIComponent(agentId)}/upload`,
