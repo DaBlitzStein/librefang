@@ -929,7 +929,12 @@ impl LibreFangKernel {
 
     /// The `SessionId` a channel-scoped turn lands on.
     ///
-    /// Single source of truth for the channel branch of session resolution, on the kernel side.
+    /// Single source of truth for the kernel-side dispatch and reset paths — NOT for every
+    /// production derivation of a channel-scoped `SessionId`. `librefang-runtime`'s
+    /// `mirror_channel_send_to_session` (`tool_runner/channel.rs`) still derives its target with
+    /// a bare `SessionId::for_sender_scope`, no reserved-name guard, because `librefang-runtime`
+    /// cannot depend on `librefang-kernel` (circular); it can reach the same guard directly via
+    /// `librefang_channels::types::sanitize_channel_name`, but has not been migrated (#7701 review).
     /// Every dispatch resolver takes this branch for a `SenderContext` that names a channel and does not set `use_canonical_session` (`send_message_full_with_upstream`, `execute_llm_agent`, the streaming resolver), and the channel bridge's `/new` / `/reboot` / `/compact` handlers must name the same session or they reset one nobody is talking in.
     ///
     /// #7701 is what disagreement looks like, and it has now cost two rounds: the channels half of the pair drifted first (`session_scope` in `librefang-channels::bridge` is the mirror of this function, and its doc-comment carries that half of the story), and the kernel half re-inlined `for_sender_scope(agent, resolve_scope_channel(..), chat)` at three sites that each had to remember the reserved-name guard.
