@@ -23,8 +23,12 @@ pub struct WorkflowInfo {
 pub struct WorkflowRun {
     pub id: String,
     pub state: String,
+    /// RFC3339 start time, straight from the payload. Sort key for the run
+    /// history; not rendered.
+    pub started_at: String,
+    /// Derived from `started_at` / `completed_at` — the payload carries no
+    /// duration of its own. Empty while the run is still in flight.
     pub duration: String,
-    pub output_preview: String,
     /// Steps that have recorded a result (`steps_completed` in the run list).
     pub steps_completed: usize,
     /// 0-based index of the step the run is executing right now.
@@ -38,6 +42,27 @@ pub struct WorkflowRun {
 
 /// Cells in the inline progress bar drawn beside the `n/m` count.
 const PROGRESS_BAR_CELLS: usize = 5;
+
+/// Width of the `Progress` column, in terminal columns.
+/// `▰▰▰▰▰ 999/999` is 13, which covers any workflow anyone hand-writes.
+const PROGRESS_CELL: usize = 13;
+
+/// Trim a progress label to [`PROGRESS_CELL`] *columns*.
+///
+/// `widgets::truncate` measures bytes, and `▰` is three of them, so handing it
+/// a width of 13 would cut the bar after four glyphs on every row. This counts
+/// chars, which is also what `{:<width$}` pads by — so the cell and the header
+/// stay the same width and `Duration` keeps its alignment.
+fn fit_progress_cell(label: &str) -> String {
+    if label.chars().count() <= PROGRESS_CELL {
+        return label.to_string();
+    }
+    label
+        .chars()
+        .take(PROGRESS_CELL - 1)
+        .chain(['\u{2026}'])
+        .collect()
+}
 
 /// The `Progress` cell for one run — how far it has got, out of how many.
 ///
@@ -59,10 +84,16 @@ pub fn run_progress_label(run: &WorkflowRun) -> String {
     if run.total_steps == 0 {
         return format!("{}/?", done);
     }
-    // A payload claiming more progress than the workflow has steps would
-    // otherwise overrun the bar; believe the larger of the two rather than
-    // subtract past zero.
-    let total = run.total_steps.max(done);
+    // `steps_completed` counts step *executions* while `total_steps` counts
+    // the steps the workflow declares, and a `StepMode::Loop` step pushes one
+    // result per iteration. So `done` routinely runs past the denominator: a
+    // 3-step workflow whose middle step loops five times and then fails has 6
+    // results against 3 declared steps. Widening the denominator to match
+    // would render that failed run as a full bar reading `6/6`. Clamp instead,
+    // so the printed denominator stays the one the workflow declares and a run
+    // that stopped early cannot claim the whole of it.
+    let total = run.total_steps;
+    let done = done.min(total);
     let filled = done * PROGRESS_BAR_CELLS / total;
     let bar = format!(
         "{}{}",
@@ -136,6 +167,16 @@ pub struct WorkflowState {
     /// screen.
     pub auto_refresh: bool,
     pub poll_tick: usize,
+    /// A poll is out and has not answered yet.
+    ///
+    /// `make_daemon_client` allows 5s per request against a 2s interval, so
+    /// without this a slow daemon accumulates up to three in-flight requests.
+    /// `WorkflowRunsLoaded` is last-write-wins, so a delayed answer overwrites
+    /// a newer one and the step counter visibly walks backwards. Skipping the
+    /// tick while one is outstanding also caps the cost: each poll makes the
+    /// daemon clone every `WorkflowRun` it holds — `step_results`, prompts and
+    /// outputs included — for a five-character progress cell.
+    pub poll_in_flight: bool,
     pub status_msg: String,
 }
 
@@ -176,6 +217,7 @@ impl WorkflowState {
             tick: 0,
             auto_refresh: true,
             poll_tick: 0,
+            poll_in_flight: false,
             status_msg: String::new(),
         }
     }
@@ -199,6 +241,7 @@ impl WorkflowState {
     pub fn should_poll(&self) -> bool {
         self.sub == WorkflowSubScreen::Runs
             && self.auto_refresh
+            && !self.poll_in_flight
             && self.poll_tick > 0
             && self.poll_tick.is_multiple_of(40)
     }
@@ -604,13 +647,16 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
+            // No Output column: `GET /api/workflows/{id}/runs` emits no
+            // `output` key, so it rendered an empty string on every row.
+            // Narrowing it to make room for Progress would have been trading
+            // width between a live column and a dead one.
             format!(
-                "  {:<12} {:<12} {:<12} {:<12} {}",
+                "  {:<12} {:<12} {:<PROGRESS_CELL$} {}",
                 crate::i18n::t("tui-workflows-header-run-id"),
                 crate::i18n::t("tui-workflows-header-state"),
                 crate::i18n::t("tui-workflows-header-progress"),
                 crate::i18n::t("tui-workflows-header-duration"),
-                crate::i18n::t("tui-workflows-header-output")
             ),
             theme::table_header(),
         )])),
@@ -637,7 +683,13 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
                     ),
                     Span::styled(format!(" {:<12}", badge), badge_style),
                     Span::styled(
-                        format!(" {:<12}", run_progress_label(run)),
+                        // Trimmed like every other cell in the row: `{:<n}`
+                        // pads but never trims, so a wide count would push
+                        // Duration right and break alignment with the header.
+                        format!(
+                            " {:<PROGRESS_CELL$}",
+                            fit_progress_cell(&run_progress_label(run))
+                        ),
                         // A run still in flight is the one the operator is
                         // watching, so its bar gets the accent; anything
                         // finished states its final count in the muted tone.
@@ -648,12 +700,8 @@ fn draw_runs(f: &mut Frame, area: Rect, state: &mut WorkflowState) {
                         },
                     ),
                     Span::styled(
-                        format!(" {:<12}", run.duration),
+                        format!(" {}", run.duration),
                         Style::default().fg(theme::YELLOW),
-                    ),
-                    Span::styled(
-                        format!(" {}", widgets::truncate(&run.output_preview, 20)),
-                        Style::default().fg(theme::TEXT_SECONDARY),
                     ),
                 ]))
             })
@@ -1172,8 +1220,8 @@ mod step_progress_tests {
         WorkflowRun {
             id: "run-1".to_string(),
             state: "running".to_string(),
+            started_at: "2026-09-09T10:00:00+00:00".to_string(),
             duration: String::new(),
-            output_preview: String::new(),
             steps_completed: completed,
             current_step_index: current,
             total_steps: total,
@@ -1257,13 +1305,77 @@ mod step_progress_tests {
         assert!(out.contains("0/?"), "{out}");
     }
 
+    /// `steps_completed` counts executions and `total_steps` counts declared
+    /// steps, so a loop step pushes the numerator past the denominator as a
+    /// matter of course — a 3-step workflow whose middle step loops five times
+    /// and then fails on step 3 has 6 results against 3 declared steps.
+    /// Widening the denominator to match painted that failed run as a full bar
+    /// reading `6/6`; the count has to be clamped to the declared total
+    /// instead, so the run reads `3/3` with the bar full but the denominator
+    /// still the workflow's own.
     #[test]
-    fn a_run_claiming_more_steps_than_the_workflow_has_does_not_overrun_the_bar() {
-        // A payload out of step with the definition must not make the bar
-        // subtract past zero.
-        let label = run_progress_label(&run(Some(9), 0, 4));
-        assert!(label.ends_with("10/10"), "{label}");
+    fn a_loop_run_with_more_results_than_steps_keeps_the_declared_denominator() {
+        let label = run_progress_label(&run(None, 6, 3));
+        assert!(
+            label.ends_with("3/3"),
+            "denominator must stay the declared step count: {label}"
+        );
         assert_eq!(label.matches('\u{25b0}').count(), PROGRESS_BAR_CELLS);
+
+        // Same for a live index that outran the definition — the bar must not
+        // subtract past zero either way.
+        let label = run_progress_label(&run(Some(9), 0, 4));
+        assert!(label.ends_with("4/4"), "{label}");
+        assert_eq!(label.matches('\u{25b0}').count(), PROGRESS_BAR_CELLS);
+    }
+
+    /// `widgets::truncate` measures bytes and `▰` is three of them, so the
+    /// shared helper would cut every bar after four glyphs. The cell needs a
+    /// char-counted trim to stay the width `{:<n}` pads to.
+    #[test]
+    fn the_progress_cell_is_trimmed_by_columns_not_bytes() {
+        let ordinary = run_progress_label(&run(Some(1), 0, 4));
+        assert_eq!(
+            fit_progress_cell(&ordinary),
+            ordinary,
+            "a 9-column label is 19 bytes and must survive untouched"
+        );
+
+        let wide = run_progress_label(&run(None, 1234, 1234));
+        assert!(wide.chars().count() > PROGRESS_CELL, "{wide}");
+        assert_eq!(
+            fit_progress_cell(&wide).chars().count(),
+            PROGRESS_CELL,
+            "a wide count must be trimmed to the column, not pushed into Duration"
+        );
+    }
+
+    /// A slow daemon answers a 2s poll interval inside a 5s client timeout, so
+    /// without a guard up to three requests are out at once. `WorkflowRunsLoaded`
+    /// is last-write-wins, so a delayed answer overwrites a newer one and the
+    /// counter walks backwards.
+    #[test]
+    fn no_second_poll_starts_while_one_is_still_out() {
+        let mut state = runs_screen(vec![run(Some(0), 0, 4)]);
+        for _ in 0..40 {
+            state.tick();
+        }
+        assert!(state.should_poll(), "the first tick window must poll");
+
+        state.poll_in_flight = true;
+        for _ in 0..40 {
+            state.tick();
+        }
+        assert!(
+            !state.should_poll(),
+            "a poll must not start while one is outstanding"
+        );
+
+        state.poll_in_flight = false;
+        for _ in 0..40 {
+            state.tick();
+        }
+        assert!(state.should_poll(), "polling resumes once the answer lands");
     }
 
     #[test]
