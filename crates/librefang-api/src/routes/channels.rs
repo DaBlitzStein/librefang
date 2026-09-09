@@ -989,10 +989,46 @@ fn remove_sidecar_block_anywhere(
     name: &str,
 ) -> Result<bool, String> {
     // Scan the includes before the first write: an unreadable include file then fails the whole delete, instead of leaving the root block already stripped behind a 500 the operator cannot retry out of.
-    let included_files = included_files_with_sidecars_blocking(config_path)?;
-    let mut removed = super::sidecar_toml::remove_sidecar_block(config_path, name)?;
-    for included in included_files {
-        removed |= super::sidecar_toml::remove_sidecar_block(&included, name)?;
+    // Unlike `configure`'s conflict check, a *missing* include is tolerated here — delete only needs to know where else a still-reachable block could be stripped, and a vanished file cannot declare one (mirrors the kernel's own tolerance for a broken include chain).
+    let included_files = included_files_with_sidecars_blocking(config_path, true)?;
+
+    // Snapshot every candidate file before the first write. The walk touches
+    // multiple files but `remove_sidecar_block` is only atomic on its own
+    // file — without a snapshot across the whole set, a failure partway
+    // through (e.g. a read-only include) leaves the earlier files already
+    // stripped with no way to retry without hand-editing the block back in.
+    let mut files = Vec::with_capacity(1 + included_files.len());
+    files.push(config_path.to_path_buf());
+    files.extend(included_files);
+    let snapshots: Vec<(std::path::PathBuf, Option<String>)> = files
+        .iter()
+        .map(|path| {
+            snapshot_file(path)
+                .map(|contents| (path.clone(), contents))
+                .map_err(|error| format!("failed to snapshot {}: {error}", path.display()))
+        })
+        .collect::<Result<_, String>>()?;
+
+    let mut removed = false;
+    for path in &files {
+        match super::sidecar_toml::remove_sidecar_block(path, name) {
+            Ok(hit) => removed |= hit,
+            Err(error) => {
+                for (snapshot_path, contents) in &snapshots {
+                    if let Err(restore_error) = super::sidecar_toml::restore_sidecar_file(
+                        snapshot_path,
+                        contents.as_deref(),
+                    ) {
+                        tracing::error!(
+                            path = %snapshot_path.display(),
+                            error = %restore_error,
+                            "sidecar delete: failed to restore snapshot after a partial-write failure"
+                        );
+                    }
+                }
+                return Err(error);
+            }
+        }
     }
     Ok(removed)
 }
@@ -1031,119 +1067,124 @@ pub struct ConfigureSidecarBody {
     pub agent: Option<String>,
 }
 
-/// Detect `[[sidecar_channels]]` entries in files referenced from the root
-/// config's `include = [...]` directive.
+/// Detect `sidecar_channels` entries in every file transitively reachable
+/// from the root config's `include = [...]` directive.
 ///
 /// Background: librefang merges every file in `include` into the runtime
-/// config (`librefang_kernel::config::load_config`). The merge concatenates
-/// arrays-of-tables — so if an included file declares `[[sidecar_channels]]`
+/// config (`librefang_kernel::config::load_config`), recursively — an
+/// included file's own `include` is resolved too. The merge concatenates
+/// arrays-of-tables — so if an included file declares `sidecar_channels`
 /// and we write a fresh root-level `[[sidecar_channels]]` here, the live
 /// config will contain BOTH entries. The freshly-written root entry will
 /// silently shadow the included one on dashboard / configure paths
 /// (the kernel reads them in include-first order, but the dashboard
 /// configure flow expects to be editing the canonical entry).
 ///
-/// Cheap heuristic: substring-match `[[sidecar_channels]]` in each included
-/// file. False positives on a comment containing that exact string are
-/// acceptable — the operator can either remove the comment or edit the
-/// included file directly as the 409 message recommends. Returns the list
-/// of include paths that contain at least one `[[sidecar_channels]]`
-/// header. A missing root config has no includes; every other read or parse
-/// failure is returned so the write-side safety check fails closed.
-#[cfg(test)]
-async fn included_files_with_sidecars(
-    config_path: &std::path::Path,
-) -> Result<Vec<std::path::PathBuf>, String> {
-    let content = match tokio::fs::read_to_string(config_path).await {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(format!(
-                "failed to read root config {}: {e}",
-                config_path.display()
-            ));
-        }
-    };
-    // Extract owned paths before the first include-file await. DocumentMut
-    // contains non-Send internals and must not be retained across a suspend
-    // point in this axum handler.
-    let include_paths = {
-        let doc: toml_edit::DocumentMut = content
-            .parse()
-            .map_err(|e| format!("failed to parse root config {}: {e}", config_path.display()))?;
-        // `include` may be a string array at the document root.
-        let Some(include_arr) = doc.get("include").and_then(|i| i.as_array()) else {
-            return Ok(Vec::new());
-        };
-        let parent = config_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        include_arr
-            .iter()
-            .filter_map(|entry| entry.as_str())
-            .map(|raw| {
-                if std::path::Path::new(raw).is_absolute() {
-                    std::path::PathBuf::from(raw)
-                } else {
-                    parent.join(raw)
-                }
-            })
-            .collect::<Vec<_>>()
-    };
-    let mut hits = Vec::new();
-    for path in include_paths {
-        let body = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| format!("failed to read included config {}: {e}", path.display()))?;
-        if body.contains("[[sidecar_channels]]") {
-            hits.push(path);
-        }
-    }
-    Ok(hits)
-}
-
-/// Blocking counterpart used only inside the configure handler's `spawn_blocking` transaction.
-/// Keeping the include reads in that transaction prevents the include list from changing between validation and the configuration write.
+/// Recurses the same way `librefang_kernel::config::resolve_config_includes`
+/// does — nested includes and diamond graphs are followed, not just the
+/// root's first-level list — and real-parses each file for a `sidecar_channels`
+/// key rather than substring-matching `[[sidecar_channels]]`, so the inline
+/// array-of-tables form (`sidecar_channels = [{ ... }]`) is caught too and a
+/// comment containing the literal header text is not a false positive.
+/// Applies the same two rules the kernel enforces on every include path —
+/// absolute paths and `..` components are skipped, never followed — so this
+/// can never resolve a file the kernel itself would refuse to merge.
+///
+/// `tolerate_missing`: `true` skips a vanished include (`NotFound`) instead
+/// of failing the whole scan. The `delete` caller passes `true` — it only
+/// needs to know where a *reachable* block could be stripped, and a file
+/// that no longer exists cannot declare one, mirroring the kernel's own
+/// tolerance for a broken include chain (`load_config` falls back to the
+/// root config rather than refusing to boot). `configure`'s conflict check
+/// passes `false` and keeps failing closed: an unreadable include might
+/// still declare a shadowing block it cannot verify, so refusing the whole
+/// save is the safe answer. Permission and parse errors always propagate
+/// either way. A missing *root* config has no includes and is never an
+/// error, regardless of `tolerate_missing`.
 fn included_files_with_sidecars_blocking(
     config_path: &std::path::Path,
+    tolerate_missing: bool,
 ) -> Result<Vec<std::path::PathBuf>, String> {
-    let content = match std::fs::read_to_string(config_path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
+    const MAX_INCLUDE_DEPTH: u32 = 10; // matches librefang_kernel::config::MAX_INCLUDE_DEPTH
+
+    fn walk(
+        path: &std::path::Path,
+        depth: u32,
+        tolerate_missing: bool,
+        seen: &mut std::collections::BTreeSet<std::path::PathBuf>,
+        hits: &mut Vec<std::path::PathBuf>,
+    ) -> Result<(), String> {
+        if depth > MAX_INCLUDE_DEPTH {
             return Err(format!(
-                "failed to read root config {}: {error}",
-                config_path.display()
+                "config include depth exceeded maximum of {MAX_INCLUDE_DEPTH} while scanning {}",
+                path.display()
             ));
         }
-    };
-    let document: toml_edit::DocumentMut = content.parse().map_err(|error| {
-        format!(
-            "failed to parse root config {}: {error}",
-            config_path.display()
-        )
-    })?;
-    let Some(include_array) = document.get("include").and_then(|item| item.as_array()) else {
-        return Ok(Vec::new());
-    };
-    let parent = config_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let mut hits = Vec::new();
-    for raw in include_array.iter().filter_map(|entry| entry.as_str()) {
-        let raw_path = std::path::Path::new(raw);
-        let path = if raw_path.is_absolute() {
-            raw_path.to_path_buf()
-        } else {
-            parent.join(raw_path)
-        };
-        let body = std::fs::read_to_string(&path).map_err(|error| {
-            format!("failed to read included config {}: {error}", path.display())
-        })?;
-        if body.contains("[[sidecar_channels]]") {
-            hits.push(path);
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if !seen.insert(canonical.clone()) {
+            return Ok(()); // diamond include or cycle already visited
         }
+        let content = match std::fs::read_to_string(&canonical) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return if depth == 0 || tolerate_missing {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "failed to read included config {}: {error}",
+                        canonical.display()
+                    ))
+                };
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to read {} config {}: {error}",
+                    if depth == 0 { "root" } else { "included" },
+                    canonical.display()
+                ));
+            }
+        };
+        let document: toml_edit::DocumentMut = content.parse().map_err(|error| {
+            format!(
+                "failed to parse {} config {}: {error}",
+                if depth == 0 { "root" } else { "included" },
+                canonical.display()
+            )
+        })?;
+        if depth > 0 && document.get("sidecar_channels").is_some() {
+            hits.push(canonical.clone());
+        }
+        let Some(include_array) = document.get("include").and_then(|item| item.as_array()) else {
+            return Ok(());
+        };
+        let parent = canonical
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        for raw in include_array.iter().filter_map(|entry| entry.as_str()) {
+            let raw_path = std::path::Path::new(raw);
+            // Same two rules `resolve_config_includes` enforces: absolute
+            // paths and `..` components are skipped, never followed.
+            if raw_path.is_absolute()
+                || raw_path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                continue;
+            }
+            walk(
+                &parent.join(raw_path),
+                depth + 1,
+                tolerate_missing,
+                seen,
+                hits,
+            )?;
+        }
+        Ok(())
     }
+
+    let mut hits = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    walk(config_path, 0, tolerate_missing, &mut seen, &mut hits)?;
     Ok(hits)
 }
 
@@ -1244,17 +1285,27 @@ fn find_conflicting_channel_type(
     Ok(None)
 }
 
-fn read_file_snapshot(
-    path: &std::path::Path,
-) -> Result<Option<String>, ConfigureSidecarWriteError> {
+/// Read a file's current contents for later restoration, tolerating "file
+/// doesn't exist yet" as `None` (nothing to roll back to). Shared by both
+/// the configure write and the multi-file delete walk, which each wrap the
+/// error into their own result type.
+fn snapshot_file(path: &std::path::Path) -> Result<Option<String>, String> {
     match std::fs::read_to_string(path) {
         Ok(contents) => Ok(Some(contents)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(ConfigureSidecarWriteError::Write(format!(
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn read_file_snapshot(
+    path: &std::path::Path,
+) -> Result<Option<String>, ConfigureSidecarWriteError> {
+    snapshot_file(path).map_err(|error| {
+        ConfigureSidecarWriteError::Write(format!(
             "failed to snapshot {} before sidecar configuration: {error}",
             path.display()
-        ))),
-    }
+        ))
+    })
 }
 
 #[cfg(unix)]
@@ -1344,7 +1395,11 @@ fn write_sidecar_configuration(
     values: &HashMap<String, String>,
     agent: Option<&str>,
 ) -> Result<Vec<String>, ConfigureSidecarWriteError> {
-    let shadowing = included_files_with_sidecars_blocking(config_path)
+    // Fail closed (`tolerate_missing = false`): an unreadable include might
+    // still declare a shadowing block this write cannot verify, so refusing
+    // the whole save is the safe answer here, unlike the tolerant scan the
+    // delete path uses.
+    let shadowing = included_files_with_sidecars_blocking(config_path, false)
         .map_err(ConfigureSidecarWriteError::Write)?;
     if !shadowing.is_empty() {
         return Err(ConfigureSidecarWriteError::IncludedSidecars(shadowing));
@@ -1871,6 +1926,23 @@ pub async fn delete_sidecar_channel(
             "sidecar delete: no config block on disk but the channel is live — \
              reconciling the running daemon with config.toml"
         );
+        // The has_adapter-only orphan never converges on its own: the map is
+        // otherwise only cleared by `HotAction::ReloadChannels`
+        // (`kernel/config_reload_ops.rs`), and that dispatch does not fire
+        // when the reload plan's diff is empty — exactly the case this
+        // branch targets, an in-memory config that already matched disk.
+        // `start_channel_bridge_with_config` only ever inserts adapters, so
+        // left alone the stale key(s) survive every reload and every repeat
+        // delete keeps taking this branch, forcing the full bridge
+        // restart below for nothing. When `in_live_config` is also true the
+        // reload's own diff already clears the map (covered by the
+        // `delete_reconciles_a_live_sidecar_that_is_no_longer_on_disk` test),
+        // so only the adapter-only case needs a direct removal here.
+        if !in_live_config {
+            let adapters = state.kernel.channel_adapters_ref();
+            adapters.remove(&name);
+            adapters.remove(&format!("{name}:{name}"));
+        }
     }
 
     let plan = state
@@ -1915,54 +1987,125 @@ pub async fn delete_sidecar_channel(
 
 #[cfg(test)]
 mod included_sidecar_config_tests {
-    use super::included_files_with_sidecars;
+    use super::included_files_with_sidecars_blocking;
 
-    #[tokio::test]
-    async fn missing_root_config_has_no_included_sidecars() {
+    #[test]
+    fn missing_root_config_has_no_included_sidecars() {
         let tmp = tempfile::tempdir().unwrap();
-        let hits = included_files_with_sidecars(&tmp.path().join("config.toml"))
-            .await
-            .unwrap();
+        let hits =
+            included_files_with_sidecars_blocking(&tmp.path().join("config.toml"), false).unwrap();
         assert!(hits.is_empty());
     }
 
-    #[tokio::test]
-    async fn unreadable_included_config_fails_closed() {
+    #[test]
+    fn unreadable_included_config_fails_closed_when_not_tolerated() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("config.toml");
-        tokio::fs::write(&root, "include = [\"missing.toml\"]\n")
-            .await
-            .unwrap();
+        std::fs::write(&root, "include = [\"missing.toml\"]\n").unwrap();
 
-        let error = included_files_with_sidecars(&root).await.unwrap_err();
+        let error = included_files_with_sidecars_blocking(&root, false).unwrap_err();
         assert!(error.contains("failed to read included config"));
         assert!(error.contains("missing.toml"));
     }
 
-    #[tokio::test]
-    async fn invalid_root_config_fails_closed() {
+    /// The delete path passes `tolerate_missing = true`: a vanished include
+    /// cannot declare a block, so it is skipped rather than failing the scan.
+    #[test]
+    fn unreadable_included_config_is_skipped_when_tolerated() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("config.toml");
-        tokio::fs::write(&root, "include = [").await.unwrap();
+        std::fs::write(&root, "include = [\"missing.toml\"]\n").unwrap();
 
-        let error = included_files_with_sidecars(&root).await.unwrap_err();
+        let hits = included_files_with_sidecars_blocking(&root, true).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn invalid_root_config_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("config.toml");
+        std::fs::write(&root, "include = [").unwrap();
+
+        let error = included_files_with_sidecars_blocking(&root, false).unwrap_err();
         assert!(error.contains("failed to parse root config"));
     }
 
-    #[tokio::test]
-    async fn included_sidecar_blocks_are_reported() {
+    #[test]
+    fn included_sidecar_blocks_are_reported() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("config.toml");
         let included = tmp.path().join("channels.toml");
-        tokio::fs::write(&root, "include = [\"channels.toml\"]\n")
-            .await
-            .unwrap();
-        tokio::fs::write(&included, "[[sidecar_channels]]\nname = \"telegram\"\n")
-            .await
-            .unwrap();
+        std::fs::write(&root, "include = [\"channels.toml\"]\n").unwrap();
+        std::fs::write(&included, "[[sidecar_channels]]\nname = \"telegram\"\n").unwrap();
 
-        let hits = included_files_with_sidecars(&root).await.unwrap();
-        assert_eq!(hits, vec![included]);
+        let hits = included_files_with_sidecars_blocking(&root, false).unwrap();
+        assert_eq!(hits, vec![std::fs::canonicalize(&included).unwrap()]);
+    }
+
+    /// GRANDE finding: the old scan only read the root's first-level
+    /// `include` list and substring-matched the array-of-tables header, so a
+    /// two-level include chain (`config.toml` -> `a.toml` -> `channels.toml`)
+    /// was invisible to it even though the kernel's own `load_config` merges
+    /// it into the live config. Reverting the recursion (calling `walk` only
+    /// at depth 0's direct includes) reproduces exactly this: this test fails
+    /// with `hits.is_empty()` against a non-empty expectation.
+    #[test]
+    fn nested_include_is_resolved_recursively() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("config.toml");
+        let mid = tmp.path().join("a.toml");
+        let leaf = tmp.path().join("channels.toml");
+        std::fs::write(&root, "include = [\"a.toml\"]\n").unwrap();
+        std::fs::write(&mid, "include = [\"channels.toml\"]\n").unwrap();
+        std::fs::write(&leaf, "[[sidecar_channels]]\nname = \"email\"\n").unwrap();
+
+        let hits = included_files_with_sidecars_blocking(&root, false).unwrap();
+        assert_eq!(
+            hits,
+            vec![std::fs::canonicalize(&leaf).unwrap()],
+            "a channel declared two include-levels deep must still be found"
+        );
+    }
+
+    /// GRANDE finding, second half: the old scan substring-matched the
+    /// literal `[[sidecar_channels]]` array-of-tables header, so the inline
+    /// `sidecar_channels = [{ ... }]` form — which the kernel merges
+    /// identically — was invisible to it. This is a real TOML parse, so both
+    /// forms resolve to the same `sidecar_channels` key.
+    #[test]
+    fn inline_array_of_tables_form_is_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("config.toml");
+        let included = tmp.path().join("channels.toml");
+        std::fs::write(&root, "include = [\"channels.toml\"]\n").unwrap();
+        std::fs::write(
+            &included,
+            "sidecar_channels = [{ name = \"email\", channel_type = \"email\" }]\n",
+        )
+        .unwrap();
+
+        let hits = included_files_with_sidecars_blocking(&root, false).unwrap();
+        assert_eq!(
+            hits,
+            vec![std::fs::canonicalize(&included).unwrap()],
+            "the inline array-of-tables form must be detected, not just [[sidecar_channels]]"
+        );
+    }
+
+    /// The kernel's own `resolve_config_includes` rejects absolute paths and
+    /// `..` traversal; this scan must skip the same entries rather than
+    /// reading (and later writing to) a file the kernel would never load.
+    #[test]
+    fn absolute_and_traversal_includes_are_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("config.toml");
+        std::fs::write(&root, "include = [\"/etc/passwd\", \"../escape.toml\"]\n").unwrap();
+
+        let hits = included_files_with_sidecars_blocking(&root, false).unwrap();
+        assert!(
+            hits.is_empty(),
+            "unsafe include paths must not be followed: {hits:?}"
+        );
     }
 }
 

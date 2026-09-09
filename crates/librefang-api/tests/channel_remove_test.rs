@@ -5,11 +5,17 @@
 //! never carried the channel — removing it yields no `ReloadChannels` action,
 //! keeping the test free of sidecar-spawn side effects.
 
+use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
+use futures::Stream;
 use librefang_api::server;
+use librefang_channels::types::{
+    ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+};
 use librefang_kernel::LibreFangKernel;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
+use std::pin::Pin;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -261,4 +267,181 @@ async fn delete_strips_a_sidecar_declared_in_root_and_include_at_once() {
 
     let (status, _) = send(h.app.clone(), auth_delete("/api/channels/sidecar/telegram")).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "second delete must 404");
+}
+
+/// A channel declared two include-levels deep (`config.toml` -> `a.toml` ->
+/// `channels.toml`), the case the old first-level-only substring scan could
+/// not see at all. The kernel's own `load_config` resolves includes
+/// recursively, so this channel is fully live and the dashboard offers its
+/// delete button; the old scan found no block in `a.toml` (no
+/// `[[sidecar_channels]]` substring there), concluded "declared nowhere",
+/// and answered `removed` while the block in `channels.toml` survived and
+/// was re-merged on the next reload.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_strips_a_sidecar_declared_two_include_levels_deep() {
+    let h = boot_router().await;
+    let config_path = h.home.join("config.toml");
+    let mid_path = h.home.join("a.toml");
+    let leaf_path = h.home.join("channels.toml");
+    std::fs::write(&config_path, "include = [\"a.toml\"]\n").expect("seed config.toml");
+    std::fs::write(&mid_path, "include = [\"channels.toml\"]\n").expect("seed a.toml");
+    std::fs::write(&leaf_path, EMAIL_BLOCK).expect("seed channels.toml");
+
+    let (status, body) = send(h.app.clone(), auth_delete("/api/channels/sidecar/email")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "removed");
+
+    let leaf = std::fs::read_to_string(&leaf_path).expect("leaf include still present");
+    assert!(
+        !leaf.contains("[[sidecar_channels]]") && !leaf.contains("name = \"email\""),
+        "block must be gone from the two-levels-deep include: {leaf}"
+    );
+
+    let (status, _) = send(h.app.clone(), auth_delete("/api/channels/sidecar/email")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "second delete must be a real 404, not a repeat of the still-present block"
+    );
+}
+
+/// The multi-file walk must be all-or-nothing. `telegram` is declared in
+/// both the root config and an included file; the included file's
+/// `sidecar_channels` is a scalar string rather than an array-of-tables, so
+/// `remove_sidecar_block` errors on it deterministically (independent of
+/// filesystem permissions or run-as-root) — but only *after* the root has
+/// already been stripped and committed to disk, since the root is processed
+/// first. Without a snapshot/restore across the whole set, the request
+/// 500s with the root's block already gone and no way to retry short of a
+/// hand-edit; with it, the root is rolled back to exactly its pre-request
+/// bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_restores_the_root_when_a_later_include_write_fails() {
+    let h = boot_router().await;
+    let config_path = h.home.join("config.toml");
+    let included_path = h.home.join("channels.toml");
+    let root_before = format!("include = [\"channels.toml\"]\n{TELEGRAM_BLOCK}");
+    std::fs::write(&config_path, &root_before).expect("seed config.toml");
+    std::fs::write(&included_path, "sidecar_channels = \"not-a-table\"\n")
+        .expect("seed channels.toml");
+
+    let (status, body) = send(h.app.clone(), auth_delete("/api/channels/sidecar/telegram")).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the malformed include must fail the request; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("root config still present"),
+        root_before,
+        "the root's already-committed strip must be rolled back when a later file fails"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&included_path).expect("included file still present"),
+        "sidecar_channels = \"not-a-table\"\n",
+        "the malformed include must be left exactly as it was"
+    );
+}
+
+/// Adapter that only exists to occupy a `channel_adapters_ref()` key; the
+/// orphan-convergence test below never calls `start`/`send`/`stop`.
+struct OrphanAdapter {
+    name: String,
+}
+
+#[async_trait]
+impl ChannelAdapter for OrphanAdapter {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::Email
+    }
+
+    async fn start(
+        &self,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        Ok(Box::pin(futures::stream::empty::<ChannelMessage>()))
+    }
+
+    async fn send(
+        &self,
+        _user: &ChannelUser,
+        _content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+}
+
+/// `has_adapter`-only orphan: nothing in `sidecar_channels` (neither on disk
+/// nor in the kernel's in-memory config), but a stale adapter is still
+/// registered under both the plain and the `name:name` qualified key — the
+/// shape `start_channel_bridge_with_config` produces for a sidecar, since it
+/// keys the qualified entry by the sidecar's own `name` as `account_id`.
+///
+/// Before the fix, `HotAction::ReloadChannels` is the only thing that clears
+/// `channel_adapters_ref()`, and it never dispatches here because the
+/// reload's plan diff is empty (memory and disk both already say "no such
+/// channel"). Without a direct removal, `has_adapter` stays `true` forever
+/// and a repeat delete keeps taking the reconcile branch and 200s instead of
+/// 404ing once the orphan is actually gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_clears_a_stale_adapter_entry_with_no_config_anywhere() {
+    let h = boot_router().await;
+    std::fs::write(h.home.join("config.toml"), "# no sidecar_channels\n").expect("seed config");
+
+    let adapter: Arc<dyn ChannelAdapter> = Arc::new(OrphanAdapter {
+        name: "email".to_string(),
+    });
+    h.state
+        .kernel
+        .channel_adapters_ref()
+        .insert("email".to_string(), adapter.clone());
+    h.state
+        .kernel
+        .channel_adapters_ref()
+        .insert("email:email".to_string(), adapter);
+
+    let (status, body) = send(h.app.clone(), auth_delete("/api/channels/sidecar/email")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an adapter-only orphan must be deletable; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    assert!(
+        !h.state.kernel.channel_adapters_ref().contains_key("email"),
+        "the plain adapter key must be cleared directly, not left for a reload that never fires"
+    );
+    assert!(
+        !h.state
+            .kernel
+            .channel_adapters_ref()
+            .contains_key("email:email"),
+        "the qualified adapter key must be cleared directly, not left for a reload that never fires"
+    );
+
+    let (status, _) = send(h.app.clone(), auth_delete("/api/channels/sidecar/email")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "once the orphan is actually gone, a repeat delete must converge to 404"
+    );
 }
