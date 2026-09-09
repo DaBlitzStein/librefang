@@ -734,6 +734,13 @@
       "format": "uint",
       "minimum": 0.0
     },
+    "max_concurrent_uploads": {
+      "description": "Maximum number of `POST /api/agents/{id}/upload` requests allowed to be mid-flight at once (default: 8). `upload_file` extracts `axum::body::Bytes`, buffering the whole body in RAM before the handler runs, so uncapped concurrency at `max_upload_size_bytes` costs `concurrent_requests * max_upload_size_bytes` in RSS. This bounds worst-case peak RAM from the upload path to `max_concurrent_uploads * max_upload_size_bytes`.",
+      "default": 8,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
     "max_cron_jobs": {
       "description": "Cron scheduler max total jobs across all agents. Default: 500.",
       "default": 500,
@@ -6347,7 +6354,7 @@
       "type": "object",
       "properties": {
         "api_base_url": {
-          "description": "Base URL of the GitHub REST API, without a trailing slash. Defaults to `https://api.github.com`. Set it to something like `https://github.example.com/api/v3` to promote against a GitHub Enterprise Server installation, which the flow could not reach at all while the host was a compiled-in constant.",
+          "description": "Base URL of the GitHub REST API, without a trailing slash. Defaults to `https://api.github.com`. Set it to something like `https://github.example.com/api/v3` to promote against a GitHub Enterprise Server installation, which the flow could not reach at all while the host was a compiled-in constant. Must be `https://` — plain `http` is accepted only for loopback hosts — and it is not writable through `POST /api/config/set`: the promotion flow attaches the repo-scoped GitHub token to every request built from it, so the value is an edit-on-disk destination field (#8179 review).",
           "default": null,
           "type": [
             "string",
