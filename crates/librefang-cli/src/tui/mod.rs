@@ -835,9 +835,23 @@ impl App {
             AppEvent::ConfigSectionsLoaded(sections) => {
                 self.settings.config.set_sections(sections);
             }
-            AppEvent::ConfigValueSaved(path) => {
-                self.settings.config.status_msg =
-                    crate::i18n::t_args("tui-mod-config-value-saved", &[("path", &path)]);
+            AppEvent::ConfigValueSaved { path, outcome } => {
+                // "Saved" on its own would be a lie for two of the three outcomes:
+                // the refetch below reads the live kernel config, so a failed reload
+                // redisplays the old value under a success message.
+                self.settings.config.status_msg = match outcome {
+                    event::ConfigSaveOutcome::Applied => {
+                        crate::i18n::t_args("tui-mod-config-value-saved", &[("path", &path)])
+                    }
+                    event::ConfigSaveOutcome::RestartRequired => crate::i18n::t_args(
+                        "tui-mod-config-value-saved-restart",
+                        &[("path", &path)],
+                    ),
+                    event::ConfigSaveOutcome::ReloadFailed(reason) => crate::i18n::t_args(
+                        "tui-mod-config-value-saved-reload-failed",
+                        &[("path", &path), ("error", &reason)],
+                    ),
+                };
                 // Re-read rather than trust the local copy: `POST /api/config/set`
                 // merges into `config.toml`, and the value that comes back is the
                 // one the daemon actually kept.
