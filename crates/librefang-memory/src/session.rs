@@ -3008,8 +3008,26 @@ mod tests {
         let agent_id = AgentId::new();
 
         let parent = store.create_session(agent_id).unwrap();
-        let mut child = store.create_session(agent_id).unwrap();
-        child.parent_session_id = Some(parent.id);
+        // Built as a fresh `Session` literal and saved once, hitting the
+        // INSERT branch — NOT `create_session` + mutate + a second
+        // `save_session`, whose `ON CONFLICT DO UPDATE` deliberately
+        // excludes `parent_session_id` (see `save_session`'s doc comment:
+        // "a session's parentage is decided when it is created and never
+        // changes"). A second save on an existing id would silently leave
+        // the column NULL from the first INSERT, passing this test for the
+        // wrong reason regardless of whether the reconcile below exists.
+        let child = Session {
+            id: SessionId::new(),
+            agent_id,
+            parent_session_id: Some(parent.id),
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        };
         store.save_session(&child).unwrap();
 
         // Backdate only the parent past the retention window; the child
@@ -3051,8 +3069,22 @@ mod tests {
         let agent_id = AgentId::new();
 
         let parent = store.create_session(agent_id).unwrap();
-        let mut child = store.create_session(agent_id).unwrap();
-        child.parent_session_id = Some(parent.id);
+        // See the sibling test above for why this is a fresh `Session`
+        // literal saved once, not `create_session` + mutate + a second
+        // `save_session` (the `ON CONFLICT DO UPDATE` clause excludes
+        // `parent_session_id`, so a second save is a no-op on that column).
+        let child = Session {
+            id: SessionId::new(),
+            agent_id,
+            parent_session_id: Some(parent.id),
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        };
         store.save_session(&child).unwrap();
 
         // Age the parent so it ranks below the child under
