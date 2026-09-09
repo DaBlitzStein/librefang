@@ -6,9 +6,9 @@ import { useUIStore } from "./lib/store";
 import {
   checkDashboardAuthMode,
   dashboardLogin,
-  getDashboardUsername,
   getStatus,
   getVersionInfo,
+  getWhoami,
   verifyStoredAuth,
 } from "./api";
 
@@ -76,6 +76,7 @@ vi.mock("./api", () => ({
   getDashboardUsername: vi.fn(),
   getStatus: vi.fn(),
   getVersionInfo: vi.fn(),
+  getWhoami: vi.fn(),
   isPasskeySupported: vi.fn(() => false),
   loginWithPasskey: vi.fn(),
   setApiKey: vi.fn(),
@@ -105,14 +106,18 @@ describe("DashboardApp authed bootstrap", () => {
     // Unauthenticated on mount, authenticated once the login succeeds.
     vi.mocked(verifyStoredAuth).mockResolvedValueOnce(false).mockResolvedValue(true);
     vi.mocked(dashboardLogin).mockResolvedValue({ ok: true });
-    vi.mocked(getVersionInfo).mockResolvedValue({
-      version: "test",
-      hostname: "myhost",
-    });
+    // `/api/version` never sends `hostname` in production (it's public and
+    // deliberately omits it) — the real value comes from the authenticated
+    // `/api/status`, so that's the only place this test supplies one.
+    vi.mocked(getVersionInfo).mockResolvedValue({ version: "test" });
     vi.mocked(getStatus).mockResolvedValue({
       terminal_enabled: true,
+      hostname: "myhost",
     } as Awaited<ReturnType<typeof getStatus>>);
-    vi.mocked(getDashboardUsername).mockResolvedValue("daemon-user");
+    // `/api/auth/dashboard-check` never echoes the username to a caller
+    // either — the daemon's identity comes from the authenticated
+    // `/api/authz/whoami` instead.
+    vi.mocked(getWhoami).mockResolvedValue({ name: "daemon-user" });
   });
 
   it("shows the daemon's username in the avatar after logging in", async () => {
@@ -124,6 +129,25 @@ describe("DashboardApp authed bootstrap", () => {
     // not the "U" placeholder the empty state renders.
     await waitFor(() => expect(screen.getAllByText("DA").length).toBeGreaterThan(0));
     expect(screen.queryByText("OP")).not.toBeInTheDocument();
+  });
+
+  it("does not re-run the auth probe after a login succeeds", async () => {
+    render(<App />);
+
+    await logIn();
+
+    await waitFor(() => expect(screen.getAllByText("DA").length).toBeGreaterThan(0));
+
+    // The probe ran once, on mount, to decide the login dialog needed to
+    // show at all. Re-running it on every login (the bootstrap effect used
+    // to depend on `authEpoch` directly) races a transient 401/500/timeout
+    // from `verifyStoredAuth()` against a session that was just
+    // established, and can bounce the user straight back to the dialog it
+    // took real credentials to get past.
+    expect(verifyStoredAuth).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByPlaceholderText("auth.username_placeholder"),
+    ).not.toBeInTheDocument();
   });
 
   it("applies the daemon's terminal policy after logging in", async () => {
