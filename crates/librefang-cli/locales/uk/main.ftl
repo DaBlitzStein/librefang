@@ -2576,6 +2576,7 @@ tui-agents-label-routing-fixed-explainer = Цей агент завжди вик
 tui-agents-label-no-router-profiles = Немає доступних профілів моделей. Додайте їх до ~/.librefang/model_profiles.toml.
 tui-agents-label-routing-any-profile = будь-який
 tui-agents-hints-model-routing = [Tab] Режим  [↑↓] Навігація  [Space] Перемкнути профіль  [+/-] Бюджет витрат  [Enter] Зберегти  [Esc] Скасувати
+tui-agents-model-routing-not-loaded = Налаштування маршрутизації цього агента ще завантажуються — спробуйте ще раз за мить.
 tui-event-model-routing-fetch-failed = Не вдалося отримати маршрутизацію моделі
 tui-event-model-routing-update-failed = Не вдалося оновити маршрутизацію моделі
 tui-mod-agent-model-routing-updated = Маршрутизацію моделі оновлено для агента { $id }.

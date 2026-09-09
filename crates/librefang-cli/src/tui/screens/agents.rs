@@ -125,6 +125,12 @@ pub struct AgentSelectState {
     /// on save for the same reason as `router_default_profile` (#7781
     /// review).
     pub router_fixed: bool,
+    /// Set only by `AgentModelRoutingLoaded`. `Enter` in the routing editor
+    /// is a no-op while this is `false` — a fetch that failed after `r` was
+    /// pressed must not let a save write the reset placeholder values (or,
+    /// before the reset, a previous agent's stale ones) onto this agent
+    /// (#7781 review).
+    pub routing_loaded: bool,
 
     // Inference-parameter editor (detail view)
     pub model_params: super::model_params::ModelParamsEditor,
@@ -275,6 +281,7 @@ impl AgentSelectState {
             cost_budget_idx: 0,
             router_default_profile: None,
             router_fixed: false,
+            routing_loaded: false,
             spawned_toml: None,
             status_msg: String::new(),
         }
@@ -302,6 +309,7 @@ impl AgentSelectState {
         self.cost_budget_idx = 0;
         self.router_default_profile = None;
         self.router_fixed = false;
+        self.routing_loaded = false;
         self.spawned_toml = None;
         self.status_msg.clear();
         self.search_active = false;
@@ -627,6 +635,7 @@ impl AgentSelectState {
                     self.cost_budget_idx = 0;
                     self.router_default_profile = None;
                     self.router_fixed = false;
+                    self.routing_loaded = false;
                     self.sub = AgentSubScreen::EditModelRouting;
                     return AgentAction::FetchAgentModelRouting(id);
                 }
@@ -999,6 +1008,16 @@ impl AgentSelectState {
                 };
             }
             KeyCode::Enter => {
+                // The fetch that populates this screen may still be in
+                // flight or may have failed (`AppEvent::FetchError` only
+                // writes a status message; it does not leave the editor).
+                // Saving before `AgentModelRoutingLoaded` ever arrived would
+                // write this screen's reset placeholder values over the
+                // agent's real settings (#7781 review).
+                if !self.routing_loaded {
+                    self.status_msg = crate::i18n::t("tui-agents-model-routing-not-loaded");
+                    return AgentAction::Continue;
+                }
                 if let Some(ref detail) = self.detail {
                     // In fixed mode the allowlist and budget describe a routing
                     // decision that will not happen, so they are not sent — the
@@ -2100,6 +2119,7 @@ mod tests {
         });
         state.model_mode = "flexible".to_string();
         state.router_default_profile = Some("coder".to_string());
+        state.routing_loaded = true;
 
         let action = state.handle_edit_model_routing(key(KeyCode::Enter));
 
@@ -2130,6 +2150,7 @@ mod tests {
         });
         state.model_mode = "flexible".to_string();
         state.router_fixed = true;
+        state.routing_loaded = true;
 
         let action = state.handle_edit_model_routing(key(KeyCode::Enter));
 
@@ -2158,6 +2179,7 @@ mod tests {
         state.cost_budget_idx = 2;
         state.router_default_profile = Some("coder".to_string());
         state.router_fixed = true;
+        state.routing_loaded = true;
 
         state.handle_detail(key(KeyCode::Char('r')));
 
@@ -2167,5 +2189,38 @@ mod tests {
         assert_eq!(state.cost_budget_idx, 0);
         assert_eq!(state.router_default_profile, None);
         assert!(!state.router_fixed);
+        assert!(
+            !state.routing_loaded,
+            "re-entering must require a fresh AgentModelRoutingLoaded before Enter can save"
+        );
+    }
+
+    /// #7781 review: if the fetch after `r` fails (or has not returned yet),
+    /// `Enter` must not save — it would write this screen's reset
+    /// placeholder values over the agent's real settings. `FetchError` only
+    /// sets a status message; it does not leave the editor, so this guard
+    /// is the only thing standing between a failed fetch and a bad write.
+    #[test]
+    fn saving_before_routing_loaded_is_a_no_op() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-3".to_string(),
+            ..AgentDetail::default()
+        });
+        state.model_mode = "flexible".to_string();
+        state.router_default_profile = Some("coder".to_string());
+        state.router_fixed = true;
+        // routing_loaded defaults to false and was not set here.
+
+        let action = state.handle_edit_model_routing(key(KeyCode::Enter));
+
+        assert!(
+            matches!(action, AgentAction::Continue),
+            "Enter must not emit a save before the real settings have loaded"
+        );
+        assert!(
+            !state.status_msg.is_empty(),
+            "the operator needs to know why Enter did nothing"
+        );
     }
 }

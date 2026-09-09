@@ -2483,6 +2483,7 @@ tui-agents-label-routing-fixed-explainer = 该智能体始终使用其清单中�
 tui-agents-label-no-router-profiles = 没有可用的模型配置。请添加到 ~/.librefang/model_profiles.toml。
 tui-agents-label-routing-any-profile = 全部
 tui-agents-hints-model-routing = [Tab] 模式  [↑↓] 导航  [Space] 切换配置  [+/-] 费用预算  [Enter] 保存  [Esc] 取消
+tui-agents-model-routing-not-loaded = 该智能体的路由设置仍在加载中 — 请稍后重试。
 tui-event-model-routing-fetch-failed = 获取模型路由失败
 tui-event-model-routing-update-failed = 更新模型路由失败
 tui-mod-agent-model-routing-updated = 已更新智能体 { $id } 的模型路由。
