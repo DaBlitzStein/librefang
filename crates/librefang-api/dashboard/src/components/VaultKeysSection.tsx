@@ -85,8 +85,10 @@ export function VaultKeysSection() {
   const keys = vaultQuery.data ?? [];
   const busy = setKey.isPending || deleteKey.isPending;
 
-  // The endpoints are Admin-gated in-handler, so a viewer-role operator gets a
-  // 401/403 rather than an empty list. Say so instead of rendering a dead form.
+  // The endpoints are Owner-gated, in `middleware::is_owner_only_write` /
+  // `min_role_for_privileged_get` and again in-handler, so anything below Owner
+  // gets a 401/403 rather than an empty list. Say so instead of rendering a
+  // dead form the operator has no way to submit.
   const forbidden =
     vaultQuery.isError &&
     vaultQuery.error instanceof ApiError &&
@@ -101,6 +103,11 @@ export function VaultKeysSection() {
     if (busy || !value) return;
     setError(null);
     setSuccess(null);
+    // Saving abandons any delete confirmation the operator opened on this row.
+    // Without this, arming the trash icon, changing your mind and saving a new
+    // value instead leaves the row re-rendering with Confirm still showing —
+    // one click from deleting the secret that was just stored.
+    setConfirmDelete(null);
     try {
       const result = await setKey.mutateAsync({ key, value });
       // Clear before anything else can read it back out of state.
@@ -177,7 +184,7 @@ export function VaultKeysSection() {
           <div className="px-1 py-3 text-sm text-text-dim">
             {t(
               "settings.vault_forbidden",
-              "Managing daemon credentials requires an Admin account.",
+              "Managing daemon credentials requires an Owner account.",
             )}
           </div>
         )}

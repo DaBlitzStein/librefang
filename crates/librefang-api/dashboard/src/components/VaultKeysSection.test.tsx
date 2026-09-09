@@ -136,11 +136,11 @@ describe("VaultKeysSection", () => {
     expect(message.innerHTML).not.toContain(SECRET);
   });
 
-  it("explains the Admin gate instead of rendering a dead form on 403", () => {
+  it("explains the Owner gate instead of rendering a dead form on 403", () => {
     stubQuery({ data: undefined, isError: true, error: new ApiError(403, "forbidden", "nope") });
     render(<VaultKeysSection />);
     expect(
-      screen.getByText("Managing daemon credentials requires an Admin account."),
+      screen.getByText("Managing daemon credentials requires an Owner account."),
     ).toBeInTheDocument();
     expect(screen.queryByLabelText(/New value for/)).not.toBeInTheDocument();
   });
@@ -155,6 +155,30 @@ describe("VaultKeysSection", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     await waitFor(() => expect(del).toHaveBeenCalledWith({ key: "GITHUB_TOKEN" }));
+  });
+
+  // Nothing but a successful delete or an explicit Cancel used to clear
+  // `confirmDelete`, so a confirmation the operator opened and then abandoned
+  // survived a save on the same row and stayed one click from firing — against
+  // the secret that had just been stored.
+  it("disarms an abandoned delete confirmation when the row is saved instead", async () => {
+    stubQuery({ data: [{ key: "GITHUB_TOKEN", set: true, source: "vault" }] });
+    render(<VaultKeysSection />);
+    const del = mockUseDeleteVaultKey.mock.results[0].value.mutateAsync;
+
+    // Arm the delete, then change your mind and store a new value instead.
+    fireEvent.click(screen.getByRole("button", { name: "Remove GITHUB_TOKEN" }));
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/New value for/), {
+      target: { value: SECRET },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Confirm" })).not.toBeInTheDocument(),
+    );
+    expect(del).not.toHaveBeenCalled();
   });
 
   // ── Effective source (#8186 review) ──────────────────────────────────────
