@@ -566,6 +566,61 @@ async fn force_compact_bypasses_threshold() {
     );
 }
 
+/// A second `/new` with a configured `reset_prompt`, and no user activity
+/// in between, must report 0 messages cleared — not the system message the
+/// *first* `/new` injected into the fresh session (#7701 review round 2).
+///
+/// `inject_reset_prompt` seeds the recreated session with `Message::system`
+/// entries; the cleared count must exclude those, or every second `/new` in
+/// a row acks a true no-op as if it wiped real history.
+#[tokio::test(flavor = "multi_thread")]
+async fn second_new_with_reset_prompt_reports_zero_cleared() {
+    let (kernel, _tmp) = MockKernelBuilder::new()
+        .with_config(|c| {
+            c.default_model.provider = "ollama".to_string();
+            c.default_model.model = "test".to_string();
+            c.default_model.api_key_env = "OLLAMA_API_KEY".to_string();
+            c.session.reset_prompt = Some("Fresh start.".to_string());
+        })
+        .build();
+
+    let agent_id = spawn_test_agent(&kernel, "reset-prompt-agent");
+    let telegram_sid = SessionId::for_channel(agent_id, "telegram:reset-prompt-chat");
+    save_session_with_jsonl(&kernel, agent_id, telegram_sid, 3);
+
+    // First /new: real history (6 messages) is cleared, and the fresh
+    // session is seeded with the configured reset_prompt as a system
+    // message.
+    let first = kernel
+        .reset_session(agent_id, ResetScope::Session(telegram_sid))
+        .await
+        .expect("first reset_session succeeds");
+    assert_eq!(first, 6, "first /new must report the real turn history");
+
+    let seeded = kernel
+        .memory_substrate()
+        .get_session(telegram_sid)
+        .unwrap()
+        .expect("session recreated at the same sid");
+    assert_eq!(
+        seeded.messages.len(),
+        1,
+        "fresh session must hold exactly the injected reset_prompt"
+    );
+
+    // Second /new, no user activity in between: must report 0, not the
+    // injected system message from the first reset.
+    let second = kernel
+        .reset_session(agent_id, ResetScope::Session(telegram_sid))
+        .await
+        .expect("second reset_session succeeds");
+    assert_eq!(
+        second, 0,
+        "a true no-op /new must not ack as if it cleared the previous \
+         reset's injected system message"
+    );
+}
+
 /// `force = false` on the auto-compaction path still no-ops when the session
 /// is below the message threshold. Regression guard for the gate change.
 #[tokio::test(flavor = "multi_thread")]

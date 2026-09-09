@@ -1,4 +1,0 @@
-`/new`, `/reboot` and `/compact` typed in a channel chat now resolve their target session through the same function the inbound message path uses, so they clear the conversation the user is actually looking at.
-The reset commands used to re-derive the session id themselves, which is only correct for as long as two independently written derivations agree; when they drifted apart the command acked success against a session holding no messages while the visible history survived untouched.
-Both ends now call the kernel's `channel_session_id`, which also carries the reserved-channel guard that a hand-rolled derivation could forget.
-The `/new` ack reports how many messages were cleared — counted by the reset itself under the same lock the delete takes, so an inbound turn cannot make it under-report and a configured reset prompt cannot be counted as history — and carries the agent's name, so a broadcast reply is self-identifying. (#7701) (@DaBlitzStein)

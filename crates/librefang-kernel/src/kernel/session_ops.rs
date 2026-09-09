@@ -305,7 +305,16 @@ impl LibreFangKernel {
         let mut cleared = 0usize;
         for sid in &pre_delete_sids {
             if let Ok(Some(old_session)) = self.memory.substrate.get_session(*sid) {
-                cleared += old_session.messages.len();
+                // Non-system only — see `reset_one_session`'s identical
+                // count for why: `inject_reset_prompt` seeds a fresh session
+                // with `Message::system` entries, so counting the whole row
+                // makes the *next* agent-wide reset report the previous
+                // reset's injections as cleared history (#7701 review).
+                cleared += old_session
+                    .messages
+                    .iter()
+                    .filter(|m| m.role != librefang_types::message::Role::System)
+                    .count();
                 // Fire session:end before removing the old session.
                 self.governance.external_hooks.fire(
                     crate::hooks::ExternalHookEvent::SessionEnd,
@@ -452,11 +461,20 @@ impl LibreFangKernel {
                 )));
             }
         }
-        // Counted from the row already read under the lock, BEFORE
-        // `inject_reset_prompt` can add anything to the fresh session —
-        // a second `/new` with a configured reset prompt reports 0, not
-        // the injected messages (#7701 review).
-        let cleared = old_session.as_ref().map(|s| s.messages.len()).unwrap_or(0);
+        // Counted from the row already read under the lock, and restricted to
+        // non-system messages: `inject_reset_prompt` seeds the fresh session
+        // with `Message::system` entries, so counting the whole row makes the
+        // *next* `/new` report the previous reset's injections as cleared
+        // history — a true no-op acking as a successful reset (#7701 review).
+        let cleared = old_session
+            .as_ref()
+            .map(|s| {
+                s.messages
+                    .iter()
+                    .filter(|m| m.role != librefang_types::message::Role::System)
+                    .count()
+            })
+            .unwrap_or(0);
 
         // Fire SessionEnd + save summary only when the session actually
         // existed (no point summarising a never-touched per-channel sid).
