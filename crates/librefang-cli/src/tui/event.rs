@@ -178,6 +178,13 @@ pub enum AppEvent {
     AgentWorkspacesLoaded(String, Vec<(String, String, String)>),
     /// The shared-folders write came back 2xx.
     AgentWorkspacesUpdated(String),
+    /// The result of a `PATCH /api/memory/config`.
+    ///
+    /// Carries the failure reason rather than a bare `false`: a connection
+    /// error, a 400 and a 500 need different operator responses, and "Save
+    /// failed" with no detail is the report that arrives as a bug with nothing
+    /// to act on.
+    MemoryConfigSaved(Result<(), FetchFailure>),
     /// The memory config could not be read — see [`FetchFailure`].
     ///
     /// Sent instead of staying silent: without it the Memory screen keeps
@@ -3012,10 +3019,81 @@ pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>
                 .as_str()
                 .unwrap_or("")
                 .to_string(),
+            // The raw setting travels alongside it, because it is the only one
+            // of the two a save may write back: the resolved name has already
+            // lost its provider prefix, and is `[default_model]`'s when nothing
+            // was configured at all.
+            configured_extraction_model: pm["extraction_model"].as_str().map(str::to_string),
             extraction_model_inherited: pm["extraction_model_source"].as_str()
                 == Some("inherited_default"),
         };
         let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
+    });
+}
+
+/// Write the memory configuration back.
+///
+/// `extraction_model` is `None` when the operator did not edit it, and the
+/// field is then left out of the PATCH entirely: the endpoint only writes the
+/// keys a request carries, so omitting it is what keeps a boolean-only save
+/// from rewriting the model. Sending the panel's displayed name instead would
+/// strip a `provider/` prefix, pin a model that was inheriting, or overwrite a
+/// change that is still waiting for a restart to take effect.
+pub fn spawn_save_memory_config(
+    backend: BackendRef,
+    auto_memorize: bool,
+    auto_retrieve: bool,
+    extraction_model: Option<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let BackendRef::Daemon { base_url, api_key } = backend else {
+            // Without this the panel sits on "Saving..." forever: nothing is
+            // spawned, no event arrives, and the operator has no way to tell
+            // the save is never going to happen.
+            let _ = tx.send(AppEvent::MemoryConfigSaved(Err(
+                FetchFailure::RequiresDaemon,
+            )));
+            return;
+        };
+        let client = make_daemon_client(api_key.as_deref());
+        let mut proactive_memory = serde_json::json!({
+            "auto_memorize": auto_memorize,
+            "auto_retrieve": auto_retrieve,
+        });
+        if let Some(model) = extraction_model.as_deref().map(str::trim) {
+            // An emptied field is not a request to configure the empty string,
+            // and the endpoint has no "unset" for this key — leave it alone.
+            if !model.is_empty() {
+                proactive_memory["extraction_model"] = serde_json::Value::String(model.to_string());
+            }
+        }
+        let body = serde_json::json!({ "proactive_memory": proactive_memory });
+        let result = match client
+            .patch(format!("{base_url}/api/memory/config"))
+            .json(&body)
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    Ok(())
+                } else {
+                    // The body is where the API explains a 400; a status line
+                    // reading "400 Bad Request" alone does not say which field.
+                    let body = resp.text().unwrap_or_default();
+                    let detail = body.trim();
+                    let mut reason = status.to_string();
+                    if !detail.is_empty() {
+                        reason.push_str(": ");
+                        reason.push_str(detail);
+                    }
+                    Err(FetchFailure::Error(reason))
+                }
+            }
+            Err(e) => Err(FetchFailure::Error(e.to_string())),
+        };
+        let _ = tx.send(AppEvent::MemoryConfigSaved(result));
     });
 }
 

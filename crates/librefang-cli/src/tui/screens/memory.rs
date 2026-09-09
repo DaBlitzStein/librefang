@@ -24,6 +24,12 @@ pub struct KvPair {
 /// than "this one is doing the work". The resolved name and its provenance
 /// are what an operator actually needs — a slow model inherited here runs
 /// after every reply and delays every answer.
+///
+/// It is not dropped either, because it is the only writable one of the two.
+/// The resolved name is what boot made of the setting — the provider prefix
+/// split off, `[default_model]` substituted when nothing was configured, and
+/// an edit still waiting for a restart not yet reflected — so writing it back
+/// as the setting rewrites configuration nobody touched.
 #[derive(Clone, Default)]
 pub struct MemoryConfigView {
     pub embedding_provider: String,
@@ -32,8 +38,25 @@ pub struct MemoryConfigView {
     pub auto_retrieve: bool,
     /// The model extraction actually runs on, chosen or inherited.
     pub effective_extraction_model: String,
+    /// The raw `extraction_model` setting, verbatim: `provider/model` when it
+    /// was written that way, and `None` when the file leaves it out to inherit.
+    /// This is the value a save may write; the resolved one above is display.
+    pub configured_extraction_model: Option<String>,
     /// True when nobody picked it and it fell through to `[default_model]`.
     pub extraction_model_inherited: bool,
+}
+
+/// What the model editor starts from.
+///
+/// The configured setting when there is one, so editing
+/// `groq/llama-3.3-70b-versatile` does not begin from the bare half boot split
+/// off it. Nothing is configured under an inherited model, and there the
+/// running name is the only useful starting point — pinning it is then the
+/// operator's own keystroke rather than a side effect of some other edit.
+fn seed_model_buf(cfg: &MemoryConfigView) -> String {
+    cfg.configured_extraction_model
+        .clone()
+        .unwrap_or_else(|| cfg.effective_extraction_model.clone())
 }
 
 #[derive(Clone)]
@@ -51,6 +74,35 @@ pub enum MemorySub {
     EditKey,
     AddKey,
     Config,
+}
+
+/// The rows of the config panel that can be changed.
+///
+/// Kept as an explicit enum rather than an index so adding a row cannot
+/// silently shift what a keypress edits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ConfigField {
+    AutoMemorize,
+    AutoRetrieve,
+    ExtractionModel,
+}
+
+impl ConfigField {
+    const ORDER: [ConfigField; 3] = [
+        ConfigField::AutoMemorize,
+        ConfigField::AutoRetrieve,
+        ConfigField::ExtractionModel,
+    ];
+
+    fn next(self) -> Self {
+        let i = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(i + 1) % Self::ORDER.len()]
+    }
+
+    fn prev(self) -> Self {
+        let i = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(i + Self::ORDER.len() - 1) % Self::ORDER.len()]
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -74,12 +126,31 @@ pub struct MemoryState {
     pub confirm_delete: bool,
     pub status_msg: String,
     pub config: Option<MemoryConfigView>,
+    pub config_field: ConfigField,
+    /// Draft of the extraction model while it is being typed.
+    pub config_model_buf: String,
+    pub config_editing_model: bool,
+    /// Set when the operator accepts a model in the editor, and only then: a
+    /// save omits `extraction_model` while it is false, so toggling a boolean
+    /// cannot rewrite a setting the operator never opened.
+    pub config_model_edited: bool,
+    /// Set once anything is changed, cleared on save — so the panel can say
+    /// there is unsaved work instead of losing it silently on Esc.
+    pub config_dirty: bool,
 }
 
+#[derive(Debug)]
 pub enum MemoryUIAction {
     Continue,
     LoadAgents,
     LoadConfig,
+    SaveConfig {
+        auto_memorize: bool,
+        auto_retrieve: bool,
+        /// `None` leaves the configured model untouched, which is what a save
+        /// that only flipped a boolean must do.
+        extraction_model: Option<String>,
+    },
     LoadKv(String),
     SaveKv {
         agent_id: String,
@@ -109,11 +180,28 @@ impl MemoryState {
             confirm_delete: false,
             status_msg: String::new(),
             config: None,
+            config_field: ConfigField::AutoMemorize,
+            config_model_buf: String::new(),
+            config_editing_model: false,
+            config_model_edited: false,
+            config_dirty: false,
         }
     }
 
     pub fn tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
+    }
+
+    /// Put a freshly fetched configuration on the panel.
+    ///
+    /// Clearing the edited flag is the point of having a method: the fetch
+    /// answers with what the file now says, so any draft the operator accepted
+    /// before it is stale, and a save carrying it would write back a value the
+    /// panel is no longer showing.
+    pub fn apply_config(&mut self, config: MemoryConfigView) {
+        self.config = Some(config);
+        self.loading = false;
+        self.config_model_edited = false;
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> MemoryUIAction {
@@ -129,14 +217,113 @@ impl MemoryState {
     }
 
     fn handle_config(&mut self, key: KeyEvent) -> MemoryUIAction {
+        // Typing the model name swallows the navigation keys, or every `r` in
+        // a model id would trigger a refresh and every `j` would move a row.
+        if self.config_editing_model {
+            match key.code {
+                KeyCode::Esc => {
+                    self.config_editing_model = false;
+                    if let Some(cfg) = &self.config {
+                        self.config_model_buf = seed_model_buf(cfg);
+                    }
+                }
+                KeyCode::Enter => {
+                    self.config_editing_model = false;
+                    if let Some(cfg) = &mut self.config {
+                        cfg.effective_extraction_model = self.config_model_buf.clone();
+                        // The typed text is the setting, prefix and all — the
+                        // one place a save is allowed to write one.
+                        cfg.configured_extraction_model = Some(self.config_model_buf.clone());
+                        cfg.extraction_model_inherited = false;
+                    }
+                    self.config_model_edited = true;
+                    self.config_dirty = true;
+                }
+                KeyCode::Backspace => {
+                    self.config_model_buf.pop();
+                }
+                KeyCode::Char(c) => self.config_model_buf.push(c),
+                _ => {}
+            }
+            return MemoryUIAction::Continue;
+        }
+
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.sub = MemorySub::AgentSelect;
+            KeyCode::Up | KeyCode::Char('k') => self.config_field = self.config_field.prev(),
+            KeyCode::Down | KeyCode::Char('j') => self.config_field = self.config_field.next(),
+            KeyCode::Char(' ') | KeyCode::Enter => match self.config_field {
+                ConfigField::AutoMemorize => {
+                    if let Some(cfg) = &mut self.config {
+                        cfg.auto_memorize = !cfg.auto_memorize;
+                        self.config_dirty = true;
+                    }
+                }
+                ConfigField::AutoRetrieve => {
+                    if let Some(cfg) = &mut self.config {
+                        cfg.auto_retrieve = !cfg.auto_retrieve;
+                        self.config_dirty = true;
+                    }
+                }
+                ConfigField::ExtractionModel => {
+                    if let Some(cfg) = &self.config {
+                        self.config_model_buf = seed_model_buf(cfg);
+                        self.config_editing_model = true;
+                    }
+                }
+            },
+            KeyCode::Char('s') => {
+                if let Some(cfg) = &self.config {
+                    let action = MemoryUIAction::SaveConfig {
+                        auto_memorize: cfg.auto_memorize,
+                        auto_retrieve: cfg.auto_retrieve,
+                        // Sent only when the operator edited it. The displayed
+                        // name is what boot resolved the setting to, so sending
+                        // it on every save replaces `groq/llama-3.3-70b-versatile`
+                        // with its bare half, pins a model that was inheriting,
+                        // and overwrites an edit still waiting for a restart.
+                        extraction_model: self
+                            .config_model_edited
+                            .then(|| cfg.configured_extraction_model.clone())
+                            .flatten(),
+                    };
+                    // `config_dirty` stays set until the daemon confirms the
+                    // write — see `apply_save_result`.
+                    self.status_msg = crate::i18n::t("tui-memory-config-saving");
+                    return action;
+                }
             }
             KeyCode::Char('r') => return MemoryUIAction::LoadConfig,
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.sub = MemorySub::AgentSelect;
+                self.config_dirty = false;
+            }
             _ => {}
         }
         MemoryUIAction::Continue
+    }
+
+    /// Fold the outcome of a config save back into the panel.
+    ///
+    /// The unsaved-changes marker is cleared here and nowhere else: it is the
+    /// only thing telling the operator their edits are still pending, so
+    /// dropping it on the keypress turns a failed PATCH into "everything is
+    /// saved" with a transient error beside it.
+    pub fn apply_save_result(&mut self, result: Result<(), crate::tui::event::FetchFailure>) {
+        self.status_msg = match result {
+            Ok(()) => {
+                self.config_dirty = false;
+                // The model is now the configured one, so the next save has
+                // nothing of its own to write until the operator edits again.
+                self.config_model_edited = false;
+                crate::i18n::t("tui-memory-config-saved")
+            }
+            Err(crate::tui::event::FetchFailure::RequiresDaemon) => {
+                crate::i18n::t("tui-memory-config-requires-daemon")
+            }
+            Err(crate::tui::event::FetchFailure::Error(reason)) => {
+                crate::i18n::t_args("tui-memory-config-save-failed", &[("error", &reason)])
+            }
+        };
     }
 
     fn handle_agent_select(&mut self, key: KeyEvent) -> MemoryUIAction {
@@ -314,10 +501,20 @@ fn draw_config(f: &mut Frame, area: Rect, state: &MemoryState) {
             )));
         }
         Some(cfg) => {
-            let label = |k: &str| {
+            // The selected row carries a marker AND a colour: a colour-only
+            // cue vanishes on a monochrome terminal, which is exactly where
+            // people run this.
+            let sel = state.config_field;
+            let label = |k: &str, mine: bool| {
                 Span::styled(
-                    format!("  {k:<26}"),
-                    Style::default().fg(theme::TEXT_SECONDARY),
+                    format!("{} {k:<26}", if mine { ">" } else { " " }),
+                    if mine {
+                        Style::default()
+                            .fg(theme::ACCENT)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme::TEXT_SECONDARY)
+                    },
                 )
             };
             let value = |v: &str| {
@@ -338,11 +535,17 @@ fn draw_config(f: &mut Frame, area: Rect, state: &MemoryState) {
                     .add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(vec![
-                label(&crate::i18n::t("tui-memory-config-auto-memorize")),
+                label(
+                    &crate::i18n::t("tui-memory-config-auto-memorize"),
+                    sel == ConfigField::AutoMemorize,
+                ),
                 value(&onoff(cfg.auto_memorize)),
             ]));
             lines.push(Line::from(vec![
-                label(&crate::i18n::t("tui-memory-config-auto-retrieve")),
+                label(
+                    &crate::i18n::t("tui-memory-config-auto-retrieve"),
+                    sel == ConfigField::AutoRetrieve,
+                ),
                 value(&onoff(cfg.auto_retrieve)),
             ]));
 
@@ -350,10 +553,20 @@ fn draw_config(f: &mut Frame, area: Rect, state: &MemoryState) {
             // and say whether anyone chose it. An inherited slow model runs
             // after every reply and delays every answer, and nothing else in
             // the terminal reported it.
-            let mut spans = vec![
-                label(&crate::i18n::t("tui-memory-config-extraction-model")),
-                value(&cfg.effective_extraction_model),
-            ];
+            let mut spans = vec![label(
+                &crate::i18n::t("tui-memory-config-extraction-model"),
+                sel == ConfigField::ExtractionModel,
+            )];
+            if state.config_editing_model {
+                spans.push(Span::styled(
+                    format!("{}_", state.config_model_buf),
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(value(&cfg.effective_extraction_model));
+            }
             if cfg.extraction_model_inherited {
                 spans.push(Span::styled(
                     format!("  {}", crate::i18n::t("tui-memory-config-inherited")),
@@ -370,14 +583,31 @@ fn draw_config(f: &mut Frame, area: Rect, state: &MemoryState) {
                     .add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(vec![
-                label(&crate::i18n::t("tui-memory-config-embedding-provider")),
+                label(
+                    &crate::i18n::t("tui-memory-config-embedding-provider"),
+                    false,
+                ),
                 value(&cfg.embedding_provider),
             ]));
             lines.push(Line::from(vec![
-                label(&crate::i18n::t("tui-memory-config-embedding-model")),
+                label(&crate::i18n::t("tui-memory-config-embedding-model"), false),
                 value(&cfg.embedding_model),
             ]));
         }
+    }
+
+    if state.config_dirty {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            crate::i18n::t("tui-memory-config-unsaved"),
+            Style::default().fg(theme::YELLOW),
+        )));
+    }
+    if !state.status_msg.is_empty() {
+        lines.push(Line::from(Span::styled(
+            state.status_msg.clone(),
+            Style::default().fg(theme::TEXT_SECONDARY),
+        )));
     }
 
     f.render_widget(Paragraph::new(lines), chunks[0]);
@@ -733,6 +963,300 @@ mod tests {
 
     /// `c` on the agent list is the panel, not a stray key on the KV browser —
     /// the browser uses its own bindings and must keep them.
+    fn loaded(model: &str) -> MemoryState {
+        let mut state = MemoryState::new();
+        state.config = Some(MemoryConfigView {
+            auto_memorize: true,
+            auto_retrieve: true,
+            effective_extraction_model: model.to_string(),
+            extraction_model_inherited: true,
+            ..Default::default()
+        });
+        state.sub = MemorySub::Config;
+        state
+    }
+
+    #[test]
+    fn toggling_a_row_marks_the_panel_unsaved() {
+        let mut state = loaded("litellm:x");
+
+        state.handle_key(key(KeyCode::Char(' ')));
+
+        assert!(!state.config.as_ref().unwrap().auto_memorize);
+        assert!(
+            state.config_dirty,
+            "an edit must be visible as unsaved work"
+        );
+    }
+
+    #[test]
+    fn moving_between_rows_edits_the_row_it_shows() {
+        let mut state = loaded("litellm:x");
+
+        state.handle_key(key(KeyCode::Down));
+        state.handle_key(key(KeyCode::Char(' ')));
+
+        let cfg = state.config.as_ref().unwrap();
+        assert!(cfg.auto_memorize, "the first row must be untouched");
+        assert!(!cfg.auto_retrieve, "space must act on the selected row");
+    }
+
+    /// Typing a model name must not be read as navigation, or every `r` in an
+    /// id would refresh and every `j` would move a row.
+    #[test]
+    fn typing_a_model_name_does_not_trigger_shortcuts() {
+        let mut state = loaded("old");
+        state.handle_key(key(KeyCode::Down));
+        state.handle_key(key(KeyCode::Down));
+        let action = state.handle_key(key(KeyCode::Enter));
+        assert!(matches!(action, MemoryUIAction::Continue));
+        assert!(state.config_editing_model);
+
+        for c in "jrsq".chars() {
+            let action = state.handle_key(key(KeyCode::Char(c)));
+            assert!(
+                matches!(action, MemoryUIAction::Continue),
+                "'{c}' must be typed, not obeyed"
+            );
+        }
+        assert_eq!(state.config_model_buf, "oldjrsq");
+        assert!(
+            matches!(state.sub, MemorySub::Config),
+            "'q' must not have exited"
+        );
+    }
+
+    #[test]
+    fn accepting_a_typed_model_stops_it_being_inherited() {
+        let mut state = loaded("inherited-one");
+        state.config_field = ConfigField::ExtractionModel;
+        state.handle_key(key(KeyCode::Enter));
+        for c in "-fast".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Enter));
+
+        let cfg = state.config.as_ref().unwrap();
+        assert_eq!(cfg.effective_extraction_model, "inherited-one-fast");
+        assert!(
+            !cfg.extraction_model_inherited,
+            "choosing a model is not inheriting one; the panel must stop saying it is"
+        );
+    }
+
+    #[test]
+    fn abandoning_a_typed_model_restores_what_was_there() {
+        let mut state = loaded("keep-me");
+        state.config_field = ConfigField::ExtractionModel;
+        state.handle_key(key(KeyCode::Enter));
+        for c in "zzz".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Esc));
+
+        assert!(!state.config_editing_model);
+        assert_eq!(
+            state.config.as_ref().unwrap().effective_extraction_model,
+            "keep-me"
+        );
+    }
+
+    /// A configuration whose raw setting and resolved name differ — the shape
+    /// that makes writing one back as the other visible.
+    fn loaded_with_setting(configured: Option<&str>, effective: &str) -> MemoryState {
+        let mut state = MemoryState::new();
+        state.config = Some(MemoryConfigView {
+            auto_memorize: true,
+            auto_retrieve: true,
+            effective_extraction_model: effective.to_string(),
+            configured_extraction_model: configured.map(str::to_string),
+            extraction_model_inherited: configured.is_none(),
+            ..Default::default()
+        });
+        state.sub = MemorySub::Config;
+        state
+    }
+
+    /// Flipping a toggle must not rewrite the model. The panel shows what boot
+    /// resolved the setting to, which for `groq/llama-3.3-70b-versatile` is the
+    /// bare `llama-3.3-70b-versatile`: sending that back as the setting drops
+    /// the provider the operator wrote.
+    #[test]
+    fn a_boolean_only_save_leaves_a_provider_qualified_model_alone() {
+        let mut state = loaded_with_setting(
+            Some("groq/llama-3.3-70b-versatile"),
+            "llama-3.3-70b-versatile",
+        );
+        state.handle_key(key(KeyCode::Char(' ')));
+
+        let action = state.handle_key(key(KeyCode::Char('s')));
+
+        match action {
+            MemoryUIAction::SaveConfig {
+                auto_memorize,
+                auto_retrieve,
+                extraction_model,
+            } => {
+                assert!(
+                    !auto_memorize,
+                    "the toggle the operator flipped must be sent"
+                );
+                assert!(auto_retrieve);
+                assert_eq!(
+                    extraction_model, None,
+                    "an untouched model must be left out of the save, not rewritten"
+                );
+            }
+            other => panic!("expected a save, got {other:?}"),
+        }
+        assert!(
+            state.config_dirty,
+            "the keypress only asks for a save; the marker is what says the edits are still pending"
+        );
+    }
+
+    /// Nothing configured means the model is inherited from `[default_model]`.
+    /// Writing the running name back would pin it, turning "follow the default"
+    /// into a choice the operator never made.
+    #[test]
+    fn a_boolean_only_save_does_not_pin_an_inherited_model() {
+        let mut state = loaded_with_setting(None, "inherited-fast");
+        state.handle_key(key(KeyCode::Char(' ')));
+
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            MemoryUIAction::SaveConfig {
+                extraction_model, ..
+            } => assert_eq!(extraction_model, None),
+            other => panic!("expected a save, got {other:?}"),
+        }
+    }
+
+    /// The other half of the contract: a model the operator did type is sent,
+    /// verbatim, prefix included.
+    #[test]
+    fn an_edited_model_is_saved_as_typed() {
+        let mut state = loaded_with_setting(Some("groq/llama-3.1-8b"), "llama-3.1-8b");
+        state.config_field = ConfigField::ExtractionModel;
+        state.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            state.config_model_buf, "groq/llama-3.1-8b",
+            "the editor must start from the setting, not from the name boot split out of it"
+        );
+        for _ in 0.."groq/llama-3.1-8b".len() {
+            state.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "cerebras/llama-3.3-70b".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Enter));
+
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            MemoryUIAction::SaveConfig {
+                extraction_model, ..
+            } => assert_eq!(extraction_model, Some("cerebras/llama-3.3-70b".to_string())),
+            other => panic!("expected a save, got {other:?}"),
+        }
+    }
+
+    /// A refetch answers with what the file says now, so the draft that was
+    /// accepted before it must stop being something the next save writes.
+    #[test]
+    fn a_refetch_stops_a_previous_edit_from_being_saved_again() {
+        let mut state = loaded_with_setting(Some("groq/llama-3.1-8b"), "llama-3.1-8b");
+        state.config_field = ConfigField::ExtractionModel;
+        state.handle_key(key(KeyCode::Enter));
+        state.handle_key(key(KeyCode::Char('x')));
+        state.handle_key(key(KeyCode::Enter));
+        assert!(state.config_model_edited);
+
+        state.apply_config(MemoryConfigView {
+            configured_extraction_model: Some("groq/llama-3.1-8b".to_string()),
+            effective_extraction_model: "llama-3.1-8b".to_string(),
+            ..Default::default()
+        });
+
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            MemoryUIAction::SaveConfig {
+                extraction_model, ..
+            } => assert_eq!(extraction_model, None),
+            other => panic!("expected a save, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_successful_save_clears_the_unsaved_marker() {
+        let mut state = loaded("litellm:x");
+        state.handle_key(key(KeyCode::Char(' ')));
+        let _ = state.handle_key(key(KeyCode::Char('s')));
+
+        state.apply_save_result(Ok(()));
+
+        assert!(
+            !state.config_dirty,
+            "a successful save clears the unsaved marker"
+        );
+        assert_eq!(
+            state.status_msg,
+            crate::i18n::t("tui-memory-config-saved"),
+            "a saved panel must say it saved, not repeat a row label"
+        );
+    }
+
+    /// A failed PATCH used to read as "everything is saved" with a transient
+    /// error beside it, because the marker was gone before the daemon answered.
+    #[test]
+    fn a_failed_save_keeps_the_unsaved_marker() {
+        let mut state = loaded("litellm:x");
+        state.handle_key(key(KeyCode::Char(' ')));
+        let _ = state.handle_key(key(KeyCode::Char('s')));
+
+        state.apply_save_result(Err(crate::tui::event::FetchFailure::Error(
+            "500 Internal Server Error".to_string(),
+        )));
+
+        assert!(
+            state.config_dirty,
+            "edits the daemon refused are still unsaved"
+        );
+        assert!(
+            state.status_msg.contains("500"),
+            "the panel must carry why it failed, got {:?}",
+            state.status_msg
+        );
+    }
+
+    /// In-process there is no HTTP surface to PATCH, so nothing ever answered
+    /// and the panel sat on "Saving..." with no way out.
+    #[test]
+    fn a_save_without_a_daemon_says_so_instead_of_hanging() {
+        let mut state = loaded("litellm:x");
+        state.handle_key(key(KeyCode::Char(' ')));
+        let _ = state.handle_key(key(KeyCode::Char('s')));
+
+        state.apply_save_result(Err(crate::tui::event::FetchFailure::RequiresDaemon));
+
+        assert_eq!(
+            state.status_msg,
+            crate::i18n::t("tui-memory-config-requires-daemon")
+        );
+        assert!(
+            state.config_dirty,
+            "nothing was written, so nothing is safe"
+        );
+    }
+
+    #[test]
+    fn saving_without_data_does_nothing() {
+        let mut state = MemoryState::new();
+        state.sub = MemorySub::Config;
+
+        let action = state.handle_key(key(KeyCode::Char('s')));
+        assert!(
+            matches!(action, MemoryUIAction::Continue),
+            "an empty panel must not PATCH blanks over the stored configuration"
+        );
+    }
+
     #[test]
     fn the_kv_browser_does_not_lose_its_own_bindings() {
         let mut state = MemoryState::new();
