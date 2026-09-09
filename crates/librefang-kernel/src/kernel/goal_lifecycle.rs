@@ -17,6 +17,7 @@ use librefang_types::goal::{
 };
 
 use super::{LibreFangKernel, SYSTEM_CHANNEL_AUTONOMOUS};
+use crate::registry::AgentRegistry;
 use crate::MemorySubsystemApi;
 
 impl LibreFangKernel {
@@ -106,12 +107,7 @@ impl LibreFangKernel {
         // back into the registry from there would mean carrying a kernel handle
         // for two `u32`s.
         let skills_dir = self.home_dir().join("skills");
-        let workshop = self
-            .agents
-            .registry
-            .get(agent_id)
-            .map(|e| e.manifest.skill_workshop)
-            .unwrap_or_default();
+        let workshop = resolve_workshop_config(&self.agents.registry, agent_id);
         let goal_title = self
             .goal_by_id(goal_id)
             .map(|g| g.title)
@@ -316,6 +312,34 @@ fn learned_skill_body(goal_title: &str, learnings: &[String]) -> String {
 /// The tag is what a reviewer sees in `librefang skill pending show`, so it names the producer, not the shape.
 const LEARNED_CAPTURE_TRIGGER: &str = "goal_learned";
 
+/// Whether a goal run's captured `GOAL_LEARNED:` lessons should be queued as
+/// a pending skill draft at all.
+///
+/// The workshop is default-OFF and opted into per agent (`agent.toml:
+/// [skill_workshop] enabled = true`) — see [`SkillWorkshopConfig::default`].
+/// Without this gate a goal run queued a draft for every agent regardless of
+/// that setting, because `on_learnings_captured` had no reason to read it:
+/// nothing else in the goal-run path consults the workshop config, only the
+/// approval-side CLI / API / dashboard do. `auto_capture` is checked too —
+/// it is the independent "run the capture scan at all" toggle every other
+/// automatic capture path in the workshop already gates on (see
+/// `skill_workshop::mod.rs`).
+fn should_queue_learnings(workshop: &SkillWorkshopConfig) -> bool {
+    workshop.enabled && workshop.auto_capture
+}
+
+/// Resolve the skill-workshop config a goal run's learnings capture is
+/// gated by. An agent absent from the registry — deleted, never spawned,
+/// or simply mistyped — denies via [`SkillWorkshopConfig::default`]
+/// (`enabled: false`) rather than assuming any particular default should
+/// permit queuing for an id nobody registered.
+fn resolve_workshop_config(registry: &AgentRegistry, agent_id: AgentId) -> SkillWorkshopConfig {
+    registry
+        .get(agent_id)
+        .map(|e| e.manifest.skill_workshop)
+        .unwrap_or_default()
+}
+
 /// Queue a run's lessons as a pending skill draft awaiting human approval.
 ///
 /// The lessons are model-authored text an autonomous loop wrote about itself, so they go where every other machine-proposed skill goes: the workshop's `pending/` queue (#3328), promoted only by an explicit `librefang skill pending approve` / `POST /api/skills/pending/{id}/approve`.
@@ -338,7 +362,7 @@ fn queue_learnings_as_pending_skill(
         CandidateKind, CandidateSkill, CaptureSource, Provenance, PROVENANCE_EXCERPT_MAX_CHARS,
     };
 
-    if learnings.is_empty() {
+    if !should_queue_learnings(workshop) || learnings.is_empty() {
         return;
     }
     let name = learned_skill_name(goal_id, goal_title);
@@ -431,6 +455,81 @@ fn goal_tick_sender_context(agent_id: AgentId, goal_id: GoalId) -> SenderContext
 mod tests {
     use super::*;
 
+    /// The workshop is default-OFF: a goal run must not queue a pending
+    /// skill draft for an agent that never opted in.
+    #[test]
+    fn should_queue_learnings_is_false_by_default() {
+        assert!(!should_queue_learnings(&SkillWorkshopConfig::default()));
+    }
+
+    #[test]
+    fn should_queue_learnings_is_true_once_opted_in() {
+        let workshop = SkillWorkshopConfig {
+            enabled: true,
+            ..SkillWorkshopConfig::default()
+        };
+        assert!(should_queue_learnings(&workshop));
+    }
+
+    /// `auto_capture` is the independent scan toggle within an enabled
+    /// workshop — turning it off must still block queuing, matching every
+    /// other automatic capture path.
+    #[test]
+    fn should_queue_learnings_is_false_when_auto_capture_is_off() {
+        let workshop = SkillWorkshopConfig {
+            enabled: true,
+            auto_capture: false,
+            ..SkillWorkshopConfig::default()
+        };
+        assert!(!should_queue_learnings(&workshop));
+    }
+
+    /// The half of the opt-in gate a pure predicate test can't reach: an
+    /// agent that isn't in the registry at all (deleted, never spawned,
+    /// mistyped id) must still deny queuing, not fall through to some other
+    /// default that happens to allow it.
+    #[test]
+    fn resolve_workshop_config_denies_when_the_agent_is_absent_from_the_registry() {
+        let registry = AgentRegistry::new();
+        let config = resolve_workshop_config(&registry, AgentId::new());
+        assert!(
+            !should_queue_learnings(&config),
+            "an agent absent from the registry must resolve to a denying config"
+        );
+    }
+
+    /// The other half: a REGISTERED agent's own manifest setting is what
+    /// gets read, not a hardcoded value — otherwise the denial above would
+    /// be indistinguishable from the function ignoring the registry
+    /// entirely and always returning a fixed config.
+    #[test]
+    fn resolve_workshop_config_reads_the_registered_agents_own_manifest() {
+        use librefang_types::agent::{AgentEntry, AgentManifest};
+
+        let registry = AgentRegistry::new();
+        let agent_id = AgentId::new();
+        registry
+            .register(AgentEntry {
+                id: agent_id,
+                name: format!("workshop-test-{agent_id}"),
+                manifest: AgentManifest {
+                    skill_workshop: SkillWorkshopConfig {
+                        enabled: true,
+                        ..SkillWorkshopConfig::default()
+                    },
+                    ..AgentManifest::default()
+                },
+                ..AgentEntry::default()
+            })
+            .expect("registering a fresh agent must succeed");
+
+        let config = resolve_workshop_config(&registry, agent_id);
+        assert!(
+            should_queue_learnings(&config),
+            "a registered agent's own opted-in workshop config must be the one read"
+        );
+    }
+
     #[test]
     fn evaluator_verdict_reads_a_bare_yes_or_no() {
         assert!(evaluator_reply_is_yes("YES"));
@@ -504,6 +603,33 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    /// The opt-in gate lives inside this function (moved from its one
+    /// production caller, `goal_run_start`'s `on_learnings` closure, so
+    /// there is exactly one place to verify it): a disabled workshop must
+    /// queue nothing, no matter how many lessons a run captured.
+    #[test]
+    fn queue_learnings_as_pending_skill_does_nothing_when_the_workshop_is_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path();
+        let agent = AgentId::new();
+        let goal_id = GoalId::new();
+        queue_learnings_as_pending_skill(
+            skills,
+            agent,
+            &SkillWorkshopConfig::default(),
+            goal_id,
+            "Ship the report",
+            &["Back off before retrying".to_string()],
+        );
+
+        assert!(
+            crate::skill_workshop::storage::list_pending(skills, &agent.to_string())
+                .unwrap()
+                .is_empty(),
+            "a disabled workshop must not queue a pending draft"
+        );
+    }
+
     /// A goal run is an autonomous loop, and the lessons it captures are
     /// model-authored text. Writing them straight into the installed skills
     /// directory would let an agent author a skill that loads itself into the
@@ -515,10 +641,14 @@ mod tests {
         let skills = tmp.path();
         let agent = AgentId::new();
         let goal_id = GoalId::new();
+        let workshop = SkillWorkshopConfig {
+            enabled: true,
+            ..SkillWorkshopConfig::default()
+        };
         queue_learnings_as_pending_skill(
             skills,
             agent,
-            &SkillWorkshopConfig::default(),
+            &workshop,
             goal_id,
             "Ship the report",
             &["Back off before retrying".to_string()],
@@ -547,10 +677,14 @@ mod tests {
         let skills = tmp.path();
         let agent = AgentId::new();
         let goal_id = GoalId::new();
+        let workshop = SkillWorkshopConfig {
+            enabled: true,
+            ..SkillWorkshopConfig::default()
+        };
         queue_learnings_as_pending_skill(
             skills,
             agent,
-            &SkillWorkshopConfig::default(),
+            &workshop,
             goal_id,
             "Ship the report",
             &["Back off before retrying".to_string()],

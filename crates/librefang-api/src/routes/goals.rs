@@ -213,6 +213,7 @@ pub async fn start_goal_run(
 ///
 /// Optional body: `{ "max_iterations": <u32> }`, which **re-budgets** the resumed run — an operator extending a run that is about to hit its cap has no other way to say so.
 /// Omitting it restores the cap the paused run was already under rather than substituting the default, which is what this route did before: with the iteration count restored from the same checkpoint, a smaller default ends the resumed run at the top of its first loop, and that exit clears the checkpoint, so the progress the resume was asked to continue is gone.
+/// It is a total ceiling compared against the restored iteration count, not additional headroom on top of it — a value at or below that count is rejected with a 400 rather than silently destroying the checkpoint the same way.
 pub async fn resume_goal_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -240,19 +241,21 @@ async fn start_or_resume(
         Err(error) => return error,
     };
 
-    if require_paused {
-        let paused = state
-            .kernel
-            .goal_run_state(goal_id)
-            .is_some_and(|run| run.phase == librefang_types::goal::GoalRunPhase::Paused);
-        if !paused {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "error": "This goal has no paused run to resume. Use POST /api/goals/{id}/start to begin a new run."
-                })),
-            );
-        }
+    // Read once and reuse below: `/start` also auto-resumes from an existing
+    // checkpoint (same as `/resume`), so both routes need the checkpoint's
+    // iteration count to validate an explicit `max_iterations` against it.
+    let run_state = state.kernel.goal_run_state(goal_id);
+    let paused_run = run_state
+        .as_ref()
+        .filter(|run| run.phase == librefang_types::goal::GoalRunPhase::Paused);
+
+    if require_paused && paused_run.is_none() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "This goal has no paused run to resume. Use POST /api/goals/{id}/start to begin a new run."
+            })),
+        );
     }
 
     // Same swallow as #6654/#6653 on a start rather than a read: the old catch-all `_ => Vec::new()` folded a substrate failure into the empty array, so an unreadable store answered `404 Goal '<id>' not found` for a goal that exists — sending the operator to re-create it instead of to the host.
@@ -307,6 +310,25 @@ async fn start_or_resume(
             Some(value) => Some(value),
         },
     };
+    // An explicit cap is a total budget, not a top-up on top of the
+    // checkpoint's already-spent iterations (`GoalRunner::start` compares
+    // it against the RESTORED iteration count, not against 0) — so a cap at
+    // or below that count would resume, immediately trip the iteration-cap
+    // check on the very first pass with no turn run, and clear the
+    // checkpoint on the way out. Refusing it up front keeps the checkpoint
+    // (and the learnings it carries) intact instead of destroying it for a
+    // request that could never have advanced the run.
+    if let (Some(cap), Some(run)) = (max_iterations, paused_run) {
+        if cap <= run.iteration {
+            return ApiErrorResponse::bad_request(format!(
+                "max_iterations ({cap}) must exceed the paused run's already-completed \
+                 iteration count ({}); the run would resume only to hit the cap immediately \
+                 and discard its checkpoint",
+                run.iteration
+            ))
+            .into_json_tuple();
+        }
+    }
 
     // Loop-engineering configuration lives on the goal, not on the request, so
     // a run started from the dashboard, the CLI or a script all get the same
@@ -334,11 +356,18 @@ async fn start_or_resume(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let verify_max_retries = body
-        .as_ref()
-        .and_then(|b| b.0.get("verify_max_retries"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32);
+    let verify_max_retries = match body.as_ref().and_then(|b| b.0.get("verify_max_retries")) {
+        None => None,
+        Some(value) => match value.as_u64().and_then(|n| u32::try_from(n).ok()) {
+            Some(0) | None => {
+                return ApiErrorResponse::bad_request(
+                    "verify_max_retries must be an integer between 1 and 4294967295",
+                )
+                .into_json_tuple();
+            }
+            Some(value) => Some(value),
+        },
+    };
 
     let started = if require_paused {
         state.kernel.resume_goal_run(
@@ -573,26 +602,31 @@ pub async fn create_goal(
     };
 
     let loop_engineering = req["loop_engineering"].as_bool().unwrap_or(false);
-    // Same boundary rule as `agent_id`: reject a bad verifier id here rather
-    // than storing junk that `start_goal_run` has to reject later.
-    let verify_agent_id_str: Option<String> = req
-        .get("verify_agent_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string());
-    if let Some(ref vid) = verify_agent_id_str {
-        if vid.parse::<uuid::Uuid>().is_err() {
+    // Same boundary rule as `agent_id` / `parent_id`: `optional_uuid_field`
+    // treats a blank string or `null` as "not set" rather than a malformed
+    // UUID (#6562), so a verifier field left blank in a form no longer 400s
+    // as "Invalid verify_agent_id" — only a non-blank, non-UUID value does.
+    let verify_agent_id_str = match optional_uuid_field(&req, "verify_agent_id") {
+        Ok(value) => value.flatten(),
+        Err(()) => {
             return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
         }
-    }
+    };
     // Deliberately NOT validated the way the verifier id is: a model id has no
     // checkable shape, and whether it resolves depends on the provider config
     // at call time, not at save time. An unresolvable id degrades — the runner
     // warns per iteration and falls back to the agent's own marker. See the
     // field doc on `librefang_types::goal::Goal::evaluator_model`.
+    //
+    // A blank string IS filtered here, though: unlike an unresolvable model
+    // id, an empty string has no provider to ever resolve against, so storing
+    // it would leave `evaluator_model` set to `Some("")` instead of the
+    // `None` the field is documented to mean when no evaluator is configured.
     let evaluator_model_str: Option<String> = req
         .get("evaluator_model")
         .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string());
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let tick_interval_secs = match validate_tick_interval(&req) {
         Ok(v) => v,
         Err(resp) => return resp,
