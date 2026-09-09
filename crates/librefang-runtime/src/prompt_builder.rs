@@ -1347,12 +1347,35 @@ fn build_channel_section(
         }
     }
 
-    // Tell the agent it can send rich media via channel_send when the tool is available.
+    // Tell the agent it can send rich media via channel_send when the tool
+    // is available AND the channel is a real messaging adapter. `webui` has
+    // no messaging adapter at all — media reaches the user only by being
+    // embedded in the reply text, so channel_send there would silently fail.
+    // `cron` and `autonomous` are different: they have no default channel or
+    // recipient (the turn's own `channel` is the kernel sentinel, not a
+    // deliverable target), but channel_send still works there when the
+    // agent names a real channel and recipient explicitly — suppressing the
+    // tool for those two would regress a capability they already have
+    // (#7995 follow-up).
     let has_channel_send = granted_tools
         .iter()
         .any(|t| t == "channel_send" || t == "*");
     if has_channel_send {
-        if let Some(id) = sender_id {
+        if channel == "webui" {
+            section.push_str(
+                "\n\nYou are on the LibreFang web interface, which has no messaging adapter. \
+                 To share images, files, or other media you generate, include the returned \
+                 URL or file path in your reply as markdown — it is rendered directly. Do NOT \
+                 use `channel_send`; there is no channel for it to deliver to.",
+            );
+        } else if crate::channel_registry::is_system_channel(channel) {
+            section.push_str(
+                "\n\nThis turn has no default channel or recipient. To send images, files, \
+                 polls, or other media, use the `channel_send` tool with an explicit real \
+                 channel (e.g. \"telegram\", \"slack\") and recipient — omitting either will \
+                 fail rather than fall back to a default.",
+            );
+        } else if let Some(id) = sender_id {
             section.push_str(&format!(
                 "\n\nTo send images, files, polls, or other media to the user, use the `channel_send` tool \
                  with channel=\"{channel}\" and recipient=\"{id}\". Set `image_url` for photos, \
