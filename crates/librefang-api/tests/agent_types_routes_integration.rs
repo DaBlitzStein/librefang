@@ -474,6 +474,27 @@ async fn a_workspace_agent_row_is_readable_but_refuses_the_write_verbs() {
     cleanup(name);
 }
 
+/// `registry-diff` must refuse a name whose only local content is a live
+/// agent's own workspace manifest, with the same 409 `restore_from_registry`
+/// answers for it — otherwise the diff drawer offers a comparison for a
+/// restore that can never succeed (#8042).
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_diff_refuses_a_name_that_only_resolves_through_a_live_agent() {
+    let _g = lock().lock().await;
+    let name = "at_registry_diff_liveagent";
+    cleanup(name);
+    write_workspace_agent(name, &manifest_with_non_form_fields(name));
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 42));
+
+    let h = boot().await;
+
+    let (status, body) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_not_editable", "{body}");
+
+    cleanup(name);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn create_refuses_a_name_that_belongs_to_a_live_agent() {
     let _g = lock().lock().await;
@@ -992,6 +1013,53 @@ async fn registry_diff_marks_a_field_outside_the_projection_as_non_identical() {
     cleanup(name);
 }
 
+/// `unlisted_diffs` must not double-count a listed field that happens to be a
+/// list. `tags` is one of the twelve fields the itemised `diffs` table
+/// already covers; when it is the *only* difference, `unlisted_diffs` must
+/// be zero rather than counting each differing array element as an
+/// out-of-projection difference on top of the itemised row that already
+/// shows it.
+#[tokio::test(flavor = "multi_thread")]
+async fn unlisted_diffs_does_not_double_count_a_differing_listed_list_field() {
+    let _g = lock().lock().await;
+    let name = "at_registry_list_field_diff";
+    cleanup(name);
+    let manifest_with_tags = |tags: &str| {
+        format!(
+            r#"name = "{name}"
+description = "same everywhere"
+module = "builtin:chat"
+tags = {tags}
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "Seeded."
+"#
+        )
+    };
+    write_agent_type(name, &manifest_with_tags(r#"["a", "b"]"#));
+    write_registry_agent_type(name, &manifest_with_tags(r#"["c", "d"]"#));
+
+    let h = boot().await;
+
+    let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
+    assert_eq!(status, StatusCode::OK, "{diff}");
+    assert_eq!(diff["identical"], false, "{diff}");
+    assert_eq!(
+        diff["diffs"].as_array().map(Vec::len),
+        Some(1),
+        "tags is the only itemised difference: {diff}"
+    );
+    assert_eq!(
+        diff["unlisted_diffs"], 0,
+        "tags is fully itemised already — its two differing elements must not \
+         also be counted as unlisted: {diff}"
+    );
+
+    cleanup(name);
+}
+
 /// Restore overwrites the local copy with the registry version, and a follow-up
 /// GET returns the registry content rather than the pre-restore local content.
 #[tokio::test(flavor = "multi_thread")]
@@ -1026,9 +1094,9 @@ async fn restore_overwrites_the_local_copy_and_reads_back_the_registry_version()
 }
 
 /// The registry restore is the one write path that destroys the local copy by design, so it has to leave a snapshot behind like every other write path does.
-/// A manifest whose current content came from a hand-edit of the file has no history row of its own, and a restore that records nothing leaves the operator with nothing to go back to while `GET /history` keeps reporting whatever was there before as current.
+/// A manifest whose current content came from a hand-edit of the file has no history row of its own, so recording only the post-restore content is not enough: the pre-restore content — the thing an operator actually wants back — must itself be recoverable from history, not merely implied by a row existing.
 #[tokio::test(flavor = "multi_thread")]
-async fn restore_from_registry_records_a_version_snapshot() {
+async fn restore_from_registry_records_a_recoverable_pre_restore_snapshot() {
     let _g = lock().lock().await;
     let name = "at_registry_restore_history";
     cleanup(name);
@@ -1048,9 +1116,12 @@ async fn restore_from_registry_records_a_version_snapshot() {
     let versions = history["versions"].as_array().expect("versions array");
     assert_eq!(
         versions.len(),
-        1,
-        "the restore must record exactly one snapshot: {history}"
+        2,
+        "restore must record both the pre-restore and the post-restore content: {history}"
     );
+
+    // Newest first (`ORDER BY timestamp DESC, id DESC`): the post-restore snapshot lands
+    // after the pre-restore one within the same request, so it sorts first.
     assert_eq!(versions[0]["template_name"], name, "{history}");
     assert_eq!(
         versions[0]["change_source"], "registry-restore",
@@ -1061,7 +1132,65 @@ async fn restore_from_registry_records_a_version_snapshot() {
             .as_str()
             .expect("manifest_toml")
             .contains("from registry"),
-        "the snapshot must carry the content the restore wrote: {history}"
+        "the post-restore snapshot must carry the content the restore wrote: {history}"
+    );
+
+    assert_eq!(
+        versions[1]["change_source"], "pre-registry-restore",
+        "{history}"
+    );
+    assert!(
+        versions[1]["manifest_toml"]
+            .as_str()
+            .expect("manifest_toml")
+            .contains("hand edited on disk"),
+        "the pre-restore content — what a restore actually needs to make recoverable — \
+         must be readable back out of history, not just gone from disk: {history}"
+    );
+
+    cleanup(name);
+}
+
+/// Restoring must pin the manifest's own `name` field to the URL path
+/// segment, the same way `update_agent_type` already does — otherwise a
+/// registry document whose declared `name` disagrees with its directory
+/// (the registry stores each type at `agent-types/<dir>/agent.toml`, and
+/// `AgentManifest::name` is documented as the human-readable display name,
+/// so the two are free to differ) persists that mismatch into the local
+/// catalog.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_from_registry_pins_the_manifest_name_to_the_url_segment() {
+    let _g = lock().lock().await;
+    let name = "at_registry_restore_name_mismatch";
+    cleanup(name);
+    write_agent_type(name, &registry_manifest_body(name, "local", 42));
+    write_registry_agent_type(
+        name,
+        r#"name = "Some Other Display Name"
+description = "from registry"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "Seeded."
+"#,
+    );
+
+    let h = boot().await;
+
+    let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(
+        restored["manifest"]["name"], name,
+        "the persisted manifest's own `name` must match the URL segment it was \
+         restored through, not the registry document's declared name: {restored}"
+    );
+
+    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(
+        stored.contains(&format!("name = \"{name}\"")),
+        "the file on disk must carry the pinned name too: {stored}"
     );
 
     cleanup(name);
