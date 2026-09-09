@@ -1463,6 +1463,7 @@ tui-event-provider-key-management-not-available-in-process = Управлінн�
 tui-event-vault-not-available-in-process = Управління ключами сховища недоступне в інпроцес-режимі
 tui-event-vault-save-failed = Не вдалося зберегти { $key }
 tui-event-vault-delete-failed = Не вдалося очистити { $key }
+tui-event-vault-list-failed = Не вдалося завантажити ключі сховища
 tui-event-backups-list-failed = Не вдалося завантажити резервні копії
 tui-event-backups-need-daemon = Для резервних копій потрібен запущений демон
 tui-event-backup-create-failed = Не вдалося створити резервну копію

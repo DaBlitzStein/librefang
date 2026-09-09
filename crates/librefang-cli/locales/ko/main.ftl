@@ -1449,6 +1449,7 @@ tui-event-provider-key-management-not-available-in-process = 인프로세스 모
 tui-event-vault-not-available-in-process = 인프로세스 모드에서는 볼트 키 관리를 사용할 수 없습니다
 tui-event-vault-save-failed = { $key } 저장에 실패했습니다
 tui-event-vault-delete-failed = { $key } 삭제에 실패했습니다
+tui-event-vault-list-failed = 볼트 키 목록을 불러오지 못했습니다
 tui-event-backups-list-failed = 백업 목록을 불러오지 못했습니다
 tui-event-backups-need-daemon = 백업에는 실행 중인 데몬이 필요합니다
 tui-event-backup-create-failed = 백업을 생성하지 못했습니다

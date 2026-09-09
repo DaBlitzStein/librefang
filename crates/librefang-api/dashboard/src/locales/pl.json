@@ -2230,7 +2230,7 @@
     "vault": "Sejf poświadczeń",
     "vault_title": "Poświadczenia demona",
     "vault_desc": "Sekrety, których demon potrzebuje do własnych działań na zewnątrz, jak token GitHub wymagany przez zgłaszanie umiejętności i promowanie typów agentów. Przechowywane w postaci zaszyfrowanej; po zapisaniu nigdy nie są pokazywane ponownie.",
-    "vault_forbidden": "Zarządzanie poświadczeniami demona wymaga konta administratora.",
+    "vault_forbidden": "Zarządzanie poświadczeniami demona wymaga konta właściciela.",
     "vault_load_failed": "Nie udało się wczytać kluczy sejfu.",
     "vault_empty": "Ten demon nie udostępnia żadnych zapisywalnych kluczy sejfu.",
     "vault_is_set": "Ustawiony",

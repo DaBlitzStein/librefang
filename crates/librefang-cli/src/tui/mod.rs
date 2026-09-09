@@ -543,7 +543,14 @@ impl App {
                     Tab::Hands => self.hands.status_msg = err,
                     Tab::Extensions => self.extensions.status_msg = err,
                     Tab::Templates => self.templates.status_msg = err,
-                    Tab::Settings => self.settings.status_msg = err,
+                    Tab::Settings => {
+                        // Same trap as `Channels` below: the vault sub-tab renders its
+                        // spinner unconditionally while `loading` is set, so a failed
+                        // fetch that only wrote a status message would leave the pane
+                        // spinning until some later fetch happened to succeed.
+                        self.settings.loading = false;
+                        self.settings.status_msg = err;
+                    }
                     Tab::Channels => {
                         // `draw_list` renders its spinner unconditionally while
                         // `loading` is set, so a failed fetch that only wrote a

@@ -1452,6 +1452,7 @@ tui-event-provider-key-management-not-available-in-process = Provider key manage
 tui-event-vault-not-available-in-process = Vault key management not available in in-process mode
 tui-event-vault-save-failed = Failed to store { $key }
 tui-event-vault-delete-failed = Failed to clear { $key }
+tui-event-vault-list-failed = Failed to load vault keys
 tui-event-backups-list-failed = Failed to load backups
 tui-event-backups-need-daemon = Backups need a running daemon
 tui-event-backup-create-failed = Failed to create backup

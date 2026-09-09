@@ -3681,31 +3681,47 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
 ///
 /// The response carries names, a boolean and a source; there is no read-back
 /// endpoint, so nothing here can ever receive a stored value to leak.
+///
+/// Failures go through [`daemon_response`] like every sibling fetcher, because
+/// the alternative is worse than a missing list: an empty `Vec` reaches
+/// `draw_vault` as `tui-settings-vault-empty`, telling an operator whose role
+/// the daemon just refused — or whose daemon is not running at all — that this
+/// build has no writable vault keys. The dashboard half of #8164 reports the
+/// `403` explicitly, and the two surfaces have to agree about the same
+/// response.
 pub fn spawn_fetch_vault_keys(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            let keys = match client.get(format!("{base_url}/api/vault/keys")).send() {
-                Ok(resp) => match resp.json::<serde_json::Value>() {
-                    Ok(body) => body["keys"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|entry| VaultKeyInfo {
-                                    key: entry["key"].as_str().unwrap_or("").to_string(),
-                                    set: entry["set"].as_bool().unwrap_or(false),
-                                    source: VaultKeySource::from_wire(
-                                        entry["source"].as_str().unwrap_or_default(),
-                                    ),
-                                })
-                                .collect()
+            let outcome = daemon_response(
+                client.get(format!("{base_url}/api/vault/keys")).send(),
+                || crate::i18n::t("tui-event-vault-list-failed"),
+            );
+            match outcome {
+                Ok(resp) => {
+                    let keys = resp
+                        .json::<serde_json::Value>()
+                        .ok()
+                        .and_then(|body| {
+                            body["keys"].as_array().map(|arr| {
+                                arr.iter()
+                                    .map(|entry| VaultKeyInfo {
+                                        key: entry["key"].as_str().unwrap_or("").to_string(),
+                                        set: entry["set"].as_bool().unwrap_or(false),
+                                        source: VaultKeySource::from_wire(
+                                            entry["source"].as_str().unwrap_or_default(),
+                                        ),
+                                    })
+                                    .collect()
+                            })
                         })
-                        .unwrap_or_default(),
-                    Err(_) => Vec::new(),
-                },
-                Err(_) => Vec::new(),
-            };
-            let _ = tx.send(AppEvent::VaultKeysLoaded(keys));
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::VaultKeysLoaded(keys));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
         }
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
@@ -3728,6 +3744,20 @@ fn response_source(resp: reqwest::blocking::Response) -> VaultKeySource {
         .unwrap_or_default()
 }
 
+/// Percent-encode a vault key for use as a path segment.
+///
+/// #8164's design goal is that adding a name to the server-side `WRITABLE_KEYS`
+/// allowlist surfaces it in both the dashboard and the TUI with no client
+/// change. The namespace that allowlist guards already holds
+/// `mcp-oauth:{server_url}:client_secret`-shaped names, so an entry containing
+/// `/`, `:` or `%` would work from the dashboard — which goes through
+/// `encodeURIComponent` — and silently address the wrong path, or miss the
+/// route entirely, from here. `urlencoding::encode` renders `/` as `%2F`,
+/// which is what keeps the two halves in agreement.
+fn encode_path_segment(segment: &str) -> String {
+    urlencoding::encode(segment).into_owned()
+}
+
 /// Store a secret under a writable vault key.
 ///
 /// `value` is moved into the request body and dropped with the closure; it is
@@ -3743,7 +3773,10 @@ pub fn spawn_set_vault_key(
             let client = make_daemon_client(api_key.as_deref());
             let outcome = daemon_response(
                 client
-                    .put(format!("{base_url}/api/vault/keys/{key}"))
+                    .put(format!(
+                        "{base_url}/api/vault/keys/{}",
+                        encode_path_segment(&key)
+                    ))
                     .json(&serde_json::json!({ "value": value.as_str() }))
                     .send(),
                 || crate::i18n::t_args("tui-event-vault-save-failed", &[("key", &key)]),
@@ -3772,7 +3805,10 @@ pub fn spawn_delete_vault_key(backend: BackendRef, key: String, tx: mpsc::Sender
             let client = make_daemon_client(api_key.as_deref());
             let outcome = daemon_response(
                 client
-                    .delete(format!("{base_url}/api/vault/keys/{key}"))
+                    .delete(format!(
+                        "{base_url}/api/vault/keys/{}",
+                        encode_path_segment(&key)
+                    ))
                     .send(),
                 || crate::i18n::t_args("tui-event-vault-delete-failed", &[("key", &key)]),
             );
@@ -5239,6 +5275,54 @@ mod tests {
             // `AgentLoopResult`), so the wrong-variant message cannot print it.
             _ => panic!("expected MemoryConfigFailed(FetchFailure::Error), got another AppEvent"),
         }
+    }
+
+    /// A vault listing that cannot reach the daemon must report a failure, not an empty list.
+    ///
+    /// Every failure used to collapse into `VaultKeysLoaded(vec![])`: a non-2xx body has no
+    /// `keys` array so `.as_array()` was `None`, and a transport error took the `Err(_) =>
+    /// Vec::new()` arm. `draw_vault` renders that as `tui-settings-vault-empty` — "This daemon
+    /// exposes no writable vault keys" — so an operator the daemon refused by role, or one whose
+    /// daemon is not running, was told this build has no vault keys at all.
+    #[test]
+    fn vault_keys_fetch_reports_an_unreachable_daemon() {
+        let (tx, rx) = mpsc::channel();
+        spawn_fetch_vault_keys(unreachable_daemon(), tx);
+
+        let ev = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("an unreachable daemon must still produce an event");
+        match ev {
+            AppEvent::FetchError(reason) => {
+                assert!(!reason.is_empty(), "the failure must carry a reason");
+            }
+            AppEvent::VaultKeysLoaded(keys) => panic!(
+                "an unreachable daemon must not be reported as an empty vault listing (got {} keys)",
+                keys.len()
+            ),
+            _ => panic!("expected FetchError, got another AppEvent"),
+        }
+    }
+
+    /// The TUI must address the same URL the dashboard's `encodeURIComponent` produces.
+    ///
+    /// #8164's premise is that adding a name to the server-side allowlist surfaces it in both
+    /// surfaces with no client change, and the namespace already holds
+    /// `mcp-oauth:{server_url}:client_secret`-shaped names. Interpolating one raw would request a
+    /// different path than the dashboard, or miss the route entirely.
+    #[test]
+    fn vault_key_path_segments_are_percent_encoded() {
+        assert_eq!(encode_path_segment("GITHUB_TOKEN"), "GITHUB_TOKEN");
+        assert_eq!(
+            encode_path_segment("mcp-oauth:https://evil.example/x:client_secret"),
+            "mcp-oauth%3Ahttps%3A%2F%2Fevil.example%2Fx%3Aclient_secret",
+            "a `/` in a key must not become a path separator"
+        );
+        assert_eq!(
+            encode_path_segment("a%2Fb"),
+            "a%252Fb",
+            "an existing `%` must be escaped once"
+        );
     }
 
     /// Same for a goal's run state, and the event must name the goal so the

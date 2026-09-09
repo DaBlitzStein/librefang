@@ -2190,7 +2190,7 @@
     "vault": "凭据保险库",
     "vault_title": "守护进程凭据",
     "vault_desc": "守护进程对外工作所需的密钥，例如技能提案和智能体类型晋升所需的 GitHub 令牌。加密存储；保存后不再显示。",
-    "vault_forbidden": "管理守护进程凭据需要管理员账户。",
+    "vault_forbidden": "管理守护进程凭据需要所有者账户。",
     "vault_load_failed": "无法加载保险库键。",
     "vault_empty": "此守护进程未提供任何可写的保险库键。",
     "vault_is_set": "已设置",

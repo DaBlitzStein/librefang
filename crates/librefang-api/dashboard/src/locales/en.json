@@ -2224,7 +2224,7 @@
     "vault": "Credential Vault",
     "vault_title": "Daemon credentials",
     "vault_desc": "Secrets the daemon needs for its own outbound work, such as the GitHub token that skill proposal and agent-type promotion require. Stored encrypted; never shown again after saving.",
-    "vault_forbidden": "Managing daemon credentials requires an Admin account.",
+    "vault_forbidden": "Managing daemon credentials requires an Owner account.",
     "vault_load_failed": "Could not load vault keys.",
     "vault_empty": "This daemon exposes no writable vault keys.",
     "vault_is_set": "Set",

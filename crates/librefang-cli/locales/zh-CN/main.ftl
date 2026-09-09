@@ -517,6 +517,7 @@ tui-event-provider-key-management-not-available-in-process = 进程内模式下�
 tui-event-vault-not-available-in-process = 进程内模式下保险库键管理不可用
 tui-event-vault-save-failed = 存储 { $key } 失败
 tui-event-vault-delete-failed = 清除 { $key } 失败
+tui-event-vault-list-failed = 加载保险库键失败
 tui-event-backups-list-failed = 加载备份失败
 tui-event-backups-need-daemon = 备份需要正在运行的守护进程
 tui-event-backup-create-failed = 创建备份失败
