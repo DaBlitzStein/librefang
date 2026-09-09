@@ -22,7 +22,6 @@ import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
 import { useAgents } from "../lib/queries/agents";
 import { useTaskQueue } from "../lib/queries/runtime";
-import { useAgents } from "../lib/queries/agents";
 import {
   useCreateTask,
   useUpdateTaskStatus,
@@ -532,16 +531,13 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
             <label className="block text-xs font-semibold text-text-dim mb-1.5">
               {t("tasks.field_priority")}
             </label>
-            <select
+            <input
+              type="number"
               value={priority}
               onChange={(e) => setPriority(Number(e.target.value))}
+              placeholder={t("tasks.field_priority_placeholder")}
               className={INPUT_CLASS}
-            >
-              {PRIORITY_LEVELS.map((p) => (
-                <option key={p.value} value={p.value}>{t(p.labelKey)}</option>
-              ))}
-            </select>
-            <p className="mt-1 text-[10px] text-text-dim/50">{t("tasks.field_priority_hint")}</p>
+            />
           </div>
 
           <div>

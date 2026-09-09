@@ -628,9 +628,13 @@ describe("TasksPage", () => {
       );
       renderPage();
       fireEvent.click(screen.getAllByText("tasks.new_task")[0]);
-      const assigneeSelect = screen.getByDisplayValue("tasks.assignee_none");
-      const offered = Array.from(assigneeSelect.querySelectorAll("option")).map(
-        (o) => o.textContent,
+      // The registry-sourced suggestions live in the assignee input's
+      // <datalist>, not in a <select> — see "keeps a typed assignee once the
+      // agent registry loads" above for why a <select> cannot be used here.
+      const assigneeInput = screen.getByPlaceholderText("tasks.field_assignee_placeholder");
+      const datalist = document.getElementById(assigneeInput.getAttribute("list")!);
+      const offered = Array.from(datalist!.querySelectorAll("option")).map(
+        (o) => o.getAttribute("value"),
       );
       // Previously an empty board meant an empty list, which downgraded the
       // field to a free-text box that could only produce a rejected post.
@@ -641,7 +645,7 @@ describe("TasksPage", () => {
   });
 
   describe("task limits", () => {
-    it("posts the agent id, priority and timeout the operator chose", async () => {
+    it("posts the agent name, priority and timeout the operator chose", async () => {
       const mutate = vi.fn();
       useCreateTaskMock.mockReturnValue(makeMutation({ mutate }));
       renderPage();
@@ -653,10 +657,10 @@ describe("TasksPage", () => {
       fireEvent.change(screen.getByPlaceholderText("tasks.field_description_placeholder"), {
         target: { value: "Check the thing" },
       });
-      fireEvent.change(screen.getByDisplayValue("tasks.assignee_none"), {
-        target: { value: ALPHA_ID },
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_assignee_placeholder"), {
+        target: { value: SAMPLE_AGENTS[0].name },
       });
-      fireEvent.change(screen.getByDisplayValue("tasks.priority_normal"), {
+      fireEvent.change(screen.getByPlaceholderText("tasks.field_priority_placeholder"), {
         target: { value: "2" },
       });
       fireEvent.change(screen.getByPlaceholderText("tasks.field_timeout_placeholder"), {
@@ -669,7 +673,7 @@ describe("TasksPage", () => {
         expect.objectContaining({
           title: "Urgent probe",
           description: "Check the thing",
-          assigned_to: ALPHA_ID,
+          assigned_to: SAMPLE_AGENTS[0].name,
           priority: 2,
           timeout_secs: 90,
         }),
