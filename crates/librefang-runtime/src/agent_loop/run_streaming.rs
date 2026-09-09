@@ -402,6 +402,20 @@ async fn run_agent_loop_streaming_inner(
         combined_prefix.as_deref(),
     );
 
+    // Mirror of the non-streaming loop: persist the inbound message before the
+    // first LLM call. This is the path the dashboard takes, so it is the one
+    // where a daemon restart, or a hang that outlives the surrounding timeout,
+    // between the push and the first interim save silently loses the
+    // operator's message. The provider-failure note added further down covers
+    // only `stream_with_retry` returning `Err` — not a crash, not a restart,
+    // not a cancellation. Same guards as the interim save: fork and incognito
+    // turns stay ephemeral even on mid-turn crashes.
+    if !opts.is_fork && !opts.incognito {
+        if let Err(e) = memory.save_session_async(session).await {
+            warn!("Failed to save inbound message: {e}");
+        }
+    }
+
     let max_history = resolve_max_history(manifest, opts);
     let PreparedMessages {
         mut messages,
@@ -929,15 +943,16 @@ async fn run_agent_loop_streaming_inner(
                     // breaker opened after a stream error, the turn ended,
                     // and neither the chat nor the history explained it.
                     //
-                    // The note is `Role::System`, not `Role::Assistant`, because the failure is a fact about the daemon and an assistant-role note is replayed on the next turn as the model's own prior output, in its own voice.
-                    // That is the role the kernel's context injections already use for system facts written into session history.
+                    // `Role::Assistant`, matching the timeout note above, with the `[System: …]` text prefix carrying the "this is the daemon speaking" framing.
+                    // A `Role::System` message in the middle of history reaches no hosted model: `anthropic.rs` filters it out of the request, `gemini.rs` and `bedrock.rs` skip it, and `openai.rs` / `ollama.rs` only emit one when the request carries no system prompt — which the agent loop always sets.
+                    // Worse, it survives long enough to break alternation: `session_repair` merges *adjacent* same-role messages, so a system note interposed between two user turns blocks that merge and the driver then strips it, handing the provider the `user, user` pair the merge exists to prevent.
                     warn!(
                         event = "provider_failure_note",
                         agent = %manifest.name,
                         error = %err_str,
                         "Provider failed on the streaming path — the session gets an opaque note, and this line is the only place the raw provider error appears"
                     );
-                    session.push_message(Message::system(PROVIDER_FAILURE_NOTE));
+                    session.push_message(Message::assistant(PROVIDER_FAILURE_NOTE));
                     repair_session_before_save(
                         session,
                         agent_id_str.as_str(),

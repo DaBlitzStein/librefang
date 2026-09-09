@@ -70,10 +70,14 @@ class LibreFang {
     return path + (path.includes("?") ? "&" : "?") + q;
   }
 
-  async _request(method, path, body, query) {
+  // `contentType` sends `body` as-is (Buffer / Uint8Array / Blob) instead of JSON.
+  async _request(method, path, body, query, contentType) {
     const url = this.baseUrl + this._withQuery(path, query);
-    const opts = { method, headers: this._headers };
-    if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
+    const headers = contentType
+      ? Object.assign({}, this._headers, { "Content-Type": contentType })
+      : this._headers;
+    const opts = { method, headers };
+    if (body !== undefined && body !== null) opts.body = contentType ? body : JSON.stringify(body);
     const res = await fetch(url, opts);
     const text = await res.text();
     if (!res.ok) throw new LibreFangError(`HTTP ${res.status}: ${text}`, res.status, text);
@@ -399,8 +403,8 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/traces`);
   }
 
-  async uploadFile(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/upload`, data, undefined);
+  async uploadFile(id, body, contentType) {
+    return this._c._request("POST", `/api/agents/${id}/upload`, body, undefined, contentType || "application/octet-stream");
   }
 
   async serveUpload(file_id) {
@@ -919,8 +923,8 @@ class MediaResource {
     return this._c._request("POST", "/api/media/speech", data, undefined);
   }
 
-  async transcribeAudio(data) {
-    return this._c._request("POST", "/api/media/transcribe", data, undefined);
+  async transcribeAudio(body, contentType) {
+    return this._c._request("POST", "/api/media/transcribe", body, undefined, contentType || "audio/webm");
   }
 
   async submitVideo(data) {

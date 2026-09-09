@@ -364,7 +364,7 @@
       "capability_image_understanding": "비전",
       "capability_image_understanding_hint": "비전을 지원하지 않는 모델을 위해 이미지를 버리지 않고 설명합니다.",
       "capability_speech_to_text": "전사",
-      "capability_speech_to_text_hint": "수신된 음성을 텍스트로 변환합니다.",
+      "capability_speech_to_text_hint": "수신된 음성을 텍스트로 변환합니다. 현재는 전역 설정만 적용됩니다 — 에이전트별 값은 아직 반영되지 않습니다.",
       "capability_image_generation": "이미지 생성",
       "capability_image_generation_hint": "현재는 전역 설정만 적용됩니다 — 에이전트별 값은 아직 반영되지 않습니다.",
       "capability_text_to_speech": "음성 생성",

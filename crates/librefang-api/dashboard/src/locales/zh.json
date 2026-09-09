@@ -364,7 +364,7 @@
       "capability_image_understanding": "视觉",
       "capability_image_understanding_hint": "为不支持视觉的模型描述图片，而不是直接丢弃。",
       "capability_speech_to_text": "语音转写",
-      "capability_speech_to_text_hint": "将收到的语音转换为文字。",
+      "capability_speech_to_text_hint": "将收到的语音转换为文字。目前仅支持全局设置——单个智能体的取值尚未生效。",
       "capability_image_generation": "图像生成",
       "capability_image_generation_hint": "目前仅支持全局设置——单个智能体的取值尚未生效。",
       "capability_text_to_speech": "语音合成",

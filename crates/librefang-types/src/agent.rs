@@ -1876,8 +1876,9 @@ pub struct ManifestCapabilities {
     /// ```
     ///
     /// Absent keys inherit the global block (see
-    /// [`crate::media::CapabilityRouting::merged_over`]); the whole struct
-    /// defaulting to empty is what "inherit everything" looks like on disk.
+    /// [`crate::media::MediaConfig::with_capability_routing`]); the whole
+    /// struct defaulting to empty is what "inherit everything" looks like on
+    /// disk.
     #[serde(flatten)]
     pub routing: crate::media::CapabilityRouting,
 }

@@ -89,6 +89,31 @@ async fn do_req(
     } else {
         req
     };
+    send_and_parse(req).await
+}
+
+/// Sends `body` verbatim under `content_type`, for endpoints that read the
+/// request body as bytes and reject `application/json`.
+async fn do_req_raw(
+    client: &Client,
+    base_url: &str,
+    method: reqwest::Method,
+    path_segments: &[&str],
+    body: Vec<u8>,
+    content_type: &str,
+) -> Result<Value> {
+    let url = build_url(client, base_url, path_segments.iter().copied())?;
+    send_and_parse(
+        client
+            .request(method, url)
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body),
+    )
+    .await
+}
+
+async fn send_and_parse(req: reqwest::RequestBuilder) -> Result<Value> {
     let res = req.send().await?;
     let status = res.status();
     let text = res.text().await?;
@@ -1223,14 +1248,20 @@ impl AgentsResource {
         .await
     }
 
-    pub async fn upload_file(&self, id: &str, data: Value) -> Result<Value> {
-        do_req(
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn upload_file(
+        &self,
+        id: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
             &["api", "agents", id, "upload"],
-            Some(data),
-            &[],
+            body,
+            content_type.unwrap_or("application/octet-stream"),
         )
         .await
     }
@@ -2780,14 +2811,19 @@ impl MediaResource {
         .await
     }
 
-    pub async fn transcribe_audio(&self, data: Value) -> Result<Value> {
-        do_req(
+    /// Sends a raw `audio/webm` body; `content_type` overrides that default.
+    pub async fn transcribe_audio(
+        &self,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
             &["api", "media", "transcribe"],
-            Some(data),
-            &[],
+            body,
+            content_type.unwrap_or("audio/webm"),
         )
         .await
     }

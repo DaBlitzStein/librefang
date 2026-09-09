@@ -35,7 +35,7 @@ use librefang_types::media::{
     MediaMusicResult, MediaTaskStatus, MediaTtsRequest, MediaTtsResult, MediaVideoRequest,
     MediaVideoResult, MediaVideoSubmitResult,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::warn;
@@ -174,6 +174,16 @@ pub struct MediaDriverCache {
     /// surfaced to operators, and this repo requires deterministic ordering
     /// for anything that gets stringified.
     capability_routing: RwLock<BTreeMap<MediaCapability, String>>,
+    /// Capabilities whose nomination has already been reported as unusable.
+    ///
+    /// [`MediaDriverCache::detect_for_capability`] runs once per media
+    /// request, so warning on every miss turns one stale config line into a
+    /// log entry per `POST /api/media/image` and per `image_generate` tool
+    /// call, for the life of the daemon. The information is actionable exactly
+    /// once; the fallback itself is not an error. Cleared by
+    /// [`MediaDriverCache::set_capability_routing`] so a config reload that
+    /// changes the nomination is allowed to warn again.
+    warned_capability_misses: RwLock<BTreeSet<MediaCapability>>,
 }
 
 fn read_media_state<'a, T>(lock: &'a RwLock<T>, state: &'static str) -> RwLockReadGuard<'a, T> {
@@ -212,6 +222,7 @@ impl MediaDriverCache {
                 "google_tts".into(),
             ]),
             capability_routing: RwLock::new(BTreeMap::new()),
+            warned_capability_misses: RwLock::new(BTreeSet::new()),
         }
     }
 
@@ -236,6 +247,7 @@ impl MediaDriverCache {
                 "google_tts".into(),
             ]),
             capability_routing: RwLock::new(BTreeMap::new()),
+            warned_capability_misses: RwLock::new(BTreeSet::new()),
         }
     }
 
@@ -311,6 +323,9 @@ impl MediaDriverCache {
             }
         }
         *write_media_state(&self.capability_routing, "capability_routing") = table;
+        // A reload that changes the nomination deserves a fresh warning if the
+        // new one is also unusable.
+        write_media_state(&self.warned_capability_misses, "warned_capability_misses").clear();
     }
 
     /// Auto-detect and return the first configured driver that supports the
@@ -334,12 +349,27 @@ impl MediaDriverCache {
                 {
                     return Ok(driver);
                 }
-                _ => warn!(
-                    provider = %provider,
-                    capability = %capability,
-                    "[capabilities] nominates a provider that is not configured for this \
-                     capability; falling back to the registry preference order"
-                ),
+                _ => {
+                    let first_time = write_media_state(
+                        &self.warned_capability_misses,
+                        "warned_capability_misses",
+                    )
+                    .insert(capability);
+                    if first_time {
+                        warn!(
+                            provider = %provider,
+                            capability = %capability,
+                            "[capabilities] nominates a provider that is not configured for this \
+                             capability; falling back to the registry preference order"
+                        );
+                    } else {
+                        tracing::debug!(
+                            provider = %provider,
+                            capability = %capability,
+                            "[capabilities] nomination still unusable; already warned once"
+                        );
+                    }
+                }
             }
         }
 
@@ -536,6 +566,47 @@ mod tests {
                 .provider_name(),
             "beta",
             "a mistaken nomination must degrade to the preference order, not fail the call"
+        );
+    }
+
+    /// The fallback is a per-request event; the misconfiguration behind it is
+    /// not. Latching keeps one stale config line from emitting a `WARN` on
+    /// every media call for the life of the daemon, while a reload that
+    /// changes the nomination is still allowed to complain about the new one.
+    #[test]
+    fn an_unusable_nomination_is_warned_about_once_until_the_routing_changes() {
+        let cache = cache_with_fakes(&[
+            ("beta", vec![MediaCapability::ImageGeneration]),
+            ("alpha", vec![MediaCapability::TextToSpeech]),
+        ]);
+        let routing: CapabilityRouting =
+            toml::from_str("image_generation = \"alpha\"\n").expect("parse routing");
+        cache.set_capability_routing(&routing);
+        assert!(
+            read_media_state(&cache.warned_capability_misses, "warned_capability_misses")
+                .is_empty(),
+            "nothing has been detected yet"
+        );
+
+        for _ in 0..5 {
+            let _ = cache.detect_for_capability(MediaCapability::ImageGeneration);
+        }
+        assert_eq!(
+            read_media_state(&cache.warned_capability_misses, "warned_capability_misses")
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![MediaCapability::ImageGeneration],
+            "five failing lookups must latch exactly one warned capability"
+        );
+
+        // Re-nominating resets the latch: the operator changed something, so
+        // the next verdict on it is news again.
+        cache.set_capability_routing(&routing);
+        assert!(
+            read_media_state(&cache.warned_capability_misses, "warned_capability_misses")
+                .is_empty(),
+            "a routing change must re-arm the warning"
         );
     }
 

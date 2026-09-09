@@ -364,7 +364,7 @@
       "capability_image_understanding": "Vision",
       "capability_image_understanding_hint": "Describes images for a model with no vision support, instead of dropping them.",
       "capability_speech_to_text": "Transcription",
-      "capability_speech_to_text_hint": "Turns inbound speech into text.",
+      "capability_speech_to_text_hint": "Turns inbound speech into text. Global only for now — a per-agent value is not yet applied.",
       "capability_image_generation": "Image generation",
       "capability_image_generation_hint": "Global only for now — a per-agent value is not yet applied.",
       "capability_text_to_speech": "Speech generation",

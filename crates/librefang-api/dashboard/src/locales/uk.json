@@ -364,7 +364,7 @@
       "capability_image_understanding": "Зір",
       "capability_image_understanding_hint": "Описує зображення для моделі без підтримки зору замість того, щоб їх відкидати.",
       "capability_speech_to_text": "Транскрибування",
-      "capability_speech_to_text_hint": "Перетворює вхідне мовлення на текст.",
+      "capability_speech_to_text_hint": "Перетворює вхідне мовлення на текст. Наразі лише глобально — значення для окремого агента ще не застосовується.",
       "capability_image_generation": "Генерація зображень",
       "capability_image_generation_hint": "Наразі лише глобально — значення для окремого агента ще не застосовується.",
       "capability_text_to_speech": "Синтез мовлення",
