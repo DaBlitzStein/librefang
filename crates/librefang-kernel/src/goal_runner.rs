@@ -2665,6 +2665,15 @@ mod tests {
     /// (`definitions.rs`), written to the same document, never seen by
     /// `parse_tick` or the verifier. The top-of-loop check must ignore it
     /// exactly the same way it now ignores tool-written progress.
+    ///
+    /// Unlike progress, this bypass only lives in the tick's `Err` arm: a
+    /// successful tick always writes `new_status = Some(InProgress)` at the
+    /// end of the same iteration (`done` is false on a rejection), which
+    /// overwrites a tool-written `Completed` before the header ever reads it
+    /// back. Only a turn that calls the tool and THEN fails leaves the
+    /// write standing — the `Err` arm never touches the goal document at
+    /// all — so the first tick here fails after writing, to exercise the
+    /// window that actually survives to the next header check.
     #[tokio::test(start_paused = true)]
     async fn a_rejected_iterations_tool_written_completed_status_cannot_finish_the_run() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
@@ -2686,10 +2695,17 @@ mod tests {
                 if target == verifier {
                     Ok("VERDICT: FAIL\nREASON: not actually done".to_string())
                 } else {
-                    t.fetch_add(1, Ordering::SeqCst);
+                    let n = t.fetch_add(1, Ordering::SeqCst) + 1;
                     // No `GOAL_DONE` marker — the agent called the tool with
                     // status="completed" instead.
                     patch_goal(&sub, goal_id, None, Some(GoalStatus::Completed));
+                    if n == 1 {
+                        // The `Err` arm never touches the goal document, so
+                        // this is the only shape of turn that leaves the
+                        // tool's `Completed` write standing for the next
+                        // header check to see.
+                        return Err("provider hiccup".to_string());
+                    }
                     Ok("still working on it".to_string())
                 }
             }
