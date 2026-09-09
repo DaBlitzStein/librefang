@@ -2597,7 +2597,6 @@ tui-agents-label-routing-medium = 中等
 tui-agents-label-routing-expensive = 高价
 
 tui-event-manifest-history-fetch-failed = 无法加载该代理的配置历史
-tui-event-manifest-history-daemon-only = 配置历史由守护进程记录；请先启动守护进程再重新连接。
 tui-event-model-params-fetch-failed = 无法加载该代理的模型参数
 tui-event-model-params-update-failed = 无法保存模型参数
 tui-event-model-params-daemon-only = 模型参数通过守护进程编辑；请先启动守护进程再重新连接。
