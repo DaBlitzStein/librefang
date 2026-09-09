@@ -2409,6 +2409,20 @@ agent-set-invalid-integer = { $field } must be a positive whole number, got '{ $
 agent-set-invalid-decimal = { $field } must be a decimal number, got '{ $value }'
 agent-set-limit-warning = warning: { $message }
 
+# Model routing editor (profile-based routing)
+tui-agents-title-model-routing = Model Routing
+tui-agents-label-routing-fixed = fixed — always use this agent's own model
+tui-agents-label-routing-flexible = flexible — let the router pick per task
+tui-agents-hint-routing-mode = [Tab] switch mode
+tui-agents-label-routing-fixed-explainer = This agent always uses the model in its own manifest. Press Tab to let the router choose per task.
+tui-agents-label-no-router-profiles = No model profiles available. Add them to ~/.librefang/model_profiles.toml.
+tui-agents-label-routing-any-profile = any
+tui-agents-hints-model-routing = [Tab] Mode  [↑↓] Navigate  [Space] Toggle profile  [+/-] Cost budget  [Enter] Save  [Esc] Cancel
+tui-agents-model-routing-not-loaded = Still loading this agent's routing settings — try again in a moment.
+tui-event-model-routing-fetch-failed = Failed to fetch model routing
+tui-event-model-routing-update-failed = Failed to update model routing
+tui-mod-agent-model-routing-updated = Model routing updated for agent { $id }.
+
 # --- Goals screen (TUI) ---
 tui-goals-title = ⌖ Goals
 tui-goals-count = { $count } goals

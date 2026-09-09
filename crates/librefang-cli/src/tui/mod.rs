@@ -483,6 +483,7 @@ impl App {
                     .unwrap_or(0);
                 self.agents.router_default_profile = default_profile;
                 self.agents.router_fixed = fixed;
+                self.agents.routing_loaded = true;
             }
             AppEvent::AgentModelRoutingUpdated(id) => {
                 self.agents.status_msg =
