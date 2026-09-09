@@ -908,6 +908,7 @@
       "manifest_saved": "配置已保存",
       "manifest_load_failed": "加载当前配置失败。",
       "manifest_history": "清单历史",
+      "manifest_history_load_err": "无法加载清单历史。",
       "no_history": "尚未记录配置更改。",
       "proactive_conditions": "条件（逗号分隔）",
       "proactive_conditions_hint": "这将替换完整的条件列表——不会预填当前内容。使用完整的清单编辑器查看当前生效的内容。",

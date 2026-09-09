@@ -910,6 +910,7 @@
       "manifest_saved": "Konfiguracja zapisana",
       "manifest_load_failed": "Nie udało się wczytać bieżącej konfiguracji.",
       "manifest_history": "Historia manifestu",
+      "manifest_history_load_err": "Nie udało się wczytać historii manifestu.",
       "no_history": "Nie zarejestrowano jeszcze żadnych zmian konfiguracji.",
       "proactive_conditions": "Warunki (oddzielone przecinkami)",
       "proactive_conditions_hint": "To zastępuje pełną listę warunków — nie jest wstępnie wypełnione bieżącymi. Użyj pełnego edytora manifestu, aby zobaczyć, co jest aktywne.",

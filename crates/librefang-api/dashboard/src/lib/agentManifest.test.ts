@@ -1050,9 +1050,13 @@ prompt_template = "on push"
     expect(reparsed.form.tool_allowlist).toEqual(["file_read"]);
     expect(reparsed.extras.topLevel["future_field"]).toBe("unknown to this daemon");
     expect(reparsed.extras.topLevel["compaction"]).toEqual({ threshold_messages: 7 });
-    expect(reparsed.extras.topLevel["workspaces"]).toEqual({
-      notes: { path: "notes", mode: "rw" },
-    });
+    // `[workspaces]` graduated from unknown-key passthrough to a first-class parsed field, so a path-based row round-trips through `form.workspaces` instead of `extras`.
+    // Only mount-based declarations and malformed non-path rows still land in `extras.topLevel` (see the `topTableExtras.workspaces` branch in the serializer).
+    // The promise this test guards is "nothing lost", and the row survives the cycle either way — it just has a home of its own now.
+    expect(reparsed.extras.topLevel["workspaces"]).toBeUndefined();
+    expect(
+      reparsed.form.workspaces.map(({ name, path, mode }) => ({ name, path, mode })),
+    ).toEqual([{ name: "notes", path: "notes", mode: "rw" }]);
     expect(reparsed.extras.topLevel["triggers"]).toEqual([
       { pattern: "git.push", prompt_template: "on push" },
     ]);

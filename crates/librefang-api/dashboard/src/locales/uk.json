@@ -852,6 +852,7 @@
       "auto_evolve_label": "Автоеволюція",
       "crashed_title": "Агент {{name}} у стані помилки",
       "manifest_history": "Історія маніфесту",
+      "manifest_history_load_err": "Не вдалося завантажити історію маніфесту.",
       "no_history": "Змін конфігурації ще не зафіксовано.",
       "events_tail": "події · хвіст",
       "install_skill": "Встановити",
