@@ -1844,6 +1844,15 @@ fn draw_edit_workspaces(f: &mut Frame, area: Rect, state: &AgentSelectState) {
         };
         lines.push(Line::from(crate::i18n::t(key)));
     }
+    // A failed fetch, a rejected save (duplicate name), or a dropped
+    // half-typed row all land here via `status_msg` — without this the
+    // operator saw nothing distinguish a reject from a save (#7835).
+    if !state.status_msg.is_empty() {
+        lines.push(Line::from(Span::styled(
+            state.status_msg.clone(),
+            Style::default().fg(theme::YELLOW),
+        )));
+    }
     f.render_widget(Paragraph::new(lines), area);
 }
 
@@ -2053,10 +2062,30 @@ mod tests {
 #[cfg(test)]
 mod workspaces_tests {
     use super::*;
+    use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Renders `draw_edit_workspaces` to an in-memory buffer and returns its
+    /// text content, so a test can assert on what an operator would actually
+    /// see rather than on internal state alone (#7835).
+    fn rendered_edit_workspaces(state: &AgentSelectState) -> String {
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw_edit_workspaces(f, f.area(), state))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
     }
 
     fn editing_state() -> AgentSelectState {
@@ -2166,6 +2195,11 @@ mod workspaces_tests {
         assert!(
             !state.status_msg.is_empty(),
             "dropping a half-typed row must surface a message, not fail silently"
+        );
+        let rendered = rendered_edit_workspaces(&state);
+        assert!(
+            rendered.contains(state.status_msg.trim()),
+            "the status message must actually be painted, not just set: {rendered:?}"
         );
     }
 
