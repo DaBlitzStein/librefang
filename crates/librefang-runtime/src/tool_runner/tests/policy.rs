@@ -893,6 +893,9 @@ fn spawn_test_profile(
         provider: provider.to_string(),
         model: model.to_string(),
         context_window,
+        // The helper parameterises only the context window; these tests read the
+        // profile's provider/model, never its output cap.
+        max_output_tokens: None,
         cost_tier: librefang_types::model_profile::CostTier::Cheap,
         priority: 0,
         max_complexity: 1.0,

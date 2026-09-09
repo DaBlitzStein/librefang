@@ -2494,7 +2494,8 @@ async fn test_max_tokens_pure_markup_overflow_replaced_with_honest_reply() {
         context_window_tokens: 0,
         label: None,
         model_override: None,
-
+        // An ordinary session, not a delegated sub-agent run (#7752).
+        parent_session_id: None,
         messages_generation: 0,
         last_repaired_generation: None,
         peer_id: None,

@@ -1349,14 +1349,11 @@ async fn restore_from_registry_records_a_recoverable_pre_restore_snapshot() {
 /// Dropping `template_versions` is the deterministic stand-in for the failure that actually happens — a `SQLITE_BUSY` from a concurrent writer — and reaches `record_version` as the same `LibreFangError::Memory`.
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_refuses_to_overwrite_when_the_pre_restore_snapshot_fails() {
-    let _g = lock().lock().await;
     let name = "at_registry_restore_snapshot_failure";
-    cleanup(name);
-    let hand_edited = registry_manifest_body(name, "hand edited on disk", 42);
-    write_agent_type(name, &hand_edited);
-    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
-
     let h = boot().await;
+    let hand_edited = registry_manifest_body(name, "hand edited on disk", 42);
+    write_agent_type(&h, name, &hand_edited);
+    write_registry_agent_type(&h, name, &registry_manifest_body(name, "from registry", 99));
 
     // Break the snapshot store through the pool the substrate already exposes — the same
     // route `goals_routes_integration.rs` uses to make a substrate read fail from out here.
@@ -1377,14 +1374,13 @@ async fn restore_refuses_to_overwrite_when_the_pre_restore_snapshot_fails() {
     );
 
     // The assertion the finding is about: the operator's content survived.
-    let on_disk = std::fs::read_to_string(agent_type_file(name)).expect("agent type still on disk");
+    let on_disk =
+        std::fs::read_to_string(agent_type_file(&h, name)).expect("agent type still on disk");
     assert_eq!(
         on_disk, hand_edited,
         "the hand-edited manifest must still be on disk — it was the only copy, and the \
          snapshot meant to preserve it never landed"
     );
-
-    cleanup(name);
 }
 
 /// Restoring must pin the manifest's own `name` field to the URL path

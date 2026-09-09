@@ -318,16 +318,10 @@ description = "second"
     // protects tests within this file from each other, not from a
     // `launcher.rs` test flipping the same var mid-assertion.
     // -----------------------------------------------------------------------
+    // Imported rather than wrapped: `crate::test_env` owns a second, separate
+    // `static LOCK`, so routing through it would guard a different mutex than
+    // the one `launcher.rs` holds while it mutates the same `LIBREFANG_HOME`.
     use crate::test_env_lock::env_lock;
-
-    /// Process-wide guard for the env-mutating tests in this module: cargo
-    /// runs `#[test]` fns in parallel, and `LIBREFANG_HOME`/`LIBREFANG_AGENTS_DIR`
-    /// are global state. Every env-var test in this binary must lock the same
-    /// mutex — a private lock here would race the sibling modules' tests
-    /// (#8179 review).
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::test_env::env_lock()
-    }
 
     /// Regression for #8239: a type written only into the canonical
     /// `agent-types/<name>.toml` store (the destination `POST /api/templates`
