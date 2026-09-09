@@ -938,9 +938,18 @@ function DashboardApp() {
 
   useKeyboardShortcuts({ onShowHelp: () => setShowShortcuts(true) });
 
+  // Re-armed on setup, not just cleared on teardown: `main.tsx` renders under
+  // `<React.StrictMode>`, which mounts → unmounts → remounts once in
+  // development. The ref survives that simulated remount, so a cleanup-only
+  // guard would stay `false` for the whole session and every continuation
+  // below would return early — the placeholder avatar and hostname this
+  // guard exists to prevent, back again under `vite dev`.
   const mountedRef = useRef(true);
-  useEffect(() => () => {
-    mountedRef.current = false;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   // Endpoints that require auth. Hoisted out of the mount effect below so the
