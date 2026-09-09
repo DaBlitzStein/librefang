@@ -1277,45 +1277,33 @@ mod apply_resolved_inference_params_tests {
 
     /// #8112: before this helper existed, `execute_llm_agent`
     /// (`kernel::agent_execution`) called `resolve_inference_params` +
-    /// `apply_to` inline, but `messaging::send_message_ephemeral` and
-    /// `messaging::send_message_streaming_with_sender_context_routing_thinking_and_session`
-    /// (plus `ephemeral_spawn`) built their manifest from a bare
-    /// `entry.manifest.clone()` and never called either. Two independently
-    /// built manifests (never derived from one another, matching how each
-    /// dispatcher clones `entry.manifest` on its own) must resolve to the
-    /// identical `top_p` once both go through the shared helper.
+    /// `apply_to` inline, but `messaging::send_message_ephemeral`, the
+    /// streaming dispatch and `ephemeral_spawn` built their manifest from a
+    /// bare `entry.manifest.clone()` and never called either — so a `top_p`
+    /// carried only by a per-model catalog override reached the wire on one
+    /// path and vanished on the other three.
+    ///
+    /// This pins the helper's own contract, and nothing more. Whether each
+    /// dispatcher actually *calls* it is not observable from here — two calls
+    /// to a deterministic function agreeing with each other cannot fail — so
+    /// the guard for that lives at the four injection sites, in
+    /// `kernel::tests::top_p_catalog_override_reaches_*`, which drive real
+    /// turns to a mocked backend and read the literal wire body.
     #[test]
-    fn two_independently_built_manifests_resolve_to_the_same_extra_params() {
+    fn catalog_override_lands_in_extra_params_when_the_agent_leaves_top_p_unset() {
         let catalog = catalog_with_top_p_override(0.5);
-
-        let mut manifest_a = inheriting_agent_model(); // stands in for agent_execution's manifest
-        apply_resolved_inference_params(&catalog, &mut manifest_a);
-
-        let mut manifest_b = inheriting_agent_model(); // stands in for messaging/ephemeral's manifest
-        apply_resolved_inference_params(&catalog, &mut manifest_b);
-
-        assert_eq!(
-            manifest_a.extra_params.get("top_p"),
-            manifest_b.extra_params.get("top_p"),
-            "both dispatch paths must resolve the same model-catalog top_p override"
-        );
-        assert_eq!(
-            manifest_a.extra_params.get("top_p"),
-            Some(&serde_json::json!(0.5_f32))
-        );
-    }
-
-    /// The bug this fix closes, shown directly: a manifest that never runs
-    /// through `apply_resolved_inference_params` carries no `top_p` at all,
-    /// regardless of what the model catalog says — this was the observable
-    /// behaviour on every dispatch path except `execute_llm_agent` before #8112.
-    #[test]
-    fn skipping_the_resolution_step_drops_the_catalog_override() {
-        let unresolved = inheriting_agent_model();
+        let mut model = inheriting_agent_model();
         assert!(
-            !unresolved.extra_params.contains_key("top_p"),
-            "a manifest that skipped apply_resolved_inference_params must not \
-             carry a top_p, even though the catalog has an override for it"
+            !model.extra_params.contains_key("top_p"),
+            "precondition: the agent sets no top_p of its own, so the catalog \
+             override is the only source that can put one on the wire"
+        );
+
+        apply_resolved_inference_params(&catalog, &mut model);
+
+        assert_eq!(
+            model.extra_params.get("top_p"),
+            Some(&serde_json::json!(0.5_f32))
         );
     }
 
