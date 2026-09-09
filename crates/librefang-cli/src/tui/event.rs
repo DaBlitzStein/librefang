@@ -3710,7 +3710,9 @@ fn workspace_agents_dir() -> std::path::PathBuf {
 /// Operator-authored agent types, one flat `{name}.toml` each — the same directory
 /// `POST`/`PUT /api/templates` writes (#7740).
 fn agent_types_dir() -> std::path::PathBuf {
-    librefang_kernel::config::librefang_home().join("agent-types")
+    librefang_types::agent_type_store::agent_types_dir_in(
+        &librefang_kernel::config::librefang_home(),
+    )
 }
 
 /// Resolve one agent type's manifest path, agent-types first.

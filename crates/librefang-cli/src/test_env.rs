@@ -1,11 +1,14 @@
 //! Shared test helper for tests that mutate process-global environment
 //! variables.
 //!
-//! `doctor.rs` and `commands/skill.rs` both compile into the same
-//! `librefang-cli` unit-test binary, and `cargo test` runs tests in parallel,
-//! so every env-mutating test must take the one lock in this module — a
-//! private `ENV_LOCK` in one module excludes the sibling module's tests and
-//! nothing else, which is exactly the race the #8179 review found.
+//! `doctor.rs`, `commands/skill.rs`, `templates.rs` and `launcher.rs` all
+//! compile into the same `librefang-cli` unit-test binary, and `cargo test`
+//! runs tests in parallel, so every env-mutating test must take the one lock
+//! in this module — a private `ENV_LOCK` in one module excludes the sibling
+//! module's tests and nothing else, which is exactly the race the #8179
+//! review found. `LIBREFANG_HOME` is mutated by both `templates.rs` and
+//! `launcher.rs`; anything touching it locks here rather than growing yet
+//! another module-private mutex (#8239).
 
 #![cfg(test)]
 
