@@ -1827,7 +1827,16 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   // Same query key as the page-level `useFullConfig`, so this shares one cache entry and one refetch rather than issuing a second request.
   const configQuery = useFullConfig();
   const serverUploadCap = (configQuery.data as Record<string, unknown> | undefined)?.max_upload_size_bytes;
-  const maxAttachmentBytes = typeof serverUploadCap === "number" ? serverUploadCap : DEFAULT_MAX_ATTACHMENT_BYTES;
+  // While `configQuery` is still in flight, `serverUploadCap` is undefined — falling back to
+  // `DEFAULT_MAX_ATTACHMENT_BYTES` there would enforce the 10 MB mirror as if it were the real
+  // cap for the first few hundred ms of every page load, refusing files a raised
+  // `max_upload_size_bytes` allows. The server enforces the real limit regardless, so it's safe
+  // to not refuse locally until the cap is actually known.
+  const maxAttachmentBytes = typeof serverUploadCap === "number"
+    ? serverUploadCap
+    : configQuery.isSuccess
+      ? DEFAULT_MAX_ATTACHMENT_BYTES
+      : Number.POSITIVE_INFINITY;
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
   const setDeepThinking = useUIStore((s) => s.setDeepThinking);
