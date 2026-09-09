@@ -1347,33 +1347,40 @@ fn build_channel_section(
         }
     }
 
-    // Tell the agent it can send rich media via channel_send when the tool
-    // is available AND the channel is a real messaging adapter. `webui` has
-    // no messaging adapter at all — media reaches the user only by being
-    // embedded in the reply text, so channel_send there would silently fail.
-    // `cron` and `autonomous` are different: they have no default channel or
-    // recipient (the turn's own `channel` is the kernel sentinel, not a
-    // deliverable target), but channel_send still works there when the
-    // agent names a real channel and recipient explicitly — suppressing the
-    // tool for those two would regress a capability they already have
-    // (#7995 follow-up).
+    // Tell the agent it can send rich media via channel_send when the tool is available and the channel has a real messaging adapter behind it.
+    // The kernel-internal system channels have no external client, so a `channel_send` aimed at them fails (no adapter) and pushes the agent to fall back to some other channel on its own.
     let has_channel_send = granted_tools
         .iter()
         .any(|t| t == "channel_send" || t == "*");
     if has_channel_send {
-        if channel == "webui" {
+        // Match the literal `cron` / `autonomous` / `webui` sentinels rather
+        // than deriving "this is a background run" from
+        // `is_reserved_system_channel` — that predicate exists to stop
+        // externally-supplied channel names from colliding with a
+        // kernel-derived SessionId, an unrelated concern, and its reserved
+        // list can grow to include a future interactive surface. Keep these
+        // literals in sync with the kernel-side sentinels
+        // (`librefang_kernel::SYSTEM_CHANNEL_{CRON,AUTONOMOUS,WEBUI}`);
+        // runtime can't import the constants directly (circular dep —
+        // runtime is below kernel), same tradeoff as `agent_loop::mod::
+        // build_sender_prefix`.
+        if channel.trim().eq_ignore_ascii_case("webui") {
             section.push_str(
-                "\n\nYou are on the LibreFang web interface, which has no messaging adapter. \
-                 To share images, files, or other media you generate, include the returned \
-                 URL or file path in your reply as markdown — it is rendered directly. Do NOT \
-                 use `channel_send`; there is no channel for it to deliver to.",
+                "\n\nYou are on the LibreFang web interface. Files, images, and media you \
+                 generate are NOT delivered automatically — the browser only sees what your \
+                 reply text embeds. Include the `/api/uploads/...` URL the generating tool \
+                 returned in your response so it renders. Do NOT use `channel_send` to reply \
+                 here. Use it only to reach someone on a different channel (email, telegram, \
+                 …), naming that channel and recipient explicitly.",
             );
-        } else if crate::channel_registry::is_system_channel(channel) {
+        } else if channel.trim().eq_ignore_ascii_case("cron")
+            || channel.trim().eq_ignore_ascii_case("autonomous")
+        {
             section.push_str(
-                "\n\nThis turn has no default channel or recipient. To send images, files, \
-                 polls, or other media, use the `channel_send` tool with an explicit real \
-                 channel (e.g. \"telegram\", \"slack\") and recipient — omitting either will \
-                 fail rather than fall back to a default.",
+                "\n\nThis is a background run — there is no interactive chat attached for \
+                 `channel_send` to reply into. `channel_send` cannot reach this system \
+                 channel — do NOT use it here. To reach a person, target a real messaging \
+                 channel/recipient explicitly.",
             );
         } else if let Some(id) = sender_id {
             section.push_str(&format!(
