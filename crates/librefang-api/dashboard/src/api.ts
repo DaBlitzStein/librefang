@@ -3440,6 +3440,18 @@ export async function getStatus(): Promise<StatusResponse> {
   return get<StatusResponse>("/api/status");
 }
 
+export interface WhoamiResponse {
+  name: string;
+}
+
+/** The calling credential's own resolved identity — `GET /api/authz/whoami`.
+ *  Authenticated, unlike `/api/auth/dashboard-check`, so `name` is always
+ *  the real login rather than the empty string that endpoint deliberately
+ *  sends to anonymous callers. */
+export async function getWhoami(): Promise<WhoamiResponse> {
+  return get<WhoamiResponse>("/api/authz/whoami");
+}
+
 export async function getQueueStatus(): Promise<QueueStatusResponse> {
   return get<QueueStatusResponse>("/api/queue/status");
 }
