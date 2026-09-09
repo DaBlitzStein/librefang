@@ -2105,7 +2105,6 @@ tui-agents-title-custom-prompt = Власний — Системний пром�
 tui-agents-detail-tokens = Обсяг токенів  ($ оновити)
 tui-agents-detail-tokens-injected = введено
 tui-agents-token-usage-failed = Не вдалося завантажити обсяг токенів
-tui-agents-token-usage-daemon-only = Обсяг токенів доступний лише в режимі демона
 tui-agents-title-custom-tools = Власний — Інструменти
 tui-agents-title-custom-skills = Власний — Скіли
 tui-agents-title-custom-mcp = Власний — MCP-сервери
@@ -2140,7 +2139,7 @@ tui-agents-opt-create-new = Створити нового агента
 
 tui-agents-hints-filter =   [Введення] Фільтр  [Enter] Застосувати  [Esc] Скасувати пошук
 tui-agents-hints-list =   [↑↓] Навігація  [Enter] Деталі  [/] Пошук  [Esc] Назад
-tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [p] Параметри моделі  [c] Чат  [k] Зупинити  [Esc] Назад
+tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [p] Параметри моделі  [$] Токени  [c] Чат  [k] Зупинити  [Esc] Назад
 tui-agents-title-model-params = Параметри моделі
 tui-agents-prompt-model-params = Налаштування цього агента мають перевагу над налаштуваннями моделі. `inherit` означає налаштування моделі.
 tui-agents-hints-model-params =   [←→] Змінити  [i] Успадкувати  [e] Своє значення  [Enter] Зберегти  [Esc] Скасувати

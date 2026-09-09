@@ -2256,11 +2256,36 @@ pub fn spawn_fetch_agent_token_usage(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || {
-        let BackendRef::Daemon { base_url, api_key } = backend else {
-            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                "tui-agents-token-usage-daemon-only",
-            )));
-            return;
+        let (base_url, api_key) = match backend {
+            BackendRef::Daemon { base_url, api_key } => (base_url, api_key),
+            BackendRef::InProcess(kernel) => {
+                let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) else {
+                    return;
+                };
+                let aid = librefang_types::agent::AgentId(uuid);
+                let Some(entry) = kernel.agent_registry_ref().get(aid) else {
+                    return;
+                };
+                let tools = kernel.available_tools(aid);
+                let total_tokens = librefang_kernel::compactor::estimate_token_count(
+                    &[],
+                    Some(&entry.manifest.model.system_prompt),
+                    Some(tools.as_slice()),
+                ) as u64;
+                let recent = librefang_kernel::KernelApi::memory_substrate(kernel.as_ref())
+                    .usage()
+                    .list_agent_events_recent(aid, 5)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| (r.model, r.input_tokens, r.output_tokens, r.cost_usd))
+                    .collect();
+                let usage = crate::tui::screens::agents::AgentTokenUsage {
+                    total_tokens,
+                    recent,
+                };
+                let _ = tx.send(AppEvent::AgentTokenUsageLoaded { agent_id, usage });
+                return;
+            }
         };
         let client = make_daemon_client(api_key.as_deref());
         let mut usage = crate::tui::screens::agents::AgentTokenUsage::default();
@@ -2272,9 +2297,15 @@ pub fn spawn_fetch_agent_token_usage(
         )
         .and_then(|r| r.json::<serde_json::Value>().map_err(|e| e.to_string()))
         {
-            Ok(body) => {
-                usage.total_tokens = body["injected_footprint_tokens"].as_u64().unwrap_or(0);
-            }
+            Ok(body) => match body["injected_footprint_tokens"].as_u64() {
+                Some(n) => usage.total_tokens = n,
+                None => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-agents-token-usage-failed",
+                    )));
+                    return;
+                }
+            },
             Err(message) => {
                 let _ = tx.send(AppEvent::FetchError(message));
                 return;
@@ -5162,6 +5193,29 @@ mod tests {
         }
     }
 
+    /// A tiny raw-socket stand-in for a daemon that answers exactly one
+    /// request with a fixed JSON body, then closes. Enough to exercise how a
+    /// caller parses a *response shape*, which `unreachable_daemon` cannot —
+    /// that one only ever produces a transport error.
+    fn one_shot_json_server(body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf); // request content is irrelevant here
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
     /// A memory-config fetch that cannot reach the daemon must say so.
     ///
     /// Before #8141 this returned without sending anything, and the Memory
@@ -5204,6 +5258,34 @@ mod tests {
                 );
             }
             _ => panic!("expected GoalRunFailed, got another AppEvent"),
+        }
+    }
+
+    /// A `200` whose body has no `injected_footprint_tokens` (an older
+    /// daemon, or a future key rename) must not be read as a confident
+    /// zero — that is indistinguishable from a real zero footprint, which is
+    /// exactly the number the operator pressed `$` to see.
+    #[test]
+    fn token_usage_fetch_reports_a_missing_footprint_field_rather_than_a_fake_zero() {
+        let base_url = one_shot_json_server(r#"{"id":"agent-1"}"#);
+        let (tx, rx) = mpsc::channel();
+        spawn_fetch_agent_token_usage(
+            BackendRef::Daemon {
+                base_url,
+                api_key: None,
+            },
+            "agent-1".to_string(),
+            tx,
+        );
+
+        let ev = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a 200 missing injected_footprint_tokens must still produce an event");
+        match ev {
+            AppEvent::FetchError(reason) => {
+                assert!(!reason.is_empty(), "the failure must carry a reason");
+            }
+            _ => panic!("expected FetchError, got another AppEvent"),
         }
     }
 

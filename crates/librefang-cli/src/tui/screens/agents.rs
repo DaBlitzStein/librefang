@@ -1356,6 +1356,33 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                 ]),
             ];
 
+            // Rendered right under the fixed header (not appended at the end) so it
+            // cannot be pushed past the bottom of the pane by the variable-length
+            // sections below it — the Paragraph here has no scroll offset.
+            if let Some(usage) = &state.token_usage {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    crate::i18n::t("tui-agents-detail-tokens"),
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  {} {}",
+                        crate::i18n::t("tui-agents-detail-tokens-injected"),
+                        usage.total_tokens
+                    ),
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                )));
+                for (model, input, output, cost) in usage.recent.iter().take(5) {
+                    lines.push(Line::from(Span::styled(
+                        format!("    {model:<20} {input}/{output}  ${cost:.4}"),
+                        Style::default().fg(theme::TEXT_TERTIARY),
+                    )));
+                }
+            }
+
             if !detail.created.is_empty() {
                 lines.push(Line::from(vec![
                     Span::styled(
@@ -1467,30 +1494,6 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                     ),
                     Span::styled(detail.channels.join(", "), Style::default().fg(theme::CYAN)),
                 ]));
-            }
-
-            if let Some(usage) = &state.token_usage {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    crate::i18n::t("tui-agents-detail-tokens"),
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "  {} {}",
-                        crate::i18n::t("tui-agents-detail-tokens-injected"),
-                        usage.total_tokens
-                    ),
-                    Style::default().fg(theme::TEXT_SECONDARY),
-                )));
-                for (model, input, output, cost) in usage.recent.iter().take(5) {
-                    lines.push(Line::from(Span::styled(
-                        format!("    {model:<20} {input}/{output}  ${cost:.4}"),
-                        Style::default().fg(theme::TEXT_TERTIARY),
-                    )));
-                }
             }
 
             f.render_widget(Paragraph::new(lines), chunks[0]);

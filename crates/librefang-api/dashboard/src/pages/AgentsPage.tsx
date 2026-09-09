@@ -154,6 +154,17 @@ export function cloneResultNotice(result: CloneAgentResult): {
   };
 }
 
+/**
+ * Whether the token-footprint panel has data to show. A genuine zero (a
+ * tools-disabled agent with no system_prompt) is real data, not "missing" —
+ * only the absence of the field means the daemon has nothing to report.
+ */
+export function hasTokenFootprintData(
+  injectedFootprintTokens: number | null | undefined,
+): injectedFootprintTokens is number {
+  return injectedFootprintTokens != null;
+}
+
 /** Two-column row used inside the detail modal's value cards. */
 function DetailRow({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -3130,7 +3141,7 @@ export function AgentsPage() {
                 )}
               </div>
 
-              {detailAgent.injected_footprint_tokens != null && detailAgent.injected_footprint_tokens > 0 && (
+              {hasTokenFootprintData(detailAgent.injected_footprint_tokens) && (
                 <div className="rounded-lg bg-main/30 p-3 space-y-1.5">
                   <p className="text-[11px] font-bold text-text-dim">
                     {t("agents.token_usage_title", { defaultValue: "Token footprint" })}

@@ -2089,7 +2089,6 @@ tui-agents-title-custom-prompt = Custom — System Prompt
 tui-agents-detail-tokens = Token footprint  ($ to refresh)
 tui-agents-detail-tokens-injected = injected
 tui-agents-token-usage-failed = Could not load the token footprint
-tui-agents-token-usage-daemon-only = The token footprint is only available in daemon mode
 tui-agents-title-custom-tools = Custom — Tools
 tui-agents-title-custom-skills = Custom — Skills
 tui-agents-title-custom-mcp = Custom — MCP Servers
@@ -2124,7 +2123,7 @@ tui-agents-opt-create-new = Create new agent
 
 tui-agents-hints-filter =   [Type] Filter  [Enter] Accept  [Esc] Cancel search
 tui-agents-hints-list =   [↑↓] Navigate  [Enter] Detail  [/] Search  [Esc] Back
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [p] Model params  [c] Chat  [k] Kill  [Esc] Back
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [p] Model params  [$] Tokens  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-title-model-params = Model parameters
 tui-agents-prompt-model-params = This agent's own settings win over the model's. `inherit` means the model's setting applies.
 tui-agents-hints-model-params =   [←→] Change  [i] Inherit  [e] Custom value  [Enter] Save  [Esc] Cancel
