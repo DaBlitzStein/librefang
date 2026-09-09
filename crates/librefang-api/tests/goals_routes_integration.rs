@@ -1612,6 +1612,69 @@ async fn goal_run_resume_rejects_an_invalid_iteration_cap() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
 }
 
+/// #7973 review: a cap at or below the checkpoint's already-completed
+/// iteration count would resume, immediately trip the iteration-cap check
+/// with no turn run, and discard the checkpoint on the way out — for a
+/// request that could never have advanced the run in the first place.
+/// Refused rather than silently destroying the checkpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_resume_rejects_a_cap_at_or_below_the_checkpoints_iteration() {
+    let h = boot().await;
+    for cap in [10, 30] {
+        let id = paused_goal(&h).await;
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            &format!("/api/goals/{id}/resume"),
+            Some(serde_json::json!({"max_iterations": cap})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "cap {cap}: {body:?}");
+
+        // The checkpoint must survive the rejected request.
+        let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+        assert_eq!(
+            run["run"]["phase"].as_str(),
+            Some("paused"),
+            "cap {cap}: a rejected resume must not consume the checkpoint: {run:?}"
+        );
+    }
+}
+
+/// The same guard applies to `/start`, not just `/resume`: a paused goal's
+/// `/start` auto-resumes from its checkpoint too.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_on_a_paused_goal_rejects_a_cap_at_or_below_the_checkpoints_iteration() {
+    let h = boot().await;
+    let id = paused_goal(&h).await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/goals/{id}/start"),
+        Some(serde_json::json!({"max_iterations": 30})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+}
+
+/// A cap that leaves headroom past the checkpoint still resumes normally.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_resume_accepts_a_cap_above_the_checkpoints_iteration() {
+    let h = boot().await;
+    let id = paused_goal(&h).await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/goals/{id}/resume"),
+        Some(serde_json::json!({"max_iterations": 31})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert_eq!(body["run"]["max_iterations"].as_u64(), Some(31));
+
+    json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
+}
+
 /// A paused run's timestamps are facts about the run, not about the moment it was polled.
 ///
 /// `state()`'s checkpoint fallback stamped both with `Utc::now()`, so two consecutive polls of a goal that is not moving disagreed, and "how long has this been paused" computed to roughly zero every time.
