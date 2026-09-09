@@ -2285,15 +2285,19 @@ mod model_resolution_declines_routing_tests {
     /// list models for under that provider — cataloged or not is
     /// irrelevant to a local provider, unlike a remote one.
     ///
-    /// The catalog here is deliberately non-empty for "ollama": an empty
-    /// catalog alone already forces `provider_has_models == false`, which
-    /// short-circuits the decline check regardless of `is_local` and would
-    /// let this test pass even if the local-provider exemption were deleted
-    /// (#7781 review).
+    /// "ollama" is deliberately *declared* here, and with a model that does
+    /// not match. Both halves are load-bearing: `is_local` is the last term
+    /// of `!is_local && provider_declared`, so an undeclared provider
+    /// short-circuits the decline on `provider_declared == false` alone and
+    /// the assertion would still hold with the local-provider exemption
+    /// deleted. Declaring the provider makes `is_local` the only reason this
+    /// case is allowed through (#7781 review).
     #[test]
     fn local_provider_allows_unresolvable_model() {
-        let catalog =
-            ModelCatalog::from_entries(vec![catalog_entry("ollama", "qwen3:8b")], Vec::new());
+        let catalog = ModelCatalog::from_entries(
+            vec![catalog_entry("ollama", "qwen3:8b")],
+            vec![declared_provider("ollama")],
+        );
         let mut p = profile("ollama", "llama3.2");
 
         assert!(
