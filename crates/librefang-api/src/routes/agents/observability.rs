@@ -728,6 +728,7 @@ fn default_history_limit() -> u32 {
 )]
 pub async fn list_agent_manifest_history(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     query: Result<Query<ManifestHistoryQuery>, axum::extract::rejection::QueryRejection>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -753,7 +754,12 @@ pub async fn list_agent_manifest_history(
                 .into_response();
         }
     };
-    if state.kernel.agent_registry().get(agent_uuid).is_none() {
+    // A snapshot is the agent's entire `agent.toml` — system prompt, capabilities,
+    // resource budgets, tool/skill/MCP allowlists — so this read is gated the way
+    // every sibling agent-scoped read in this file is rather than merely checking
+    // that the id resolves. The 404 is deliberate: it is what stops id enumeration
+    // from distinguishing "not yours" from "does not exist".
+    if !super::super::can_access_agent(&state, agent_uuid, api_user.as_ref()) {
         return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
             .with_code("agent_not_found")
             .into_response();
