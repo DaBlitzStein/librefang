@@ -840,7 +840,9 @@ impl GoalRunner {
     /// `max_iterations` is resolved here rather than by the caller, because this is the only layer that knows whether the goal is being resumed.
     /// In precedence order: an explicit argument, then the cap the paused run was already running under, then [`DEFAULT_GOAL_MAX_ITERATIONS`].
     ///
-    /// So an operator who passes a cap gets it, on a resume as on a fresh start — a resume body naming `max_iterations` is a deliberate re-budgeting of the remaining run, and refusing to honour it would leave no way to extend a run that is about to hit its cap.
+    /// So an operator who passes a cap gets it, on a resume as on a fresh start — a resume body naming `max_iterations` is a deliberate re-budgeting of the run, and refusing to honour it would leave no way to extend a run that is about to hit its cap.
+    /// It is a TOTAL ceiling compared against the RESTORED iteration count, not additional headroom on top of what the run already spent — the same way a fresh start's cap is compared against iteration 0, not against "iterations remaining".
+    /// A cap at or below that restored count would trip the check on the very first pass with no turn run, so the API layer rejects one before it reaches here.
     /// Passing nothing restores the run's own cap, because the alternative is substituting the compiled default for a number the operator chose: with the iteration count restored from the same checkpoint, a smaller default ends the resumed run at the top of its first loop, and that exit clears the checkpoint, so the progress the resume was asked to continue is destroyed.
     /// Only a goal that never had a cap of its own falls through to the default.
     #[allow(clippy::too_many_arguments)]
@@ -3318,8 +3320,8 @@ mod tests {
         assert!(runner.stop(goal_id));
     }
 
-    /// An explicit cap is an operator re-budgeting the remaining run, so it
-    /// outranks the checkpoint's.
+    /// An explicit cap is an operator re-budgeting the run's total ceiling,
+    /// so it outranks the checkpoint's.
     #[tokio::test]
     async fn an_explicit_cap_outranks_the_checkpoints_on_resume() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
