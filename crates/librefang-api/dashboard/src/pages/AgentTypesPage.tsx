@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
 import { Edit2, ExternalLink, History, LayoutTemplate, Lock, Play, Plus, RotateCcw, Share2, ShieldCheck, Trash2 } from "lucide-react";
-import type { AgentTemplate, AgentTypeSpec, SpawnEphemeralResult } from "../api";
+import type { AgentTemplate, SpawnEphemeralResult } from "../api";
 import { useAgentType, useAgentTypeRegistryDiff, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
