@@ -257,15 +257,22 @@ pub struct SessionStore {
 /// Parse the stored `parent_session_id` back into a `SessionId`.
 ///
 /// `None` for every ordinary session and for rows written before the column existed (v56 adds it NULL).
-/// A malformed stored value is an error rather than a silent `None`: the INSERT only ever writes rendered UUIDs, so a malformed one means manual surgery or a foreign writer, and re-hydrating it as unparented would hide that.
-fn parse_parent_session_id(value: Option<String>) -> LibreFangResult<Option<SessionId>> {
-    value
-        .map(|s| {
-            uuid::Uuid::parse_str(&s)
-                .map(SessionId)
-                .map_err(LibreFangError::memory)
-        })
-        .transpose()
+///
+/// A malformed stored value degrades to `None` with a `warn!`, the same
+/// contract `model_override` and `peer_id` use two columns over — it does
+/// NOT return `Err` (#7991 review: it used to, but the column has no FK and
+/// no CHECK, and every kernel call site of `get_session` collapses any `Err`
+/// into "session does not exist" via a `_ =>` fallback that then overwrites
+/// the whole session's message history with an empty one on the next save.
+/// One malformed lineage value was costing an entire conversation).
+fn parse_parent_session_id(value: Option<String>) -> Option<SessionId> {
+    value.and_then(|s| match uuid::Uuid::parse_str(&s) {
+        Ok(u) => Some(SessionId(u)),
+        Err(e) => {
+            warn!(value = %s, error = %e, "ignoring malformed sessions.parent_session_id");
+            None
+        }
+    })
 }
 
 impl SessionStore {
@@ -377,7 +384,7 @@ impl SessionStore {
                 Ok(Some(Session {
                     id: session_id,
                     agent_id,
-                    parent_session_id: parse_parent_session_id(parent_str)?,
+                    parent_session_id: parse_parent_session_id(parent_str),
                     messages,
                     context_window_tokens: tokens as u64,
                     label,
@@ -446,7 +453,7 @@ impl SessionStore {
                     Session {
                         id: session_id,
                         agent_id,
-                        parent_session_id: parse_parent_session_id(parent_str)?,
+                        parent_session_id: parse_parent_session_id(parent_str),
                         messages,
                         context_window_tokens: tokens as u64,
                         label,
@@ -730,37 +737,90 @@ impl SessionStore {
     /// column via `ALTER TABLE`, which SQLite cannot back with a foreign
     /// key — and the recursion uses `UNION` so a parentage cycle written
     /// by a foreign tool terminates instead of looping forever.
-    pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()> {
+    ///
+    /// Returns every session id actually removed (the requested id plus any
+    /// cascaded descendants), so a caller with per-session side-state to
+    /// reclaim — `file_read_tracker`, currently — can do it for the whole
+    /// set rather than just the one id it asked for (#7991 review).
+    ///
+    /// This is the cascading "dashboard delete" primitive; callers that must
+    /// touch exactly one row (`reset_session`) want [`Self::delete_session_only`].
+    pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<Vec<SessionId>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let id_str = session_id.0.to_string();
         let tx = conn
             .unchecked_transaction()
             .map_err(LibreFangError::memory)?;
-        // The FTS delete runs FIRST, while the subtree is still intact: the
-        // recursive seed `SELECT id FROM sessions WHERE id = ?1` needs the
-        // parent row present, and re-running the CTE after the sessions
-        // DELETE would seed nothing and leave children's FTS rows behind —
-        // the #3548 privacy regression, in child form. Both statements share
-        // one transaction, so an FTS failure rolls the cascade back.
-        // `UNION` (not `UNION ALL`) so a parentage cycle written by a
-        // foreign tool terminates instead of recursing forever.
-        tx.execute(
-            "WITH RECURSIVE doomed(id) AS (
-                SELECT id FROM sessions WHERE id = ?1
+        // The seed is `?1` unconditionally, NOT `SELECT id FROM sessions
+        // WHERE id = ?1`: a session whose `sessions` row is already gone (a
+        // known, reconciled state — see `reconcile_fts_index`) must still be
+        // in `doomed`, or a leftover FTS row for it never gets swept and
+        // stays searchable via `search_sessions`, which does not JOIN
+        // `sessions` — the #3548 privacy regression, recurring (#7991
+        // review). `UNION` (not `UNION ALL`) so a parentage cycle written by
+        // a foreign tool terminates instead of recursing forever.
+        const DOOMED_CTE: &str = "WITH RECURSIVE doomed(id) AS (
+                SELECT ?1 AS id
                 UNION
                 SELECT s.id FROM sessions s JOIN doomed d ON s.parent_session_id = d.id
-            )
-            DELETE FROM sessions_fts WHERE session_id IN (SELECT id FROM doomed)",
+            )";
+        // Resolve the full doomed set BEFORE deleting anything, while the
+        // subtree is still there to walk, so it can be returned to the
+        // caller once the deletes below have committed.
+        let removed_ids: Vec<SessionId> = {
+            let mut stmt = tx
+                .prepare(&format!("{DOOMED_CTE} SELECT id FROM doomed"))
+                .map_err(LibreFangError::memory)?;
+            let rows = stmt
+                .query_map(rusqlite::params![id_str], |row| {
+                    let id_str: String = row.get(0)?;
+                    Ok(id_str)
+                })
+                .map_err(LibreFangError::memory)?;
+            rows.flatten()
+                .filter_map(|s| uuid::Uuid::parse_str(&s).ok().map(SessionId))
+                .collect()
+        };
+        // The FTS delete runs first so a failure rolls the whole cascade
+        // back rather than leaving `sessions` gone with `sessions_fts` still
+        // pointing at the deleted content.
+        tx.execute(
+            &format!(
+                "{DOOMED_CTE} DELETE FROM sessions_fts WHERE session_id IN (SELECT id FROM doomed)"
+            ),
             rusqlite::params![id_str],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
         tx.execute(
-            "WITH RECURSIVE doomed(id) AS (
-                SELECT id FROM sessions WHERE id = ?1
-                UNION
-                SELECT s.id FROM sessions s JOIN doomed d ON s.parent_session_id = d.id
-            )
-            DELETE FROM sessions WHERE id IN (SELECT id FROM doomed)",
+            &format!("{DOOMED_CTE} DELETE FROM sessions WHERE id IN (SELECT id FROM doomed)"),
+            rusqlite::params![id_str],
+        )
+        .map_err(LibreFangError::memory)?;
+        tx.commit().map_err(LibreFangError::memory)?;
+        Ok(removed_ids)
+    }
+
+    /// Delete exactly one session row and its own FTS row — no cascade.
+    ///
+    /// This is what [`Self::delete_session`] did before #7752 added the
+    /// children cascade, and it is what `reset_session` needs: resetting a
+    /// chat's own history must not also delete every sub-agent session it
+    /// ever delegated to. `reset_session` used to reach for the cascading
+    /// `delete_session` and silently take the whole descendant subtree down
+    /// with it (#7991 review).
+    pub fn delete_session_only(&self, session_id: SessionId) -> LibreFangResult<()> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let id_str = session_id.0.to_string();
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(LibreFangError::memory)?;
+        tx.execute(
+            "DELETE FROM sessions_fts WHERE session_id = ?1",
+            rusqlite::params![id_str],
+        )
+        .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
+        tx.execute(
+            "DELETE FROM sessions WHERE id = ?1",
             rusqlite::params![id_str],
         )
         .map_err(LibreFangError::memory)?;
@@ -1378,7 +1438,7 @@ impl SessionStore {
                 Ok(Some(Session {
                     id: session_id,
                     agent_id,
-                    parent_session_id: parse_parent_session_id(parent_str)?,
+                    parent_session_id: parse_parent_session_id(parent_str),
                     messages,
                     context_window_tokens: tokens as u64,
                     label: lbl,
@@ -1536,6 +1596,15 @@ impl SessionStore {
                 rusqlite::params![cutoff_str],
             )
             .map_err(LibreFangError::memory)?;
+        // This selector deletes parents by age without expanding the
+        // subtree — unlike `delete_session`, it has no cascade — so a
+        // child updated inside the retention window can survive its
+        // parent's deletion and be left pointing at a `parent_session_id`
+        // that no longer exists. NULL it out rather than cascading: bulk
+        // retention cleanup deleting a live, recently-touched sub-agent
+        // session because its parent aged out would be a bigger surprise
+        // than a dangling reference (#7991 review).
+        Self::reconcile_dangling_parent_ids(&tx)?;
         tx.commit().map_err(LibreFangError::memory)?;
         Ok(deleted as u64)
     }
@@ -1578,9 +1647,37 @@ impl SessionStore {
                 rusqlite::params![max_per_agent],
             )
             .map_err(LibreFangError::memory)?;
+        // Children carry the parent's `agent_id` (they're spawned attributed
+        // to the parent — see `ephemeral_spawn.rs`), so they rank against it
+        // for this per-agent cap and can outrank it, leaving a dangling
+        // `parent_session_id` the same way `cleanup_expired_sessions` can
+        // (#7991 review — see that function's comment for why this NULLs
+        // rather than cascades).
+        Self::reconcile_dangling_parent_ids(&tx)?;
         tx.commit().map_err(LibreFangError::memory)?;
 
         Ok(deleted as u64)
+    }
+
+    /// NULL out any `parent_session_id` that no longer points at a live
+    /// `sessions` row.
+    ///
+    /// Mirrors `reconcile_fts_index`'s "known, handled drift" shape, but for
+    /// lineage instead of full-text search: the selectors deleting sessions
+    /// in bulk here don't expand the parent/child subtree the way
+    /// `delete_session` does, so an orphaned reference is an expected
+    /// outcome of normal retention cleanup, not corruption — and `NOT IN
+    /// (SELECT id FROM sessions)` is a no-op (zero rows touched) on every
+    /// call where nothing is actually dangling.
+    fn reconcile_dangling_parent_ids(tx: &rusqlite::Transaction<'_>) -> LibreFangResult<()> {
+        tx.execute(
+            "UPDATE sessions SET parent_session_id = NULL \
+             WHERE parent_session_id IS NOT NULL \
+             AND parent_session_id NOT IN (SELECT id FROM sessions)",
+            [],
+        )
+        .map_err(LibreFangError::memory)?;
+        Ok(())
     }
 
     /// Delete sessions whose agent_id is not in the provided live set.
@@ -2895,6 +2992,92 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "the retained session must stay searchable"
+        );
+    }
+
+    /// Regression for #7991 review: `cleanup_expired_sessions` deletes
+    /// parents by age with no cascade (unlike `delete_session`), so a
+    /// child updated inside the retention window survives its parent's
+    /// deletion and is left with a `parent_session_id` pointing at a row
+    /// that no longer exists. Nothing reconciled that — contrast
+    /// `sessions_fts`, which has `reconcile_fts_index` for exactly this
+    /// class of dangling reference.
+    #[test]
+    fn test_cleanup_expired_sessions_nulls_dangling_parent_ids() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        let parent = store.create_session(agent_id).unwrap();
+        let mut child = store.create_session(agent_id).unwrap();
+        child.parent_session_id = Some(parent.id);
+        store.save_session(&child).unwrap();
+
+        // Backdate only the parent past the retention window; the child
+        // stays fresh, so the plain age-based selector removes the parent
+        // and leaves the child untouched.
+        {
+            let conn = store.pool.get().expect("pool get");
+            let old_date = (Utc::now() - chrono::Duration::days(60)).to_rfc3339();
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![old_date, parent.id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        let deleted = store.cleanup_expired_sessions(30).unwrap();
+        assert_eq!(deleted, 1, "only the aged-out parent should be deleted");
+
+        let reloaded_child = store
+            .get_session(child.id)
+            .unwrap()
+            .expect("the child must survive — it was not aged out");
+        assert!(
+            reloaded_child.parent_session_id.is_none(),
+            "a parent_session_id pointing at a row that no longer exists \
+             must be reconciled to None, not left dangling"
+        );
+    }
+
+    /// Regression for #7991 review: `cleanup_excess_sessions` ranks
+    /// sessions per `agent_id` by recency and evicts everything past the
+    /// cap. Children carry the parent's `agent_id` (they're attributed to
+    /// it), so they compete with it for the cap and can outrank it,
+    /// leaving the same dangling `parent_session_id` as
+    /// `cleanup_expired_sessions`.
+    #[test]
+    fn test_cleanup_excess_sessions_nulls_dangling_parent_ids() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        let parent = store.create_session(agent_id).unwrap();
+        let mut child = store.create_session(agent_id).unwrap();
+        child.parent_session_id = Some(parent.id);
+        store.save_session(&child).unwrap();
+
+        // Age the parent so it ranks below the child under
+        // `ORDER BY updated_at DESC` and gets evicted by a cap of 1.
+        {
+            let conn = store.pool.get().expect("pool get");
+            let old_date = (Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![old_date, parent.id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        let deleted = store.cleanup_excess_sessions(1).unwrap();
+        assert_eq!(deleted, 1, "only the older-ranked parent should be evicted");
+
+        let reloaded_child = store
+            .get_session(child.id)
+            .unwrap()
+            .expect("the child must survive — it outranked the parent");
+        assert!(
+            reloaded_child.parent_session_id.is_none(),
+            "a parent_session_id pointing at a row that no longer exists \
+             must be reconciled to None, not left dangling"
         );
     }
 
@@ -4323,6 +4506,51 @@ mod tests {
         );
     }
 
+    /// Regression for #7991 review: a malformed `parent_session_id` used to
+    /// make `parse_parent_session_id` return `Err`, and every kernel call
+    /// site of `get_session` collapses `Err` alongside `Ok(None)` into "no
+    /// session exists" — which then proceeds to build a fresh empty
+    /// `Session` and `save_session` it, overwriting the real message
+    /// history with a single message. Degrading to `None` with a `warn!`
+    /// (the same contract `model_override` / `peer_id` use) means a
+    /// malformed lineage value costs nothing beyond the lineage itself.
+    #[test]
+    fn test_get_session_degrades_malformed_parent_session_id_to_none() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        session.messages.push(Message::user("hello"));
+        session.messages.push(Message::assistant("hi"));
+        store.save_session(&session).unwrap();
+
+        // Manual surgery: the INSERT only ever writes rendered UUIDs, so
+        // this simulates the "foreign writer" scenario the old doc comment
+        // called out as the only way this column goes bad.
+        {
+            let conn = store.pool.get().expect("pool get");
+            conn.execute(
+                "UPDATE sessions SET parent_session_id = 'not-a-uuid' WHERE id = ?1",
+                rusqlite::params![session.id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        let loaded = store
+            .get_session(session.id)
+            .expect("a malformed parent_session_id must not turn into Err")
+            .expect("the session must still be found, not treated as missing");
+        assert!(
+            loaded.parent_session_id.is_none(),
+            "a malformed value degrades to None rather than propagating Err"
+        );
+        assert_eq!(
+            loaded.messages.len(),
+            2,
+            "the real message history must survive — the bug this guards \
+             against overwrote it with an empty session"
+        );
+    }
+
     /// Review blocking #2: the changelog promised "deleting the parent
     /// cascades to its children", but no delete path removed children.
     /// Pins the application-side cascade: deleting a parent removes its
@@ -4362,7 +4590,19 @@ mod tests {
             .save_session(&mk(unrelated_id, None, "unrelated"))
             .unwrap();
 
-        store.delete_session(parent_id).unwrap();
+        // #7991 review: the cascade used to be unobservable — callers had
+        // no way to learn which ids came down with the one they asked for,
+        // so the kernel's per-session cleanup (`file_read_tracker`) ran only
+        // for `parent_id` and leaked an entry per cascaded child.
+        let removed = store.delete_session(parent_id).unwrap();
+        let mut removed_sorted = removed.clone();
+        removed_sorted.sort_by_key(|s| s.0);
+        let mut expected_sorted = vec![parent_id, child_id, grandchild_id];
+        expected_sorted.sort_by_key(|s| s.0);
+        assert_eq!(
+            removed_sorted, expected_sorted,
+            "delete_session must report every id it actually removed"
+        );
 
         for gone in [parent_id, child_id, grandchild_id] {
             let row = store
@@ -4392,6 +4632,64 @@ mod tests {
         assert_eq!(
             fts_orphans, 0,
             "cascade must remove children's FTS rows, not leave them searchable"
+        );
+    }
+
+    /// Regression for #7991 review: the doomed-set seed used to be `SELECT
+    /// id FROM sessions WHERE id = ?1`, which resolves to nothing once the
+    /// `sessions` row is already gone — a known, reconciled state
+    /// (`reconcile_fts_index` exists precisely to clean it up). Re-issuing
+    /// `delete_session` on such a session used to return `Ok(())` and leave
+    /// its FTS row indexed and searchable, which is the #3548 privacy
+    /// regression this function's own doc comment is about.
+    #[test]
+    fn test_delete_session_removes_fts_row_when_sessions_row_already_gone() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let needle = "alreadygonenonce555";
+        let mut session = store.create_session(agent_id).unwrap();
+        session.messages.push(Message::user(needle));
+        store.save_session(&session).unwrap();
+
+        // Simulate the "sessions row already gone, FTS row left behind"
+        // state directly, bypassing `delete_session` entirely.
+        {
+            let conn = store.pool.get().expect("pool get");
+            conn.execute(
+                "DELETE FROM sessions WHERE id = ?1",
+                rusqlite::params![session.id.0.to_string()],
+            )
+            .unwrap();
+        }
+        let fts_before: i64 = {
+            let conn = store.pool.get().expect("pool get");
+            conn.query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                rusqlite::params![session.id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            fts_before, 1,
+            "the FTS row must still be there to reproduce the bug"
+        );
+
+        store.delete_session(session.id).unwrap();
+
+        let fts_after: i64 = {
+            let conn = store.pool.get().expect("pool get");
+            conn.query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                rusqlite::params![session.id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            fts_after, 0,
+            "delete_session must clear the FTS row even when the sessions \
+             row was already gone before the call"
         );
     }
 
