@@ -4347,16 +4347,25 @@ mod tests {
         // carries the learnings, so polling `state()` alone can race ahead
         // of the write this test is actually waiting on.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if load_pause_checkpoint(&substrate, goal_id).is_some() {
-                break;
+        let checkpoint = loop {
+            if let Some(cp) = load_pause_checkpoint(&substrate, goal_id) {
+                break cp;
             }
             assert!(
                 std::time::Instant::now() < deadline,
                 "pause checkpoint never landed"
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        };
+        // #7785 keys a run's lessons by the run's own `started_at` so a second run of the same goal cannot overwrite the first one's.
+        // A resume continues the paused run rather than beginning a new one, so the finished run writes under the start time the checkpoint carries, not the resume's own clock.
+        let learnings_key = format!(
+            "{LEARNINGS_KEY_PREFIX}{goal_id}_{}",
+            checkpoint
+                .started_at
+                .expect("the pause checkpoint carries the run's start time")
+                .timestamp_millis()
+        );
 
         // Resume and let the run finish, capturing a second lesson.
         let send_second = |_a: AgentId, _p: String| async move {
@@ -4395,10 +4404,7 @@ mod tests {
         }
 
         let stored = substrate
-            .structured_get(
-                goals_storage_agent_id(),
-                &format!("{LEARNINGS_KEY_PREFIX}{goal_id}"),
-            )
+            .structured_get(goals_storage_agent_id(), &learnings_key)
             .unwrap()
             .expect("learnings must be persisted");
         let learnings: Vec<String> = stored["learnings"]
