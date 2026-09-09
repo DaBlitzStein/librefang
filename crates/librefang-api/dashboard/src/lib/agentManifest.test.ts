@@ -1230,9 +1230,14 @@ prompt_template = "on push"
     expect(reparsed.form.tool_allowlist).toEqual(["file_read"]);
     expect(reparsed.extras.topLevel["future_field"]).toBe("unknown to this daemon");
     expect(reparsed.extras.topLevel["compaction"]).toEqual({ threshold_messages: 7 });
-    expect(reparsed.extras.topLevel["workspaces"]).toEqual({
-      notes: { path: "notes", mode: "rw" },
-    });
+    // #8013 promoted `[workspaces]` from an unknown passthrough table to a
+    // first-class form field, so it survives the cycle through `form.workspaces`
+    // instead of `extras.topLevel`. `mode` is omitted from the serialized output
+    // when it holds the default `rw`, and the parser puts it back.
+    expect(
+      reparsed.form.workspaces.map((ws) => ({ name: ws.name, path: ws.path, mode: ws.mode })),
+    ).toEqual([{ name: "notes", path: "notes", mode: "rw" }]);
+    expect(reparsed.extras.topLevel["workspaces"]).toBeUndefined();
     expect(reparsed.extras.topLevel["triggers"]).toEqual([
       { pattern: "git.push", prompt_template: "on push" },
     ]);
