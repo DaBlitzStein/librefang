@@ -374,28 +374,38 @@ impl GoalsState {
             }
             // The cadence step takes digits only: silently dropping a letter
             // beats accepting one and failing the parse at submit time.
-            KeyCode::Char(c) => match self.create_step {
-                0 => self.create_title.push(c),
-                1 => self.create_desc.push(c),
-                2 => self.create_agent_id.push(c),
-                3 if c.is_ascii_digit() => self.create_tick_interval.push(c),
-                _ => {}
-            },
-            KeyCode::Backspace => match self.create_step {
-                0 => {
-                    self.create_title.pop();
+            //
+            // Editing any field also clears the rejection message: it names a
+            // value that is no longer the one in the box, and a stale error
+            // sitting under a corrected number reads as a second rejection.
+            KeyCode::Char(c) => {
+                self.status_msg.clear();
+                match self.create_step {
+                    0 => self.create_title.push(c),
+                    1 => self.create_desc.push(c),
+                    2 => self.create_agent_id.push(c),
+                    3 if c.is_ascii_digit() => self.create_tick_interval.push(c),
+                    _ => {}
                 }
-                1 => {
-                    self.create_desc.pop();
+            }
+            KeyCode::Backspace => {
+                self.status_msg.clear();
+                match self.create_step {
+                    0 => {
+                        self.create_title.pop();
+                    }
+                    1 => {
+                        self.create_desc.pop();
+                    }
+                    2 => {
+                        self.create_agent_id.pop();
+                    }
+                    3 => {
+                        self.create_tick_interval.pop();
+                    }
+                    _ => {}
                 }
-                2 => {
-                    self.create_agent_id.pop();
-                }
-                3 => {
-                    self.create_tick_interval.pop();
-                }
-                _ => {}
-            },
+            }
             _ => {}
         }
         GoalsAction::Continue
@@ -635,7 +645,8 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
         Constraint::Length(1), // field label
         Constraint::Length(1), // input
         Constraint::Length(1), // info hint
-        Constraint::Min(0),
+        Constraint::Min(0),    // spacer
+        Constraint::Length(1), // status
         Constraint::Length(1), // nav hints
     ])
     .split(area);
@@ -742,12 +753,19 @@ fn draw_create(f: &mut Frame, area: Rect, state: &GoalsState) {
         chunks[6],
     );
 
+    // The wizard owns the whole screen while it is open, so `draw_list_panel`
+    // — the only other place that renders `status_msg` — is not running. Until
+    // this line existed, an out-of-range cadence set a message that reached no
+    // surface at all: Enter simply appeared to do nothing, on the one step
+    // whose whole point is telling the operator the number was refused.
+    f.render_widget(widgets::status_or_hint(&state.status_msg, ""), chunks[8]);
+
     let nav_key = if state.create_step + 1 < CREATE_STEPS {
         "tui-goals-nav-next"
     } else {
         "tui-goals-nav-submit"
     };
-    f.render_widget(widgets::hint_bar(&crate::i18n::t(nav_key)), chunks[8]);
+    f.render_widget(widgets::hint_bar(&crate::i18n::t(nav_key)), chunks[9]);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1091,6 +1109,50 @@ mod tests {
             "the wizard stays open rather than posting a value the API refuses"
         );
         assert!(!s.status_msg.is_empty(), "and says what the bounds are");
+
+        // Setting the field is not telling the operator. `draw_list_panel` is
+        // the only other place that renders `status_msg`, and it does not run
+        // while the wizard owns the screen — so this message reached no
+        // surface at all and Enter simply looked inert, on the one step whose
+        // whole point is saying the number was refused.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| draw_create(f, f.area(), &s))
+            .expect("the create wizard must render");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            rendered.contains(&s.status_msg),
+            "the wizard must show the rejection, not just store it.\nlooked for: {}\nrendered:\n{rendered}",
+            s.status_msg
+        );
+    }
+
+    /// A rejection describes the number that was in the box. Once the operator
+    /// starts correcting it, the message is about a value that is no longer
+    /// there, and leaving it up reads as a second refusal.
+    #[test]
+    fn editing_a_refused_cadence_clears_the_message() {
+        let mut s = state_with(vec![]);
+        s.create_open = true;
+        s.create_step = CREATE_STEPS - 1;
+        s.status_msg = "Tick interval must be between 1 and 86400 seconds.".to_string();
+
+        s.handle_key(key(KeyCode::Backspace));
+        assert!(
+            s.status_msg.is_empty(),
+            "backspace clears the stale message"
+        );
+
+        s.status_msg = "Tick interval must be between 1 and 86400 seconds.".to_string();
+        s.handle_key(key(KeyCode::Char('9')));
+        assert!(s.status_msg.is_empty(), "typing clears the stale message");
     }
 
     #[test]
