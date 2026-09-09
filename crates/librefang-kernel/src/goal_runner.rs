@@ -4758,6 +4758,28 @@ mod tests {
             None,
         ));
 
+        // #7785's review keyed learnings to the run rather than the goal, so a
+        // second run of the same goal cannot overwrite the first's lessons.
+        // The resumed run restores `started_at` from the pause checkpoint, so a
+        // single key spans the whole cycle — which is what makes the
+        // accumulation asserted below observable in one document.
+        // `state()` try_locks and `run_loop` holds that lock between awaits, so
+        // poll rather than reading once.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let learnings_key = loop {
+            if let Some(s) = runner.state(goal_id) {
+                break format!(
+                    "{LEARNINGS_KEY_PREFIX}{goal_id}_{}",
+                    s.started_at.timestamp_millis()
+                );
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the run state never became readable"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while turns.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -4818,10 +4840,7 @@ mod tests {
         }
 
         let stored = substrate
-            .structured_get(
-                goals_storage_agent_id(),
-                &format!("{LEARNINGS_KEY_PREFIX}{goal_id}"),
-            )
+            .structured_get(goals_storage_agent_id(), &learnings_key)
             .unwrap()
             .expect("learnings must be persisted");
         let learnings: Vec<String> = stored["learnings"]
