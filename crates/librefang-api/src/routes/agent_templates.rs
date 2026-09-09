@@ -697,7 +697,7 @@ pub async fn put_agent_template_toml(
 
     match persist_agent_type(&name, &manifest) {
         Ok(rendered) => {
-            record_template_version(&state, &name, &rendered, "toml");
+            let _ = record_template_version(&state, &name, &rendered, "toml");
             let mut detail =
                 agent_type_detail(&name, TemplateSource::AgentType, &manifest, &rendered);
             if !unknown_keys.is_empty() {
@@ -769,7 +769,7 @@ pub async fn post_agent_template_toml(
 
     match store_create_from_manifest(&name, &manifest) {
         Ok(rendered) => {
-            record_template_version(&state, &name, &rendered, "create");
+            let _ = record_template_version(&state, &name, &rendered, "create");
             let mut detail =
                 agent_type_detail(&name, TemplateSource::AgentType, &manifest, &rendered);
             if !unknown_keys.is_empty() {
