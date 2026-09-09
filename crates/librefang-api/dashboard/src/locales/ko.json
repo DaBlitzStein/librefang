@@ -4167,6 +4167,7 @@
     "field_timeout_placeholder": "전역 점유 TTL을 재정의, 0 = 회수하지 않음",
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}초",
+    "timeout_badge_never": "TTL: 회수 안 함",
     "submit": "작업 만들기",
     "cancel": "취소",
     "empty": "작업 없음",

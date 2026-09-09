@@ -4178,6 +4178,7 @@
     "field_timeout_placeholder": "Zastępuje globalny limit TTL, 0 = nigdy nie odbieraj",
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}s",
+    "timeout_badge_never": "TTL: nigdy nie odbierany",
     "submit": "Utwórz zadanie",
     "cancel": "Anuluj",
     "empty": "Brak zadań",

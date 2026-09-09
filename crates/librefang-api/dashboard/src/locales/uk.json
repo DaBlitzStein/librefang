@@ -4178,6 +4178,7 @@
     "field_timeout_placeholder": "Перевизначає глобальний TTL захоплення, 0 = ніколи не повертати",
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}с",
+    "timeout_badge_never": "TTL: ніколи не повертається",
     "submit": "Створити таску",
     "cancel": "Скасувати",
     "empty": "Немає тасок",
