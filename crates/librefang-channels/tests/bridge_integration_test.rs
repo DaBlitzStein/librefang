@@ -3082,6 +3082,255 @@ async fn test_approval_listener_binding_respects_account_id_scope() {
 }
 
 // ---------------------------------------------------------------------------
+// #8227: "approval reached nobody" is a verdict on the whole fan-out
+// ---------------------------------------------------------------------------
+//
+// The #5002 `WARN` sat inside `for adapter in &adapters`, so it described one
+// adapter's turn while being phrased as a verdict on the approval. On a host
+// running one sidecar per agent — a supported configuration — every approval
+// logged N-1 lines claiming it had been dropped, while the Nth adapter
+// delivered it. The guarantee #5002 wanted (a genuinely undeliverable approval
+// is never silently swallowed) is preserved by evaluating the same condition
+// once, after the loop.
+
+thread_local! {
+    static WARN_SINK: std::cell::RefCell<Option<Arc<Mutex<Vec<String>>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Process-global subscriber that forwards `WARN`/`ERROR` events to the sink of
+/// whichever thread raised them, if that thread registered one.
+///
+/// The obvious shape — a subscriber per test via
+/// `tracing::subscriber::set_default` — is thread-local, but `tracing` caches
+/// callsite interest *globally*: a sibling test dropping its guard can leave a
+/// callsite cached as "never", after which the event never reaches the
+/// thread-local subscriber at all. That is not hypothetical; it made these two
+/// tests pass under `--test-threads=1` and time out in the parallel run.
+/// Answering `enabled` from a permanent global keeps interest at "sometimes",
+/// so the decision is taken per event, and the thread-local sink still keeps
+/// concurrent tests from seeing each other's warnings.
+struct WarnRouter;
+
+struct WarnVisitor(String);
+
+impl tracing::field::Visit for WarnVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.push_str(&format!(" {}={:?}", field.name(), value));
+    }
+}
+
+impl tracing::Subscriber for WarnRouter {
+    fn enabled(&self, meta: &tracing::Metadata<'_>) -> bool {
+        *meta.level() <= tracing::Level::WARN
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        WARN_SINK.with(|sink| {
+            if let Some(events) = sink.borrow().as_ref() {
+                let mut visitor = WarnVisitor(format!("[{}]", event.metadata().level()));
+                event.record(&mut visitor);
+                events.lock().unwrap().push(visitor.0);
+            }
+        });
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Captures `WARN`/`ERROR` events raised on this thread for as long as it lives.
+///
+/// `#[tokio::test]` runs a current-thread runtime, so the listener task spawned
+/// by `start_approval_listener` is polled on the test's own thread and its
+/// events land in this spy.
+struct WarnSpy(Arc<Mutex<Vec<String>>>);
+
+impl WarnSpy {
+    fn install() -> Self {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            tracing::subscriber::set_global_default(WarnRouter)
+                .expect("nothing else installs a global subscriber in this test binary");
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        WARN_SINK.with(|sink| *sink.borrow_mut() = Some(events.clone()));
+        Self(events)
+    }
+
+    fn seen(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl Drop for WarnSpy {
+    fn drop(&mut self) {
+        WARN_SINK.with(|sink| *sink.borrow_mut() = None);
+    }
+}
+
+/// Two adapters, only the second covering the requesting agent: the approval is
+/// delivered, so the fan-out must produce no warning at all.
+#[tokio::test]
+async fn test_approval_fanout_is_silent_when_a_later_adapter_covers_the_agent() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+
+    // No `channel_default` anywhere: both adapters route purely via bindings,
+    // and only `bot-b` has one covering agent X. `bot-a` is iterated first, so
+    // pre-fix it warns before `bot-b` gets its turn.
+    let router = AgentRouter::new();
+    router.register_agent("binder-x".to_string(), agent_x);
+    router.load_bindings(&[librefang_types::config::AgentBinding {
+        agent: "binder-x".to_string(),
+        match_rule: librefang_types::config::BindingMatchRule {
+            channel: Some("telegram".to_string()),
+            account_id: Some("bot-b".to_string()),
+            peer_id: Some("chat-z".to_string()),
+            ..Default::default()
+        },
+    }]);
+    let router = Arc::new(router);
+
+    let adapter_a = NotifyingAdapter::with_account("telegram-a", "bot-a", Vec::new());
+    let adapter_b = NotifyingAdapter::with_account("telegram-b", "bot-b", Vec::new());
+    let adapter_b_ref = adapter_b.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter_a).await.unwrap();
+    manager.start_adapter(adapter_b).await.unwrap();
+
+    // Installed only now: adapter startup warns about the test double having
+    // no webhook routes, which has nothing to do with the fan-out. Scoping the
+    // spy to the listener keeps the assertion literally "zero warnings" rather
+    // than a substring filter that could hide a second, differently-worded one.
+    let spy = WarnSpy::install();
+
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_x,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "8227aaaa00001111".to_string(),
+                agent_id: agent_x.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "rm".to_string(),
+                risk_level: "high".to_string(),
+                ..Default::default()
+            }),
+        )))
+        .expect("broadcast send");
+
+    wait_until("approval delivered to bot-b", || {
+        !adapter_b_ref.get_sent().is_empty()
+    })
+    .await;
+    // The uncovered adapter's turn is over by the time the covered one has
+    // sent, but give the listener room in case iteration order ever changes.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let seen = spy.seen();
+    assert!(
+        seen.is_empty(),
+        "#8227: a delivered approval must not warn about the adapters that did not cover it, got: {seen:#?}"
+    );
+
+    manager.stop().await;
+}
+
+/// No adapter covers the requesting agent: the #5002 guarantee still holds, but
+/// the operator gets exactly one warning naming the approval, not one per
+/// adapter.
+#[tokio::test]
+async fn test_approval_fanout_warns_exactly_once_when_no_adapter_covers_the_agent() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+    let agent_other = AgentId::new();
+
+    // The only binding covers a different agent, so neither adapter has a
+    // delivery target for agent X's approval.
+    let router = AgentRouter::new();
+    router.register_agent("binder-other".to_string(), agent_other);
+    router.load_bindings(&[librefang_types::config::AgentBinding {
+        agent: "binder-other".to_string(),
+        match_rule: librefang_types::config::BindingMatchRule {
+            channel: Some("telegram".to_string()),
+            peer_id: Some("chat-other".to_string()),
+            ..Default::default()
+        },
+    }]);
+    let router = Arc::new(router);
+
+    let adapter_a = NotifyingAdapter::with_account("telegram-a", "bot-a", Vec::new());
+    let adapter_b = NotifyingAdapter::with_account("telegram-b", "bot-b", Vec::new());
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter_a).await.unwrap();
+    manager.start_adapter(adapter_b).await.unwrap();
+
+    // See the sibling test: the spy goes in after adapter startup so the count
+    // is the fan-out's own warnings and nothing else.
+    let spy = WarnSpy::install();
+
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_x,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "8227bbbb22223333".to_string(),
+                agent_id: agent_x.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "rm".to_string(),
+                risk_level: "high".to_string(),
+                ..Default::default()
+            }),
+        )))
+        .expect("broadcast send");
+
+    wait_until("undeliverable approval warned", || !spy.seen().is_empty()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let seen = spy.seen();
+    assert_eq!(
+        seen.len(),
+        1,
+        "#8227: an undeliverable approval must warn once for the whole fan-out, got: {seen:#?}"
+    );
+    assert!(
+        seen[0].contains("8227bbbb22223333") && seen[0].contains(&agent_x.0.to_string()),
+        "the warning must stay actionable — request id and requesting agent, got: {}",
+        seen[0]
+    );
+
+    manager.stop().await;
+}
+
+// ---------------------------------------------------------------------------
 // Broadcast dispatch session scope (#7140)
 // ---------------------------------------------------------------------------
 
