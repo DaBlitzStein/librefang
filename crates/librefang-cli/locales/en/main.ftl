@@ -2256,6 +2256,7 @@ tui-memory-config-auto-retrieve = Recall automatically
 tui-memory-config-extraction-model = Model that writes memories
 tui-memory-config-inherited = (inherited from the system default)
 tui-memory-config-pending = pending save
+tui-memory-config-restart-required = saved — restart to use it
 tui-memory-config-searching = How memories are searched
 tui-memory-config-embedding-provider = Search provider
 tui-memory-config-embedding-model = Search model

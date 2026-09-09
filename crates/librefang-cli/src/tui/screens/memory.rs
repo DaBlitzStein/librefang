@@ -59,6 +59,39 @@ fn seed_model_buf(cfg: &MemoryConfigView) -> String {
         .unwrap_or_else(|| cfg.effective_extraction_model.clone())
 }
 
+/// Whether the configured setting is not the model extraction is running on.
+///
+/// `effective_extraction_model` is what boot resolved and what the daemon is
+/// still using: `HotAction::UpdateProactiveMemory` swaps the new
+/// `[proactive_memory]` table onto the running store without rebuilding the
+/// extraction driver, so from the moment a save lands until the next restart
+/// the file and the running extractor legitimately name different models.
+/// Saying so is the whole premise of this panel — it is the only surface that
+/// can answer "which model is writing my memories right now".
+///
+/// The comparison is a suffix test rather than a second provider split. Boot
+/// accepts `provider/model` and `provider:model` alike and takes the prefix
+/// back off with `strip_provider_prefix`; re-deriving that here is how two
+/// derivations of "which model extracts" start disagreeing, and the one an
+/// operator reads is then the one that is wrong. A spec ending in the running
+/// name — whole, or after a separator — is in step whatever the prefix was.
+fn extraction_model_awaits_restart(cfg: &MemoryConfigView) -> bool {
+    let Some(configured) = cfg.configured_extraction_model.as_deref() else {
+        return false;
+    };
+    let effective = cfg.effective_extraction_model.as_str();
+    // No model runs at all: extraction is inactive, a sidecar does the work, or
+    // the driver failed to build and extraction fell back to substring
+    // matching. There is nothing for the setting to be out of step with, and
+    // reporting a restart would send the operator after the wrong problem.
+    if effective.is_empty() || configured == effective {
+        return false;
+    }
+    !configured
+        .strip_suffix(effective)
+        .is_some_and(|prefix| prefix.ends_with('/') || prefix.ends_with(':'))
+}
+
 #[derive(Clone)]
 pub struct AgentEntry {
     pub id: String,
@@ -146,6 +179,13 @@ pub struct MemoryState {
     /// unsaved markers when the panel still matches this snapshot, so an edit
     /// made while the PATCH was in flight is not reported as saved.
     pending_save: Option<(bool, bool, Option<String>)>,
+    /// The last configuration the daemon answered with, kept verbatim so `Esc`
+    /// can put it back. Without it "Esc to discard" only dropped the marker and
+    /// left the edited values on `self.config`, and they were corrected solely
+    /// because re-entering through `c` happens to refetch — an accident that
+    /// showed unsaved edits as the daemon's own configuration whenever the
+    /// refetch was slow or failed.
+    config_saved: Option<MemoryConfigView>,
 }
 
 #[derive(Debug)]
@@ -196,6 +236,7 @@ impl MemoryState {
             config_model_edited: false,
             config_dirty: false,
             pending_save: None,
+            config_saved: None,
         }
     }
 
@@ -210,6 +251,7 @@ impl MemoryState {
     /// before it is stale, and a save carrying it would write back a value the
     /// panel is no longer showing.
     pub fn apply_config(&mut self, config: MemoryConfigView) {
+        self.config_saved = Some(config.clone());
         self.config = Some(config);
         self.loading = false;
         self.config_model_edited = false;
@@ -335,7 +377,14 @@ impl MemoryState {
             KeyCode::Char('r') => return MemoryUIAction::LoadConfig,
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.sub = MemorySub::AgentSelect;
+                // "Esc to discard" has to discard the values too. Clearing only
+                // the marker left the edits sitting on `self.config`, looking
+                // like configuration the daemon had reported.
+                if let Some(saved) = &self.config_saved {
+                    self.config = Some(saved.clone());
+                }
                 self.config_dirty = false;
+                self.config_model_edited = false;
             }
             _ => {}
         }
@@ -354,7 +403,18 @@ impl MemoryState {
     /// while the PATCH is in flight, and an edit made in that window (e.g.
     /// toggling a second row) must not be discarded just because an earlier
     /// save came back clean.
-    pub fn apply_save_result(&mut self, result: Result<(), crate::tui::event::FetchFailure>) {
+    ///
+    /// Returns [`MemoryUIAction::LoadConfig`] after a clean save so the panel
+    /// shows what the daemon reports rather than what was typed: the write
+    /// changes `extraction_model` on disk without moving the running extractor,
+    /// and only a fetch can say which model each of those now is. The refetch
+    /// is deliberately skipped when an edit landed while the PATCH was in
+    /// flight — [`apply_config`](Self::apply_config) takes the daemon's answer
+    /// as the truth, which would throw that edit away.
+    pub fn apply_save_result(
+        &mut self,
+        result: Result<(), crate::tui::event::FetchFailure>,
+    ) -> MemoryUIAction {
         let unchanged_since_dispatch = match (&self.pending_save, &self.config) {
             (Some((auto_memorize, auto_retrieve, model)), Some(cfg)) => {
                 *auto_memorize == cfg.auto_memorize
@@ -364,6 +424,7 @@ impl MemoryState {
             _ => false,
         };
         self.pending_save = None;
+        let mut next = MemoryUIAction::Continue;
         self.config_status_msg = match result {
             Ok(()) => {
                 if unchanged_since_dispatch {
@@ -371,6 +432,7 @@ impl MemoryState {
                     // The model is now the configured one, so the next save
                     // has nothing of its own to write until edited again.
                     self.config_model_edited = false;
+                    next = MemoryUIAction::LoadConfig;
                 }
                 crate::i18n::t("tui-memory-config-saved")
             }
@@ -381,6 +443,7 @@ impl MemoryState {
                 crate::i18n::t_args("tui-memory-config-save-failed", &[("error", &reason)])
             }
         };
+        next
     }
 
     fn handle_agent_select(&mut self, key: KeyEvent) -> MemoryUIAction {
@@ -623,22 +686,32 @@ fn draw_config(f: &mut Frame, area: Rect, state: &MemoryState) {
                 ));
             } else {
                 spans.push(value(&cfg.effective_extraction_model));
-                // The typed model is not what is running yet — it is what a
-                // save will write. Showing it as its own span, distinct from
-                // the effective one above, is what keeps the panel from
-                // claiming extraction already moved to it.
-                if state.config_model_edited {
-                    if let Some(pending) = &cfg.configured_extraction_model {
-                        spans.push(Span::styled("  → ", Style::default().fg(theme::YELLOW)));
-                        spans.push(Span::styled(
-                            pending.clone(),
-                            Style::default().fg(theme::YELLOW),
-                        ));
-                        spans.push(Span::styled(
-                            format!(" ({})", crate::i18n::t("tui-memory-config-pending")),
-                            Style::default().fg(theme::YELLOW),
-                        ));
-                    }
+                // The configured model is not what is running yet. Showing it
+                // as its own span, distinct from the effective one above, is
+                // what keeps the panel from claiming extraction already moved
+                // to it — and the two reasons it can be out of step are
+                // different enough that one label for both would lie about
+                // whichever it is not: an accepted draft has not reached disk,
+                // while a saved setting has and is waiting for a restart.
+                // Gating on the edited flag alone hid the second case
+                // entirely, so a save appeared to revert the moment it landed.
+                let note = if state.config_model_edited {
+                    Some("tui-memory-config-pending")
+                } else if extraction_model_awaits_restart(cfg) {
+                    Some("tui-memory-config-restart-required")
+                } else {
+                    None
+                };
+                if let (Some(note), Some(pending)) = (note, &cfg.configured_extraction_model) {
+                    spans.push(Span::styled("  → ", Style::default().fg(theme::YELLOW)));
+                    spans.push(Span::styled(
+                        pending.clone(),
+                        Style::default().fg(theme::YELLOW),
+                    ));
+                    spans.push(Span::styled(
+                        format!(" ({})", crate::i18n::t(note)),
+                        Style::default().fg(theme::YELLOW),
+                    ));
                 }
             }
             if cfg.extraction_model_inherited {
@@ -1424,6 +1497,140 @@ mod tests {
             matches!(action, MemoryUIAction::Continue),
             "the endpoint does a full read-modify-write of config.toml; a no-op save still \
              strips every comment in it"
+        );
+    }
+
+    /// The write lands on disk but the running extractor stays on the boot
+    /// model, so the panel has to keep naming both. Gating that span on "did
+    /// this session edit it" hid the saved value the instant the save
+    /// succeeded: the operator was told "Saved" while the row went back to
+    /// showing only the old model.
+    #[test]
+    fn a_saved_model_the_daemon_has_not_picked_up_is_reported_as_awaiting_a_restart() {
+        let cfg = MemoryConfigView {
+            configured_extraction_model: Some("groq/llama-3.1-8b".to_string()),
+            effective_extraction_model: "llama-3.3-70b-versatile".to_string(),
+            ..Default::default()
+        };
+
+        assert!(
+            extraction_model_awaits_restart(&cfg),
+            "the file names one model and the extractor is running another"
+        );
+    }
+
+    /// The comparison must survive the provider split boot performs, or every
+    /// in-step `provider/model` setting reports a restart that is not pending.
+    #[test]
+    fn a_provider_qualified_setting_that_is_already_running_needs_no_restart() {
+        for configured in [
+            "groq/llama-3.3-70b-versatile",
+            "groq:llama-3.3-70b-versatile",
+        ] {
+            let cfg = MemoryConfigView {
+                configured_extraction_model: Some(configured.to_string()),
+                effective_extraction_model: "llama-3.3-70b-versatile".to_string(),
+                ..Default::default()
+            };
+
+            assert!(
+                !extraction_model_awaits_restart(&cfg),
+                "{configured} is the spec boot resolved to the running model, not a pending change"
+            );
+        }
+    }
+
+    /// `effective_extraction_model` is absent whenever no model runs at all —
+    /// extraction inactive, a sidecar doing the work, or the driver having
+    /// failed to build. Calling that a pending restart sends the operator
+    /// after the wrong problem.
+    #[test]
+    fn a_setting_with_no_running_model_is_not_a_pending_restart() {
+        let cfg = MemoryConfigView {
+            configured_extraction_model: Some("groq/llama-3.1-8b".to_string()),
+            effective_extraction_model: String::new(),
+            ..Default::default()
+        };
+
+        assert!(!extraction_model_awaits_restart(&cfg));
+    }
+
+    /// Without the refetch the panel keeps reporting the typed value as the
+    /// model that is extracting, and nothing ever corrects it.
+    #[test]
+    fn a_clean_save_refetches_what_the_daemon_now_reports() {
+        let mut state = loaded("litellm:x");
+        state.handle_key(key(KeyCode::Char(' ')));
+        let _ = state.handle_key(key(KeyCode::Char('s')));
+
+        let next = state.apply_save_result(Ok(()));
+
+        assert!(
+            matches!(next, MemoryUIAction::LoadConfig),
+            "a save moves the setting without moving the extractor; only a fetch \
+             can say what each one is now"
+        );
+    }
+
+    /// The refetch must not become a second way to lose an edit made while the
+    /// PATCH was in flight: `apply_config` takes the daemon's answer as truth.
+    #[test]
+    fn a_save_that_raced_an_edit_does_not_refetch_over_it() {
+        let mut state = loaded("litellm:x");
+        state.handle_key(key(KeyCode::Char(' ')));
+        let _ = state.handle_key(key(KeyCode::Char('s')));
+
+        state.handle_key(key(KeyCode::Down));
+        state.handle_key(key(KeyCode::Char(' ')));
+
+        let next = state.apply_save_result(Ok(()));
+
+        assert!(
+            matches!(next, MemoryUIAction::Continue),
+            "refetching here would overwrite the edit that arrived after the snapshot"
+        );
+    }
+
+    /// "Esc to discard" has to put the values back too. Clearing only the
+    /// marker left the edits on `self.config`, where they read as
+    /// configuration the daemon had reported.
+    #[test]
+    fn esc_puts_back_the_configuration_the_daemon_reported() {
+        let mut state = MemoryState::new();
+        state.sub = MemorySub::Config;
+        state.apply_config(MemoryConfigView {
+            auto_memorize: true,
+            auto_retrieve: true,
+            effective_extraction_model: "llama-3.3-70b-versatile".to_string(),
+            configured_extraction_model: Some("groq/llama-3.3-70b-versatile".to_string()),
+            ..Default::default()
+        });
+
+        state.handle_key(key(KeyCode::Char(' ')));
+        state.config_field = ConfigField::ExtractionModel;
+        state.handle_key(key(KeyCode::Enter));
+        state.handle_key(key(KeyCode::Char('z')));
+        state.handle_key(key(KeyCode::Enter));
+
+        state.handle_key(key(KeyCode::Esc));
+
+        let cfg = state
+            .config
+            .as_ref()
+            .expect("the panel keeps a configuration");
+        assert!(
+            cfg.auto_memorize,
+            "the discarded toggle must be back to what the daemon reported"
+        );
+        assert_eq!(
+            cfg.configured_extraction_model.as_deref(),
+            Some("groq/llama-3.3-70b-versatile"),
+            "the discarded model must be back to what the daemon reported"
+        );
+        assert!(!state.config_dirty);
+        assert!(
+            !state.config_model_edited,
+            "a discarded draft must not be something the next save writes"
         );
     }
 

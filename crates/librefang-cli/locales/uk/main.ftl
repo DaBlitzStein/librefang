@@ -2272,6 +2272,7 @@ tui-memory-config-auto-retrieve = Пригадувати автоматично
 tui-memory-config-extraction-model = Модель, що пише спогади
 tui-memory-config-inherited = (успадковано від типової моделі системи)
 tui-memory-config-pending = очікує збереження
+tui-memory-config-restart-required = збережено — потрібен перезапуск, щоб застосувати
 tui-memory-config-searching = Як шукаються спогади
 tui-memory-config-embedding-provider = Провайдер пошуку
 tui-memory-config-embedding-model = Модель пошуку

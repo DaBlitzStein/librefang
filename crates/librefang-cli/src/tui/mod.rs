@@ -626,7 +626,12 @@ impl App {
                 self.memory.apply_config(config);
             }
             AppEvent::MemoryConfigSaved(result) => {
-                self.memory.apply_save_result(result);
+                // A clean save asks for a refetch: the write moves
+                // `extraction_model` on disk without moving the running
+                // extractor, and the panel can only report both honestly by
+                // asking the daemon what each one now is.
+                let next = self.memory.apply_save_result(result);
+                self.handle_memory_action(next);
             }
             AppEvent::MemoryConfigFailed(failure) => {
                 // Clear `loading` on the failure path too, or the screen sits

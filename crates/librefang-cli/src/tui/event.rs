@@ -2526,6 +2526,30 @@ pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>
     });
 }
 
+/// Read the outcome of a memory-config PATCH out of its response body.
+///
+/// `memory_config_patch` returns `(StatusCode::OK, Json(body))` on every path
+/// that got as far as writing the file, and its contract says clients MUST
+/// inspect `body.status`: `"applied"` is a clean save, `"partial"` means the
+/// TOML reached disk but `reload_config()` rejected it, leaving the running
+/// kernel on the boot snapshot with the validator output in `reload_error`.
+/// Reading the HTTP status alone reports that as a clean "Saved" while nothing
+/// the operator changed is in effect.
+///
+/// Split out of the request thread so the discrimination is testable without
+/// standing up an HTTP server.
+fn interpret_memory_config_patch_body(json: &serde_json::Value) -> Result<(), FetchFailure> {
+    if json["status"].as_str() == Some("applied") {
+        return Ok(());
+    }
+    let mut reason = crate::i18n::t("tui-memory-config-save-partial");
+    if let Some(err) = json["reload_error"].as_str() {
+        reason.push_str(": ");
+        reason.push_str(err);
+    }
+    Err(FetchFailure::Error(reason))
+}
+
 /// Write the memory configuration back.
 ///
 /// `extraction_model` is `None` when the operator did not edit it, and the
@@ -2585,15 +2609,7 @@ pub fn spawn_save_memory_config(
                     // clean "Saved" with the daemon still on the boot
                     // snapshot.
                     match resp.json::<serde_json::Value>() {
-                        Ok(json) if json["status"].as_str() == Some("applied") => Ok(()),
-                        Ok(json) => {
-                            let mut reason = crate::i18n::t("tui-memory-config-save-partial");
-                            if let Some(err) = json["reload_error"].as_str() {
-                                reason.push_str(": ");
-                                reason.push_str(err);
-                            }
-                            Err(FetchFailure::Error(reason))
-                        }
+                        Ok(json) => interpret_memory_config_patch_body(&json),
                         Err(e) => Err(FetchFailure::Error(e.to_string())),
                     }
                 } else {
@@ -5177,6 +5193,37 @@ pub fn spawn_fetch_agents_for_chat(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    // ── the memory-config PATCH reports its outcome in the body ───────────
+
+    /// The clean case, and the only one that may clear the unsaved marker.
+    #[test]
+    fn an_applied_memory_config_patch_is_a_success() {
+        let body = serde_json::json!({ "status": "applied", "restart_required": false });
+
+        assert!(interpret_memory_config_patch_body(&body).is_ok());
+    }
+
+    /// The endpoint answers 200 here too: the file was written but the live
+    /// reload failed, so the kernel is still running the boot snapshot.
+    /// Reporting it as "Saved" tells the operator their change is in effect
+    /// when none of it is.
+    #[test]
+    fn a_partial_memory_config_patch_is_not_a_success() {
+        let body = serde_json::json!({
+            "status": "partial",
+            "restart_required": true,
+            "reload_error": "invalid type: string, expected u64 for key `queue.depth`",
+        });
+
+        match interpret_memory_config_patch_body(&body) {
+            Err(FetchFailure::Error(reason)) => assert!(
+                reason.contains("invalid type: string"),
+                "the validator output is the only thing that says what to fix, got {reason:?}"
+            ),
+            other => panic!("a partial save must not read as success, got {other:?}"),
+        }
+    }
 
     // ── fetch helpers must never exit silently (#8141) ─────────────────────
 

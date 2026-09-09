@@ -1307,6 +1307,7 @@ tui-memory-config-auto-retrieve = 自动回忆
 tui-memory-config-extraction-model = 撰写记忆的模型
 tui-memory-config-inherited = （继承自系统默认值）
 tui-memory-config-pending = 待保存
+tui-memory-config-restart-required = 已保存 —— 需重启后生效
 tui-memory-config-searching = 如何检索记忆
 tui-memory-config-embedding-provider = 检索提供方
 tui-memory-config-embedding-model = 检索模型

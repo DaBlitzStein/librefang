@@ -2251,6 +2251,7 @@ tui-memory-config-auto-retrieve = 자동으로 회상
 tui-memory-config-extraction-model = 기억을 작성하는 모델
 tui-memory-config-inherited = (시스템 기본값에서 상속됨)
 tui-memory-config-pending = 저장 대기 중
+tui-memory-config-restart-required = 저장됨 — 적용하려면 재시작 필요
 tui-memory-config-searching = 기억을 검색하는 방식
 tui-memory-config-embedding-provider = 검색 제공자
 tui-memory-config-embedding-model = 검색 모델
