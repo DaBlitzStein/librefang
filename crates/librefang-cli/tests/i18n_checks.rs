@@ -240,6 +240,9 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "spawn_run_workflow builds a 60 s client; a longer wait can never return 202",
         // Technical format strings
         "%Y-%m-%d %H:%M",
+        // SQLite's `datetime('now')` shape, parsed and re-rendered by the
+        // manifest history pane. A strftime pattern is not prose.
+        "%Y-%m-%d %H:%M:%S",
         "{model:<20} {input}/{output}  ${cost:.4}",
         // Hand CLI command names for require_daemon
         "hand install",

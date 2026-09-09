@@ -208,6 +208,9 @@ export function usePatchAgent() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      // Unconditional: every accepted PATCH rewrites agent.toml, so the history
+      // gains a version whichever fields the body carried.
+      qc.invalidateQueries({ queryKey: agentKeys.manifestHistory(variables.agentId) });
       if (variables.body.manifest_toml !== undefined) {
         qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
         qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
@@ -237,6 +240,7 @@ export function usePatchAgentRuntimeConfig() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.manifestHistory(variables.agentId) });
       if (variables.isHand) {
         qc.invalidateQueries({ queryKey: handKeys.details() });
       }

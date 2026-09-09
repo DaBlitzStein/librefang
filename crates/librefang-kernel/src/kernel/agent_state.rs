@@ -202,6 +202,14 @@ impl LibreFangKernel {
             warn!(agent = %entry.name, "Failed to persist MCP servers to agent manifest: {error}");
         } else {
             debug!(agent = %entry.name, path = %toml_path.display(), "Persisted MCP servers to agent manifest");
+            // This path patches the `mcp_servers` array in the existing file rather
+            // than going through `persist_full_manifest_at`, so it has to record its
+            // own snapshot. Without it an MCP allowlist change leaves the newest
+            // recorded version disagreeing with what is on disk, and "what changed on
+            // this agent, and when" answers wrong rather than incompletely (#8231).
+            // The snapshot is `patched` — what the file now holds — not a re-serialized
+            // manifest, so history stays a record of the file.
+            self.record_manifest_version(&current_entry, &patched, "mcp-servers");
         }
     }
 
@@ -1029,10 +1037,12 @@ impl LibreFangKernel {
 
     /// Best-effort record of a manifest snapshot for version history.
     ///
-    /// `change_source` vocabulary: the persist path is shared by every control-plane write (API routes, TUI commands, and the MCP-servers fallback all funnel through the same kernel setters), so the call site cannot tell who triggered the persist.
+    /// `change_source` vocabulary: this path is shared by every control-plane write that re-serializes the full manifest (API routes, TUI commands, and the MCP-servers fallback all funnel through the same kernel setters), so the call site cannot tell who triggered the persist.
     /// It records two values:
     /// - `update` — the `agent.toml` write succeeded.
     /// - `update-persist-failed` — the in-memory manifest changed but the disk write failed, so disk and memory now disagree.
+    ///
+    /// Suspend/resume does not go through here: `persist_agent_enabled` patches the `enabled` line directly rather than re-serializing the manifest, so it records its own `suspend` / `resume` snapshots via `ManifestVersionStore` directly.
     fn record_manifest_version(
         &self,
         entry: &librefang_types::agent::AgentEntry,
@@ -1049,18 +1059,6 @@ impl LibreFangKernel {
                 "Failed to record manifest version snapshot"
             );
         }
-    }
-
-    /// List manifest version history for an agent, newest first.
-    pub fn manifest_versions_for_agent(
-        &self,
-        agent_id: AgentId,
-        limit: usize,
-    ) -> KernelResult<Vec<librefang_memory::ManifestVersionRow>> {
-        let store = librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
-        store
-            .list_for_agent(&agent_id.to_string(), limit)
-            .map_err(KernelError::LibreFang)
     }
 }
 

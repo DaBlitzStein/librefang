@@ -2818,6 +2818,10 @@ export function AgentsPage() {
         </div>
         {manifestHistoryQuery.isLoading ? (
           <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading..." })}</div>
+        ) : manifestHistoryQuery.isError ? (
+          <div className="rounded-md border border-red-500/30 bg-red-500/10 p-4 text-[12px] text-red-500">
+            {t("agents.detail.manifest_history_load_err", { defaultValue: "Failed to load manifest history." })}
+          </div>
         ) : versions.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
             {t("agents.detail.no_history", { defaultValue: "No config changes recorded yet." })}
