@@ -3083,7 +3083,10 @@
     "verifier_agent": "Агент-перевіряч",
     "no_verifier_selected": "Без перевіряча (без контролю)",
     "evaluator_model": "Модель-оцінювач",
-    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)"
+    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)",
+    "tick_interval": "Інтервал ітерацій",
+    "tick_interval_placeholder": "Секунди між ітераціями циклу (типово {{defaultSecs}})",
+    "tick_interval_out_of_range": "Інтервал ітерацій має бути цілим числом від {{min}} до {{max}} секунд."
   },
   "sessions": {
     "title": "Сесії",

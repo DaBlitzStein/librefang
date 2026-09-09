@@ -3076,7 +3076,10 @@
     "verifier_agent": "검증 에이전트",
     "no_verifier_selected": "검증자 없음(게이트 없이 실행)",
     "evaluator_model": "평가 모델",
-    "evaluator_model_placeholder": "평가 모델(선택)"
+    "evaluator_model_placeholder": "평가 모델(선택)",
+    "tick_interval": "반복 간격",
+    "tick_interval_placeholder": "루프 반복 사이의 초 (기본값 {{defaultSecs}})",
+    "tick_interval_out_of_range": "반복 간격은 {{min}}초에서 {{max}}초 사이의 정수여야 합니다."
   },
   "sessions": {
     "title": "세션",

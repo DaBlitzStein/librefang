@@ -2334,6 +2334,7 @@ impl App {
                 loop_engineering,
                 verify_agent_id,
                 evaluator_model,
+                tick_interval_secs,
             } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_create_goal(
@@ -2344,6 +2345,7 @@ impl App {
                         loop_engineering,
                         verify_agent_id,
                         evaluator_model,
+                        tick_interval_secs,
                         self.event_tx.clone(),
                     );
                 }
