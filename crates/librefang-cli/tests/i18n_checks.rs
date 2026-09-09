@@ -238,6 +238,9 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "failed to spawn librefang-tui-stream thread",
         "daemon_client() times out at 120 s; a longer wait can never return 202",
         "spawn_run_workflow builds a 60 s client; a longer wait can never return 202",
+        // Redaction markers `GET /api/config` emits in place of a value.
+        // Matched, never displayed — the editor renders an i18n string instead.
+        "not set",
         // Technical format strings
         "%Y-%m-%d %H:%M",
         "{model:<20} {input}/{output}  ${cost:.4}",
