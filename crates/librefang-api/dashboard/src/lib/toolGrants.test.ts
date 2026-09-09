@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  isMcpGroupCardActionable,
   isMcpServerGranted,
   isToolAllowed,
   isToolBlocked,
+  mcpGroupCardState,
   normalizeMcpName,
   resolveMcpGrantMode,
   toggleMcpServerGrant,
@@ -161,5 +163,45 @@ describe("isToolAllowed", () => {
 
   it("keeps everything under a bare star", () => {
     expect(isToolAllowed("mcp__github__create_issue", ["*"])).toBe(true);
+  });
+});
+
+describe("mcpGroupCardState (#7749 review)", () => {
+  it("reports a hard switch even though the mode has already folded it into 'none'", () => {
+    // `mcpModeEffective` collapses `tools_disabled`/`mcp_disabled` to "none",
+    // which is byte-identical to "nothing granted yet". Reading the card state
+    // off the mode alone therefore labels an inert card "click to grant" and
+    // wires a click that silently stages nothing.
+    expect(mcpGroupCardState({ granted: false, mode: "none", hardDisabled: true })).toBe(
+      "hard-disabled",
+    );
+    expect(mcpGroupCardState({ granted: false, mode: "none", hardDisabled: false })).toBe(
+      "grantable",
+    );
+  });
+
+  it("keeps the hard switch ahead of a wildcard or an existing grant", () => {
+    expect(mcpGroupCardState({ granted: true, mode: "all", hardDisabled: true })).toBe(
+      "hard-disabled",
+    );
+    expect(mcpGroupCardState({ granted: true, mode: "allowlist", hardDisabled: true })).toBe(
+      "hard-disabled",
+    );
+  });
+
+  it("separates a wildcard grant from a per-server pin", () => {
+    // `mcp_servers = ["*"]` is revoked by editing the wildcard, not by
+    // un-clicking one card, so the card must not offer a toggle.
+    expect(mcpGroupCardState({ granted: true, mode: "all", hardDisabled: false })).toBe("wildcard");
+    expect(mcpGroupCardState({ granted: true, mode: "allowlist", hardDisabled: false })).toBe(
+      "granted",
+    );
+  });
+
+  it("only arms a save from the two states that can actually stage one", () => {
+    expect(isMcpGroupCardActionable("granted")).toBe(true);
+    expect(isMcpGroupCardActionable("grantable")).toBe(true);
+    expect(isMcpGroupCardActionable("wildcard")).toBe(false);
+    expect(isMcpGroupCardActionable("hard-disabled")).toBe(false);
   });
 });
