@@ -13,11 +13,11 @@ use librefang_channels::types::SenderContext;
 use librefang_skills::evolution::load_installed_skill_from_disk;
 use librefang_types::agent::{AgentId, SkillWorkshopConfig};
 use librefang_types::goal::{
-    goals_storage_agent_id, Goal, GoalId, GoalRunState, DEFAULT_GOAL_MAX_ITERATIONS,
-    GOALS_STORAGE_KEY,
+    goals_storage_agent_id, Goal, GoalId, GoalRunState, GOALS_STORAGE_KEY,
 };
 
 use super::{LibreFangKernel, SYSTEM_CHANNEL_AUTONOMOUS};
+use crate::registry::AgentRegistry;
 use crate::MemorySubsystemApi;
 
 impl LibreFangKernel {
@@ -25,9 +25,11 @@ impl LibreFangKernel {
     ///
     /// Each tick is a full agent turn; the runner parses the agent's reply for
     /// `GOAL_PROGRESS:` / `GOAL_DONE` markers and updates the goal until it is
-    /// complete, the iteration cap (`max_iterations`, default
-    /// [`DEFAULT_GOAL_MAX_ITERATIONS`]) is reached, an operator stops it, or the
+    /// complete, the iteration cap is reached, an operator stops it, or the
     /// kernel shuts down.
+    ///
+    /// `max_iterations` stays an `Option` all the way down to [`crate::goal_runner::GoalRunner::start`], which is the only layer that knows whether this call is resuming a paused run.
+    /// Substituting [`librefang_types::goal::DEFAULT_GOAL_MAX_ITERATIONS`] here would overwrite the cap that run was already under, because by then a `None` is indistinguishable from an operator asking for the default.
     #[allow(clippy::too_many_arguments)]
     pub fn goal_run_start(
         &self,
@@ -39,7 +41,6 @@ impl LibreFangKernel {
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
     ) -> bool {
-        let max = max_iterations.unwrap_or(DEFAULT_GOAL_MAX_ITERATIONS).max(1);
         let substrate = self.substrate_ref().clone();
 
         // The tick closure drives a real agent turn, which needs an owned
@@ -60,13 +61,7 @@ impl LibreFangKernel {
                 // Trusted internal system path — reuse the autonomous-channel
                 // sentinel so the RBAC resolver applies the system carve-out
                 // (see background_lifecycle.rs).
-                let sender = SenderContext {
-                    channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
-                    user_id: aid.to_string(),
-                    display_name: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
-                    is_internal_system: true,
-                    ..Default::default()
-                };
+                let sender = goal_tick_sender_context(aid, goal_id);
                 match k.send_message_with_sender_context(aid, &msg, &sender).await {
                     Ok(r) => Ok(r.response),
                     Err(e) => Err(e.to_string()),
@@ -135,12 +130,11 @@ impl LibreFangKernel {
         // back into the registry from there would mean carrying a kernel handle
         // for two `u32`s.
         let skills_dir = self.home_dir().join("skills");
-        let workshop = self
-            .agents
-            .registry
-            .get(agent_id)
-            .map(|e| e.manifest.skill_workshop)
-            .unwrap_or_default();
+        let workshop = resolve_workshop_config(&self.agents.registry, agent_id);
+        let goal_title = self
+            .goal_by_id(goal_id)
+            .map(|g| g.title)
+            .unwrap_or_else(|| format!("Goal {goal_id}"));
         let on_learnings = move |learnings: Vec<String>| {
             queue_learnings_as_pending_skill(
                 &skills_dir,
@@ -162,7 +156,7 @@ impl LibreFangKernel {
         self.workflows.goal_runner.start(
             goal_id,
             agent_id,
-            max,
+            max_iterations,
             substrate,
             send,
             on_learnings,
@@ -189,8 +183,61 @@ impl LibreFangKernel {
     }
 
     /// Stop an active goal run. Returns whether a run was stopped.
+    ///
+    /// Terminal: discards any resume checkpoint, so starting the goal again
+    /// begins from iteration 0. Use [`Self::goal_run_pause`] to suspend a run
+    /// that should later continue where it left off.
     pub fn goal_run_stop(&self, goal_id: GoalId) -> bool {
         self.workflows.goal_runner.stop(goal_id)
+    }
+
+    /// Pause an active goal run, checkpointing its iteration count and
+    /// progress. Returns whether a live run was signalled.
+    ///
+    /// The loop finishes the turn it is on before checkpointing and exiting
+    /// in [`librefang_types::goal::GoalRunPhase::Paused`], so a `true` return
+    /// means the pause was accepted, not that the run has already stopped —
+    /// poll [`Self::goal_run_status`] for the phase to reach `Paused`.
+    pub fn goal_run_pause(&self, goal_id: GoalId) -> bool {
+        self.workflows.goal_runner.pause(goal_id)
+    }
+
+    /// Resume a previously-paused goal run from its checkpoint.
+    ///
+    /// Identical to [`Self::goal_run_start`] — `GoalRunner::start` auto-detects
+    /// and resumes from a pause checkpoint when one exists, so this is the
+    /// same start path. Callers that want to refuse a resume when there is no
+    /// checkpoint (rather than silently starting a fresh run) should check
+    /// [`Self::goal_run_status`] for [`librefang_types::goal::GoalRunPhase::Paused`]
+    /// before calling.
+    ///
+    /// A `None` `max_iterations` restores the cap the paused run was under; an explicit value re-budgets it.
+    /// See [`crate::goal_runner::GoalRunner::start`] for why that precedence is resolved down there rather than here.
+    ///
+    /// The loop-engineering arguments are taken from the caller for the same
+    /// reason [`Self::goal_run_start`] takes them: the configuration lives on
+    /// the goal document, and resolving it at the API boundary keeps one
+    /// definition of where a verifier comes from rather than two.
+    #[allow(clippy::too_many_arguments)]
+    pub fn goal_run_resume(
+        &self,
+        goal_id: GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
+    ) -> bool {
+        self.goal_run_start(
+            goal_id,
+            agent_id,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        )
     }
 
     /// Snapshot the observable state of a goal's run, if one is active.
@@ -316,6 +363,34 @@ fn learned_skill_body(goal_title: &str, learnings: &[String]) -> String {
 /// The tag is what a reviewer sees in `librefang skill pending show`, so it names the producer, not the shape.
 const LEARNED_CAPTURE_TRIGGER: &str = "goal_learned";
 
+/// Whether a goal run's captured `GOAL_LEARNED:` lessons should be queued as
+/// a pending skill draft at all.
+///
+/// The workshop is default-OFF and opted into per agent (`agent.toml:
+/// [skill_workshop] enabled = true`) — see [`SkillWorkshopConfig::default`].
+/// Without this gate a goal run queued a draft for every agent regardless of
+/// that setting, because `on_learnings_captured` had no reason to read it:
+/// nothing else in the goal-run path consults the workshop config, only the
+/// approval-side CLI / API / dashboard do. `auto_capture` is checked too —
+/// it is the independent "run the capture scan at all" toggle every other
+/// automatic capture path in the workshop already gates on (see
+/// `skill_workshop::mod.rs`).
+fn should_queue_learnings(workshop: &SkillWorkshopConfig) -> bool {
+    workshop.enabled && workshop.auto_capture
+}
+
+/// Resolve the skill-workshop config a goal run's learnings capture is
+/// gated by. An agent absent from the registry — deleted, never spawned,
+/// or simply mistyped — denies via [`SkillWorkshopConfig::default`]
+/// (`enabled: false`) rather than assuming any particular default should
+/// permit queuing for an id nobody registered.
+fn resolve_workshop_config(registry: &AgentRegistry, agent_id: AgentId) -> SkillWorkshopConfig {
+    registry
+        .get(agent_id)
+        .map(|e| e.manifest.skill_workshop)
+        .unwrap_or_default()
+}
+
 /// Queue a run's lessons as a pending skill draft awaiting human approval.
 ///
 /// The lessons are model-authored text an autonomous loop wrote about itself, so they go where every other machine-proposed skill goes: the workshop's `pending/` queue (#3328), promoted only by an explicit `librefang skill pending approve` / `POST /api/skills/pending/{id}/approve`.
@@ -338,7 +413,7 @@ fn queue_learnings_as_pending_skill(
         CandidateKind, CandidateSkill, CaptureSource, Provenance, PROVENANCE_EXCERPT_MAX_CHARS,
     };
 
-    if learnings.is_empty() {
+    if !should_queue_learnings(workshop) || learnings.is_empty() {
         return;
     }
     let name = learned_skill_name(goal_id, goal_title);
@@ -400,9 +475,111 @@ fn queue_learnings_as_pending_skill(
     }
 }
 
+/// Build the [`SenderContext`] a goal-run tick is dispatched with.
+///
+/// ## Why `chat_id` carries the goal id
+///
+/// `send_message_full`'s channel branch derives the session as
+/// `SessionId::for_sender_scope(agent, channel, chat_id)`, which collapses to
+/// `for_channel(agent, "autonomous")` when `chat_id` is absent. Every goal of
+/// a given agent would then resolve to one single session: two goals running
+/// concurrently would interleave their prompts into one conversation history,
+/// and each would read back the other's turns as its own context.
+///
+/// Scoping by goal id splits them without costing prompt-cache reuse: cache
+/// reuse depends on consecutive turns of *one* goal sharing a session prefix,
+/// and they still do, since the scope is a function of the goal rather than
+/// of the tick. What changes is only that a *different* goal no longer lands
+/// on that same id.
+fn goal_tick_sender_context(agent_id: AgentId, goal_id: GoalId) -> SenderContext {
+    SenderContext {
+        channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
+        user_id: agent_id.to_string(),
+        chat_id: Some(goal_id.to_string()),
+        display_name: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
+        is_internal_system: true,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The workshop is default-OFF: a goal run must not queue a pending
+    /// skill draft for an agent that never opted in.
+    #[test]
+    fn should_queue_learnings_is_false_by_default() {
+        assert!(!should_queue_learnings(&SkillWorkshopConfig::default()));
+    }
+
+    #[test]
+    fn should_queue_learnings_is_true_once_opted_in() {
+        let workshop = SkillWorkshopConfig {
+            enabled: true,
+            ..SkillWorkshopConfig::default()
+        };
+        assert!(should_queue_learnings(&workshop));
+    }
+
+    /// `auto_capture` is the independent scan toggle within an enabled
+    /// workshop — turning it off must still block queuing, matching every
+    /// other automatic capture path.
+    #[test]
+    fn should_queue_learnings_is_false_when_auto_capture_is_off() {
+        let workshop = SkillWorkshopConfig {
+            enabled: true,
+            auto_capture: false,
+            ..SkillWorkshopConfig::default()
+        };
+        assert!(!should_queue_learnings(&workshop));
+    }
+
+    /// The half of the opt-in gate a pure predicate test can't reach: an
+    /// agent that isn't in the registry at all (deleted, never spawned,
+    /// mistyped id) must still deny queuing, not fall through to some other
+    /// default that happens to allow it.
+    #[test]
+    fn resolve_workshop_config_denies_when_the_agent_is_absent_from_the_registry() {
+        let registry = AgentRegistry::new();
+        let config = resolve_workshop_config(&registry, AgentId::new());
+        assert!(
+            !should_queue_learnings(&config),
+            "an agent absent from the registry must resolve to a denying config"
+        );
+    }
+
+    /// The other half: a REGISTERED agent's own manifest setting is what
+    /// gets read, not a hardcoded value — otherwise the denial above would
+    /// be indistinguishable from the function ignoring the registry
+    /// entirely and always returning a fixed config.
+    #[test]
+    fn resolve_workshop_config_reads_the_registered_agents_own_manifest() {
+        use librefang_types::agent::{AgentEntry, AgentManifest};
+
+        let registry = AgentRegistry::new();
+        let agent_id = AgentId::new();
+        registry
+            .register(AgentEntry {
+                id: agent_id,
+                name: format!("workshop-test-{agent_id}"),
+                manifest: AgentManifest {
+                    skill_workshop: SkillWorkshopConfig {
+                        enabled: true,
+                        ..SkillWorkshopConfig::default()
+                    },
+                    ..AgentManifest::default()
+                },
+                ..AgentEntry::default()
+            })
+            .expect("registering a fresh agent must succeed");
+
+        let config = resolve_workshop_config(&registry, agent_id);
+        assert!(
+            should_queue_learnings(&config),
+            "a registered agent's own opted-in workshop config must be the one read"
+        );
+    }
 
     #[test]
     fn evaluator_verdict_reads_a_bare_yes_or_no() {
@@ -509,6 +686,33 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    /// The opt-in gate lives inside this function (moved from its one
+    /// production caller, `goal_run_start`'s `on_learnings` closure, so
+    /// there is exactly one place to verify it): a disabled workshop must
+    /// queue nothing, no matter how many lessons a run captured.
+    #[test]
+    fn queue_learnings_as_pending_skill_does_nothing_when_the_workshop_is_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path();
+        let agent = AgentId::new();
+        let goal_id = GoalId::new();
+        queue_learnings_as_pending_skill(
+            skills,
+            agent,
+            &SkillWorkshopConfig::default(),
+            goal_id,
+            "Ship the report",
+            &["Back off before retrying".to_string()],
+        );
+
+        assert!(
+            crate::skill_workshop::storage::list_pending(skills, &agent.to_string())
+                .unwrap()
+                .is_empty(),
+            "a disabled workshop must not queue a pending draft"
+        );
+    }
+
     /// A goal run is an autonomous loop, and the lessons it captures are
     /// model-authored text. Writing them straight into the installed skills
     /// directory would let an agent author a skill that loads itself into the
@@ -520,10 +724,14 @@ mod tests {
         let skills = tmp.path();
         let agent = AgentId::new();
         let goal_id = GoalId::new();
+        let workshop = SkillWorkshopConfig {
+            enabled: true,
+            ..SkillWorkshopConfig::default()
+        };
         queue_learnings_as_pending_skill(
             skills,
             agent,
-            &SkillWorkshopConfig::default(),
+            &workshop,
             goal_id,
             "Ship the report",
             &["Back off before retrying".to_string()],
@@ -552,10 +760,14 @@ mod tests {
         let skills = tmp.path();
         let agent = AgentId::new();
         let goal_id = GoalId::new();
+        let workshop = SkillWorkshopConfig {
+            enabled: true,
+            ..SkillWorkshopConfig::default()
+        };
         queue_learnings_as_pending_skill(
             skills,
             agent,
-            &SkillWorkshopConfig::default(),
+            &workshop,
             goal_id,
             "Ship the report",
             &["Back off before retrying".to_string()],
@@ -600,5 +812,77 @@ mod tests {
         assert!(body.contains("Ship the report"));
         assert!(body.contains("1. Back off before retrying"));
         assert!(body.contains("2. Cite sources"));
+    }
+}
+
+#[cfg(test)]
+mod goal_session_scope_tests {
+    use super::*;
+    use librefang_types::agent::SessionId;
+
+    /// Reproduce the session id `send_message_full` derives for a goal tick.
+    /// Mirrors the channel branch of `messaging.rs::send_message_full_inner`
+    /// verbatim — `resolve_scope_channel` then `SessionId::for_sender_scope`
+    /// — so this asserts against the real derivation rather than a local
+    /// re-statement of it.
+    fn derived_session_id(ctx: &SenderContext, agent_id: AgentId) -> SessionId {
+        let scope = LibreFangKernel::resolve_scope_channel(&ctx.channel, ctx.is_internal_system);
+        SessionId::for_sender_scope(agent_id, &scope, ctx.chat_id.as_deref())
+    }
+
+    /// Two loop-mode goals driven by the SAME agent must not share a session.
+    ///
+    /// Before the fix every goal tick synthesized `chat_id: None`, collapsing
+    /// to `SessionId::for_channel(agent, "autonomous")` — so two concurrent
+    /// goal runs interleaved their prompts into one conversation history.
+    #[test]
+    fn two_goals_on_one_agent_do_not_share_a_session() {
+        let agent = AgentId::new();
+        let goal_a = GoalId::new();
+        let goal_b = GoalId::new();
+
+        let ctx_a = goal_tick_sender_context(agent, goal_a);
+        let ctx_b = goal_tick_sender_context(agent, goal_b);
+
+        assert_ne!(
+            derived_session_id(&ctx_a, agent),
+            derived_session_id(&ctx_b, agent),
+            "two goals of the same agent resolved to one session — their \
+             prompts interleave in a single conversation history"
+        );
+    }
+
+    /// Isolation is per GOAL, not per tick: every tick of one goal must keep
+    /// landing on the same session, or turn-to-turn context and the provider
+    /// prompt cache are both destroyed mid-run.
+    #[test]
+    fn repeated_ticks_of_one_goal_share_its_session() {
+        let agent = AgentId::new();
+        let goal = GoalId::new();
+
+        let first = goal_tick_sender_context(agent, goal);
+        let second = goal_tick_sender_context(agent, goal);
+
+        assert_eq!(
+            derived_session_id(&first, agent),
+            derived_session_id(&second, agent),
+        );
+    }
+
+    /// The same goal id under two different agents stays separate — the agent
+    /// dimension is still part of the key.
+    #[test]
+    fn one_goal_across_two_agents_does_not_share_a_session() {
+        let goal = GoalId::new();
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        let ctx_a = goal_tick_sender_context(agent_a, goal);
+        let ctx_b = goal_tick_sender_context(agent_b, goal);
+
+        assert_ne!(
+            derived_session_id(&ctx_a, agent_a),
+            derived_session_id(&ctx_b, agent_b),
+        );
     }
 }

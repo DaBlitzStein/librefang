@@ -131,6 +131,7 @@ const goalRunPhaseBadge = (
 ): { bg: string; text: string; dot: string } => {
   switch (phase) {
     case "running":                 return { bg: "bg-brand/10",   text: "text-brand",    dot: "bg-brand" };
+    case "paused":                 return { bg: "bg-warning/10", text: "text-warning",  dot: "bg-warning" };
     case "finished":                return { bg: "bg-success/10", text: "text-success",  dot: "bg-success" };
     case "stopped":                 return { bg: "bg-warning/10", text: "text-warning",  dot: "bg-warning" };
     case "rate_limited":            return { bg: "bg-error/10",   text: "text-error",    dot: "bg-error" };
