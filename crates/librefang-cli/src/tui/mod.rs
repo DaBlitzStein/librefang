@@ -663,8 +663,15 @@ impl App {
                     crate::i18n::t_args("tui-mod-session-deleted", &[("id", &id)]);
             }
             AppEvent::MemoryConfigLoaded(config) => {
-                self.memory.config = Some(config);
-                self.memory.loading = false;
+                self.memory.apply_config(config);
+            }
+            AppEvent::MemoryConfigSaved(result) => {
+                // A clean save asks for a refetch: the write moves
+                // `extraction_model` on disk without moving the running
+                // extractor, and the panel can only report both honestly by
+                // asking the daemon what each one now is.
+                let next = self.memory.apply_save_result(result);
+                self.handle_memory_action(next);
             }
             AppEvent::AgentWorkspacesLoaded(id, entries) => {
                 // `!ws_loaded` accepts only the first response of the
@@ -704,8 +711,10 @@ impl App {
             AppEvent::MemoryConfigFailed(failure) => {
                 // Clear `loading` on the failure path too, or the screen sits
                 // on its spinner forever and the message never gets read.
+                // The message is the config panel's own, not the KV
+                // browser's — this fetch is only ever for the config screen.
                 self.memory.loading = false;
-                self.memory.status_msg = match failure {
+                self.memory.config_status_msg = match failure {
                     event::FetchFailure::RequiresDaemon => {
                         crate::i18n::t("tui-memory-config-requires-daemon")
                     }
@@ -2248,6 +2257,21 @@ impl App {
             memory::MemoryUIAction::DeleteKv { agent_id, key } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_delete_memory_kv(backend, agent_id, key, self.event_tx.clone());
+                }
+            }
+            memory::MemoryUIAction::SaveConfig {
+                auto_memorize,
+                auto_retrieve,
+                extraction_model,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_save_memory_config(
+                        backend,
+                        auto_memorize,
+                        auto_retrieve,
+                        extraction_model,
+                        self.event_tx.clone(),
+                    );
                 }
             }
         }
