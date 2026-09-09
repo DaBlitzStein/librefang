@@ -2531,6 +2531,30 @@ tui-groups-hints = ↑/↓ navigate · r refresh
 
 tui-goals-judge-label = { "  " }Goal Judge:{ " " }
 tui-goals-phase-label = { "  " }Run Phase:{ " " }
+# purge command
+purge-failed-config = Purge aborted: the configuration could not be loaded, so the installation to purge is unknown: { $error }
+purge-database-line = Database: { $path }
+purge-home-line = Home (cron jobs, event triggers, agent-type templates, workspaces): { $path }
+purge-failed-no-database = Purge failed: no database at { $path }
+purge-failed-open-database = Purge failed: open database: { $error }
+purge-nothing-to-purge = Nothing to purge: '{ $agent }' left no trace in this installation.
+purge-purged-header = Purged '{ $agent }':
+purge-removed-roster-entry =   - roster entry, sessions, memories and KV rows
+purge-removed-orphaned-data =   - orphaned sessions, memories and KV rows (roster entry was already gone)
+purge-removed-identity-record =   - canonical UUID record in agent_identities.toml
+purge-removed-workspace =   - workspace directory
+purge-workspace-unresolved =   - NOTE: the workspace directory could not be located. No manifest survives for this agent, so a custom workspace path would not have been found; check the workspaces directory yourself.
+purge-workspace-shared =   - NOTE: the workspace directory was left alone. It resolves to the workspaces root itself, or to a directory another registered agent's manifest also resolves to — deleting it would have destroyed more than this agent's data; check the workspaces directory yourself.
+purge-removed-agent-type =   - agent-type template
+purge-removed-cron-jobs =   - cron jobs
+purge-removed-trigger-jobs =   - event triggers
+purge-removed-channel-bindings =   - channel/conversation routing bindings
+purge-other-orphans-present =   - NOTE: this installation has orphaned rows under an id that could not be attributed to any name (most likely a child or ephemeral agent whose roster entry is already gone); they were left untouched.
+purge-failure-line =   - FAILED: { $error }
+purge-confirm-header = About to permanently purge '{ $agent }':
+purge-confirm-warning = This cannot be undone.
+purge-dry-run-header = Dry run — would purge '{ $agent }' (opening the database may still apply pending schema migrations and reindex the search index, even though nothing is deleted):
+purge-failed-daemon-running = Purge aborted: a daemon is running at { $url } and holds this installation's data. Stop it first, or pass --force if you know better.
 
 # --- Channels screen (#8044) ---
 tui-tab-channels = Channels
