@@ -406,26 +406,30 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
           <label className="block text-xs font-semibold text-text-dim mb-1.5">
             {t("tasks.field_assignee")}
           </label>
-          {agents.length > 0 ? (
-            <select
-              value={assignee}
-              onChange={(e) => setAssignee(e.target.value)}
-              className={INPUT_CLASS}
-            >
-              <option value="">{t("tasks.all_agents")}</option>
-              {agents.map((a) => (
-                <option key={a} value={a}>{a}</option>
-              ))}
-            </select>
-          ) : (
-            <input
-              type="text"
-              value={assignee}
-              onChange={(e) => setAssignee(e.target.value)}
-              placeholder={t("tasks.field_assignee_placeholder")}
-              className={INPUT_CLASS}
-            />
-          )}
+          {/* A single free-text input with a <datalist> of suggestions,
+              never a <select> that swaps in once the registry loads: a
+              two-widget swap left a value typed while `agents` was still
+              `[]` sitting in state under a dropdown that had already
+              re-rendered with nothing selected, so a submit right after
+              looked like it targeted no one but silently posted the typed
+              name. A single input has no mode to swap, so there is nothing
+              to desync — and typing a name outside the suggestion list
+              (a hand agent, or another operator's agent excluded by the
+              per-user scoping on GET /api/agents) still works exactly as
+              before. */}
+          <input
+            type="text"
+            list="new-task-assignee-agents"
+            value={assignee}
+            onChange={(e) => setAssignee(e.target.value)}
+            placeholder={t("tasks.field_assignee_placeholder")}
+            className={INPUT_CLASS}
+          />
+          <datalist id="new-task-assignee-agents">
+            {agents.map((a) => (
+              <option key={a} value={a} />
+            ))}
+          </datalist>
         </div>
 
         <div className="flex gap-3">
@@ -509,7 +513,10 @@ export function TasksPage() {
   // historical tasks: the kernel validates the assignee against the registry
   // now, so a picker offering a deleted agent's name (or a typo on an empty
   // board) produces a 400 the moment the operator picks it.
-  const agentsQuery = useAgents();
+  // `includeHands: true` because the kernel accepts hand agents as assignees
+  // too; the default-excluding list here would otherwise offer strictly less
+  // than what a claim can actually target.
+  const agentsQuery = useAgents({ includeHands: true });
 
   const allTasks: TaskQueueItem[] = taskListQuery.data?.tasks ?? [];
   const validTasks = allTasks.filter(
