@@ -258,6 +258,32 @@ describe("ChannelsSection (#7742)", () => {
     ).toBeInTheDocument();
   });
 
+  it("still renders an allowlist whose channels are no longer configured on the instance (#7749 review)", async () => {
+    // `get_agent_channels` builds `available` from `config.sidecar_channels`
+    // alone, so an `agent.toml` carrying `channels = ["telegram"]` after that
+    // sidecar channel was removed from `config.toml` reports a non-empty
+    // `assigned` against an empty `available`. Gating the picker on
+    // `available` hid a live restriction behind "No channels configured" and
+    // left no way to clear it.
+    const user = userEvent.setup();
+    useAgentChannelsMock.mockReturnValue({
+      data: { assigned: ["telegram"], available: [], mode: "allowlist" },
+      isLoading: false,
+    });
+    renderChannels();
+
+    expect(
+      screen.queryByText("No channels configured on this instance."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove telegram" })).toBeInTheDocument();
+
+    // …and it is clearable from here, which is the half that mattered.
+    await user.click(screen.getByRole("button", { name: "Remove telegram" }));
+    fireEvent.click(screen.getByRole("button", { name: /common\.save/i }));
+    expect(setChannelsMutate).toHaveBeenCalledTimes(1);
+    expect(setChannelsMutate.mock.calls[0][0]).toEqual({ agentId: "agent-1", channels: [] });
+  });
+
   it("picking a channel from the dropdown and saving PUTs the new allowlist (#7742)", async () => {
     const user = userEvent.setup();
     renderChannels();

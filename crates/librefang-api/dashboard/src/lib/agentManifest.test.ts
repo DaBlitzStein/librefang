@@ -844,6 +844,49 @@ fallback_models = []
     expect(reparsed.form.fallback_models).toEqual([]);
   });
 
+  it("emits a declared fallback_models = [] at top level, not inside the last table (#7749 review)", () => {
+    // The fixture above is `name` + `description` only, so every section body
+    // came out empty, no `[header]` was ever emitted, and the bare key landed
+    // at top level by accident. Every manifest the daemon actually serves
+    // carries a `[model]` table (`toml::to_string_pretty` on a real
+    // `AgentManifest`), which put `fallback_models = []` inside `[model]`.
+    // `AgentManifest`/`ModelConfig` declare no `deny_unknown_fields`, so the
+    // kernel dropped it silently and the agent went back to inheriting the
+    // deployment-wide `fallback_providers` chain with no error surfaced.
+    const original = `name = "agent"
+description = "test"
+
+fallback_models = []
+
+[model]
+provider = "anthropic"
+model = "claude-sonnet-4"
+`;
+    const parsed = parseManifestToml(original);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.fallback_models).toEqual([]);
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    // The key must precede the first table header, which is what makes it
+    // top-level. Asserting only `toContain("fallback_models = []")` passes on
+    // the broken output too — that is exactly how this shipped.
+    const keyAt = round.indexOf("fallback_models = []");
+    const firstHeaderAt = round.indexOf("[model]");
+    expect(keyAt).toBeGreaterThanOrEqual(0);
+    expect(firstHeaderAt).toBeGreaterThanOrEqual(0);
+    expect(keyAt).toBeLessThan(firstHeaderAt);
+
+    // And the round trip has to survive a re-parse as a top-level key rather
+    // than surfacing as a `model` extra.
+    const reparsed = parseManifestToml(round);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.fallback_models).toEqual([]);
+    expect(reparsed.extras.model).not.toHaveProperty("fallback_models");
+    expect(reparsed.form.model.provider).toBe("anthropic");
+  });
+
   it("keeps an absent fallback_models absent after a round trip (inherit stays inherit)", () => {
     const original = `name = "agent"
 description = "test"
