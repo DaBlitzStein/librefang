@@ -18,11 +18,14 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { Modal } from "../components/ui/Modal";
 import {
+  isMcpGroupCardActionable,
   isMcpServerGranted,
   isToolAllowed,
   isToolBlocked,
+  mcpGroupCardState,
   resolveMcpGrantMode,
   toggleMcpServerGrant,
+  type McpGroupCardState,
 } from "../lib/toolGrants";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
@@ -466,7 +469,16 @@ export function ChannelsSection({ agentId }: { agentId: string }) {
       </p>
       {channelsQuery.isLoading ? (
         <p className="text-xs text-text-dim">{t("common.loading", { defaultValue: "Loading..." })}</p>
-      ) : available.length > 0 ? (
+      ) : /* `available` comes only from `config.sidecar_channels`
+             (`routes/agents/config.rs: get_agent_channels`) and never unions in
+             the agent's own `channels`, so an allowlist left over from a
+             since-removed sidecar channel has a non-empty `assigned` against an
+             empty `available`. Gating on `available` alone hid that allowlist
+             behind "No channels configured" while it actively restricted the
+             agent, with no way to clear it. `MultiSelectCmdk` renders its chips
+             from `value`, so an assigned-but-unavailable name still shows and
+             still survives a save (#7749 review). */
+        available.length > 0 || assigned.length > 0 ? (
         <MultiSelectCmdk
           options={available}
           value={current}
@@ -1178,6 +1190,11 @@ export function AgentsPage() {
     setManifestEditorSeeded(false);
     setManifestEditorErrors(new Set());
     setManifestEditorParseError(null);
+    // The drawer renders `manifestPatchMutation.error` unconditionally, and a
+    // mutation keeps its last error until it is reset or re-run. Without this,
+    // a failed save → Cancel → reopen greets the operator with the previous
+    // attempt's error over a session that has submitted nothing (#7749 review).
+    manifestPatchMutation.reset();
     // #7749 review: the query cache holds the TOML for `staleTime: 30_000`,
     // so reopening inside that window serves the stale copy synchronously —
     // the seed effect below marks the editor seeded from it and then
@@ -2211,6 +2228,33 @@ export function AgentsPage() {
       if (server === undefined) return false;
       return isMcpServerGranted(server, mcpDraftArr, mcpModeEffective);
     };
+    // Both hard switches, read straight off the agent rather than through
+    // `mcpModeEffective` — that one folds them into "none", which is
+    // indistinguishable from "no server granted yet" and would label an inert
+    // card as grantable.
+    const mcpHardDisabled = !!(agent.tools_disabled || agent.mcp_disabled);
+    // One source of truth for what an MCP card may do and say, shared by the
+    // all-tools grid and the assigned/available lists (#7749 review).
+    const mcpCardStateOf = (groupName: string) =>
+      mcpGroupCardState({
+        granted: isMcpGroupGranted(groupName),
+        mode: mcpModeEffective,
+        hardDisabled: mcpHardDisabled,
+      });
+    // Never "click to assign" on a card that cannot be clicked.
+    const mcpGroupLabel = (state: McpGroupCardState): string => {
+      if (state === "hard-disabled") {
+        return t("agents.detail.tools_mcp_inert", {
+          defaultValue: "not granted — MCP is hard-disabled",
+        });
+      }
+      if (state === "grantable") {
+        return t("agents.detail.tools_mcp_not_granted", {
+          defaultValue: "not granted — click to grant",
+        });
+      }
+      return t("agents.detail.tools_mcp_granted", { defaultValue: "granted via mcp_servers" });
+    };
     // Whether one tool inside a group counts as active for display purposes.
     const isToolActive = (groupName: string, tool: ToolDefinition): boolean => {
       if (isMcpGroup(groupName)) {
@@ -2256,10 +2300,9 @@ export function AgentsPage() {
         // stage under a hard switch either: with `tools_disabled` or
         // `mcp_disabled` the kernel skips MCP entirely, so a staged grant
         // would arm a Save that changes nothing visible or effective
-        // (#7749 review) — the banner below explains why instead.
-        const mcpHardDisabled = agent.tools_disabled || agent.mcp_disabled;
+        // (#7749 review) — the banner above the cards explains why instead.
         const server = mcpServerByGroup.get(groupName);
-        if (!server || mcpModeEffective === "all" || mcpHardDisabled) return;
+        if (!server || !isMcpGroupCardActionable(mcpCardStateOf(groupName))) return;
         setMcpServersDraft((prev) => toggleMcpServerGrant(prev ?? persistedMcpServers, server));
         if (expandedToolGroup === groupName) setExpandedToolGroup(null);
         return;
@@ -2471,6 +2514,16 @@ export function AgentsPage() {
           </div>
         )}
 
+        {/* Above the view switch, not inside one arm of it: the MCP cards this
+            explains live in the all-tools grid and in the assigned/available
+            lists, and the branch it used to sit in is the one with no cards on
+            screen at all (#7749 review). */}
+        {!isLoading && mcpHardDisabled && (
+          <p className="text-xs text-warning">
+            {t("agents.detail.mcp_hard_disabled_note", { defaultValue: "MCP servers are hard-disabled for this agent (tools_disabled or mcp_disabled). Granting one here would change nothing until the hard switch is turned off, so the toggles are inert." })}
+          </p>
+        )}
+
         {isLoading ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
             <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
@@ -2483,12 +2536,21 @@ export function AgentsPage() {
                   // An empty `capabilities_tools` means "all builtin tools", but it says nothing about MCP: an MCP server is only reachable when `mcp_servers` grants it (#6565), so label MCP groups by their actual grant instead of "included".
                   const mcpGroup = isMcpGroup(groupName);
                   const granted = !mcpGroup || isMcpGroupGranted(groupName);
+                  // `mcp_servers` is its own draft and its own endpoint, so an
+                  // MCP grant can be toggled straight from this card. Routing it
+                  // through Customize instead made `isBuiltinDirty` true and had
+                  // Save write `capabilities_tools = [<every builtin that exists
+                  // today>]` as a side effect of an MCP-only intent, silently
+                  // ending the agent's "all tools" status (#7749 review).
+                  const cardState = mcpGroup ? mcpCardStateOf(groupName) : null;
+                  const actionable = cardState !== null && isMcpGroupCardActionable(cardState);
                   return (
                     <div
                       key={groupName}
+                      onClick={actionable ? () => handleToggleGroup(groupName) : undefined}
                       className={`px-3 py-2.5 rounded-md border bg-main/40 flex items-start justify-between gap-2 ${
                         granted ? "border-border-subtle" : "border-border-subtle opacity-60"
-                      }`}
+                      } ${actionable ? "cursor-pointer transition-colors hover:border-brand/40" : ""}`}
                     >
                       <div className="min-w-0 flex-1">
                         <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
@@ -2502,17 +2564,14 @@ export function AgentsPage() {
                         <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
                           {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
                           {" · "}
-                          {!mcpGroup
+                          {cardState === null
                             ? t("agents.detail.tools_included", { defaultValue: "included" })
-                            : granted
-                              ? t("agents.detail.tools_mcp_granted", {
-                                  defaultValue: "granted via mcp_servers",
-                                })
-                              : t("agents.detail.tools_mcp_not_granted", {
-                                  defaultValue: "not granted — customize to grant individual servers",
-                                })}
+                            : mcpGroupLabel(cardState)}
                         </div>
                       </div>
+                      {actionable && !granted && (
+                        <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                      )}
                     </div>
                   );
                 })}
@@ -2528,12 +2587,6 @@ export function AgentsPage() {
               </Button>
             </>
           ) : (
-            <>
-            {(agent as AgentView).tools_disabled || (agent as AgentView).mcp_disabled ? (
-              <p className="text-xs text-warning mb-2">
-                {t("agents.detail.mcp_hard_disabled_note", { defaultValue: "MCP servers are hard-disabled for this agent (tools_disabled or mcp_disabled). Granting one here would change nothing until the hard switch is turned off, so the toggles are inert." })}
-              </p>
-            ) : null}
             <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
               <Wrench className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
               <div className="min-w-0 flex-1">
@@ -2545,7 +2598,6 @@ export function AgentsPage() {
                 </div>
               </div>
             </div>
-            </>
           )
         ) : (
           <>
@@ -2556,7 +2608,9 @@ export function AgentsPage() {
                   const activeCount = activeCountIn(groupName, groupTools);
                   const isExpanded = expandedToolGroup === groupName;
                   const mcpGroup = isMcpGroup(groupName);
-                  const mcpRemovable = mcpGroup && mcpModeEffective !== "all";
+                  // Same rule as the other two card lists rather than a third
+                  // inline reading of the mode (#7749 review).
+                  const mcpRemovable = mcpGroup && isMcpGroupCardActionable(mcpCardStateOf(groupName));
                   return (
                     <div key={groupName} className="flex flex-col">
                       <div
@@ -2626,11 +2680,19 @@ export function AgentsPage() {
                   {availableGroups.map(([groupName, groupTools]) => {
                     const mcpGroup = isMcpGroup(groupName);
                     const isExpanded = expandedToolGroup === groupName;
+                    // A builtin group is always assignable; an MCP one only in
+                    // the states that stage something. Dropping the pointer and
+                    // the hover highlight too, not just the label — an inert card
+                    // that still looks clickable is the same defect one layer down.
+                    const actionable =
+                      !mcpGroup || isMcpGroupCardActionable(mcpCardStateOf(groupName));
                     return (
                       <div key={groupName} className="flex flex-col">
                         <div
-                          onClick={() => handleToggleGroup(groupName)}
-                          className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 transition-colors flex items-start justify-between gap-2 cursor-pointer hover:border-brand/40"
+                          onClick={actionable ? () => handleToggleGroup(groupName) : undefined}
+                          className={`px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 transition-colors flex items-start justify-between gap-2 ${
+                            actionable ? "cursor-pointer hover:border-brand/40" : ""
+                          }`}
                         >
                           <div className="min-w-0 flex-1">
                             <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
@@ -2644,7 +2706,10 @@ export function AgentsPage() {
                             <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
                               {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
                               {" · "}
-                              {t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })}
+                              {/* An MCP card under a hard switch stages nothing, so it must not read "click to assign" (#7749 review). */}
+                              {mcpGroup
+                                ? mcpGroupLabel(mcpCardStateOf(groupName))
+                                : t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })}
                             </div>
                           </div>
                           <div className="flex items-center gap-1 shrink-0 mt-0.5">
@@ -2660,7 +2725,7 @@ export function AgentsPage() {
                                 className={`w-3.5 h-3.5 transition-transform ${isExpanded ? "" : "-rotate-90"}`}
                               />
                             </button>
-                            <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                            {actionable && <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0" />}
                           </div>
                         </div>
                         {isExpanded && renderGroupToolList(groupName, groupTools, mcpGroup)}

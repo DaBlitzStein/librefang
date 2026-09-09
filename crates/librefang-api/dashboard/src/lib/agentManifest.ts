@@ -496,6 +496,20 @@ export const serializeManifestForm = (
   if (form.allowed_plugins.length) {
     lines.push(`allowed_plugins = ${tomlArray(form.allowed_plugins)}`);
   }
+  // `fallback_models = []` is a TOP-LEVEL key, so it has to be emitted here,
+  // with the other top-level arrays and before the first `[section]` header.
+  // `null` omits it (inherit the global fallback_providers); a declared `[]`
+  // must still emit — it is the disable-all statement, and dropping it would
+  // re-enable global fallbacks on an agent pinned to none (#7749).
+  // Emitting it after the section headers instead put the bare key inside
+  // whichever table was appended last (`[model]` on any manifest the daemon
+  // renders, since `toml::to_string_pretty` always writes a `[model]` table).
+  // Neither `AgentManifest` nor `ModelConfig` declares `deny_unknown_fields`,
+  // so the kernel dropped that `model.fallback_models` silently and the agent
+  // went back to inheriting the deployment-wide chain with no error surfaced.
+  if (form.fallback_models !== null && form.fallback_models.length === 0) {
+    lines.push("fallback_models = []");
+  }
 
   // Schedule — Reactive is the default and emits nothing; tagged variants
   // serialize as the externally-tagged TOML form `schedule = { variant = { … } }`.
@@ -632,12 +646,6 @@ export const serializeManifestForm = (
   }
 
   // [[fallback_models]]
-  // `null` omits the key (inherit global fallback_providers); a declared
-  // `[]` must still emit — it is the disable-all statement, and dropping it
-  // would re-enable global fallbacks on an agent pinned to none (#7749).
-  if (form.fallback_models !== null && form.fallback_models.length === 0) {
-    lines.push("fallback_models = []");
-  }
   for (const fb of form.fallback_models ?? []) {
     const body: string[] = [];
     writeStringScalar(body, "provider", fb.provider.trim());
