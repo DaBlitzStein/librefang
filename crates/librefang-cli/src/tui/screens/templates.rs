@@ -226,6 +226,12 @@ pub enum TemplatesAction {
     ShowVersionHistory {
         name: String,
     },
+    /// Restore the template currently shown in the history overlay to one
+    /// specific historical version, selected there.
+    RestoreTemplateVersion {
+        name: String,
+        version_id: String,
+    },
     /// Promote the selected manifest-backed agent type to the registry.
     PromoteTemplate {
         name: String,
@@ -326,6 +332,18 @@ impl TemplatesState {
                     let next = (i + 1) % total;
                     self.history_list.select(Some(next));
                 }
+                KeyCode::Enter if total > 0 => {
+                    if let Some(row) = self
+                        .history_list
+                        .selected()
+                        .and_then(|i| self.version_history.get(i))
+                    {
+                        return TemplatesAction::RestoreTemplateVersion {
+                            name: self.history_name.clone(),
+                            version_id: row.id.clone(),
+                        };
+                    }
+                }
                 _ => {}
             }
             return TemplatesAction::Continue;
@@ -396,9 +414,12 @@ impl TemplatesState {
                 if let Some(sel) = self.list_state.selected() {
                     if let Some(&idx) = self.filtered.get(sel) {
                         let t = &self.templates[idx];
-                        return TemplatesAction::ShowVersionHistory {
-                            name: t.name.clone(),
-                        };
+                        if t.source == TemplateSource::Manifest {
+                            return TemplatesAction::ShowVersionHistory {
+                                name: t.name.clone(),
+                            };
+                        }
+                        self.status_msg = crate::i18n::t("tui-templates-history-manifest-only");
                     }
                 }
             }
@@ -943,8 +964,44 @@ mod tests {
     }
 
     #[test]
-    fn version_history_key_returns_the_history_action() {
+    fn history_key_on_a_builtin_refuses_and_stays() {
         let mut state = TemplatesState::new();
+        // `new()` selects the first row, and every builtin row has no manifest
+        // to read history from.
+        assert_eq!(
+            state.templates[state.filtered[0]].source,
+            TemplateSource::Builtin
+        );
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert!(matches!(action, TemplatesAction::Continue));
+        assert_eq!(
+            state.status_msg,
+            crate::i18n::t("tui-templates-history-manifest-only")
+        );
+    }
+
+    #[test]
+    fn history_key_on_a_manifest_row_returns_the_history_action() {
+        let mut state = TemplatesState::new();
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "payroll".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let idx = state
+            .templates
+            .iter()
+            .position(|t| t.name == "payroll")
+            .expect("manifest row exists");
+        let pos = state
+            .filtered
+            .iter()
+            .position(|&i| i == idx)
+            .expect("payroll is reachable");
+        state.list_state.select(Some(pos));
         assert!(matches!(
             state.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)),
             TemplatesAction::ShowVersionHistory { .. }
@@ -982,5 +1039,44 @@ mod tests {
         assert_eq!(state.history_list.selected(), Some(1));
         state.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert_eq!(state.history_list.selected(), Some(0));
+    }
+
+    #[test]
+    fn enter_inside_version_history_restores_the_selected_row() {
+        let mut state = TemplatesState::new();
+        state.showing_history = true;
+        state.history_name = "payroll".to_string();
+        state.version_history = vec![
+            TemplateVersionRow {
+                id: "1".to_string(),
+                timestamp: "t1".to_string(),
+                change_source: "create".to_string(),
+            },
+            TemplateVersionRow {
+                id: "2".to_string(),
+                timestamp: "t2".to_string(),
+                change_source: "update".to_string(),
+            },
+        ];
+        state.history_list.select(Some(1));
+        let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match action {
+            TemplatesAction::RestoreTemplateVersion { name, version_id } => {
+                assert_eq!(name, "payroll");
+                assert_eq!(version_id, "2");
+            }
+            _ => panic!("expected RestoreTemplateVersion, got a different action"),
+        }
+        // The overlay stays open until the daemon confirms the restore.
+        assert!(state.showing_history);
+    }
+
+    #[test]
+    fn enter_inside_empty_version_history_does_nothing() {
+        let mut state = TemplatesState::new();
+        state.showing_history = true;
+        state.history_name = "payroll".to_string();
+        let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, TemplatesAction::Continue));
     }
 }

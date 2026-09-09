@@ -219,6 +219,12 @@ pub enum AppEvent {
         name: String,
         result: Result<Vec<TemplateVersionRow>, String>,
     },
+    /// Result of restoring a template to one specific historical version.
+    TemplateVersionRestoreResult {
+        name: String,
+        ok: bool,
+        message: String,
+    },
     /// Result of promoting an agent type to the registry.
     AgentTypePromoted {
         name: String,
@@ -3057,8 +3063,12 @@ pub struct TemplateVersionRow {
 
 /// Parse the body of `GET /api/templates/{name}/history` into display rows.
 /// The endpoint answers `{"versions": [{id, template_name, timestamp, manifest_toml, change_source}, …]}` —
-/// every deviation from that shape is an error, not an empty list, because a failed request must
-/// not render the same "no history" state as an empty list.
+/// a missing or non-array `versions` envelope is an error, not an empty list, because a failed
+/// request must not render the same "no history" state as an empty list.
+/// This guarantee stops at the envelope: within one row, a missing or non-string `id` /
+/// `timestamp` / `change_source` falls back to a placeholder (`"?"` / `"unknown"`) rather than
+/// erroring, so a daemon that renamed a row field renders placeholders instead of surfacing the
+/// shape mismatch.
 pub(crate) fn parse_template_history(
     body: &serde_json::Value,
 ) -> Result<Vec<TemplateVersionRow>, String> {
@@ -3118,6 +3128,44 @@ pub fn spawn_restore_from_registry(backend: BackendRef, name: String, tx: mpsc::
             }
         };
         let _ = tx.send(AppEvent::RegistryRestoreResult { name, ok, message });
+    });
+}
+
+/// Restore a template to one specific historical version, via
+/// `POST /api/templates/{name}/history/{version_id}/restore` — the only
+/// restore endpoint the daemon serves today (see `spawn_restore_from_registry`).
+pub fn spawn_restore_template_version(
+    backend: BackendRef,
+    name: String,
+    version_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let (ok, message) = if !is_safe_template_name(&name) || !is_safe_template_name(&version_id)
+        {
+            (false, crate::i18n::t("tui-templates-restore-invalid-name"))
+        } else {
+            match backend {
+                BackendRef::Daemon { base_url, api_key } => {
+                    let client = make_daemon_client(api_key.as_deref());
+                    let outcome = client
+                        .post(format!(
+                            "{base_url}/api/templates/{name}/history/{version_id}/restore"
+                        ))
+                        .send();
+                    match daemon_response(outcome, || {
+                        crate::i18n::t("tui-templates-version-restore-failed")
+                    }) {
+                        Ok(_) => (true, crate::i18n::t("tui-templates-restore-success")),
+                        Err(message) => (false, message),
+                    }
+                }
+                BackendRef::InProcess(_) => {
+                    (false, crate::i18n::t("tui-templates-restore-daemon-only"))
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::TemplateVersionRestoreResult { name, ok, message });
     });
 }
 
