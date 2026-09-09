@@ -1,19 +1,36 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  createAgentType,
+  createAgentTypeFromToml,
   deleteAgentType,
   promoteAgentType,
   restoreTemplateVersion,
   spawnEphemeral,
   putAgentTemplateToml,
 } from "../http/client";
-import type { AgentTypeSpec, SpawnEphemeralRequest } from "../../api";
+import type { AgentTypeDetail, SpawnEphemeralRequest } from "../../api";
 import { agentTypeKeys, budgetKeys, usageKeys } from "../queries/keys";
 
-export function useCreateAgentType() {
+/**
+ * Report a save's `unknown_keys` back to the caller (#8028).
+ *
+ * The server drops any top-level key the submitted TOML carried that
+ * `AgentManifest` doesn't recognize, and says so in the response body — but
+ * a mutation's `onSuccess` runs before the caller sees the result, so this
+ * is the one place shared by both write paths that can turn it into
+ * something the operator actually sees instead of a fact only the network
+ * tab knows.
+ */
+export const unknownKeysWarning = (detail: AgentTypeDetail): string | null =>
+  detail.unknown_keys && detail.unknown_keys.length > 0
+    ? detail.unknown_keys.join(", ")
+    : null;
+
+/** Create a new agent type from a complete manifest, in one atomic write (#8028). */
+export function useCreateAgentTypeFromToml() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (spec: AgentTypeSpec) => createAgentType(spec),
+    mutationFn: ({ name, toml }: { name: string; toml: string }) =>
+      createAgentTypeFromToml(name, toml),
     onSuccess: () => qc.invalidateQueries({ queryKey: agentTypeKeys.all }),
   });
 }

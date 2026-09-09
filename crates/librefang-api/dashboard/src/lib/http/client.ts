@@ -200,6 +200,7 @@ export type {
 export {
   // agents
   createAgentType,
+  createAgentTypeFromToml,
   putAgentTemplateToml,
   deleteAgentType,
   promoteAgentType,
