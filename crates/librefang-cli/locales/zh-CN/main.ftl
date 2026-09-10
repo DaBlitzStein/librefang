@@ -2371,6 +2371,30 @@ tui-groups-hints = ↑/↓ 导航 · r 刷新
 
 tui-goals-judge-label = { "  " }目标裁判:{ " " }
 tui-goals-phase-label = { "  " }运行阶段:{ " " }
+# purge command
+purge-failed-config = 清除已中止：无法加载配置，因此无法确定要清除哪个安装：{ $error }
+purge-database-line = 数据库：{ $path }
+purge-home-line = 主目录（定时任务、事件触发器、代理类型模板、工作区）：{ $path }
+purge-failed-no-database = 清除失败：{ $path } 处无数据库
+purge-failed-open-database = 清除失败：打开数据库：{ $error }
+purge-nothing-to-purge = 无需清除：'{ $agent }' 在此安装中未留下痕迹。
+purge-purged-header = 已清除 '{ $agent }'：
+purge-removed-roster-entry =   - 名册条目、会话、记忆和 KV 行
+purge-removed-orphaned-data =   - 孤立会话、记忆和 KV 行（名册条目已消失）
+purge-removed-identity-record =   - agent_identities.toml 中的规范 UUID 记录
+purge-removed-workspace =   - 工作区目录
+purge-workspace-unresolved =   - 注意：无法定位工作区目录。该代理的清单已不存在，因此无法找到自定义的工作区路径；请自行检查工作区目录。
+purge-workspace-shared =   - 注意：工作区目录被保留未删除。它解析为工作区根目录本身，或解析为另一个已注册代理的清单也指向的目录——删除它会破坏超出该代理自身数据的内容；请自行检查工作区目录。
+purge-removed-agent-type =   - 代理类型模板
+purge-removed-cron-jobs =   - 定时任务
+purge-removed-trigger-jobs =   - 事件触发器
+purge-removed-channel-bindings =   - 频道/对话路由绑定
+purge-other-orphans-present =   - 注意：此安装中存在无法归属到任何名称的孤立记录（很可能是子代理或临时代理，其名册条目已经消失）；这些记录未被处理。
+purge-failure-line =   - 失败：{ $error }
+purge-confirm-header = 即将永久清除 '{ $agent }'：
+purge-confirm-warning = 此操作无法撤销。
+purge-dry-run-header = 试运行 — 将清除 '{ $agent }'（打开数据库仍可能应用待处理的架构迁移并重建搜索索引，即使不会删除任何内容）：
+purge-failed-daemon-running = 清除已中止：守护进程正在 { $url } 上运行，占用着此安装的数据。请先停止它，或者如果你确定无妨，可传入 --force。
 
 # --- Goals screen (TUI) ---
 tui-goals-title = ⌖ 目标
