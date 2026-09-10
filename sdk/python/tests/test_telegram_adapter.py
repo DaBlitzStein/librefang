@@ -1391,3 +1391,46 @@ async def test_refused_edit_in_the_streaming_path_is_reported(monkeypatch, capsy
     errors = [r for r in _stderr_records(captured) if r.get("level") == "error"]
     assert errors, "a refused edit in the streaming path must be reported"
     assert errors[0]["fields"]["error_code"] == 403
+
+
+def test_negotiated_fallbacks_that_deliver_report_nothing(monkeypatch, capsys):
+    """Both deliberate silences on the chunk path, guarded.
+
+    `_send_formatted_chunk` is where the reporting lives, and it sits after
+    *two* negotiations that each produce a non-`ok` response on the way to a
+    delivered message:
+
+      * `sendRichMessage` refused by a pre-10.1 Bot API server, which routes
+        the reply to the legacy HTML pipeline;
+      * the HTML chunk refused with `400 can't parse entities`, which is
+        re-sent as plain text and lands.
+
+    Neither is a failure, and neither may log. This test fails if the guard is
+    ever moved onto the intermediate `_call_retrying` response instead of the
+    final one — a one-line change that would make every message containing a
+    stray `<` report an error for a send that succeeded.
+    """
+    def fake(self, method, payload):
+        if method == "sendRichMessage":
+            return {
+                "ok": False, "_http": 400, "error_code": 400,
+                "description": "Bad Request: method not found",
+            }
+        if "parse_mode" in payload:
+            return {
+                "ok": False, "_http": 400, "error_code": 400,
+                "description": "Bad Request: can't parse entities in message text",
+            }
+        return {"ok": True, "result": {"message_id": 11}}
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_call", fake)
+    a = _adapter()
+
+    resp = a._send_text("c1", "a < b, y se entrega en plano")
+
+    captured = capsys.readouterr()
+    assert resp.get("ok") is True, "the plain retry must be the reported outcome"
+    assert not [r for r in _stderr_records(captured) if r.get("level") == "error"], (
+        "a negotiated fallback that delivers the message must stay silent: "
+        f"{captured.err}"
+    )
