@@ -3,4 +3,4 @@ With a dashboard password configured, `/dashboard/agents` answered the login pag
 Both paths serve the same `index.html`, and the root was also excluded from the session-cookie lookup, so a session established there could never have been recognised anyway.
 The root now follows exactly the same rule as the rest of the shell: served when no dashboard password is configured, answered with the login page when one is.
 An `api_key`-only deployment is deliberately unchanged — it has no username-and-password login screen to show, and closing the shell there would leave the operator with nowhere to enter the key.
-(#8261) (@DaBlitzStein)
+(#8279) (@DaBlitzStein)
