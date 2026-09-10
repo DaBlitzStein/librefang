@@ -544,10 +544,15 @@ impl App {
                     Tab::Extensions => self.extensions.status_msg = err,
                     Tab::Templates => self.templates.status_msg = err,
                     Tab::Settings => {
-                        // Same trap as `Channels` below: the vault sub-tab renders its
-                        // spinner unconditionally while `loading` is set, so a failed
-                        // fetch that only wrote a status message would leave the pane
-                        // spinning until some later fetch happened to succeed.
+                        // Same reason as `Tab::Channels` below: every Settings
+                        // pane draws its spinner on `state.loading` alone, and
+                        // `loading` is only cleared by a successful *Loaded
+                        // event. A fetch that fails after `refresh_settings_*`
+                        // set the flag would otherwise leave the pane spinning
+                        // forever, with the message underneath it invisible
+                        // behind the spinner (#8059 review). `loading` is shared
+                        // by every pane, so this belongs here rather than in any
+                        // one fetch helper.
                         self.settings.loading = false;
                         self.settings.status_msg = err;
                     }
@@ -630,14 +635,23 @@ impl App {
                     crate::i18n::t_args("tui-mod-session-deleted", &[("id", &id)]);
             }
             AppEvent::MemoryConfigLoaded(config) => {
-                self.memory.config = Some(config);
-                self.memory.loading = false;
+                self.memory.apply_config(config);
+            }
+            AppEvent::MemoryConfigSaved(result) => {
+                // A clean save asks for a refetch: the write moves
+                // `extraction_model` on disk without moving the running
+                // extractor, and the panel can only report both honestly by
+                // asking the daemon what each one now is.
+                let next = self.memory.apply_save_result(result);
+                self.handle_memory_action(next);
             }
             AppEvent::MemoryConfigFailed(failure) => {
                 // Clear `loading` on the failure path too, or the screen sits
                 // on its spinner forever and the message never gets read.
+                // The message is the config panel's own, not the KV
+                // browser's — this fetch is only ever for the config screen.
                 self.memory.loading = false;
-                self.memory.status_msg = match failure {
+                self.memory.config_status_msg = match failure {
                     event::FetchFailure::RequiresDaemon => {
                         crate::i18n::t("tui-memory-config-requires-daemon")
                     }
@@ -791,6 +805,17 @@ impl App {
                 self.settings.tools = tools;
                 if !self.settings.tools.is_empty() {
                     self.settings.tool_list.select(Some(0));
+                }
+                self.settings.loading = false;
+            }
+            AppEvent::SettingsAuxiliaryLoaded(aux) => {
+                self.settings.auxiliary = aux;
+                self.settings.aux_tasks = self.settings.auxiliary.keys().cloned().collect();
+                self.settings.aux_tasks.sort();
+                if !self.settings.aux_tasks.is_empty()
+                    && self.settings.aux_list.selected().is_none()
+                {
+                    self.settings.aux_list.select(Some(0));
                 }
                 self.settings.loading = false;
             }
@@ -1648,6 +1673,13 @@ impl App {
         }
     }
 
+    fn refresh_settings_auxiliary(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.settings.loading = true;
+            event::spawn_fetch_auxiliary(backend, self.event_tx.clone());
+        }
+    }
+
     fn refresh_settings_vault(&mut self) {
         if let Some(backend) = self.backend.to_ref() {
             self.settings.loading = true;
@@ -2171,6 +2203,21 @@ impl App {
                     event::spawn_delete_memory_kv(backend, agent_id, key, self.event_tx.clone());
                 }
             }
+            memory::MemoryUIAction::SaveConfig {
+                auto_memorize,
+                auto_retrieve,
+                extraction_model,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_save_memory_config(
+                        backend,
+                        auto_memorize,
+                        auto_retrieve,
+                        extraction_model,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
         }
     }
 
@@ -2334,6 +2381,7 @@ impl App {
             settings::SettingsAction::RefreshModels => self.refresh_settings_models(),
             settings::SettingsAction::RefreshTools => self.refresh_settings_tools(),
             settings::SettingsAction::RefreshBackups => self.refresh_settings_backups(),
+            settings::SettingsAction::RefreshAuxiliary => self.refresh_settings_auxiliary(),
             settings::SettingsAction::RefreshVault => self.refresh_settings_vault(),
             settings::SettingsAction::SetVaultKey { key, value } => {
                 if let Some(backend) = self.backend.to_ref() {
@@ -2373,6 +2421,11 @@ impl App {
             settings::SettingsAction::RestoreBackup(body) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_restore_backup(backend, body, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::SaveAuxChain { task, chain } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_save_aux_chain(backend, task, chain, self.event_tx.clone());
                 }
             }
         }
