@@ -801,6 +801,16 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 /// and unmistakable in `git log` / log output (`r00t…`).
 pub const ROOT_API_KEY_USER_ID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-72006f0074a0");
 
+/// Audit-log identity for a restored session row that carries no `user_name`.
+///
+/// A sentinel for the same reason [`ROOT_API_KEY_USER_ID`] is one:
+/// `UserId::from_name("anonymous")` would collide with a real
+/// `[users] name = "anonymous"` in `config.toml` and attribute these requests
+/// to that account. Such a session is denied everything above the Viewer floor,
+/// so this id only ever reaches the audit row for the denial.
+pub const UNATTRIBUTED_SESSION_USER_ID: uuid::Uuid =
+    uuid::uuid!("00000000-0000-0000-0000-616e6f6e0000");
+
 /// Resolved language code extracted from the `Accept-Language` header.
 ///
 /// Inserted into request extensions by the [`accept_language`] middleware so
@@ -2082,14 +2092,29 @@ pub async fn auth(
             // itself runs either way. It used to sit inside the `if let`, so an
             // unattributed row skipped owner-only writes, privileged GETs and
             // the non-GET check entirely and fell straight through to the
-            // handler; that fail-open was only ever masked by such rows being
-            // discarded on load.
+            // handler.
+            //
+            // That fail-open was reachable before this change, not merely
+            // latent: `load_sessions` discarded the HASHED rows and kept the
+            // cleartext-keyed ones, and a daemon old enough to predate
+            // attribution also predates #5494, so it wrote cleartext keys. Its
+            // unattributed rows loaded and authenticated with the gate skipped.
+            // `try_from_str_role` and not `from_str_role`: the lax variant
+            // resolves anything unrecognised to `User`, so a row carrying
+            // `""` or a typo like `"vewer"` would land ABOVE the floor while
+            // this code claims to be applying one. The strict variant is what
+            // the channel-role translators already use for the same reason
+            // (`auth.rs:70-74`).
             let role = session
                 .user_role
                 .as_deref()
-                .map(UserRole::from_str_role)
+                .and_then(UserRole::try_from_str_role)
                 .unwrap_or(UserRole::Viewer);
-            let user_id = UserId::from_name(session.user_name.as_deref().unwrap_or("anonymous"));
+            let user_id = session
+                .user_name
+                .as_deref()
+                .map(UserId::from_name)
+                .unwrap_or(UserId(UNATTRIBUTED_SESSION_USER_ID));
             if !user_role_allows_request(role, &method, path) {
                 let lang = request
                     .extensions()
