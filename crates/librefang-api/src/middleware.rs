@@ -1675,7 +1675,9 @@ pub async fn auth(
                 // a session cookie that must retain its role attribution.
                 let session_attribution = {
                     let sessions = auth_state.active_sessions.read().await;
-                    sessions.get(&token_str).cloned()
+                    sessions
+                        .get(&crate::password_hash::hash_device_token(&token_str))
+                        .cloned()
                 };
                 if let Some(session) = session_attribution {
                     if let (Some(name), Some(role_str)) = (session.user_name, session.user_role) {
@@ -2065,7 +2067,10 @@ pub async fn auth(
                 crate::password_hash::DEFAULT_SESSION_TTL_SECS,
             )
         });
-        if let Some(session) = sessions.get(token_str).cloned() {
+        if let Some(session) = sessions
+            .get(&crate::password_hash::hash_device_token(token_str))
+            .cloned()
+        {
             drop(sessions);
             // If the session was issued by a credential flow that carried
             // identity (dashboard_login attaches `user_name` + `user_role`),

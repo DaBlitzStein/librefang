@@ -836,7 +836,10 @@ pub(crate) async fn dashboard_login(
             session.user_role = Some("owner".to_string());
             {
                 let mut sessions = state.active_sessions.write().await;
-                sessions.insert(session.token.clone(), session);
+                sessions.insert(
+                    crate::password_hash::hash_device_token(&session.token),
+                    session,
+                );
                 // Persist so sessions survive daemon restarts.
                 save_sessions(state.kernel.home_dir(), &sessions);
             }
@@ -895,7 +898,10 @@ pub(crate) async fn mint_dashboard_session(
     token.user_role = Some(role.to_string());
     {
         let mut sessions = state.active_sessions.write().await;
-        sessions.insert(token.token.clone(), token.clone());
+        sessions.insert(
+            crate::password_hash::hash_device_token(&token.token),
+            token.clone(),
+        );
         save_sessions(state.kernel.home_dir(), &sessions);
     }
     let cookie = format!(
@@ -1018,7 +1024,10 @@ pub(crate) async fn dashboard_logout(
         let mut sessions = state.active_sessions.write().await;
         let mut removed_any = false;
         for token in &tokens {
-            if sessions.remove(token).is_some() {
+            if sessions
+                .remove(&crate::password_hash::hash_device_token(token))
+                .is_some()
+            {
                 removed_any = true;
             }
         }
@@ -1341,22 +1350,23 @@ const SESSIONS_HASH_PREFIX: &str = "$sha256$";
 /// upgraded onto a multi-user host stops leaking bearer tokens immediately
 /// instead of waiting for the next session mutation.
 ///
-/// SECURITY (#5494): the on-disk map key is hashed by `save_sessions` so
+/// SECURITY (#5494): the on-disk map key is a `$sha256$` hash so
 /// `sessions.json` lifted out of a backup snapshot (Time Machine, restic,
 /// BorgBackup pipelines often do NOT honor source 0600 perms) does not
-/// yield a usable set of bearer tokens. Entries whose key carries the
-/// `$sha256$` prefix are dropped on load — there is no cleartext to re-key
-/// the in-memory auth map with, so they cannot authenticate any presented
-/// token. The daemon trades cross-restart session continuity for
-/// backup-snapshot replay resistance; operators get one re-login per
-/// restart, an attacker with a month-old `sessions.json` gets nothing.
+/// yield a usable set of bearer tokens.
 ///
-/// Entries whose key does NOT carry the `$sha256$` prefix are treated as
-/// legacy cleartext from a pre-#5494 daemon. They authenticate normally
-/// for one session lifetime and are rewritten in the new hashed form by
-/// the very next `save_sessions` call (every login, every logout, the
-/// periodic GC sweep), so the migration window is at most one mutation
-/// deep.
+/// That protection does not require discarding the entries. The in-memory
+/// map is keyed by the same hash, and every lookup hashes the token the
+/// caller presented before probing it, so a hashed entry authenticates its
+/// token without the daemon ever holding the cleartext. Restoring the map
+/// verbatim therefore costs nothing an attacker can use: the file still
+/// contains only hashes, and `SessionToken.token` is still cleared before
+/// it is written.
+///
+/// Entries whose key does NOT carry the prefix are legacy cleartext from a
+/// pre-#5494 daemon. They are hashed on load so both vintages share one
+/// keyspace, and the next `save_sessions` writes the file back in the
+/// hashed form.
 fn load_sessions(
     home_dir: &std::path::Path,
 ) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
@@ -1392,13 +1402,15 @@ fn load_sessions(
         serde_json::from_str(&content).unwrap_or_default();
     sessions
         .into_iter()
-        .filter(|(key, _)| {
-            // New-format hashed entries (post-#5494) cannot be reversed
-            // into the cleartext key the auth middleware looks up against
-            // — keeping them would just bloat the map with rows that
-            // match no presented token. Drop them; operator must
-            // re-authenticate after restart.
-            !key.starts_with(SESSIONS_HASH_PREFIX)
+        .map(|(key, st)| {
+            // Legacy pre-#5494 rows carry the cleartext token as the key.
+            // Hash them so the restored map is uniformly keyed the way
+            // every lookup probes it.
+            if key.starts_with(SESSIONS_HASH_PREFIX) {
+                (key, st)
+            } else {
+                (crate::password_hash::hash_device_token(&key), st)
+            }
         })
         .filter(|(_, st)| {
             !crate::password_hash::is_token_expired(
@@ -1425,13 +1437,22 @@ fn sessions_for_disk(
 ) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
     sessions
         .iter()
-        .map(|(token, st)| {
+        .map(|(key, st)| {
             let mut redacted = st.clone();
             // Wipe the inner copy of the token so a backup snapshot
             // doesn't hand the attacker the same secret via the value
             // payload that the key already hid.
             redacted.token.clear();
-            (crate::password_hash::hash_device_token(token), redacted)
+            // The in-memory map is already keyed by the digest, so this is
+            // normally a passthrough. Hashing anything that is not still
+            // keeps the guarantee at the disk boundary rather than resting
+            // it on every insert site getting the key right.
+            let key = if key.starts_with(SESSIONS_HASH_PREFIX) {
+                key.clone()
+            } else {
+                crate::password_hash::hash_device_token(key)
+            };
+            (key, redacted)
         })
         .collect()
 }
@@ -1441,14 +1462,14 @@ fn sessions_for_disk(
 /// SECURITY: The file is written with owner-only permissions (0600) so that
 /// bearer tokens stored in it cannot be read by other local users (#3589/#3725).
 ///
-/// SECURITY (#5494): each map key is hashed via `hash_device_token` (and
-/// the duplicate `SessionToken.token` field is cleared) before
-/// serialization, so `sessions.json` cannot be replayed even if leaked
-/// through a backup pipeline that did not honor the source 0600 perms
-/// (Time Machine, restic, BorgBackup snapshots). The in-memory
-/// `active_sessions` map keeps the cleartext token as the key, so live
-/// auth lookups in `middleware.rs` (`sessions.get(token_str)`) are
-/// unchanged.
+/// SECURITY (#5494): the map key is a `hash_device_token` digest and the
+/// duplicate `SessionToken.token` field is cleared before serialization, so
+/// `sessions.json` cannot be replayed even if leaked through a backup
+/// pipeline that did not honor the source 0600 perms (Time Machine, restic,
+/// BorgBackup snapshots). The in-memory `active_sessions` map is keyed by
+/// that same digest, so live auth lookups in `middleware.rs` hash the
+/// presented token before probing (`sessions.get(&hash_device_token(tok))`)
+/// and the cleartext never has to be stored anywhere.
 fn save_sessions(
     home_dir: &std::path::Path,
     sessions: &std::collections::HashMap<String, crate::password_hash::SessionToken>,
@@ -3291,8 +3312,11 @@ mod observability_tests {
         };
 
         let mut sessions = std::collections::HashMap::new();
-        sessions.insert("live-token".to_string(), live);
-        sessions.insert("expired-token".to_string(), expired);
+        sessions.insert(crate::password_hash::hash_device_token("live-token"), live);
+        sessions.insert(
+            crate::password_hash::hash_device_token("expired-token"),
+            expired,
+        );
 
         // Per #5494, the on-disk form is keyed by the SHA-256 hash of
         // the cleartext token (and the inner token field is wiped), so
@@ -3428,7 +3452,10 @@ mod observability_tests {
     fn sessions_for_disk_redacts_token_field() {
         let cleartext = "f0e1d2c3b4a596878695a4b3c2d1e0f0e1d2c3b4a596878695a4b3c2d1e0f0e1";
         let mut sessions = std::collections::HashMap::new();
-        sessions.insert(cleartext.to_string(), make_session_5494(cleartext));
+        sessions.insert(
+            crate::password_hash::hash_device_token(cleartext),
+            make_session_5494(cleartext),
+        );
 
         let on_disk = sessions_for_disk(&sessions);
 
@@ -3450,11 +3477,14 @@ mod observability_tests {
     }
 
     /// End-to-end audit threat model: a daemon writes a session to
-    /// `sessions.json`, the file is later restored from a backup
-    /// snapshot (Time Machine, restic, BorgBackup), and the original
-    /// cleartext token must NOT authenticate against the re-loaded
-    /// map. Asserts both that the raw file holds no cleartext AND that
-    /// `load_sessions` does not produce a row keyed by it.
+    /// `sessions.json` and the file is later lifted out of a backup
+    /// snapshot (Time Machine, restic, BorgBackup). The file must yield
+    /// nothing an attacker can present — no cleartext anywhere, and a
+    /// key that is a one-way digest.
+    ///
+    /// Also pins the fail-safe at the disk boundary: this map is keyed by
+    /// cleartext, which the live map never is, and it must still be hashed
+    /// on the way out.
     #[test]
     fn save_then_load_does_not_resurrect_cleartext_token() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3473,15 +3503,25 @@ mod observability_tests {
             "sessions.json must not contain the cleartext bearer: {raw}"
         );
 
-        // `load_sessions` simulates both the boot path and what a
-        // forensic reader would derive from a backup. The middleware's
-        // auth lookup is `sessions.get(presented_token_cleartext)`, so
-        // absence of the cleartext key here means a presented
-        // `Bearer <cleartext>` returns None ⇒ 401.
+        // The threat is an attacker holding the FILE, and the file yields
+        // nothing to present: the key is a one-way digest and the inner
+        // token field is empty, so there is no bearer to replay. That is
+        // what the two assertions above establish.
+        //
+        // What the restored map *does* still authenticate is the original
+        // token, for whoever legitimately holds it — the browser that was
+        // issued it. Keying the map by the same digest the file uses means
+        // the daemon can honour that without ever storing the cleartext.
+        // Dropping these rows on load never denied an attacker anything;
+        // it only logged out every operator on every restart.
         let reloaded = load_sessions(home);
         assert!(
             !reloaded.contains_key(&cleartext),
-            "disk-recovered map must not authenticate the original cleartext token"
+            "the cleartext must never be a key anywhere, on disk or in memory"
+        );
+        assert!(
+            reloaded.contains_key(&crate::password_hash::hash_device_token(&cleartext)),
+            "a restored session must still authenticate the token its holder presents"
         );
     }
 
@@ -3504,8 +3544,12 @@ mod observability_tests {
 
         let reloaded = load_sessions(home);
         assert!(
-            reloaded.contains_key(&cleartext),
-            "legacy cleartext sessions.json entries must continue to auth across one upgrade cycle"
+            reloaded.contains_key(&crate::password_hash::hash_device_token(&cleartext)),
+            "legacy cleartext entries must be hashed on load so they keep authenticating"
+        );
+        assert!(
+            !reloaded.contains_key(&cleartext),
+            "the cleartext key must not survive the migration into memory"
         );
 
         // Next save_sessions migrates the file in place.
@@ -3518,6 +3562,76 @@ mod observability_tests {
         assert!(
             migrated_raw.contains(SESSIONS_HASH_PREFIX),
             "migrated file must carry the $sha256$ marker for the rewritten entry: {migrated_raw}"
+        );
+    }
+
+    /// A restored session must keep the identity it was issued with.
+    ///
+    /// `sessions_for_disk` clears `SessionToken.token` but deliberately keeps
+    /// `user_name` / `user_role`, and both carry `#[serde(default)]`. If they
+    /// were lost in the round trip the session would still authenticate but
+    /// arrive with no `AuthenticatedApiUser`, taking the trusted-anonymous
+    /// path meant for pre-attribution sessions — a silent privilege change
+    /// rather than a visible failure.
+    #[test]
+    fn restored_session_keeps_its_user_and_role() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        let cleartext = "b".repeat(64);
+        let mut session = make_session_5494(&cleartext);
+        session.user_name = Some("admin".to_string());
+        session.user_role = Some("owner".to_string());
+
+        let key = crate::password_hash::hash_device_token(&cleartext);
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(key.clone(), session);
+        save_sessions(home, &sessions);
+
+        let restored = load_sessions(home);
+        let restored = restored
+            .get(&key)
+            .expect("session must survive the save/load round trip");
+        assert_eq!(
+            restored.user_name.as_deref(),
+            Some("admin"),
+            "user_name must survive persistence"
+        );
+        assert_eq!(
+            restored.user_role.as_deref(),
+            Some("owner"),
+            "user_role must survive persistence, or the session silently downgrades"
+        );
+        assert!(
+            restored.token.is_empty(),
+            "the redacted token field stays empty; nothing reads it after lookup"
+        );
+    }
+
+    /// An expired session must not come back to life across a restart.
+    #[test]
+    fn expired_sessions_are_not_restored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cleartext = "c".repeat(64);
+        let mut stale = make_session_5494(&cleartext);
+        stale.created_at = now.saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS + 60);
+
+        let key = crate::password_hash::hash_device_token(&cleartext);
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(key.clone(), stale);
+        save_sessions(home, &sessions);
+
+        assert!(
+            !load_sessions(home).contains_key(&key),
+            "a session past DEFAULT_SESSION_TTL_SECS must not be restored"
         );
     }
 }

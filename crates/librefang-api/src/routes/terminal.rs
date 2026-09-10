@@ -458,7 +458,7 @@ pub(super) async fn authorize_terminal_request(
                     crate::password_hash::DEFAULT_SESSION_TTL_SECS,
                 )
             });
-            sessions.contains_key(token_str)
+            sessions.contains_key(&crate::password_hash::hash_device_token(token_str))
         };
         let user_key_auth = !session_auth
             && user_api_keys
