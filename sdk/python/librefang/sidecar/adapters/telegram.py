@@ -1101,11 +1101,10 @@ class TelegramAdapter(SidecarAdapter):
                 # Outcome unknown — do not re-send the same answer. Report it:
                 # unknown is not success, and the reply may never have landed.
                 return self._report_send_failure("sendRichMessage", chat_id, resp)
+        # Each chunk reports itself inside `_send_formatted_chunk`, so a
+        # refusal on chunk three is not hidden behind the chunk-one response
+        # returned here.
         responses = self._send_text_chunks(chat_id, text, thread_id)
-        # Every chunk, not just the one returned: a long reply is split, and a
-        # refusal on chunk three is a truncated answer the caller cannot see.
-        for chunk_resp in responses:
-            self._report_send_failure("sendMessage", chat_id, chunk_resp)
         return responses[0] if responses else {}
 
     def _send_rich(self, chat_id, text: str, thread_id=None):
@@ -1165,7 +1164,13 @@ class TelegramAdapter(SidecarAdapter):
             if thread_id:
                 plain["message_thread_id"] = thread_id
             resp = self._call("sendMessage", plain)
-        return resp
+        # Reported here rather than in `_send_text`, because this is the one
+        # function both outbound paths funnel through: `_send_text_chunks` for
+        # an ordinary reply, and `_sync_stream_messages` for a streaming one.
+        # For an agent with streaming on, the streaming path is the ordinary
+        # one — `_send_text` is reached only from `_stream_end`, and only
+        # while no message has been created yet.
+        return self._report_send_failure("sendMessage", chat_id, resp)
 
     def _edit_formatted_chunk(
         self, chat_id, message_id, sanitized: str, plain_fallback: str,
@@ -1177,12 +1182,17 @@ class TelegramAdapter(SidecarAdapter):
             "parse_mode": PARSE_MODE_HTML,
         })
         desc = str(resp.get("description", ""))
-        if resp.get("_http") and "message is not modified" not in desc:
-            if resp.get("_http") == 400 and "can't parse entities" in desc:
-                self._call("editMessageText", {
-                    "chat_id": chat_id, "message_id": message_id,
-                    "text": plain_fallback,
-                })
+        # Telegram's way of saying the text is already what we are setting.
+        if "message is not modified" in desc:
+            return
+        if resp.get("_http") == 400 and "can't parse entities" in desc:
+            resp = self._call("editMessageText", {
+                "chat_id": chat_id, "message_id": message_id,
+                "text": plain_fallback,
+            })
+        # A refused edit leaves a half-written answer frozen on screen, which
+        # reads to the user exactly like no answer at all.
+        self._report_send_failure("editMessageText", chat_id, resp)
 
     def _send_media_request(self, endpoint: str, chat_id, body: dict,
                             thread_id=None) -> dict:

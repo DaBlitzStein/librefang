@@ -1322,3 +1322,72 @@ def test_successful_send_reports_nothing(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert not [r for r in _stderr_records(captured) if r.get("level") == "error"]
+
+
+@pytest.mark.asyncio
+async def test_refused_send_in_the_streaming_path_is_reported(monkeypatch, capsys):
+    """The streaming path has its own sends, and they were silent.
+
+    For an agent with streaming on, `_sync_stream_messages` is the ordinary
+    path, not the exceptional one: `_send_text` is reached only by
+    `_stream_end`, and only while no message has been created yet. A user who
+    blocks the bot mid-stream produced a 403 on `sendRichMessage`, a second
+    403 on the chunk send, `message_id is None`, `break` — and not one line
+    anywhere.
+    """
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, method, payload: {
+            "ok": False,
+            "_http": 403,
+            "error_code": 403,
+            "description": "Forbidden: bot was blocked by the user",
+        },
+    )
+    a = _adapter()
+
+    await a.on_command(tg.protocol.StreamStart("c1", "s1"))
+    await a.on_command(tg.protocol.StreamDelta("s1", "la respuesta en streaming"))
+
+    captured = capsys.readouterr()
+    errors = [r for r in _stderr_records(captured) if r.get("level") == "error"]
+    assert errors, "a refused send in the streaming path must be reported"
+    assert errors[0]["fields"]["error_code"] == 403
+    assert errors[0]["fields"]["method"] == "sendMessage"
+    assert "la respuesta en streaming" not in captured.err
+
+
+@pytest.mark.asyncio
+async def test_refused_edit_in_the_streaming_path_is_reported(monkeypatch, capsys):
+    """A refused edit freezes a half-written answer on screen.
+
+    The first delta creates the message; a later one edits it. If the edit is
+    refused the reader is left looking at a truncated reply forever, which is
+    the same symptom as no reply at all and was equally silent.
+    """
+    # First call creates the message; everything after it is refused.
+    seen = {"n": 0}
+
+    def fake(self, method, payload):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return {"ok": True, "result": {"message_id": 7}}
+        return {
+            "ok": False,
+            "_http": 403,
+            "error_code": 403,
+            "description": "Forbidden: bot was blocked by the user",
+        }
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_call", fake)
+    monkeypatch.setattr(tg, "STREAM_EDIT_INTERVAL", 0)
+    a = _adapter()
+
+    await a.on_command(tg.protocol.StreamStart("c1", "s2"))
+    await a.on_command(tg.protocol.StreamDelta("s2", "primera parte"))
+    await a.on_command(tg.protocol.StreamDelta("s2", " y la segunda"))
+
+    captured = capsys.readouterr()
+    errors = [r for r in _stderr_records(captured) if r.get("level") == "error"]
+    assert errors, "a refused edit in the streaming path must be reported"
+    assert errors[0]["fields"]["error_code"] == 403
