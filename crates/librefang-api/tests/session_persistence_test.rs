@@ -85,56 +85,84 @@ async fn get_with_token(app: axum::Router, path: &str, token: Option<&str>) -> S
         .status()
 }
 
-/// A restored row that carries no identity must still face the RBAC gate.
+/// A restored row whose role is missing *or* unparseable must face the gate at
+/// the Viewer floor.
 ///
 /// The gate (`user_role_allows_request`) denies owner-only writes, privileged
 /// GETs, and every non-GET below `User`. It used to live inside the `if let`
 /// that unpacks `user_name` / `user_role`, so a row with neither skipped it
-/// entirely and fell through to the handler — a fail-open that only stayed
-/// harmless while such rows were discarded on load.
+/// entirely and fell through to the handler.
+///
+/// The malformed case is the one `unwrap_or(Viewer)` alone does not cover:
+/// the field is present, so the `Option` is `Some`, and `from_str_role`
+/// resolves anything unrecognised to `User` — above the floor. Only the strict
+/// `try_from_str_role` makes "Viewer is the floor" literally true.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_restored_session_without_attribution_still_faces_the_rbac_gate() {
+async fn a_restored_session_without_a_usable_role_still_faces_the_rbac_gate() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let home = tmp.path();
     librefang_kernel::registry_sync::seed_registry_fixture_for_tests(home);
     std::fs::create_dir_all(home.join("data")).expect("data dir");
 
-    // A pre-attribution row: hashed key, no user_name, no user_role. Written
-    // by hand because no current code path can produce one.
-    let token = "e".repeat(64);
-    let key = librefang_api::password_hash::hash_device_token(&token);
+    // Written by hand because no current code path produces either shape: a
+    // pre-attribution row with no role at all, and a row whose role is a typo.
+    let absent = "e".repeat(64);
+    let malformed = "f".repeat(64);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
     std::fs::write(
         home.join("data").join("sessions.json"),
-        format!(r#"{{"{key}":{{"token":"","created_at":{now}}}}}"#),
+        format!(
+            r#"{{"{}":{{"token":"","created_at":{now}}},"{}":{{"token":"","created_at":{now},"user_name":"someone","user_role":"vewer"}}}}"#,
+            librefang_api::password_hash::hash_device_token(&absent),
+            librefang_api::password_hash::hash_device_token(&malformed),
+        ),
     )
     .expect("write sessions.json");
 
     let (app, state) = boot(home).await;
 
-    // POST /api/agents is an agent-creation write: Viewer must not reach it.
-    let status = app
-        .clone()
-        .oneshot(with_peer(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/agents")
-                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
-                .header(axum::http::header::CONTENT_TYPE, "application/json"),
-            Body::from(serde_json::json!({ "name": "probe" }).to_string()),
-        ))
-        .await
-        .expect("response")
-        .status();
+    // Each probe targets an endpoint the *wrong* answer would let through.
+    // `POST /api/agents` is agent creation, denied to both Viewer and User —
+    // it discriminates for the absent case, which used to skip the gate
+    // outright. `POST /api/agents/{id}/message` is explicitly allowed to User,
+    // so it is the one that catches a malformed role resolving to User instead
+    // of the floor.
+    let mut outcomes = Vec::new();
+    for (label, token, uri) in [
+        ("absent role", &absent, "/api/agents"),
+        (
+            "malformed role",
+            &malformed,
+            "/api/agents/nonexistent/message",
+        ),
+    ] {
+        let status = app
+            .clone()
+            .oneshot(with_peer(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json"),
+                Body::from(serde_json::json!({ "message": "probe" }).to_string()),
+            ))
+            .await
+            .expect("response")
+            .status();
+        outcomes.push((label, status));
+    }
     state.kernel.shutdown();
 
+    let expected: Vec<_> = outcomes
+        .iter()
+        .map(|(label, _)| (*label, StatusCode::FORBIDDEN))
+        .collect();
     assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "an unattributed session must be evaluated at the Viewer floor, not waved past the gate"
+        outcomes, expected,
+        "a session with no usable role must be evaluated at the Viewer floor, not waved past the gate"
     );
 }
 
