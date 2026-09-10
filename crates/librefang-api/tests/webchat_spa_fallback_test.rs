@@ -112,6 +112,39 @@ async fn spa_route_serves_index_html() {
     );
 }
 
+/// The basepath root itself must serve the shell.
+///
+/// `matchit`'s `{*path}` capture requires at least one character, so the
+/// `/dashboard/{*path}` catch-all never matched `/dashboard` or `/dashboard/`
+/// and both returned 404 — the bookmark an operator lands on, and the
+/// `start_url` an installed PWA launches into (`manifest.json` declares
+/// `/dashboard/#/overview`, whose path component is exactly `/dashboard/`).
+#[tokio::test(flavor = "multi_thread")]
+async fn dashboard_basepath_root_serves_index_html() {
+    let h = boot_open_with_dashboard().await;
+    let (root_status, root_body) = get(h.app.clone(), "/").await;
+    assert_eq!(root_status, StatusCode::OK, "`/` must serve the shell");
+
+    // Collected rather than asserted per-iteration: the two spellings take
+    // different paths through the router, so a failure should report both
+    // instead of stopping at the first.
+    // Compared against `/` byte-for-byte rather than just probed for 200, so
+    // routing them at some *other* page would fail here too.
+    let mut outcomes = Vec::new();
+    for route in ["/dashboard", "/dashboard/"] {
+        let (status, body) = get(h.app.clone(), route).await;
+        outcomes.push((route, status, body == root_body));
+    }
+    let expected: Vec<_> = outcomes
+        .iter()
+        .map(|(route, _, _)| (*route, StatusCode::OK, true))
+        .collect();
+    assert_eq!(
+        outcomes, expected,
+        "both spellings of the dashboard basepath root must serve the same shell `/` serves"
+    );
+}
+
 /// A nested SPA route (e.g. `/dashboard/config/general`) matches on its first
 /// segment and serves the shell.
 #[tokio::test(flavor = "multi_thread")]

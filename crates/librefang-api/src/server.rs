@@ -1977,6 +1977,13 @@ pub async fn build_router(
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
+        // matchit's `{*path}` capture requires at least one character, so the
+        // catch-all below never matched the basepath root itself and both forms
+        // returned 404 — the URL an operator bookmarks, and the one an installed
+        // PWA launches into (`manifest.json` declares `start_url` as
+        // `/dashboard/#/overview`, whose path component is `/dashboard/`).
+        .route("/dashboard", axum::routing::get(webchat::webchat_page))
+        .route("/dashboard/", axum::routing::get(webchat::webchat_page))
         .route(
             "/dashboard/{*path}",
             axum::routing::get(webchat::react_asset),
