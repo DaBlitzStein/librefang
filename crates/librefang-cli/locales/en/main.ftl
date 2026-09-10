@@ -1390,6 +1390,7 @@ chat-runner-agent-killed = Agent "{ $name }" killed.
 chat-runner-failed-kill-agent = Failed to kill agent "{ $name }".
 chat-runner-kill-failed = Kill failed: { $error }
 chat-runner-no-backend-connected = No backend connected.
+chat-runner-goal-daemon-unsupported = /goal is not yet supported while attached to a daemon — create and start the goal from the dashboard instead.
 chat-runner-no-models-available = No models available.
 chat-runner-switched-model = Switched to { $model }
 chat-runner-failed-switch-model = Failed to switch to { $model }
