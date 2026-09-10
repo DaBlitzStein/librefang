@@ -3609,6 +3609,42 @@ mod observability_tests {
         );
     }
 
+    /// The other direction of the same question: a row that genuinely lacks
+    /// the attribution fields must load as `None`, not as some default that
+    /// grants more than it should.
+    ///
+    /// `None` is what routes an unattributed session to
+    /// `anonymous_fallback_acl` — one readable namespace, no writes, no PII,
+    /// no export, no delete. So an absent field degrades, never escalates.
+    #[test]
+    fn a_row_without_attribution_loads_as_none_not_as_a_privileged_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        // Written by hand with the two optional fields absent, which is what a
+        // pre-attribution daemon left behind.
+        let key = crate::password_hash::hash_device_token("d".repeat(64).as_str());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(
+            sessions_path(home),
+            format!(r#"{{"{key}":{{"token":"","created_at":{now}}}}}"#),
+        )
+        .unwrap();
+
+        let restored = load_sessions(home);
+        let restored = restored.get(&key).expect("row must load");
+        assert!(
+            restored.user_name.is_none() && restored.user_role.is_none(),
+            "absent attribution must stay absent, got {:?}/{:?}",
+            restored.user_name,
+            restored.user_role
+        );
+    }
+
     /// An expired session must not come back to life across a restart.
     #[test]
     fn expired_sessions_are_not_restored() {
