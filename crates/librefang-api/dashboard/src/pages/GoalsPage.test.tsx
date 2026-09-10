@@ -645,6 +645,7 @@ describe("GoalsPage helpers", () => {
 describe("GoalRunPhaseBadge", () => {
   const API_PHASES = [
     "running",
+    "paused",
     "finished",
     "max_iterations_reached",
     "rate_limited",
@@ -686,9 +687,22 @@ describe("GoalRunPhaseBadge", () => {
     expect(badge!.querySelector("svg")!.getAttribute("class")).not.toMatch(/\bmr-/);
   });
 
-  it("renders an unknown phase under the neutral variant with its own key, not a confident Stopped", () => {
-    // "paused" is the phase #7973 adds — the unknown-phase case that fires first here.
+  // "paused" reached the switch's `default` arm until this PR, so it rendered with the same neutral styling as a phase the dashboard had never heard of.
+  // Asserting the variant is what separates the two: without it the badge passes whether or not `paused` has an arm of its own.
+  it("gives paused its own warning variant and icon rather than the unknown-phase fallback", () => {
     const { container } = render(<GoalRunPhaseBadge phase="paused" />);
+    const badge = container.querySelector("span.inline-flex")!;
+    expect(badge.className).toContain("bg-warning/10");
+    expect(badge.className).not.toContain("bg-main");
+    // A known phase leads with its icon and drops `Badge`'s dot.
+    expect(badge.querySelectorAll("svg")).toHaveLength(1);
+    expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(0);
+  });
+
+  it("renders an unknown phase under the neutral variant with its own key, not a confident Stopped", () => {
+    // This used to render "paused", which was unknown to the switch until this PR gave it its own arm.
+    // The case being guarded is a phase the daemon emits before the dashboard has learned it, so the example has to be one the switch still does not know.
+    const { container } = render(<GoalRunPhaseBadge phase="quiescing" />);
 
     // The label is asked of i18n by the phase's own key with the raw phase as
     // the fallback, so a locale that gains `run_phase_paused` starts using it
@@ -697,7 +711,7 @@ describe("GoalRunPhaseBadge", () => {
     // (`t` is mocked here as `key:{options}`; in production this renders the
     // translation when the key exists and "paused" when it does not.)
     expect(
-      screen.getByText('goals.run_phase_paused:{"defaultValue":"paused"}'),
+      screen.getByText('goals.run_phase_quiescing:{"defaultValue":"quiescing"}'),
     ).toBeInTheDocument();
     expect(screen.queryByText(/goals\.run_phase_stopped/)).not.toBeInTheDocument();
 
