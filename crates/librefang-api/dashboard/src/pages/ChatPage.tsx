@@ -152,8 +152,13 @@ function useWebSocket(
   }, []);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retriesRef = useRef(0);
-  // Callback fired when WS closes while a response is pending
-  const onDropRef = useRef<(() => void) | null>(null);
+  // Callback fired when the WS goes away while a response is pending.
+  // The `intentional` flag separates the two ways that happens, because they imply
+  // opposite recoveries: an unplanned close leaves delivery of the last frame in
+  // doubt, so the turn retries over HTTP, while a close we perform ourselves on an
+  // agent/session switch followed a healthy `send`, so the daemon already has the
+  // turn and retrying would run it twice.
+  const onDropRef = useRef<((intentional: boolean) => void) | null>(null);
   // Issue #3550: every in-flight slash-command listener registers its
   // AbortController here so ws.onclose can detach them all at once.
   // Without this the listeners stay attached on the dead WebSocket
@@ -230,7 +235,7 @@ function useWebSocket(
           setWsConnected(false);
           // Notify pending response handler
           if (onDropRef.current) {
-            onDropRef.current();
+            onDropRef.current(false);
             onDropRef.current = null;
           }
           // Issue #3550: detach any pending slash-command listeners.
@@ -315,6 +320,12 @@ function useWebSocket(
       retriesRef.current = 0;
       authErrorRef.current = false;
       gaveUpRef.current = false;
+      // Invoke before dropping. `ws.onclose` is nulled below so the handler that
+      // normally settles a pending turn will never run on this socket, and without
+      // this call the in-flight turn is abandoned outright: its loading flag stays
+      // raised, its bubble keeps spinning, and its 180s watchdog stays armed to
+      // re-send a message the daemon already accepted.
+      onDropRef.current?.(true);
       onDropRef.current = null;
       // Issue #3550: agent/session change tears down the socket. Any
       // command listener still pending would be orphaned, so abort
@@ -354,7 +365,10 @@ const cacheSet = setCachedChatMessages<ChatMessage>;
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(
+// Exported as a test seam: the turn lifecycle this hook owns (socket teardown, the
+// per-agent loading flag, the HTTP fallback watchdog) is not reachable from `ChatPage`
+// without standing up the whole page, and it is where the agent-switch hang lives.
+export function useChatMessages(
   agentId: string | null,
   agents: AgentItem[] = [],
   sessionVersion = 0,
@@ -1209,15 +1223,36 @@ function useChatMessages(
           }
         };
 
-        // Register fallback: if WS drops mid-stream, retry via HTTP
-        onDropRef.current = () => {
-          if (!turn.responded) {
-            ws.current?.removeEventListener("message", handleMessage);
-            if (activeTurnsRef.current[sendAgentId] === turn) {
-              delete activeTurnsRef.current[sendAgentId];
-            }
-            sendViaHttp();
+        // What to do when the socket goes away mid-turn.
+        //
+        // Unplanned drop: the `send` below may or may not have reached the daemon, so the
+        // turn is retried over HTTP — the recovery this ref has always provided.
+        //
+        // Intentional teardown (agent or session switch): the frame went out on a healthy
+        // socket, so the daemon has the turn and is still running it. Retrying would execute
+        // the same turn twice against one session's history, and stopping it would cancel
+        // work nobody asked to cancel — switching agents is not a cancel, and a long run
+        // should survive the user looking at something else. So the turn is detached: the
+        // watchdog is disarmed and the input released, the run is left alone, and its result
+        // reaches the user through session history on the next load.
+        // Re-attaching to the live stream is not available here — `ws.rs` writes terminal
+        // frames to the socket that sent the message and has no per-session fan-out, so a
+        // reconnected socket never sees them.
+        onDropRef.current = (intentional: boolean) => {
+          if (turn.responded) return;
+          if (intentional) {
+            cleanup();
+            updateAgentMessages(sendAgentId, prev => prev.map(m =>
+              m.id === botMsg.id ? { ...m, isStreaming: false } : m,
+            ));
+            finishTurnIfCurrent(sendAgentId, botMsg.id);
+            return;
           }
+          ws.current?.removeEventListener("message", handleMessage);
+          if (activeTurnsRef.current[sendAgentId] === turn) {
+            delete activeTurnsRef.current[sendAgentId];
+          }
+          sendViaHttp();
         };
 
         ws.current.addEventListener("message", handleMessage);
