@@ -577,8 +577,14 @@ export function GoalsPage() {
           message={t("goals.loadError")}
           onRetry={() => void goalsQuery.refetch()}
         />
-      ) : goals.length === 0 ? (
-        <div className="flex flex-col gap-6">
+      ) : (
+        <>
+          {/* The template gallery is a *header* on an empty board, not a replacement for it.
+              Making it the whole empty state meant the only way to start a goal was to accept
+              somebody else's template: with zero goals the create form did not exist, while the
+              very same form was on screen the moment one goal existed. */}
+          {goals.length === 0 && (
+        <div className="flex flex-col gap-6 mb-6">
           <div className="text-center py-8">
             <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">
               <Target className="h-7 w-7 text-brand" />
@@ -624,8 +630,7 @@ export function GoalsPage() {
             })}
           </StaggerList>
         </div>
-      ) : (
-        <>
+          )}
           {/* KPI row */}
           <StaggerList className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4">
             {[
