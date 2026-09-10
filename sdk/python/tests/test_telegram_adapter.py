@@ -1391,6 +1391,7 @@ async def test_refused_edit_in_the_streaming_path_is_reported(monkeypatch, capsy
     errors = [r for r in _stderr_records(captured) if r.get("level") == "error"]
     assert errors, "a refused edit in the streaming path must be reported"
     assert errors[0]["fields"]["error_code"] == 403
+    assert errors[0]["fields"]["method"] == "editMessageText"
 
 
 def test_negotiated_fallbacks_that_deliver_report_nothing(monkeypatch, capsys):
