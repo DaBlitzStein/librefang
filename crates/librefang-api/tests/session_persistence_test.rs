@@ -85,6 +85,59 @@ async fn get_with_token(app: axum::Router, path: &str, token: Option<&str>) -> S
         .status()
 }
 
+/// A restored row that carries no identity must still face the RBAC gate.
+///
+/// The gate (`user_role_allows_request`) denies owner-only writes, privileged
+/// GETs, and every non-GET below `User`. It used to live inside the `if let`
+/// that unpacks `user_name` / `user_role`, so a row with neither skipped it
+/// entirely and fell through to the handler — a fail-open that only stayed
+/// harmless while such rows were discarded on load.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restored_session_without_attribution_still_faces_the_rbac_gate() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(home);
+    std::fs::create_dir_all(home.join("data")).expect("data dir");
+
+    // A pre-attribution row: hashed key, no user_name, no user_role. Written
+    // by hand because no current code path can produce one.
+    let token = "e".repeat(64);
+    let key = librefang_api::password_hash::hash_device_token(&token);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        home.join("data").join("sessions.json"),
+        format!(r#"{{"{key}":{{"token":"","created_at":{now}}}}}"#),
+    )
+    .expect("write sessions.json");
+
+    let (app, state) = boot(home).await;
+
+    // POST /api/agents is an agent-creation write: Viewer must not reach it.
+    let status = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/agents")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json"),
+            Body::from(serde_json::json!({ "name": "probe" }).to_string()),
+        ))
+        .await
+        .expect("response")
+        .status();
+    state.kernel.shutdown();
+
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an unattributed session must be evaluated at the Viewer floor, not waved past the gate"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dashboard_session_survives_a_daemon_restart() {
     let tmp = tempfile::tempdir().expect("tempdir");

@@ -3613,9 +3613,15 @@ mod observability_tests {
     /// the attribution fields must load as `None`, not as some default that
     /// grants more than it should.
     ///
-    /// `None` is what routes an unattributed session to
-    /// `anonymous_fallback_acl` — one readable namespace, no writes, no PII,
-    /// no export, no delete. So an absent field degrades, never escalates.
+    /// `None` routes an unattributed session to `anonymous_fallback_acl` in
+    /// the memory ACL — one readable namespace, no writes, no PII, no export,
+    /// no delete.
+    ///
+    /// That is only half the picture, and the half that misled a first reading
+    /// of this: the middleware's own RBAC gate is a *separate* check, and it
+    /// used to be skipped entirely for a row with no role rather than run at a
+    /// low one. `a_restored_session_without_attribution_still_faces_the_rbac_gate`
+    /// covers that side; this test only pins the deserialization contract.
     #[test]
     fn a_row_without_attribution_loads_as_none_not_as_a_privileged_default() {
         let tmp = tempfile::tempdir().unwrap();

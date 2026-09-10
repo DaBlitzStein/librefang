@@ -2072,28 +2072,33 @@ pub async fn auth(
             .cloned()
         {
             drop(sessions);
-            // If the session was issued by a credential flow that carried
-            // identity (dashboard_login attaches `user_name` + `user_role`),
-            // rebuild the AuthenticatedApiUser extension so RBAC-gated
-            // handlers (audit/query, per-user budget writes) can see the
-            // role. Legacy sessions persisted before attribution was added
-            // load with both fields `None` and continue through as
-            // trusted-anonymous — preserves the pre-fix behaviour for any
-            // session sitting in `~/.librefang/sessions.json` from older
-            // builds.
-            if let (Some(name), Some(role_str)) = (session.user_name, session.user_role) {
-                let role = UserRole::from_str_role(&role_str);
-                let user_id = UserId::from_name(&name);
-                // Enforce the same RBAC gate as the per-user-API-key branch:
-                // a session's role must be allowed to reach this endpoint.
-                if !user_role_allows_request(role, &method, path) {
-                    let lang = request
-                        .extensions()
-                        .get::<RequestLanguage>()
-                        .map(|rl| rl.0)
-                        .unwrap_or(i18n::DEFAULT_LANGUAGE);
-                    return rbac_denied_response(&auth_state, &method, path, role, user_id, lang);
-                }
+            // A session issued by a credential flow carries identity
+            // (`dashboard_login` attaches `user_name` + `user_role`), which
+            // rebuilds the AuthenticatedApiUser extension so RBAC-gated
+            // handlers (audit/query, per-user budget writes) can see the role.
+            //
+            // A row that carries neither — written before attribution existed,
+            // or edited by hand — is evaluated at `Viewer`, the floor. The gate
+            // itself runs either way. It used to sit inside the `if let`, so an
+            // unattributed row skipped owner-only writes, privileged GETs and
+            // the non-GET check entirely and fell straight through to the
+            // handler; that fail-open was only ever masked by such rows being
+            // discarded on load.
+            let role = session
+                .user_role
+                .as_deref()
+                .map(UserRole::from_str_role)
+                .unwrap_or(UserRole::Viewer);
+            let user_id = UserId::from_name(session.user_name.as_deref().unwrap_or("anonymous"));
+            if !user_role_allows_request(role, &method, path) {
+                let lang = request
+                    .extensions()
+                    .get::<RequestLanguage>()
+                    .map(|rl| rl.0)
+                    .unwrap_or(i18n::DEFAULT_LANGUAGE);
+                return rbac_denied_response(&auth_state, &method, path, role, user_id, lang);
+            }
+            if let Some(name) = session.user_name {
                 request.extensions_mut().insert(AuthenticatedApiUser {
                     name,
                     role,
