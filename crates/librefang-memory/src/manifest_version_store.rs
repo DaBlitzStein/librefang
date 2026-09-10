@@ -232,6 +232,30 @@ mod tests {
         assert!(store.list_for_agent("a1", 10).unwrap().is_empty());
     }
 
+    /// `delete_cascade` above only proves this store can clear its own table; removing
+    /// an agent goes through `AGENT_SCOPED_TABLES` instead, and nothing at that delete
+    /// site names `manifest_versions`.
+    /// Drop the entry and every test here still passes while a deleted agent's manifest
+    /// history survives it, with no error and no orphan the caller can see.
+    #[test]
+    fn remove_agent_purges_manifest_versions() {
+        let pool = test_pool();
+        let store = ManifestVersionStore::new(pool.clone());
+        let agent = librefang_types::agent::AgentId(uuid::Uuid::new_v4());
+        let agent_id = agent.0.to_string();
+
+        store
+            .record_version(&agent_id, "agent", "name = \"v1\"", "dashboard")
+            .unwrap();
+        assert_eq!(store.list_for_agent(&agent_id, 10).unwrap().len(), 1);
+
+        crate::structured::StructuredStore::new(pool)
+            .remove_agent(agent)
+            .unwrap();
+
+        assert!(store.list_for_agent(&agent_id, 10).unwrap().is_empty());
+    }
+
     /// A disk-full write records `update-persist-failed` with the
     /// in-memory TOML; the operator retries and the identical content now
     /// persists successfully as `update`. The dedup must not read that as
