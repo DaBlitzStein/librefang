@@ -624,18 +624,21 @@ describe("GoalRunPhaseBadge", () => {
     expect(badge!.querySelector("svg")!.getAttribute("class")).not.toMatch(/\bmr-/);
   });
 
+  // #8067 wrote this case against "paused", the phase this branch adds. Now that
+  // the switch knows "paused" the case needs a phase no build knows, or it would
+  // assert the neutral variant against an arm that is deliberately not neutral —
+  // and pass again the moment someone deleted that arm.
   it("renders an unknown phase under the neutral variant with its own key, not a confident Stopped", () => {
-    // "paused" is the phase #7973 adds — the unknown-phase case that fires first here.
-    const { container } = render(<GoalRunPhaseBadge phase="paused" />);
+    const { container } = render(<GoalRunPhaseBadge phase="quiesced" />);
 
     // The label is asked of i18n by the phase's own key with the raw phase as
-    // the fallback, so a locale that gains `run_phase_paused` starts using it
+    // the fallback, so a locale that gains `run_phase_quiesced` starts using it
     // with no code change. The previous shape gated translation on a hardcoded
     // `labelKey` per phase, so an unknown phase could never pick one up.
     // (`t` is mocked here as `key:{options}`; in production this renders the
-    // translation when the key exists and "paused" when it does not.)
+    // translation when the key exists and "quiesced" when it does not.)
     expect(
-      screen.getByText('goals.run_phase_paused:{"defaultValue":"paused"}'),
+      screen.getByText('goals.run_phase_quiesced:{"defaultValue":"quiesced"}'),
     ).toBeInTheDocument();
     expect(screen.queryByText(/goals\.run_phase_stopped/)).not.toBeInTheDocument();
 
@@ -648,6 +651,23 @@ describe("GoalRunPhaseBadge", () => {
     // The unknown branch is the one that keeps the dot, having no icon.
     expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(1);
     expect(badge.querySelectorAll("svg")).toHaveLength(0);
+  });
+
+  // The arm this branch adds, and the one a merge with #8067 could have dropped
+  // without any other test noticing: without it "paused" falls through to
+  // `default`, which is what the unknown-phase case above asserts and would
+  // therefore still be green.
+  it("gives paused its own warning variant and icon rather than the unknown fallback", () => {
+    const { container } = render(<GoalRunPhaseBadge phase="paused" />);
+    const badge = container.querySelector("span.inline-flex")!;
+
+    expect(
+      screen.getByText('goals.run_phase_paused:{"defaultValue":"paused"}'),
+    ).toBeInTheDocument();
+    expect(badge.className).toContain("bg-warning/10");
+    expect(badge.className).not.toContain("bg-main");
+    expect(badge.querySelectorAll("svg")).toHaveLength(1);
+    expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(0);
   });
 });
 
