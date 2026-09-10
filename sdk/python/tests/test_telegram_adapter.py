@@ -9,6 +9,7 @@ drift apart silently.
 """
 
 import io
+import json
 import os
 import time
 import urllib.error
@@ -1261,3 +1262,63 @@ async def test_stream_buffer_cap_drops_the_stream(monkeypatch):
     assert "big" in a._streams
     await a.on_command(tg.protocol.StreamDelta("big", "\u4e2d" * 8))
     assert "big" not in a._streams, "cap did not accumulate across deltas"
+
+
+def _stderr_records(captured):
+    return [
+        json.loads(line)
+        for line in captured.err.splitlines()
+        if line.startswith("{")
+    ]
+
+
+def test_refused_send_is_reported_on_stderr(monkeypatch, capsys):
+    """A definitive refusal by Telegram must leave a trace.
+
+    The daemon's `send` frame is fire-and-forget — it returns as soon as the
+    JSON line is written to our stdin, and the protocol carries no response
+    frame — and `on_command` discards whatever the send helpers return. So
+    without this line a `403 bot was blocked by the user` produces no journal
+    entry, no counter and no stderr, and is indistinguishable from a turn that
+    never happened. That is not hypothetical: it turned a ten-minute channel
+    diagnosis into an afternoon, because every observable on the host said the
+    reply had been sent.
+    """
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, method, payload: {
+            "ok": False,
+            "_http": 403,
+            "error_code": 403,
+            "description": "Forbidden: bot was blocked by the user",
+        },
+    )
+    a = _adapter()
+
+    a._send_text("c1", "el secreto de la respuesta")
+
+    captured = capsys.readouterr()
+    errors = [r for r in _stderr_records(captured) if r.get("level") == "error"]
+    assert errors, "a refused sendMessage must be reported on stderr"
+    fields = errors[0]["fields"]
+    assert fields["error_code"] == 403
+    assert fields["method"] == "sendMessage"
+    assert "blocked by the user" in fields["description"]
+    # The verdict, never the payload: the reply text and the token stay out.
+    assert "el secreto de la respuesta" not in captured.err
+    assert "T:tok" not in captured.err
+
+
+def test_successful_send_reports_nothing(monkeypatch, capsys):
+    """The happy path must stay silent — an error line per delivered reply
+    would train operators to ignore the one that matters."""
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, method, payload: {"ok": True, "result": {"message_id": 1}},
+    )
+    a = _adapter()
+
+    a._send_text("c1", "hola")
+
+    captured = capsys.readouterr()
+    assert not [r for r in _stderr_records(captured) if r.get("level") == "error"]
