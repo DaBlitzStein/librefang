@@ -174,6 +174,13 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
+    /// The result of a `PATCH /api/memory/config`.
+    ///
+    /// Carries the failure reason rather than a bare `false`: a connection
+    /// error, a 400 and a 500 need different operator responses, and "Save
+    /// failed" with no detail is the report that arrives as a bug with nothing
+    /// to act on.
+    MemoryConfigSaved(Result<(), FetchFailure>),
     /// The memory config could not be read — see [`FetchFailure`].
     ///
     /// Sent instead of staying silent: without it the Memory screen keeps
@@ -2509,10 +2516,120 @@ pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>
                 .as_str()
                 .unwrap_or("")
                 .to_string(),
+            // The raw setting travels alongside it, because it is the only one
+            // of the two a save may write back: the resolved name has already
+            // lost its provider prefix, and is `[default_model]`'s when nothing
+            // was configured at all.
+            configured_extraction_model: pm["extraction_model"].as_str().map(str::to_string),
             extraction_model_inherited: pm["extraction_model_source"].as_str()
                 == Some("inherited_default"),
         };
         let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
+    });
+}
+
+/// Read the outcome of a memory-config PATCH out of its response body.
+///
+/// `memory_config_patch` returns `(StatusCode::OK, Json(body))` on every path
+/// that got as far as writing the file, and its contract says clients MUST
+/// inspect `body.status`: `"applied"` is a clean save, `"partial"` means the
+/// TOML reached disk but `reload_config()` rejected it, leaving the running
+/// kernel on the boot snapshot with the validator output in `reload_error`.
+/// Reading the HTTP status alone reports that as a clean "Saved" while nothing
+/// the operator changed is in effect.
+///
+/// Split out of the request thread so the discrimination is testable without
+/// standing up an HTTP server.
+fn interpret_memory_config_patch_body(json: &serde_json::Value) -> Result<(), FetchFailure> {
+    if json["status"].as_str() == Some("applied") {
+        return Ok(());
+    }
+    let mut reason = crate::i18n::t("tui-memory-config-save-partial");
+    if let Some(err) = json["reload_error"].as_str() {
+        reason.push_str(": ");
+        reason.push_str(err);
+    }
+    Err(FetchFailure::Error(reason))
+}
+
+/// Write the memory configuration back.
+///
+/// `extraction_model` is `None` when the operator did not edit it, and the
+/// field is then left out of the PATCH entirely: the endpoint only writes the
+/// keys a request carries, so omitting it is what keeps a boolean-only save
+/// from rewriting the model. Sending the panel's displayed name instead would
+/// strip a `provider/` prefix, pin a model that was inheriting, or overwrite a
+/// change that is still waiting for a restart to take effect.
+pub fn spawn_save_memory_config(
+    backend: BackendRef,
+    auto_memorize: bool,
+    auto_retrieve: bool,
+    extraction_model: Option<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let BackendRef::Daemon { base_url, api_key } = backend else {
+            // Without this the panel sits on "Saving..." forever: nothing is
+            // spawned, no event arrives, and the operator has no way to tell
+            // the save is never going to happen.
+            let _ = tx.send(AppEvent::MemoryConfigSaved(Err(
+                FetchFailure::RequiresDaemon,
+            )));
+            return;
+        };
+        // This write reads config.toml, rewrites it, and runs a full
+        // `reload_config()` that can rebuild the embedding/extraction
+        // drivers and rescan skills — the 5 s default is a read timeout
+        // sized for a GET, not for this.
+        let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(30));
+        let mut proactive_memory = serde_json::json!({
+            "auto_memorize": auto_memorize,
+            "auto_retrieve": auto_retrieve,
+        });
+        if let Some(model) = extraction_model.as_deref().map(str::trim) {
+            // An emptied field is not a request to configure the empty string,
+            // and the endpoint has no "unset" for this key — leave it alone.
+            if !model.is_empty() {
+                proactive_memory["extraction_model"] = serde_json::Value::String(model.to_string());
+            }
+        }
+        let body = serde_json::json!({ "proactive_memory": proactive_memory });
+        let result = match client
+            .patch(format!("{base_url}/api/memory/config"))
+            .json(&body)
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    // The endpoint's contract: PATCH returns 200 on every
+                    // path that reached disk, and `body.status` — not the
+                    // HTTP status — discriminates a clean save ("applied")
+                    // from one where the write succeeded but the live
+                    // reload failed ("partial", `restart_required: true`).
+                    // Treating 200 alone as success reports that case as a
+                    // clean "Saved" with the daemon still on the boot
+                    // snapshot.
+                    match resp.json::<serde_json::Value>() {
+                        Ok(json) => interpret_memory_config_patch_body(&json),
+                        Err(e) => Err(FetchFailure::Error(e.to_string())),
+                    }
+                } else {
+                    // The body is where the API explains a 400; a status line
+                    // reading "400 Bad Request" alone does not say which field.
+                    let body = resp.text().unwrap_or_default();
+                    let detail = body.trim();
+                    let mut reason = status.to_string();
+                    if !detail.is_empty() {
+                        reason.push_str(": ");
+                        reason.push_str(detail);
+                    }
+                    Err(FetchFailure::Error(reason))
+                }
+            }
+            Err(e) => Err(FetchFailure::Error(e.to_string())),
+        };
+        let _ = tx.send(AppEvent::MemoryConfigSaved(result));
     });
 }
 
@@ -5245,6 +5362,37 @@ pub fn spawn_fetch_agents_for_chat(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    // ── the memory-config PATCH reports its outcome in the body ───────────
+
+    /// The clean case, and the only one that may clear the unsaved marker.
+    #[test]
+    fn an_applied_memory_config_patch_is_a_success() {
+        let body = serde_json::json!({ "status": "applied", "restart_required": false });
+
+        assert!(interpret_memory_config_patch_body(&body).is_ok());
+    }
+
+    /// The endpoint answers 200 here too: the file was written but the live
+    /// reload failed, so the kernel is still running the boot snapshot.
+    /// Reporting it as "Saved" tells the operator their change is in effect
+    /// when none of it is.
+    #[test]
+    fn a_partial_memory_config_patch_is_not_a_success() {
+        let body = serde_json::json!({
+            "status": "partial",
+            "restart_required": true,
+            "reload_error": "invalid type: string, expected u64 for key `queue.depth`",
+        });
+
+        match interpret_memory_config_patch_body(&body) {
+            Err(FetchFailure::Error(reason)) => assert!(
+                reason.contains("invalid type: string"),
+                "the validator output is the only thing that says what to fix, got {reason:?}"
+            ),
+            other => panic!("a partial save must not read as success, got {other:?}"),
+        }
+    }
 
     // ── fetch helpers must never exit silently (#8141) ─────────────────────
 
