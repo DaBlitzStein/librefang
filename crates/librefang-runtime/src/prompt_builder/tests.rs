@@ -955,6 +955,31 @@ fn test_channel_send_hint_background_run_does_not_recommend_notify_owner() {
     }
 }
 
+/// #7995 rewrites this exact block from a different pre-image, and the two
+/// commits previously disagreed about whether `channel_send` may be used at
+/// all on a background turn — this one said "do NOT use it here" and then
+/// explained how to use it. Both now emit the same sentence, so whichever
+/// merges second the resolution is textual, not a choice between two
+/// instructions.
+#[test]
+fn test_channel_send_hint_background_run_wording_matches_7995() {
+    let tools = vec!["channel_send".to_string()];
+    for channel in ["cron", "autonomous"] {
+        let section =
+            build_channel_section(channel, Some("Alice"), Some("12345"), false, false, &tools);
+        assert!(
+            section.contains("This is a background run: no chat is attached to it"),
+            "{channel}: the background-run wording must stay byte-identical across \
+             #8149 and #7995, got: {section}"
+        );
+        assert!(
+            !section.contains("do NOT use it here"),
+            "{channel}: `channel_send` with an explicit real channel and recipient works \
+             on a background turn exactly as anywhere else, got: {section}"
+        );
+    }
+}
+
 #[test]
 fn test_channel_send_hint_webui_does_not_claim_automatic_media_delivery() {
     // Nothing attaches a generated artefact to a webui turn. `tool_image_generate`
