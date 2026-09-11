@@ -1190,6 +1190,20 @@ pub fn validate_config_for_reload(config: &KernelConfig) -> Result<(), Vec<Strin
         errors.push("network_enabled is true but network.shared_secret is empty".to_string());
     }
 
+    // The same check kernel boot runs (`kernel/boot.rs`), so a config the API
+    // accepts is one the daemon can still start on.
+    // `tool_exec.default_timeout_secs` is writable over `POST /api/config/set`
+    // and the section is restart-classified, so validating only at boot meant a
+    // `0` was answered 200 OK, persisted, and surfaced as a daemon that refuses
+    // to start — with the API that wrote it gone, leaving a host-side hand-edit
+    // of `config.toml` as the only way back (#8175 review).
+    // Validated here rather than in the route handler because this is the one
+    // function every config write already funnels through: `config_set`, the
+    // `POST /api/config/reload` path, and the users / budget writers.
+    if let Err(e) = config.tool_exec.validate() {
+        errors.push(format!("tool_exec: {e}"));
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {

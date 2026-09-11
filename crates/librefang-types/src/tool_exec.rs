@@ -141,7 +141,9 @@ impl ToolExecConfig {
     /// Validate that the active backend kind has the matching sub-table
     /// populated. Called from kernel boot so misconfigurations fail
     /// loudly at startup instead of silently downgrading at the first
-    /// tool call.
+    /// tool call, and from `validate_config_for_reload` so a write that
+    /// would produce one is refused at the point it is made rather than
+    /// at the next restart (#8175 review).
     ///
     /// Currently only enforces presence of the sub-table; detailed
     /// per-field checks (host non-empty, api_url scheme, etc.) live in

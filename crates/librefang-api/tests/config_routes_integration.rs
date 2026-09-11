@@ -775,6 +775,95 @@ async fn config_set_rejects_path_traversal() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+/// #8175 review: `tool_exec.default_timeout_secs = 0` is rejected by
+/// `ToolExecConfig::validate`, but that ran only at kernel boot — so this
+/// write was answered 200 OK and persisted, and the *next* daemon start
+/// aborted with `Invalid [tool_exec] config`.
+/// Recovering from that needs a hand-edit of `config.toml` on the host,
+/// because the API that would undo it no longer comes up.
+/// The value must therefore be refused before it reaches disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_rejects_a_zero_local_backend_timeout() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "tool_exec.default_timeout_secs", "value": 0}),
+        ),
+    )
+    .await;
+    let text = String::from_utf8_lossy(&body).to_string();
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a zero local-backend timeout bricks the next boot and must not persist, got {status}: {text}"
+    );
+
+    // And nothing landed: the rejection happens before the file is written, so
+    // the operator's config is exactly as it was.
+    let written = std::fs::read_to_string(h.home.join("config.toml")).expect("toml exists");
+    let parsed: toml::Value = toml::from_str(&written).expect("valid toml");
+    let persisted = parsed
+        .get("tool_exec")
+        .and_then(|t| t.get("default_timeout_secs"));
+    assert!(
+        persisted.is_none(),
+        "the rejected value must not reach config.toml, wrote: {written}"
+    );
+    assert_eq!(
+        h.state
+            .kernel
+            .config_ref()
+            .tool_exec
+            .default_timeout_secs,
+        None,
+        "nor the live config"
+    );
+}
+
+/// The negative half of the guard above: the field is still writable, so a
+/// rejection that covered every value would be indistinguishable from the fix
+/// and would silently close a knob #8171 opened on purpose.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_accepts_a_nonzero_local_backend_timeout() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "tool_exec.default_timeout_secs", "value": 45}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "expected 200 for a sane timeout, got {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let written = std::fs::read_to_string(h.home.join("config.toml")).expect("toml exists");
+    let parsed: toml::Value = toml::from_str(&written).expect("valid toml");
+    assert_eq!(
+        parsed
+            .get("tool_exec")
+            .and_then(|t| t.get("default_timeout_secs"))
+            .and_then(|v| v.as_integer()),
+        Some(45),
+        "wrote: {written}"
+    );
+    assert_eq!(
+        h.state
+            .kernel
+            .config_ref()
+            .tool_exec
+            .default_timeout_secs,
+        Some(45),
+        "and the live config picked it up on the post-write reload"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn config_set_rejects_empty_path() {
     let h = boot_router_with_api_key(API_KEY).await;
