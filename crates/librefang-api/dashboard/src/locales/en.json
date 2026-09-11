@@ -1031,7 +1031,10 @@
     "key_rejected": "Key rejected",
     "show_suppressed_one": "Show {{count}} hidden provider",
     "show_suppressed_other": "Show {{count}} hidden providers",
-    "all_suppressed": "Every remaining provider is hidden"
+    "all_suppressed": "Every remaining provider is hidden",
+    "empty_all_suppressed_title": "Every provider is hidden",
+    "empty_all_suppressed_body": "You removed every configured provider. They are still here — reveal them to bring one back.",
+    "empty_all_suppressed_cta": "Show hidden providers"
   },
   "channels": {
     "add": "Add",

@@ -1035,7 +1035,10 @@
     "show_suppressed_few": "Pokaż {{count}} ukrytych dostawców",
     "show_suppressed_many": "Pokaż {{count}} ukrytych dostawców",
     "show_suppressed_other": "Pokaż {{count}} ukrytego dostawcy",
-    "all_suppressed": "Wszyscy pozostali dostawcy są ukryci"
+    "all_suppressed": "Wszyscy pozostali dostawcy są ukryci",
+    "empty_all_suppressed_title": "Wszyscy dostawcy są ukryci",
+    "empty_all_suppressed_body": "Usunięto wszystkich skonfigurowanych dostawców. Nadal tu są — pokaż ich, aby przywrócić.",
+    "empty_all_suppressed_cta": "Pokaż ukrytych dostawców"
   },
   "channels": {
     "add": "Dodaj",

@@ -1030,7 +1030,10 @@
     "everyapi_connected": "EveryAPI 已连接",
     "key_rejected": "密钥被拒绝",
     "show_suppressed_other": "显示 {{count}} 个已隐藏的提供商",
-    "all_suppressed": "其余提供商均已隐藏"
+    "all_suppressed": "其余提供商均已隐藏",
+    "empty_all_suppressed_title": "所有提供商均已隐藏",
+    "empty_all_suppressed_body": "你移除了所有已配置的提供商。它们仍在这里，显示后即可恢复。",
+    "empty_all_suppressed_cta": "显示隐藏的提供商"
   },
   "channels": {
     "add": "添加",

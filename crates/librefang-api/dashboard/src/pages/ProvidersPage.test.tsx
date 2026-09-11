@@ -182,6 +182,7 @@ function DrawerSlot(): React.ReactNode {
 
 describe("ProvidersPage", () => {
   let testMutateAsync: ReturnType<typeof vi.fn>;
+  let enableProviderMutateAsync: ReturnType<typeof vi.fn>;
   let connectEveryApiMutateAsync: ReturnType<typeof vi.fn>;
   let setDiscoveryMutateAsync: ReturnType<typeof vi.fn>;
   let updateOverridesMutateAsync: ReturnType<typeof vi.fn>;
@@ -219,9 +220,8 @@ describe("ProvidersPage", () => {
     useDeleteProviderKeyMock.mockReturnValue(
       stubMutation(vi.fn().mockResolvedValue(undefined)),
     );
-    useEnableProviderMock.mockReturnValue(
-      stubMutation(vi.fn().mockResolvedValue(undefined)),
-    );
+    enableProviderMutateAsync = vi.fn().mockResolvedValue(undefined);
+    useEnableProviderMock.mockReturnValue(stubMutation(enableProviderMutateAsync));
     useSetProviderUrlMock.mockReturnValue(
       stubMutation(vi.fn().mockResolvedValue(undefined)),
     );
@@ -455,6 +455,62 @@ describe("ProvidersPage", () => {
     expect(within(drawer).queryByText("Vertex AI")).not.toBeInTheDocument();
     fireEvent.click(within(drawer).getByLabelText("providers.show_suppressed"));
     expect(within(drawer).getByText("Vertex AI")).toBeInTheDocument();
+  });
+
+  it("offers Re-enable for a suppressed provider that now reads as configured", async () => {
+    const suppressedButConfigured: ProviderItem = { ...SUPPRESSED, auth_status: "configured" };
+    useProvidersMock.mockReturnValue({
+      data: [...PROVIDERS, suppressedButConfigured],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
+    const drawer = await screen.findByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByLabelText("providers.show_suppressed"));
+
+    // The Re-enable branch keys on `suppressed`, not on auth status, so it
+    // must still fire for an entry `detect_auth` has promoted.
+    fireEvent.click(within(drawer).getByText("Vertex AI"));
+    expect(enableProviderMutateAsync).toHaveBeenCalledWith("vertex-ai");
+  });
+
+  // Suppressing the only provider used to leave the page saying "No providers
+  // configured yet", which reads as config loss to whoever just removed one.
+  it("says providers are hidden, not absent, when suppression empties the page", () => {
+    useProvidersMock.mockReturnValue({
+      data: [{ ...SUPPRESSED, auth_status: "not_required", id: "ollama", display_name: "Ollama" }],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    expect(screen.getByText("providers.empty_all_suppressed_title")).toBeInTheDocument();
+    expect(screen.queryByText("providers.empty_title")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "providers.empty_all_suppressed_cta" })).toBeInTheDocument();
+  });
+
+  it("excludes suppressed providers from the configured count", () => {
+    useProvidersMock.mockReturnValue({
+      // 2 configured + 1 suppressed-but-configured + 1 unconfigured = 4 total.
+      data: [...PROVIDERS, { ...SUPPRESSED, auth_status: "configured" }],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    // The pill interpolates across text nodes, so match on the element's own
+    // normalised text rather than a string literal.
+    expect(
+      screen.getByText((_, el) =>
+        el?.textContent?.replace(/\s+/g, " ").trim() === "2 / 4 providers.configured"),
+    ).toBeInTheDocument();
   });
 
   it("keeps suppressed providers out of the Add picker until asked for", async () => {
