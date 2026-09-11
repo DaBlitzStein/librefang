@@ -429,6 +429,34 @@ describe("ProvidersPage", () => {
     expect(within(card).getByText("providers.offline")).toBeInTheDocument();
   });
 
+  // The one measured on a live daemon: `vertex-ai` sat at `suppressed: true`
+  // and an unrelated restart promoted it from `missing` to `configured` off a
+  // stray credential env var, which put a provider the operator had removed
+  // back on the page. Suppression has to cut across auth status.
+  it("keeps a suppressed provider off the page even once it looks configured", async () => {
+    const suppressedButConfigured: ProviderItem = {
+      ...SUPPRESSED,
+      auth_status: "configured",
+    };
+    useProvidersMock.mockReturnValue({
+      data: [...PROVIDERS, suppressedButConfigured],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    expect(screen.queryByText("Vertex AI")).not.toBeInTheDocument();
+
+    // And it is still recoverable through the same one toggle.
+    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
+    const drawer = await screen.findByTestId("drawer-slot");
+    expect(within(drawer).queryByText("Vertex AI")).not.toBeInTheDocument();
+    fireEvent.click(within(drawer).getByLabelText("providers.show_suppressed"));
+    expect(within(drawer).getByText("Vertex AI")).toBeInTheDocument();
+  });
+
   it("keeps suppressed providers out of the Add picker until asked for", async () => {
     useProvidersMock.mockReturnValue({
       data: [...PROVIDERS, SUPPRESSED],

@@ -1716,7 +1716,10 @@ export function ProvidersPage() {
 
   const providers = useMemo(() => providersQuery.data ?? [], [providersQuery.data]);
   const currentDefaultProvider = statusQuery.data?.default_provider ?? "";
-  const configuredCount = useMemo(() => providers.filter(p => isProviderConfigured(p.auth_status)).length, [providers]);
+  const configuredCount = useMemo(
+    () => providers.filter(p => p.suppressed !== true && isProviderConfigured(p.auth_status)).length,
+    [providers],
+  );
 
   useEffect(() => {
     if (!providersQuery.data) return;
@@ -1735,9 +1738,17 @@ export function ProvidersPage() {
   // and dropping it from this list is what made a provider disappear from the
   // page entirely after a single bad save — recoverable only by finding it
   // again inside the Add picker.
+  //
+  // Suppression is the one thing that does remove a provider from here, and
+  // that is the operator's own instruction. It cuts across auth status: the
+  // registry recreates every built-in provider TOML on boot and `detect_auth`
+  // can promote a suppressed entry back to `configured` off a stray env var,
+  // so filtering on status alone lets a provider you removed reappear on the
+  // page after an unrelated restart.
   const filteredProviders = useMemo(
     () => [...providers]
       .filter(p => {
+        if (p.suppressed === true) return false;
         if (!isProviderConfigured(p.auth_status)) return false;
         const searchMatch = !search || (p.display_name || p.id).toLowerCase().includes(search.toLowerCase()) || p.id.toLowerCase().includes(search.toLowerCase());
         let statusMatch = true;
@@ -1792,13 +1803,15 @@ export function ProvidersPage() {
     [pickerSearch],
   );
   const suppressedCount = useMemo(
-    () => providers.filter(p =>
-      !isProviderConfigured(p.auth_status) && p.suppressed === true && pickerMatchesSearch(p)).length,
+    () => providers.filter(p => p.suppressed === true && pickerMatchesSearch(p)).length,
     [providers, pickerMatchesSearch],
   );
+  // Everything the grid does not show: unconfigured, or suppressed at any
+  // status. The two lists are complements, so a provider is always in exactly
+  // one of them and none can fall through the gap.
   const pickerProviders = useMemo(
     () => [...providers]
-      .filter(p => !isProviderConfigured(p.auth_status))
+      .filter(p => p.suppressed === true || !isProviderConfigured(p.auth_status))
       .filter(p => showSuppressed || p.suppressed !== true)
       .filter(pickerMatchesSearch)
       .sort((a, b) => (a.display_name || a.id).localeCompare(b.display_name || b.id)),
