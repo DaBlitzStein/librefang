@@ -568,6 +568,15 @@ export function WorkflowsPage() {
     }
   }, [runDetailQuery.data?.step_results.length]);
 
+  // `paramTouchedRef` gates the auto-populate below, but the gate has to be
+  // per-workflow like `autoPopulatedForRef` is: without this reset, one keystroke
+  // in any param field on workflow A latches the ref for the page's whole
+  // lifetime, so workflow B comes up with schema defaults and never loads its own
+  // last-run values — contradicting the comment two lines down (#7997 review).
+  useEffect(() => {
+    paramTouchedRef.current = false;
+  }, [selectedWorkflowId]);
+
   // Auto-populate params from the most recent run's input on page load.
   // Only fills when the form is untouched (paramTouchedRef = false).
   // Tracks per-workflow so switching workflows re-populates from that workflow's history.
@@ -1534,6 +1543,11 @@ export function WorkflowsPage() {
                                     ? t("workflows.console_step_line_failed", { defaultValue: 'Step {{current}}/{{total}} "{{name}}" → {{agent}} FAILED', ...stepLineArgs })
                                     : t("workflows.console_step_line", { defaultValue: 'Step {{current}}/{{total}} "{{name}}" → {{agent}}', ...stepLineArgs });
                                   logs.push({ts: fmtTime(rd.started_at), level: hasErr ? "error" : "info", msg: stepLine});
+                                  if (s.variables && Object.keys(s.variables).length > 0) {
+                                    for (const [k,v] of Object.entries(s.variables)) {
+                                      logs.push({ts: fmtTime(rd.started_at), level: "info", msg: varLine(k, v)});
+                                    }
+                                  }
                                   logs.push({ts: fmtTime(rd.started_at), level: "info", msg: "  " + t("workflows.console_step_io", { defaultValue: "Prompt: {{inTokens}} tokens → Response: {{outTokens}} tokens in {{duration}}", inTokens: fmtN(s.input_tokens || 0), outTokens: fmtN(s.output_tokens || 0), duration: fmtDur(s.duration_ms || 0) })});
                                   if (hasErr && s.error) logs.push({ts: fmtTime(rd.started_at), level: "error", msg: "  " + t("workflows.console_step_error", { defaultValue: "Error: {{error}}", error: s.error })});
                                 }
@@ -1584,6 +1598,7 @@ export function WorkflowsPage() {
                                 const hasError = !!step.error;
                                 const stepStatus = hasError ? "failed" : "completed";
                                 const expanded = expandedStepIdx === i;
+                                const hasVars = step.variables && Object.keys(step.variables).length > 0;
                                 return (
                                 <div key={step.step_name + i} className="relative">
                                   {/* Connector line */}
@@ -1619,6 +1634,20 @@ export function WorkflowsPage() {
                                             <p className="text-[8px] font-semibold text-text-dim/40 uppercase tracking-wider mb-0.5">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
                                             <pre className="text-[9px] text-text-dim/80 bg-main rounded p-1.5 max-h-32 overflow-y-auto whitespace-pre-wrap">{step.prompt}</pre>
                                           </div>
+                                          {/* Variables */}
+                                          {hasVars && (
+                                            <div>
+                                              <p className="text-[8px] font-semibold text-text-dim/40 uppercase tracking-wider mb-0.5">{t("workflows.variables", { defaultValue: "Variables" })}</p>
+                                              <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[9px] bg-main rounded p-1.5">
+                                                {Object.entries(step.variables!).map(([k, v]) => (
+                                                  <div key={k} className="contents">
+                                                    <span className="text-brand/70 font-mono whitespace-nowrap">{`{{${k}}}`}</span>
+                                                    <span className="text-text-dim/60 truncate" title={v}>{v.length > 60 ? v.slice(0, 60) + "…" : v}</span>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            </div>
+                                          )}
                                           {/* Output */}
                                           <div>
                                             <p className="text-[8px] font-semibold text-text-dim/40 uppercase tracking-wider mb-0.5">{t("workflows.step_output", { defaultValue: "Output" })}</p>

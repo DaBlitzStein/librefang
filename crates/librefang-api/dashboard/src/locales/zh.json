@@ -1904,7 +1904,8 @@
     "starting": "启动中…",
     "steps_executed": "已执行 {{total}} 个步骤中的 {{executed}} 个…",
     "step_output": "输出",
-    "step_pending": "等待中…"
+    "step_pending": "等待中…",
+    "variables": "变量"
   },
   "scheduler": {
     "title": "调度器",

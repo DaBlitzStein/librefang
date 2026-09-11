@@ -1910,7 +1910,8 @@
     "starting": "Uruchamianie…",
     "steps_executed": "Wykonano {{executed}} z {{total}} kroków…",
     "step_output": "Wynik",
-    "step_pending": "Oczekiwanie…"
+    "step_pending": "Oczekiwanie…",
+    "variables": "Zmienne"
   },
   "scheduler": {
     "title": "Harmonogram",

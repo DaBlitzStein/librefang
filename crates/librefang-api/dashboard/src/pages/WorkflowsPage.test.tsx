@@ -925,4 +925,54 @@ describe("WorkflowsPage", () => {
     fireEvent.click(screen.getByText("finished-run-b"));
     expect(pollIntervalFor(details["run-b"])).toBe(false);
   });
+
+  // The Variables panel was deleted once on the premise that the API never
+  // emits the field. It does — `routes/workflows/workflow.rs` serialises
+  // `StepResult::variables` — and nothing in this file noticed the removal,
+  // which is why it survived a review round. This asserts the binding is on
+  // screen, so the next deletion is red.
+  it("renders a step's variable bindings when the step is expanded", async () => {
+    useWorkflowRunsMock.mockReturnValue(
+      makeQuery([
+        {
+          id: "run-vars",
+          workflow_name: "vars-run",
+          state: "completed",
+          steps_completed: 1,
+          started_at: "2026-05-01T12:00:00Z",
+        },
+      ]),
+    );
+    useWorkflowRunDetailMock.mockReturnValue(
+      makeQuery({
+        id: "run-vars",
+        workflow_id: "wf-1",
+        workflow_name: "vars-run",
+        input: "seed",
+        state: "completed",
+        started_at: "2026-05-01T12:00:00Z",
+        step_results: [
+          {
+            step_name: "greet",
+            agent_id: "a1",
+            agent_name: "alpha",
+            prompt: "say {{greeting}}",
+            output: "hello there",
+            input_tokens: 10,
+            output_tokens: 5,
+            duration_ms: 120,
+            variables: { greeting: "hello" },
+          },
+        ],
+      }),
+    );
+    renderPage();
+
+    fireEvent.click(screen.getByText("vars-run"));
+    // The timeline collapses steps by default; the binding only renders expanded.
+    fireEvent.click(await screen.findByText("greet"));
+
+    expect(await screen.findByText("{{greeting}}")).toBeInTheDocument();
+    expect(screen.getByTitle("hello")).toBeInTheDocument();
+  });
 });

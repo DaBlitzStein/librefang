@@ -1904,7 +1904,8 @@
     "starting": "Starting…",
     "steps_executed": "{{executed}} of {{total}} steps executed…",
     "step_output": "Output",
-    "step_pending": "Pending…"
+    "step_pending": "Pending…",
+    "variables": "Variables"
   },
   "scheduler": {
     "title": "Scheduler",

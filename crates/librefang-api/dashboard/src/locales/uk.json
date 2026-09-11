@@ -1910,7 +1910,8 @@
     "starting": "Запуск…",
     "steps_executed": "Виконано {{executed}} з {{total}} кроків…",
     "step_output": "Результат",
-    "step_pending": "Очікування…"
+    "step_pending": "Очікування…",
+    "variables": "Змінні"
   },
   "scheduler": {
     "title": "Планувальник",

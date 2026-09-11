@@ -1903,7 +1903,8 @@
     "starting": "시작 중…",
     "steps_executed": "{{total}}단계 중 {{executed}}단계 실행됨…",
     "step_output": "출력",
-    "step_pending": "대기 중…"
+    "step_pending": "대기 중…",
+    "variables": "변수"
   },
   "scheduler": {
     "title": "스케줄러",
