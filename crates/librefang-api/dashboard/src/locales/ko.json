@@ -347,7 +347,6 @@
       "system_prompt": "시스템 프롬프트",
       "system_prompt_placeholder": "당신은 유용한 AI 에이전트입니다.",
       "temperature": "온도",
-      "max_tokens": "최대 토큰",
       "tokens_per_hour": "LLM 토큰/시간",
       "tool_calls_per_minute": "도구 호출/분",
       "cost_per_hour": "최대 비용/시간($)",
@@ -480,15 +479,9 @@
       "name_placeholder": "예를 들어 내 에이전트",
       "module_placeholder": "예를 들어 기본",
       "model_id_placeholder": "예를 들어 gpt-4o",
-      "max_tokens_placeholder": "4096",
       "top_p": "Top-p",
       "frequency_penalty": "빈도 페널티",
       "presence_penalty": "존재 페널티",
-      "context_window": "컨텍스트 창",
-      "context_window_placeholder": "모델이 읽을 수 있는 토큰 수",
-      "max_output_tokens": "출력 상한",
-      "max_output_tokens_placeholder": "모델이 생성할 수 있는 토큰 수",
-      "custom": "직접 입력",
       "preferences_hint": "이 에이전트의 설정이 모델 설정보다 우선합니다. “기본값 상속”으로 두면 모델 설정이 적용됩니다.",
       "limits_hint": "한도는 이 엔드포인트가 허용하는 범위를 나타냅니다. 모델 한도를 초과하면 여기에 표시되지만 값은 그대로 전송되며, 수락 여부는 공급자가 결정합니다.",
       "over_limit_warning": "이 모델의 한도 {{limit}}을(를) 초과합니다. 입력한 값 그대로 저장·전송되며 공급자가 거부할 수 있습니다.",
@@ -898,14 +891,12 @@
     "latency": "지연 시간",
     "max_tokens": "최대 토큰",
     "max_tokens_saved": "최대 토큰 한도가 저장되었습니다.",
-    "max_tokens_placeholder": "예를 들어 8192",
     "max_tokens_model_label": "편집할 모델",
     "max_tokens_hint_default": "요청당 출력 제한. 모델의 카탈로그 기본값을 사용하려면 비워 두세요.",
     "max_tokens_hint_override": "모델의 카탈로그 기본값({{value}})을 재정의합니다. 되돌리려면 필드를 지우세요.",
     "model_limits": "모델 한도",
     "limit_invalid": "양의 정수를 입력하세요.",
     "context_window": "컨텍스트 윈도우",
-    "context_window_placeholder": "예를 들어 32768",
     "context_window_saved": "컨텍스트 윈도우가 저장되었습니다.",
     "context_window_hint_default": "모델이 담을 수 있는 전체 토큰 수이며, 이 모델을 사용하는 모든 에이전트가 상속합니다. 모델의 카탈로그 값을 사용하려면 비워 두세요.",
     "context_window_hint_override": "모델의 카탈로그 값({{value}})을 재정의합니다. 되돌리려면 필드를 지우세요.",
@@ -3200,7 +3191,6 @@
     "parameters": "매개변수",
     "temperature": "온도",
     "top_p": "탑 P",
-    "max_tokens_param": "최대 토큰",
     "frequency_penalty": "빈도 페널티",
     "presence_penalty": "출석 페널티",
     "reasoning_effort": "추론 노력",
@@ -3245,7 +3235,8 @@
     "media_model_overridden": "{{path}} = {{model}}이 이 필드보다 우선하므로 여기서 수정해도 적용되지 않습니다.",
     "media_key_required_inert": "API 키 환경 변수가 설정되지 않은 동안에는 적용되지 않습니다 — 변수가 지정된 경우에만 검사합니다.",
     "filter_provider": "제공자로 필터링",
-    "filter_tier": "등급으로 필터링"
+    "filter_tier": "등급으로 필터링",
+    "catalog_value": "모델이 선언한 값: {{value}}"
   },
   "media": {
     "section": "미디어",
@@ -4322,5 +4313,15 @@
     "promote_failed": "에이전트 유형을 등록할 수 없습니다",
     "promote_success": "레지스트리에 pull request가 생성되었습니다. 검토 후 병합하세요.",
     "view_pr": "Pull request 보기"
+  },
+  "model_param": {
+    "context_window": "컨텍스트 창",
+    "context_window_placeholder": "모델이 읽을 수 있는 토큰",
+    "custom": "사용자 지정",
+    "inherit": "기본값 상속",
+    "max_output_tokens": "출력 상한",
+    "max_output_tokens_placeholder": "모델이 생성할 수 있는 토큰",
+    "max_tokens": "최대 토큰",
+    "max_tokens_placeholder": "요청당 토큰"
   }
 }

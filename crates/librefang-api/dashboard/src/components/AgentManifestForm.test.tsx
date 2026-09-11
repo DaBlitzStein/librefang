@@ -291,7 +291,7 @@ describe("AgentManifestForm — inference parameters", () => {
     render(<Harness />);
     expect(screen.getByRole("spinbutton", { name: "agents.form.temperature" })).toHaveValue(null);
     // The ladder's inherit rung is pressed, which is the same state made visible.
-    const inheritRungs = screen.getAllByRole("button", { name: "agents.form.inherit_default" });
+    const inheritRungs = screen.getAllByRole("button", { name: "model_param.inherit" });
     expect(inheritRungs.length).toBeGreaterThan(0);
     for (const rung of inheritRungs) {
       expect(rung).toHaveAttribute("aria-pressed", "true");
@@ -305,7 +305,7 @@ describe("AgentManifestForm — inference parameters", () => {
     // Scoped to the response-length field: the form also renders the context
     // ladder, which legitimately offers 2M. An unscoped query would be asking
     // whether 2M appears anywhere on the page, which is a different question.
-    const lengthField = screen.getByText("agents.form.max_tokens").closest("div") as HTMLElement;
+    const lengthField = screen.getByText("model_param.max_tokens").closest("div") as HTMLElement;
 
     // The output ladder stops at 128K. 1M / 2M are context figures, and no
     // model emits a million tokens of reply.
@@ -324,7 +324,7 @@ describe("AgentManifestForm — inference parameters", () => {
   it("offers the context ladder up to 2M, which the output ladder must not", () => {
     render(<Harness />);
     const contextField = screen
-      .getByText("agents.form.context_window")
+      .getByText("model_param.context_window")
       .closest("div") as HTMLElement;
     expect(within(contextField).getByRole("button", { name: "2M" })).toBeInTheDocument();
     expect(within(contextField).getByRole("button", { name: "1M" })).toBeInTheDocument();
@@ -334,11 +334,11 @@ describe("AgentManifestForm — inference parameters", () => {
     const user = userEvent.setup();
     render(<Harness />);
 
-    const customButtons = screen.getAllByRole("button", { name: "agents.form.custom" });
+    const customButtons = screen.getAllByRole("button", { name: "model_param.custom" });
     await user.click(customButtons[0]);
 
     const field = screen.getByRole("spinbutton", {
-      name: "agents.form.max_tokens — agents.form.custom",
+      name: "model_param.max_tokens — model_param.custom",
     });
     await user.clear(field);
     await user.type(field, "50000");
@@ -373,7 +373,7 @@ describe("AgentManifestForm — inference parameters", () => {
 
     expect(screen.getByText(/agents\.form\.over_limit_warning/)).toBeInTheDocument();
     // The value is untouched, and the field is not marked invalid.
-    expect(screen.getByRole("button", { name: "agents.form.custom", pressed: true })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "model_param.custom", pressed: true })).toBeInTheDocument();
   });
 
   /**
@@ -424,7 +424,7 @@ describe("AgentManifestForm — inference parameters", () => {
       />,
     );
 
-    const lengthField = screen.getByText("agents.form.max_tokens").closest("div") as HTMLElement;
+    const lengthField = screen.getByText("model_param.max_tokens").closest("div") as HTMLElement;
     expect(within(lengthField).getByRole("button", { name: "16K" })).toBeInTheDocument();
     expect(within(lengthField).queryByRole("button", { name: "32K" })).not.toBeInTheDocument();
   });

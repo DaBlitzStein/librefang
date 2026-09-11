@@ -347,7 +347,6 @@
       "system_prompt": "系统提示词",
       "system_prompt_placeholder": "你是一个有用的 AI 智能体。",
       "temperature": "温度",
-      "max_tokens": "最大 Token 数",
       "tokens_per_hour": "每小时 LLM Token 上限",
       "tool_calls_per_minute": "每分钟工具调用上限",
       "cost_per_hour": "每小时费用上限 ($)",
@@ -480,15 +479,9 @@
       "name_placeholder": "例如 my-agent",
       "module_placeholder": "例如 default",
       "model_id_placeholder": "例如 gpt-4o",
-      "max_tokens_placeholder": "4096",
       "top_p": "Top-p",
       "frequency_penalty": "频率惩罚",
       "presence_penalty": "存在惩罚",
-      "context_window": "上下文窗口",
-      "context_window_placeholder": "模型可读取的 token 数",
-      "max_output_tokens": "输出上限",
-      "max_output_tokens_placeholder": "模型可生成的 token 数",
-      "custom": "自定义",
       "preferences_hint": "该代理的设置优先于模型设置。保持“继承默认值”则使用模型的设置。",
       "limits_hint": "限制描述该 endpoint 能接受的范围。超过模型限制会在此提示，但仍按原值发送 —— 由提供方决定是否接受。",
       "over_limit_warning": "超过该模型的限制 {{limit}}。已按输入的值保存并发送；提供方可能会拒绝。",
@@ -899,14 +892,12 @@
     "latency": "延迟",
     "max_tokens": "最大 Token",
     "max_tokens_saved": "最大 Token 限制已保存",
-    "max_tokens_placeholder": "例如 8192",
     "max_tokens_model_label": "选择要编辑的模型",
     "max_tokens_hint_default": "单次请求的输出上限。留空则使用该模型的目录默认值。",
     "max_tokens_hint_override": "覆盖该模型的目录默认值（{{value}}）。清空输入框可恢复默认。",
     "model_limits": "模型限制",
     "limit_invalid": "请输入大于 0 的整数",
     "context_window": "上下文窗口",
-    "context_window_placeholder": "例如 32768",
     "context_window_saved": "上下文窗口已保存",
     "context_window_hint_default": "该模型可容纳的总 Token 数，使用该模型的每个智能体都会继承。留空则使用该模型的目录值。",
     "context_window_hint_override": "覆盖该模型的目录值（{{value}}）。清空输入框可恢复默认。",
@@ -3167,7 +3158,6 @@
     "parameters": "模型参数",
     "temperature": "温度",
     "top_p": "Top P",
-    "max_tokens_param": "最大 Tokens",
     "frequency_penalty": "频率惩罚",
     "presence_penalty": "存在惩罚",
     "reasoning_effort": "推理强度",
@@ -3212,7 +3202,8 @@
     "media_model_overridden": "{{path}} = {{model}} 优先于此字段，因此在此处修改不会生效。",
     "media_key_required_inert": "在未设置 API 密钥环境变量前无效 —— 仅当指定了变量时才会执行检查。",
     "filter_provider": "按提供商筛选",
-    "filter_tier": "按层级筛选"
+    "filter_tier": "按层级筛选",
+    "catalog_value": "模型声明为 {{value}}"
   },
   "media": {
     "section": "媒体",
@@ -4323,5 +4314,15 @@
     "promote_failed": "无法推广代理类型",
     "promote_success": "已在注册表中创建 pull request。审查后合并即可。",
     "view_pr": "查看 pull request"
+  },
+  "model_param": {
+    "context_window": "上下文窗口",
+    "context_window_placeholder": "模型可读取的令牌数",
+    "custom": "自定义",
+    "inherit": "继承默认值",
+    "max_output_tokens": "输出上限",
+    "max_output_tokens_placeholder": "模型可生成的令牌数",
+    "max_tokens": "最大令牌数",
+    "max_tokens_placeholder": "每次请求的令牌数"
   }
 }

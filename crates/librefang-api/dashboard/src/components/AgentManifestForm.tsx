@@ -4,12 +4,8 @@ import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
 import { generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
-import { StepLadderInput } from "./ui/StepLadderInput";
-import {
-  CONTEXT_WINDOW_LADDER,
-  MAX_OUTPUT_TOKENS_LADDER,
-  formatTokens,
-} from "../lib/modelParamLadders";
+import { ModelParamField } from "./ui/ModelParamField";
+import { formatTokens } from "../lib/modelParamLadders";
 
 /**
  * Catalog entry for the skill/tool finder (#5049). Both fields are
@@ -350,15 +346,11 @@ export function AgentManifestForm({
             />
           </Field>
         </div>
-        <StepLadderInput
-          label={t("agents.form.max_tokens")}
+        <ModelParamField
+          param="max_tokens"
           value={value.model.max_tokens}
           onChange={(next) => updateModel({ max_tokens: next })}
-          ladder={MAX_OUTPUT_TOKENS_LADDER}
           cap={selectedModelLimits.maxOutputTokens}
-          inheritLabel={t("agents.form.inherit_default")}
-          customLabel={t("agents.form.custom")}
-          customPlaceholder={t("agents.form.max_tokens_placeholder")}
           warning={maxTokensWarning}
         />
         {/*
@@ -367,24 +359,16 @@ export function AgentManifestForm({
           operator sees the conflict instead of a number they never chose.
         */}
         <p className="text-[11px] text-text-dim">{t("agents.form.limits_hint")}</p>
-        <StepLadderInput
-          label={t("agents.form.context_window")}
+        <ModelParamField
+          param="context_window"
           value={value.model.context_window}
           onChange={(next) => updateModel({ context_window: next })}
-          ladder={CONTEXT_WINDOW_LADDER}
-          inheritLabel={t("agents.form.inherit_default")}
-          customLabel={t("agents.form.custom")}
-          customPlaceholder={t("agents.form.context_window_placeholder")}
           warning={contextWindowWarning}
         />
-        <StepLadderInput
-          label={t("agents.form.max_output_tokens")}
+        <ModelParamField
+          param="max_output_tokens"
           value={value.model.max_output_tokens}
           onChange={(next) => updateModel({ max_output_tokens: next })}
-          ladder={MAX_OUTPUT_TOKENS_LADDER}
-          inheritLabel={t("agents.form.inherit_default")}
-          customLabel={t("agents.form.custom")}
-          customPlaceholder={t("agents.form.max_output_tokens_placeholder")}
         />
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.api_key_env")} hint={t("agents.form.api_key_env_hint")}>

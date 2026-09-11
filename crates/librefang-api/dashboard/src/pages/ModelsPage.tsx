@@ -32,6 +32,7 @@ import {
   Brain, Tag, Settings, Mic, Volume2, Image as ImageIcon, Video, Server,
 } from "lucide-react";
 import { modelKey } from "../lib/hiddenModels";
+import { ModelParamField } from "../components/ui/ModelParamField";
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -253,7 +254,13 @@ export function settingsStateFromOverrides(
     ...(overrides.top_p != null
       ? { topP: overrides.top_p, topPEnabled: true }
       : {}),
-    ...(overrides.max_tokens != null
+    // `> 0`, not `!= null`. `ModelCatalogEntry`'s token counts use `0` as
+    // "unknown" on the wire, and `model_catalog.rs` filters the same way for
+    // `context_window` / `max_output_tokens` with the comment "so a cleared
+    // dashboard field cannot pin a model's window to zero tokens". Hydrating a
+    // stored `0` as an active override would show the operator a setting the
+    // runtime reads as absent.
+    ...(overrides.max_tokens != null && overrides.max_tokens > 0
       ? { maxTokens: overrides.max_tokens, maxTokensEnabled: true }
       : {}),
     ...(overrides.frequency_penalty != null
@@ -270,10 +277,10 @@ export function settingsStateFromOverrides(
     visionOverride: boolToOverride(overrides.supports_vision),
     streamingOverride: boolToOverride(overrides.supports_streaming),
     thinkingOverride: boolToOverride(overrides.supports_thinking),
-    ...(overrides.context_window != null
+    ...(overrides.context_window != null && overrides.context_window > 0
       ? { contextWindow: overrides.context_window, contextWindowEnabled: true }
       : {}),
-    ...(overrides.max_output_tokens != null
+    ...(overrides.max_output_tokens != null && overrides.max_output_tokens > 0
       ? {
           maxOutputTokens: overrides.max_output_tokens,
           maxOutputTokensEnabled: true,
@@ -1365,6 +1372,52 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
   const [state, dispatch] = useReducer(settingsReducer, settingsInitial);
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  // `ModelParamField` speaks one value where this reducer keeps two: the number
+  // and an "is there an override at all" flag. Empty is the inherit rung, which
+  // is the same thing the flag used to say.
+  //
+  // The positive-integer guard is load-bearing, and is the floor the slider
+  // used to enforce by clamping. `PUT /api/models/overrides/{id}` persists what
+  // it is given, `InferenceParams` does not filter `max_tokens` the way it
+  // filters `context_window` and `max_output_tokens`, and the OpenAI driver
+  // puts it on the wire verbatim — so a `0` typed here reaches the provider as
+  // `"max_tokens": 0` for every agent on that model.
+  const setLadderField = useCallback(
+    (
+      field: "contextWindow" | "maxOutputTokens" | "maxTokens",
+      enabledField: "contextWindowEnabled" | "maxOutputTokensEnabled" | "maxTokensEnabled",
+      next: string,
+    ) => {
+      const trimmed = next.trim();
+      if (trimmed === "") {
+        dispatch({ type: "SET_FIELD", field: enabledField, value: false });
+        return;
+      }
+      const parsed = Number(trimmed);
+      // A half-typed value ("12" on its way to "128000") is kept; a
+      // non-positive or fractional one is refused outright rather than stored
+      // and saved. `min="1"` on the input does not do this — HTML checks it on
+      // form submit, which this drawer never performs.
+      if (!Number.isInteger(parsed) || parsed <= 0) return;
+      dispatch({ type: "SET_FIELD", field, value: parsed });
+      dispatch({ type: "SET_FIELD", field: enabledField, value: true });
+    },
+    [],
+  );
+  // The old sliders showed the catalog figure even while inheriting, and
+  // seeded an override from it. The ladder shows nothing on the inherit rung,
+  // so the number the operator is about to override has to be stated — else
+  // correcting a 200 000-token window means already knowing it is 200 000.
+  // `0` is the wire's "unknown" for these fields, so it is not a number.
+  const catalogHint = useCallback(
+    (declared?: number): string | undefined =>
+      declared && declared > 0
+        ? t("models.catalog_value", { value: declared.toLocaleString() })
+        : undefined,
+    [t],
+  );
+
   const lastHydratedRef = useRef<SettingsState | null>(null);
 
   useEffect(() => {
@@ -1520,46 +1573,25 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
         <div className="space-y-3">
           <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.parameters")}</label>
 
-          <SliderInput
-            label={t("models.context_window")}
-            value={state.contextWindowEnabled ? state.contextWindow : (model.context_window || 128000)}
-            onChange={(v) => dispatch({ type: "SET_FIELD", field: "contextWindow", value: Math.round(v) })}
-            min={1024} max={2097152} step={1024}
-            enabled={state.contextWindowEnabled}
-            onToggle={(v) => {
-              dispatch({ type: "SET_FIELD", field: "contextWindowEnabled", value: v });
-              if (v && state.contextWindow === settingsInitial.contextWindow) {
-                dispatch({ type: "SET_FIELD", field: "contextWindow", value: model.context_window || 128000 });
-              }
-            }}
-            ticks={[32768, 131072, 524288, 1048576, 2097152]}
-            formatTick={(v) =>
-              v >= 1048576 ? `${Math.round(v / 1048576)}M` : `${Math.round(v / 1024)}K`
-            }
+          {/*
+            The same control the agent editor and the per-provider override
+            use. It replaces a 1024-step slider spanning 1 Ki to 2 Mi, on which
+            landing exactly on 131072 was a matter of pixels — and where the
+            "off" state was a separate toggle rather than a rung you could
+            point at.
+          */}
+          <ModelParamField
+            param="context_window"
+            value={state.contextWindowEnabled ? String(state.contextWindow) : ""}
+            onChange={(next) => setLadderField("contextWindow", "contextWindowEnabled", next)}
+            hint={catalogHint(model.context_window)}
           />
 
-          <SliderInput
-            label={t("models.max_output")}
-            value={
-              state.maxOutputTokensEnabled
-                ? state.maxOutputTokens
-                : (model.max_output_tokens || 8192)
-            }
-            onChange={(v) =>
-              dispatch({ type: "SET_FIELD", field: "maxOutputTokens", value: Math.round(v) })
-            }
-            min={256} max={131072} step={256}
-            enabled={state.maxOutputTokensEnabled}
-            onToggle={(v) => {
-              dispatch({ type: "SET_FIELD", field: "maxOutputTokensEnabled", value: v });
-              if (v && state.maxOutputTokens === settingsInitial.maxOutputTokens) {
-                dispatch({
-                  type: "SET_FIELD",
-                  field: "maxOutputTokens",
-                  value: model.max_output_tokens || 8192,
-                });
-              }
-            }}
+          <ModelParamField
+            param="max_output_tokens"
+            value={state.maxOutputTokensEnabled ? String(state.maxOutputTokens) : ""}
+            onChange={(next) => setLadderField("maxOutputTokens", "maxOutputTokensEnabled", next)}
+            hint={catalogHint(model.max_output_tokens)}
           />
 
           <SliderInput
@@ -1576,13 +1608,11 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
             enabled={state.topPEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "topPEnabled", value: v })}
           />
 
-          <SliderInput
-            label={t("models.max_tokens_param")}
-            value={state.maxTokens} onChange={(v) => dispatch({ type: "SET_FIELD", field: "maxTokens", value: Math.round(v) })}
-            min={256} max={1048576} step={256}
-            enabled={state.maxTokensEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "maxTokensEnabled", value: v })}
-            ticks={[256, 32768, 131072, 1048576]}
-            formatTick={(v) => v >= 1048576 ? "1M" : v >= 1024 ? `${Math.round(v/1024)}K` : String(v)}
+          <ModelParamField
+            param="max_tokens"
+            value={state.maxTokensEnabled ? String(state.maxTokens) : ""}
+            onChange={(next) => setLadderField("maxTokens", "maxTokensEnabled", next)}
+            hint={catalogHint(model.max_output_tokens)}
           />
 
           <SliderInput

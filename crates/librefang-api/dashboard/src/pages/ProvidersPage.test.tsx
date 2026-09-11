@@ -723,12 +723,13 @@ describe("ProvidersPage", () => {
     seedDiscoveredModel();
     const drawer = await openConfigureDrawer(LITELLM);
 
-    const field = within(drawer).getByLabelText("providers.context_window");
-    // Seeded from the value currently in force, so the operator edits the real
-    // number rather than an empty box.
-    expect(field).toHaveValue(131072);
+    // The shared `ModelParamField`: a rung set, seeded from the value in force
+    // so the selected rung is the real number rather than an empty box.
+    const ladder = within(drawer).getByRole("group", { name: "providers.context_window" });
+    expect(within(ladder).getByRole("button", { name: "128K" }))
+      .toHaveAttribute("aria-pressed", "true");
 
-    fireEvent.change(field, { target: { value: "16384" } });
+    fireEvent.click(within(ladder).getByRole("button", { name: "32K" }));
     fireEvent.click(
       within(drawer).getByRole("button", {
         name: /providers\.context_window/,
@@ -737,7 +738,7 @@ describe("ProvidersPage", () => {
 
     expect(updateOverridesMutateAsync).toHaveBeenCalledWith({
       modelKey: "litellm:sensor-model-generic-high",
-      overrides: { context_window: 16384 },
+      overrides: { context_window: 32768 },
     });
   });
 
@@ -753,8 +754,14 @@ describe("ProvidersPage", () => {
     });
     const drawer = await openConfigureDrawer(LITELLM);
 
-    const field = within(drawer).getByLabelText("providers.context_window");
-    expect(field).toHaveValue(16384);
+    // 16384 is not a context-window rung — the ladder starts 8K, 32K, 128K —
+    // so an override of that size lives in the custom field, seeded with it.
+    const ladder = within(drawer).getByRole("group", { name: "providers.context_window" });
+    expect(within(ladder).getByRole("button", { name: "model_param.custom" }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(
+      within(drawer).getByLabelText("providers.context_window — model_param.custom"),
+    ).toHaveValue(16384);
     // Untouched field → nothing to save.
     expect(
       within(drawer).getByRole("button", { name: /providers\.context_window/ }),
@@ -773,9 +780,12 @@ describe("ProvidersPage", () => {
     });
     const drawer = await openConfigureDrawer(LITELLM);
 
-    fireEvent.change(
-      within(drawer).getByLabelText("providers.context_window"),
-      { target: { value: "" } },
+    // Inherit is the rung that means "no override here" — the same thing the
+    // cleared box used to mean.
+    fireEvent.click(
+      within(
+        within(drawer).getByRole("group", { name: "providers.context_window" }),
+      ).getByRole("button", { name: "model_param.inherit" }),
     );
     fireEvent.click(
       within(drawer).getByRole("button", {
@@ -800,7 +810,9 @@ describe("ProvidersPage", () => {
       within(drawer).getByText("providers.context_window_unknown"),
     ).toBeInTheDocument();
     expect(
-      within(drawer).getByLabelText("providers.context_window"),
-    ).toHaveValue(null);
+      within(
+        within(drawer).getByRole("group", { name: "providers.context_window" }),
+      ).getByRole("button", { name: "model_param.inherit" }),
+    ).toHaveAttribute("aria-pressed", "true");
   });
 });
