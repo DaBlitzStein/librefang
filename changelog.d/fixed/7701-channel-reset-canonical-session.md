@@ -1,1 +1,4 @@
-`/new`, `/reboot` and `/compact` in a channel chat now also act on the agent's canonical session when the conversation resolves to it, instead of only the channel-derived one. A reset used to ack success against a session holding no messages while the conversation the user was looking at kept its full history. The `/new` ack also reports how many messages were cleared, so a no-op is visible from the chat itself. (#7701) (@DaBlitzStein)
+`/new`, `/reboot` and `/compact` in a channel chat now also act on the agent's canonical session when it differs from the channel-derived one, instead of only the derived sid.
+A reset used to ack success against a session holding no messages while the conversation the user was looking at kept its full history.
+The canonical session is the one the WebUI chat resolves to, so every ack now says so explicitly — the old "Other surfaces untouched" sentence was false the moment the main session joined the reset — and the `/new` ack reports each session's own cleared count, so a no-op is visible and the blast radius is self-evident from the chat itself.
+(#7701) (@DaBlitzStein)

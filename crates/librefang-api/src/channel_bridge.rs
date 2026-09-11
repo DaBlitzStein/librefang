@@ -56,6 +56,18 @@ fn sanitize_channel_error(err: &str) -> String {
     }
 }
 
+/// The cleared-count clause of a `/new` ack.
+///
+/// A substrate lookup failure yields `None` rather than a fabricated zero —
+/// see `count_for_ack`.
+fn cleared_label(count: Option<usize>) -> String {
+    match count {
+        Some(1) => "1 message".to_string(),
+        Some(n) => format!("{n} messages"),
+        None => "count unavailable".to_string(),
+    }
+}
+
 /// Check if text looks like a raw tool call leaked as content.
 ///
 /// Some providers emit tool calls as plain text (recovered by
@@ -761,14 +773,40 @@ impl KernelBridgeAdapter {
     /// Observed live on proteo: `deannatroi`'s derived session held 0 messages
     /// and its canonical session held 198, so `/new` acked and changed nothing.
     ///
+    /// The canonical sid is the session the WebUI chat resolves to, so a
+    /// reset that covers it is collateral the ack must name — never a silent
+    /// "other surfaces untouched". The canonical reset is therefore
+    /// best-effort: a failure there must not abort the chat's own reset,
+    /// which already succeeded by the time this runs.
+    ///
     /// Returns `None` when the two coincide, which is the ordinary case and
     /// needs no second reset. Same #7140 divergence family, session dimension.
-    fn canonical_session_besides(&self, agent_id: AgentId, sid: SessionId) -> Option<SessionId> {
+    fn canonical_session_if_different(
+        &self,
+        agent_id: AgentId,
+        sid: SessionId,
+    ) -> Option<SessionId> {
         self.kernel
             .agent_registry()
             .get(agent_id)
             .map(|e| e.session_id)
             .filter(|csid| *csid != sid)
+    }
+
+    /// Message count for a reset ack, or `None` when the substrate cannot say.
+    ///
+    /// A substrate failure must not fold into "0 messages cleared" — the
+    /// whole point of the count is to make a no-op visible, so an
+    /// uncountable session reports itself as such instead of looking empty.
+    fn count_for_ack(&self, sid: SessionId) -> Option<usize> {
+        match self.kernel.memory_substrate().get_session(sid) {
+            Ok(Some(s)) => Some(s.messages.len()),
+            Ok(None) => Some(0),
+            Err(e) => {
+                tracing::warn!(session = %sid, error = %e, "reset ack: could not count messages");
+                None
+            }
+        }
     }
 }
 
@@ -1935,30 +1973,53 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         chat_id: Option<&str>,
     ) -> Result<String, String> {
         let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
-        let canonical = self.canonical_session_besides(agent_id, sid);
+        let canonical = self.canonical_session_if_different(agent_id, sid);
 
-        // Count what we are about to clear so the ack is diagnosable in
-        // the chat itself ("did /new do anything?" → "N messages cleared").
-        let mut cleared = 0usize;
-        if let Some(csid) = canonical {
-            if let Ok(Some(s)) = self.kernel.memory_substrate().get_session(csid) {
-                cleared += s.messages.len();
-            }
-            self.kernel
-                .reset_session(agent_id, ResetScope::Session(csid))
-                .await
-                .map_err(|e| format!("{e}"))?;
-        }
-        if let Ok(Some(s)) = self.kernel.memory_substrate().get_session(sid) {
-            cleared += s.messages.len();
-        }
+        // The chat's own session is the primary target — the command was
+        // typed here, so its failure fails the command. Count what we are
+        // about to clear so the ack is diagnosable in the chat itself
+        // ("did /new do anything?" → "N messages cleared").
+        let derived_cleared = self.count_for_ack(sid);
         self.kernel
             .reset_session(agent_id, ResetScope::Session(sid))
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(format!(
-            "Session reset for this {channel} chat ({cleared} messages cleared). Other surfaces untouched."
-        ))
+
+        let Some(csid) = canonical else {
+            return Ok(format!(
+                "Session reset for this {channel} chat ({} cleared). Other surfaces untouched.",
+                cleared_label(derived_cleared),
+            ));
+        };
+
+        // The canonical sid is the WebUI chat's session, so covering it is
+        // collateral the ack must name. Best-effort: a failure must not undo
+        // the chat's own reset, but the ack reports it instead of claiming
+        // the main session was cleared.
+        let canonical_cleared = self.count_for_ack(csid);
+        match self
+            .kernel
+            .reset_session(agent_id, ResetScope::Session(csid))
+            .await
+        {
+            Ok(()) => Ok(format!(
+                "Session reset for this {channel} chat ({} cleared) and the agent's main session ({} cleared).",
+                cleared_label(derived_cleared),
+                cleared_label(canonical_cleared),
+            )),
+            Err(e) => {
+                tracing::warn!(
+                    agent = %agent_id,
+                    session = %csid,
+                    error = %e,
+                    "canonical session reset failed after the channel session was cleared"
+                );
+                Ok(format!(
+                    "Session reset for this {channel} chat ({} cleared); the agent's main session could not be reset: {e}",
+                    cleared_label(derived_cleared),
+                ))
+            }
+        }
     }
 
     async fn reboot_channel_session(
@@ -1968,19 +2029,40 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         chat_id: Option<&str>,
     ) -> Result<String, String> {
         let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
-        if let Some(csid) = self.canonical_session_besides(agent_id, sid) {
-            self.kernel
-                .reboot_session(agent_id, ResetScope::Session(csid))
-                .await
-                .map_err(|e| format!("{e}"))?;
-        }
+        let canonical = self.canonical_session_if_different(agent_id, sid);
+
+        // The chat's own session first — the command was typed here.
         self.kernel
             .reboot_session(agent_id, ResetScope::Session(sid))
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(format!(
-            "Session rebooted for this {channel} chat. Other surfaces untouched."
-        ))
+
+        let Some(csid) = canonical else {
+            return Ok(format!(
+                "Session rebooted for this {channel} chat. Other surfaces untouched."
+            ));
+        };
+
+        match self
+            .kernel
+            .reboot_session(agent_id, ResetScope::Session(csid))
+            .await
+        {
+            Ok(()) => Ok(format!(
+                "Session rebooted for this {channel} chat and the agent's main session."
+            )),
+            Err(e) => {
+                tracing::warn!(
+                    agent = %agent_id,
+                    session = %csid,
+                    error = %e,
+                    "canonical session reboot failed after the channel session was rebooted"
+                );
+                Ok(format!(
+                    "Session rebooted for this {channel} chat; the agent's main session could not be rebooted: {e}"
+                ))
+            }
+        }
     }
 
     async fn compact_channel_session(
@@ -1990,16 +2072,40 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         chat_id: Option<&str>,
     ) -> Result<String, String> {
         let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
-        if let Some(csid) = self.canonical_session_besides(agent_id, sid) {
-            self.kernel
-                .compact_agent_session_with_id(agent_id, Some(csid), true)
-                .await
-                .map_err(|e| format!("{e}"))?;
-        }
-        self.kernel
+        let canonical = self.canonical_session_if_different(agent_id, sid);
+
+        // The chat's own session first: the command was typed here, and the
+        // kernel's own ack text describes what it did to that session.
+        let chat_reply = self
+            .kernel
             .compact_agent_session_with_id(agent_id, Some(sid), true)
             .await
-            .map_err(|e| format!("{e}"))
+            .map_err(|e| format!("{e}"))?;
+
+        let Some(csid) = canonical else {
+            return Ok(chat_reply);
+        };
+
+        // The canonical sid is the WebUI chat's session; compacting it from a
+        // channel command is collateral the ack must name.
+        match self
+            .kernel
+            .compact_agent_session_with_id(agent_id, Some(csid), true)
+            .await
+        {
+            Ok(main_reply) => Ok(format!("{chat_reply} Main session: {main_reply}")),
+            Err(e) => {
+                tracing::warn!(
+                    agent = %agent_id,
+                    session = %csid,
+                    error = %e,
+                    "canonical session compaction failed after the channel session was compacted"
+                );
+                Ok(format!(
+                    "{chat_reply} Main session could not be compacted: {e}"
+                ))
+            }
+        }
     }
 
     async fn set_model(&self, agent_id: AgentId, model: &str) -> Result<String, String> {
@@ -3717,9 +3823,18 @@ mod tests {
             .reset_channel_session(assistant, "telegram", Some("chat-42"))
             .await
             .expect("reset must succeed");
+        // The ack must name BOTH targets and report each session's own
+        // count — "2 messages cleared" could not tell the user that one of
+        // the two came from a surface they were not looking at (the WebUI
+        // chat), and the old "Other surfaces untouched" sentence was false
+        // the moment the canonical sid joined the reset.
         assert!(
-            reply.contains("2 messages cleared"),
-            "ack must report the cleared count, got: {reply}"
+            reply.contains("this telegram chat (1 message cleared)"),
+            "ack must report the chat's own count, got: {reply}"
+        );
+        assert!(
+            reply.contains("the agent's main session (1 message cleared)"),
+            "ack must report the main session's count, got: {reply}"
         );
 
         let c_after = substrate
