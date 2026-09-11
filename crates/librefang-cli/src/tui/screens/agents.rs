@@ -1014,6 +1014,12 @@ impl AgentSelectState {
                 // Saving before `AgentModelRoutingLoaded` ever arrived would
                 // write this screen's reset placeholder values over the
                 // agent's real settings (#7781 review).
+                // The two cases are indistinguishable from in here, and a
+                // failed fetch cannot be retried from inside the editor —
+                // so the message names both and points at the way out
+                // (Esc, then `r`, which re-dispatches the fetch) instead of
+                // repeating "still loading" forever at an operator whose
+                // fetch is never coming back.
                 if !self.routing_loaded {
                     self.status_msg = crate::i18n::t("tui-agents-model-routing-not-loaded");
                     return AgentAction::Continue;

@@ -14,6 +14,7 @@
 use super::*;
 use crate::kernel::llm_drivers::resolve_effective_fallbacks;
 use crate::kernel::prompt_context::{attach_current_time_msg, current_time_precise_for_prompt};
+use crate::registry::clear_stale_provider_overrides;
 use crate::MeteringSubsystemApi;
 use librefang_skills::SkillError;
 
@@ -152,8 +153,9 @@ pub(crate) fn apply_routed_profile(
     // #7781 review: a provider change must also drop the per-agent
     // api_key_env / base_url overrides — they described the previous
     // provider's endpoint and would send the routed request to the
-    // wrong place with the wrong credentials. Same contract
-    // `set_agent_model` applies (`agent_state.rs:269-278`).
+    // wrong place with the wrong credentials. The dashboard's model picker
+    // now goes through the same helper (`AgentRegistry::switch_model_provider`,
+    // called by `set_agent_model`) rather than restating the field list.
     if provider_changed {
         clear_stale_provider_overrides(model);
     }
@@ -172,17 +174,6 @@ pub(crate) fn apply_routed_profile(
     if model_changed || profile.max_output_tokens.is_some() {
         model.max_output_tokens = profile.max_output_tokens;
     }
-}
-
-/// Clear the overrides that describe the *previous* provider's endpoint —
-/// its credentials and its capacity limits — so a provider change never
-/// leaves them attached to the new one (#7781 review). Shared by
-/// [`apply_routed_profile`] and [`apply_tier_routed_model`].
-fn clear_stale_provider_overrides(model: &mut librefang_types::agent::ModelConfig) {
-    model.api_key_env = None;
-    model.base_url = None;
-    model.context_window = None;
-    model.max_output_tokens = None;
 }
 
 /// Apply a tier-routed model id onto an agent's `ModelConfig` (#7781

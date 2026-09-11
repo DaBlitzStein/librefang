@@ -258,25 +258,30 @@ impl LibreFangKernel {
         drop(catalog);
 
         // Snapshot the full model state for rollback on DB persist failure (#3499).
-        let prev_model_state = self.agents.registry.get(agent_id).map(|e| {
-            (
-                e.manifest.model.model.clone(),
-                e.manifest.model.provider.clone(),
-                e.manifest.model.api_key_env.clone(),
-                e.manifest.model.base_url.clone(),
-            )
-        });
+        // The whole `[model]` block, not a hand-picked tuple of it: a provider
+        // switch clears the capacity limits too, and a rollback that put back
+        // only the fields someone remembered to list would leave the agent
+        // with the new endpoint's cleared limits (#7781 review).
+        let prev_model_config = self
+            .agents
+            .registry
+            .get(agent_id)
+            .map(|e| e.manifest.model.clone());
 
         if let Some(provider) = provider {
-            // When the provider changes, also clear any per-agent api_key_env
-            // and base_url overrides — they belonged to the previous provider
-            // and would route subsequent requests to the wrong endpoint with
-            // the wrong credentials. resolve_driver falls back to the global
-            // [provider_api_keys] / [provider_urls] tables (or convention) for
-            // the new provider, which is what the user expects when picking a
-            // model from the dashboard. When the provider is unchanged we
-            // leave the override fields alone so that genuine per-agent
-            // overrides on the same provider are preserved.
+            // When the provider changes, also clear the overrides that
+            // described the previous provider's endpoint — its credentials
+            // (api_key_env / base_url) and its capacity limits
+            // (context_window / max_output_tokens). resolve_driver falls back
+            // to the global [provider_api_keys] / [provider_urls] tables (or
+            // convention) for the new provider, and the limits fall back to
+            // the registry / probe chain, which is what the user expects when
+            // picking a model from the dashboard: a 200k window carried onto
+            // an endpoint that accepts 8k is a request the new provider
+            // rejects on every turn. `switch_model_provider` shares the field
+            // list with the model router (#7781 review). When the provider is
+            // unchanged we leave the override fields alone so that genuine
+            // per-agent overrides on the same provider are preserved.
             let prev_provider = self
                 .agents
                 .registry
@@ -286,13 +291,7 @@ impl LibreFangKernel {
             if provider_changed {
                 self.agents
                     .registry
-                    .update_model_provider_config(
-                        agent_id,
-                        normalized_model.clone(),
-                        provider.clone(),
-                        None,
-                        None,
-                    )
+                    .switch_model_provider(agent_id, normalized_model.clone(), provider.clone())
                     .map_err(KernelError::LibreFang)?;
             } else {
                 self.agents
@@ -314,14 +313,8 @@ impl LibreFangKernel {
         // silently drifting registry vs. disk (#3499).
         if let Some(entry) = self.agents.registry.get(agent_id) {
             if let Err(e) = self.memory.substrate.save_agent(&entry) {
-                if let Some((p_model, p_provider, p_api_key_env, p_base_url)) = prev_model_state {
-                    let _ = self.agents.registry.update_model_provider_config(
-                        agent_id,
-                        p_model,
-                        p_provider,
-                        p_api_key_env,
-                        p_base_url,
-                    );
+                if let Some(previous) = prev_model_config {
+                    let _ = self.agents.registry.set_model_config(agent_id, previous);
                 }
                 return Err(KernelError::LibreFang(e));
             }

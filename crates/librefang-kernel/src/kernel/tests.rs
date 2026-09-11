@@ -1599,6 +1599,138 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
     kernel.shutdown();
 }
 
+/// #7781 review: the credential half of a provider switch was already cleared
+/// (`test_set_agent_model_clears_overrides_when_provider_changes`); the
+/// capacity half was not.
+/// `context_window` / `max_output_tokens` describe what the *endpoint* can do,
+/// so an operator moving an agent from a large-window provider to a small-window
+/// one through the dashboard's model picker left the old endpoint's window
+/// attached to the new one — the same gap the model router closed for
+/// `apply_routed_profile` and `apply_tier_routed_model`, in the file next door.
+/// Both paths now share `clear_stale_provider_overrides`.
+#[test]
+fn switching_provider_also_drops_the_old_endpoints_capacity_limits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-provider-switch-limits");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // An agent pinned to a provider whose endpoint accepts a 200k window.
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "switch-provider-limits-agent".to_string(),
+                source_template: None,
+                description: "carries the previous endpoint's limits".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
+                    provider: "cloudverse".to_string(),
+                    model: "anthropic-claude-4-5-sonnet".to_string(),
+                    api_key_env: Some("CLOUDVERSE_API_KEY".to_string()),
+                    base_url: Some("https://cloudverse.freshworkscorp.com/api/v1".to_string()),
+                    context_window: Some(200_000),
+                    max_output_tokens: Some(64_000),
+                    // Flattened verbatim into the request body, so it only
+                    // means anything to the provider it was set for.
+                    extra_params: std::collections::BTreeMap::from([(
+                        "enable_memory".to_string(),
+                        serde_json::json!(true),
+                    )]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let pre = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent registry entry");
+    assert_eq!(pre.manifest.model.context_window, Some(200_000));
+    assert_eq!(pre.manifest.model.max_output_tokens, Some(64_000));
+    assert!(pre
+        .manifest
+        .model
+        .extra_params
+        .contains_key("enable_memory"));
+
+    // The dashboard's model picker, switching to a different provider.
+    kernel
+        .set_agent_model(agent_id, "gpt-4o-mini", Some("openai"))
+        .expect("provider switch should succeed");
+
+    let post = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent registry entry after switch");
+    assert_eq!(post.manifest.model.provider, "openai");
+    assert_eq!(
+        post.manifest.model.context_window, None,
+        "the previous endpoint's context_window must not cap the new provider — \
+         resolution falls back to the registry / probe chain for the new model"
+    );
+    assert_eq!(
+        post.manifest.model.max_output_tokens, None,
+        "the previous endpoint's max_output_tokens must not cap the new provider"
+    );
+    assert!(
+        post.manifest.model.extra_params.is_empty(),
+        "extra_params is flattened verbatim into the request body, so carrying the \
+         previous provider's keys onto the new one sends parameters it does not know: \
+         {:?}",
+        post.manifest.model.extra_params
+    );
+
+    // The same-provider swap keeps them: on one endpoint these are a
+    // deliberate per-agent override, not a leftover.
+    kernel
+        .agents
+        .registry
+        .update_context_window(agent_id, Some(128_000))
+        .expect("seed a deliberate per-agent window");
+    kernel
+        .agents
+        .registry
+        .update_model_max_output_tokens(agent_id, Some(16_000))
+        .expect("seed a deliberate per-agent output cap");
+    kernel
+        .set_agent_model(agent_id, "gpt-4o", Some("openai"))
+        .expect("same-provider model swap should succeed");
+
+    let same_provider = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent after same-provider swap");
+    assert_eq!(
+        same_provider.manifest.model.context_window,
+        Some(128_000),
+        "a same-provider model swap must preserve a deliberate per-agent context_window"
+    );
+    assert_eq!(
+        same_provider.manifest.model.max_output_tokens,
+        Some(16_000),
+        "a same-provider model swap must preserve a deliberate per-agent max_output_tokens"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_hand_activation_does_not_seed_runtime_tool_filters() {
     let tmp = tempfile::tempdir().unwrap();

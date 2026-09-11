@@ -2718,8 +2718,13 @@ impl LibreFangKernel {
                         {
                             restored_entry.manifest.model.provider = "default".to_string();
                             restored_entry.manifest.model.model = "default".to_string();
-                            restored_entry.manifest.model.api_key_env = None;
-                            restored_entry.manifest.model.base_url = None;
+                            // Same repointing as the model picker and the router, so the same
+                            // field list: this restated only the credentials, which left the
+                            // pinned model's context window and output cap attached to whatever
+                            // `default` resolves to (#7781 review).
+                            crate::registry::clear_stale_provider_overrides(
+                                &mut restored_entry.manifest.model,
+                            );
                         }
                     }
 
