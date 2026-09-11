@@ -1452,7 +1452,13 @@ export function WorkflowsPage() {
                             const isActive = rd.state === "running" || rd.state === "pending";
                             const allSteps = rd.step_results;
                             const totalSteps = rd.total_steps || allSteps.length;
-                            const curIdx = rd.current_step_index;
+                            // Executions, not a position in the step list: a `Loop` step pushes
+                            // one result per iteration and a skipped `Conditional` pushes none,
+                            // so this can exceed `totalSteps` or fall short of it on a finished
+                            // run. The label says "executed" and the bar is clamped for exactly
+                            // that reason. #8177 adds the tracked index that `totalSteps` really
+                            // bounds, which is the one safe to render as "step 2 of 4".
+                            const stepsExecuted = allSteps.length;
                             // Total run duration
                             const startedMs = rd.started_at ? new Date(rd.started_at).getTime() : 0;
                             const endedMs = rd.completed_at ? new Date(rd.completed_at).getTime() : Date.now();
@@ -1482,13 +1488,13 @@ export function WorkflowsPage() {
                                   <Loader2 className="w-3 h-3 text-brand animate-spin shrink-0" />
                                   <div className="flex-1">
                                     <p className="text-[10px] text-brand font-semibold">
-                                      {typeof curIdx === "number" && totalSteps > 0
-                                        ? t("workflows.step_executing", { defaultValue: "Step {{current}}/{{total}} executing…", current: curIdx + 1, total: totalSteps })
+                                      {stepsExecuted > 0 && totalSteps > 0
+                                        ? t("workflows.steps_executed", { defaultValue: "{{executed}} of {{total}} steps executed…", executed: stepsExecuted, total: totalSteps })
                                         : t("workflows.starting", { defaultValue: "Starting…" })}
                                     </p>
                                     {totalSteps > 0 && (
                                       <div className="mt-1 h-1 rounded-full bg-brand/20 overflow-hidden">
-                                        <div className="h-full rounded-full bg-brand transition-all duration-500" style={{ width: `${typeof curIdx === "number" ? ((curIdx) / totalSteps) * 100 : 0}%` }} />
+                                        <div className="h-full rounded-full bg-brand transition-all duration-500" style={{ width: `${Math.min(stepsExecuted / totalSteps, 1) * 100}%` }} />
                                       </div>
                                     )}
                                   </div>
