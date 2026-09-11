@@ -391,9 +391,12 @@ impl ChannelAdapter for OrphanAdapter {
 
 /// `has_adapter`-only orphan: nothing in `sidecar_channels` (neither on disk
 /// nor in the kernel's in-memory config), but a stale adapter is still
-/// registered under both the plain and the `name:name` qualified key — the
-/// shape `start_channel_bridge_with_config` produces for a sidecar, since it
-/// keys the qualified entry by the sidecar's own `name` as `account_id`.
+/// registered under both the plain and a qualified key. The qualified key is
+/// `{name}:{account_id}` (`channel_bridge.rs` — `format!("{name}:{aid}")`),
+/// where `aid` is the *adapter's* account id; `email:email` is the shape a
+/// single-account deployment happens to produce, and
+/// `delete_clears_a_stale_adapter_entry_keyed_by_a_real_account_id` covers the
+/// multi-account one that the removal used to miss.
 ///
 /// Before the fix, `HotAction::ReloadChannels` is the only thing that clears
 /// `channel_adapters_ref()`, and it never dispatches here because the
@@ -443,5 +446,61 @@ async fn delete_clears_a_stale_adapter_entry_with_no_config_anywhere() {
         status,
         StatusCode::NOT_FOUND,
         "once the orphan is actually gone, a repeat delete must converge to 404"
+    );
+}
+
+/// Regression (#7971 review M5): the direct removal used to take the plain key
+/// plus a guessed `{name}:{name}`, which only matches when the adapter's
+/// `account_id` happens to equal the channel name. `channel_bridge.rs` builds
+/// the qualified key as `format!("{name}:{aid}")` from the adapter's own
+/// account id, so on any multi-account deployment the real entry survived and
+/// the orphan never converged — the exact failure this branch was added to fix.
+/// A neighbouring channel whose name merely shares the prefix must not be
+/// caught by the same sweep.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_clears_a_stale_adapter_entry_keyed_by_a_real_account_id() {
+    let h = boot_router().await;
+    std::fs::write(h.home.join("config.toml"), "# no sidecar_channels\n").expect("seed config");
+
+    let adapter: Arc<dyn ChannelAdapter> = Arc::new(OrphanAdapter {
+        name: "email".to_string(),
+    });
+    let neighbour: Arc<dyn ChannelAdapter> = Arc::new(OrphanAdapter {
+        name: "email-support".to_string(),
+    });
+    let adapters = h.state.kernel.channel_adapters_ref();
+    adapters.insert("email".to_string(), adapter.clone());
+    adapters.insert("email:acct-42".to_string(), adapter.clone());
+    adapters.insert("email:acct-7".to_string(), adapter);
+    adapters.insert("email-support:acct-1".to_string(), neighbour);
+
+    let (status, body) = send(h.app.clone(), auth_delete("/api/channels/sidecar/email")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an adapter-only orphan must be deletable; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    for key in ["email", "email:acct-42", "email:acct-7"] {
+        assert!(
+            !h.state.kernel.channel_adapters_ref().contains_key(key),
+            "`{key}` must be cleared — the qualified key is keyed by the adapter's \
+             account id, not by the channel name"
+        );
+    }
+    assert!(
+        h.state
+            .kernel
+            .channel_adapters_ref()
+            .contains_key("email-support:acct-1"),
+        "a different channel that merely shares the name prefix must survive"
+    );
+
+    let (status, _) = send(h.app.clone(), auth_delete("/api/channels/sidecar/email")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "once every key this channel owns is gone, a repeat delete must converge to 404"
     );
 }

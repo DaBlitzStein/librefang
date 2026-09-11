@@ -1086,9 +1086,12 @@ pub struct ConfigureSidecarBody {
 /// key rather than substring-matching `[[sidecar_channels]]`, so the inline
 /// array-of-tables form (`sidecar_channels = [{ ... }]`) is caught too and a
 /// comment containing the literal header text is not a false positive.
-/// Applies the same two rules the kernel enforces on every include path —
-/// absolute paths and `..` components are skipped, never followed — so this
-/// can never resolve a file the kernel itself would refuse to merge.
+/// Applies the same three rules the kernel enforces on every include path —
+/// absolute paths and `..` components are skipped, and the resolved path must
+/// still be inside the including file's directory once symlinks are followed —
+/// so this can never resolve a file the kernel itself would refuse to merge.
+/// The first two are string rules and cannot see a symlink; the containment
+/// check is what actually bounds where the DELETE handler may write.
 ///
 /// `tolerate_missing`: `true` skips a vanished include (`NotFound`) instead
 /// of failing the whole scan. The `delete` caller passes `true` — it only
@@ -1162,8 +1165,8 @@ fn included_files_with_sidecars_blocking(
             .unwrap_or_else(|| std::path::Path::new("."));
         for raw in include_array.iter().filter_map(|entry| entry.as_str()) {
             let raw_path = std::path::Path::new(raw);
-            // Same two rules `resolve_config_includes` enforces: absolute
-            // paths and `..` components are skipped, never followed.
+            // Same three rules `resolve_config_includes` enforces: absolute
+            // paths and `..` components are skipped, never followed…
             if raw_path.is_absolute()
                 || raw_path
                     .components()
@@ -1171,13 +1174,24 @@ fn included_files_with_sidecars_blocking(
             {
                 continue;
             }
-            walk(
-                &parent.join(raw_path),
-                depth + 1,
-                tolerate_missing,
-                seen,
-                hits,
-            )?;
+            let resolved = parent.join(raw_path);
+            // …and the resolved path must still land inside the including
+            // file's directory once symlinks are followed, which the string
+            // rules above cannot see. Without it a symlink inside
+            // `~/.librefang/` pointing outside resolves, parses, and — if it
+            // declares `sidecar_channels` — joins the list that
+            // `remove_sidecar_block_anywhere` rewrites, so the DELETE handler
+            // would write to a file the kernel itself refuses to merge.
+            //
+            // Skipped rather than propagated, unlike the kernel, which returns
+            // `Err`: this walk answers "where could a reachable block be
+            // stripped", and a file the kernel will not merge cannot be
+            // holding a live one. Failing the whole delete over an unrelated
+            // broken include would be the worse answer.
+            if !include_stays_within(&resolved, parent) {
+                continue;
+            }
+            walk(&resolved, depth + 1, tolerate_missing, seen, hits)?;
         }
         Ok(())
     }
@@ -1186,6 +1200,28 @@ fn included_files_with_sidecars_blocking(
     let mut seen = std::collections::BTreeSet::new();
     walk(config_path, 0, tolerate_missing, &mut seen, &mut hits)?;
     Ok(hits)
+}
+
+/// Whether `resolved` still lies inside `parent` after symlinks are followed.
+///
+/// Mirrors the third rule of `librefang_kernel::config::resolve_config_includes`
+/// — `canonicalize(resolved).starts_with(canonicalize(config_dir))` — against
+/// the *including* file's directory, which is the directory the kernel passes
+/// down for a nested include (`include_dir = canonical.parent()`).
+///
+/// A path that cannot be canonicalized (a vanished include, most often) is
+/// answered `true` and left to `walk`'s own `NotFound` handling, which already
+/// distinguishes the tolerated case from the fail-closed one. Reporting it as
+/// an escape here would silently convert a missing include into a skip on the
+/// `configure` path, which is required to fail closed.
+fn include_stays_within(resolved: &std::path::Path, parent: &std::path::Path) -> bool {
+    let (Ok(canonical), Ok(canonical_parent)) = (
+        std::fs::canonicalize(resolved),
+        std::fs::canonicalize(parent),
+    ) else {
+        return true;
+    };
+    canonical.starts_with(&canonical_parent)
 }
 
 #[derive(Debug)]
@@ -1939,9 +1975,18 @@ pub async fn delete_sidecar_channel(
         // `delete_reconciles_a_live_sidecar_that_is_no_longer_on_disk` test),
         // so only the adapter-only case needs a direct removal here.
         if !in_live_config {
-            let adapters = state.kernel.channel_adapters_ref();
-            adapters.remove(&name);
-            adapters.remove(&format!("{name}:{name}"));
+            // The qualified key is `{name}:{account_id}` (`channel_bridge.rs`
+            // — `format!("{name}:{aid}")`), and `account_id` is the adapter's,
+            // not the channel's. Removing a guessed `{name}:{name}` only ever
+            // hits the coincidence where the two are equal; on a multi-account
+            // deployment `telegram:acct-42` survived and the orphan never
+            // converged, which is the whole point of this branch. Take every
+            // key this channel owns instead of guessing one.
+            let prefix = format!("{name}:");
+            state
+                .kernel
+                .channel_adapters_ref()
+                .retain(|key, _| key != &name && !key.starts_with(&prefix));
         }
     }
 
@@ -2105,6 +2150,67 @@ mod included_sidecar_config_tests {
         assert!(
             hits.is_empty(),
             "unsafe include paths must not be followed: {hits:?}"
+        );
+    }
+
+    /// The kernel applies a *third* rule the two string checks above cannot
+    /// express: after canonicalization, the include must still be inside the
+    /// including file's directory (`config.rs` —
+    /// `canonical.starts_with(&canonical_dir)`). A symlink whose name is
+    /// relative and carries no `..` passes both string rules and then resolves
+    /// wherever it points. Because every file this returns is one
+    /// `remove_sidecar_block_anywhere` will *rewrite*, missing this check let
+    /// the DELETE handler edit a file outside the config directory — one the
+    /// kernel would refuse to merge, so the block it strips was never live.
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_include_escaping_the_config_dir_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        let target = outside.path().join("elsewhere.toml");
+        std::fs::write(
+            &target,
+            "[[sidecar_channels]]\nname = \"email\"\nchannel_type = \"email\"\n",
+        )
+        .unwrap();
+
+        let root = tmp.path().join("config.toml");
+        std::fs::write(&root, "include = [\"link.toml\"]\n").unwrap();
+        std::os::unix::fs::symlink(&target, tmp.path().join("link.toml")).unwrap();
+
+        let hits = included_files_with_sidecars_blocking(&root, false).unwrap();
+        assert!(
+            hits.is_empty(),
+            "a symlink resolving outside the config directory must not become a file \
+             the delete handler rewrites: {hits:?}"
+        );
+    }
+
+    /// The containment check bounds the walk, it does not stop it: a symlink
+    /// that stays inside the config directory is a file the kernel does merge,
+    /// so a block declared through it is live and must still be found.
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_include_inside_the_config_dir_is_still_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("real.toml");
+        std::fs::write(
+            &target,
+            "[[sidecar_channels]]\nname = \"email\"\nchannel_type = \"email\"\n",
+        )
+        .unwrap();
+
+        let root = tmp.path().join("config.toml");
+        std::fs::write(&root, "include = [\"link.toml\"]\n").unwrap();
+        std::os::unix::fs::symlink(&target, tmp.path().join("link.toml")).unwrap();
+
+        let hits = included_files_with_sidecars_blocking(&root, false).unwrap();
+        assert_eq!(
+            hits,
+            vec![std::fs::canonicalize(&target).unwrap()],
+            "a symlink that stays inside the config directory resolves to a file the \
+             kernel merges, so its block is live and strippable"
         );
     }
 }
