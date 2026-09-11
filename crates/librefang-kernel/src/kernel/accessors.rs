@@ -531,6 +531,33 @@ impl LibreFangKernel {
         });
     }
 
+    /// Write a key-validation outcome into the catalog, unless the operator
+    /// suppressed the provider while the probe was in flight.
+    ///
+    /// The suppression gate mirrors the one the local probe loop already has
+    /// (`provider_probe.rs`, #4803). Without it, the sequence "save a key →
+    /// Remove key" can end with the validation spawned by the save landing
+    /// *after* the removal, restoring an auth status for a provider the
+    /// operator has just taken out — and the dashboard shows it again.
+    ///
+    /// Extracted from the spawned task purely so it can be tested: the task
+    /// itself owns a real `probe_api_key` HTTP call with no seam to inject at.
+    fn record_key_validation(
+        catalog: &mut librefang_runtime::model_catalog::ModelCatalog,
+        provider_id: &str,
+        status: librefang_types::model_catalog::AuthStatus,
+        available_models: &[String],
+    ) {
+        if catalog.is_suppressed(provider_id) {
+            return;
+        }
+        catalog.set_provider_auth_status(provider_id, status);
+        if !available_models.is_empty() {
+            // Store available models so downstream can check whether a configured model actually exists.
+            catalog.set_provider_available_models(provider_id, available_models.to_vec());
+        }
+    }
+
     /// Spawn background tasks to validate API keys for every `Configured` provider.
     ///
     /// Called at daemon boot and whenever a new key is set via the dashboard.
@@ -664,14 +691,12 @@ impl LibreFangKernel {
                             };
                             tracing::info!(provider = %id, valid, "provider key validation result");
                             kernel.model_catalog_update(|catalog| {
-                                catalog.set_provider_auth_status(&id, status);
-                                if !available_models.is_empty() {
-                                    // Store available models so downstream can check whether a configured model actually exists.
-                                    catalog.set_provider_available_models(
-                                        &id,
-                                        available_models.clone(),
-                                    );
-                                }
+                                Self::record_key_validation(
+                                    catalog,
+                                    &id,
+                                    status,
+                                    &available_models,
+                                );
                             });
                         }
                     })
@@ -1855,5 +1880,69 @@ mod tests {
         Arc::try_unwrap(kernel_arc)
             .unwrap_or_else(|_| panic!("kernel Arc still has outstanding refs"))
             .shutdown();
+    }
+
+    // ── record_key_validation ────────────────────────────────────────────
+    //
+    // The spawned validation task owns a real `probe_api_key` HTTP call, so
+    // the outcome-application step is tested directly instead.
+
+    fn catalog_with_provider(
+        id: &str,
+        auth_status: librefang_types::model_catalog::AuthStatus,
+    ) -> librefang_runtime::model_catalog::ModelCatalog {
+        librefang_runtime::model_catalog::ModelCatalog::from_entries(
+            Vec::new(),
+            vec![librefang_types::model_catalog::ProviderInfo {
+                id: id.to_string(),
+                display_name: id.to_string(),
+                api_key_env: "TEST_API_KEY".to_string(),
+                base_url: "https://example.invalid/v1".to_string(),
+                auth_status,
+                ..Default::default()
+            }],
+        )
+    }
+
+    #[test]
+    fn key_validation_records_its_outcome_on_an_ordinary_provider() {
+        use librefang_types::model_catalog::AuthStatus;
+        let mut catalog = catalog_with_provider("acme", AuthStatus::Configured);
+
+        LibreFangKernel::record_key_validation(
+            &mut catalog,
+            "acme",
+            AuthStatus::InvalidKey,
+            &["acme-large".to_string()],
+        );
+
+        assert_eq!(
+            catalog.get_provider("acme").map(|p| p.auth_status),
+            Some(AuthStatus::InvalidKey),
+        );
+    }
+
+    /// A validation spawned by "save key" must not land after the operator has
+    /// since removed that key: suppression is the record of that intent, and
+    /// writing an auth status over it puts the provider back on the dashboard.
+    #[test]
+    fn key_validation_does_not_resurrect_a_provider_suppressed_mid_flight() {
+        use librefang_types::model_catalog::AuthStatus;
+        let mut catalog = catalog_with_provider("acme", AuthStatus::Missing);
+        catalog.suppress_provider("acme");
+
+        LibreFangKernel::record_key_validation(
+            &mut catalog,
+            "acme",
+            AuthStatus::ValidatedKey,
+            &["acme-large".to_string()],
+        );
+
+        assert_eq!(
+            catalog.get_provider("acme").map(|p| p.auth_status),
+            Some(AuthStatus::Missing),
+            "suppressed provider kept the status `delete_provider_key` left it on",
+        );
+        assert!(catalog.is_suppressed("acme"), "suppression itself survives");
     }
 }

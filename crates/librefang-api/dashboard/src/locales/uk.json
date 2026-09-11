@@ -1029,7 +1029,13 @@
     "everyapi_base_url": "URL шлюзу (необов’язково)",
     "everyapi_connecting": "Підключення…",
     "everyapi_connect_action": "Підключити",
-    "everyapi_connected": "EveryAPI підключено"
+    "everyapi_connected": "EveryAPI підключено",
+    "key_rejected": "Ключ відхилено",
+    "show_suppressed_one": "Показати {{count}} прихованого постачальника",
+    "show_suppressed_few": "Показати {{count}} прихованих постачальників",
+    "show_suppressed_many": "Показати {{count}} прихованих постачальників",
+    "show_suppressed_other": "Показати {{count}} прихованих постачальників",
+    "all_suppressed": "Усі інші постачальники приховані"
   },
   "channels": {
     "add": "Додати",
