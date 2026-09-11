@@ -1,0 +1,3 @@
+The workflow run timeline shows each step's variable bindings again, and the run console prints them.
+The panel had been removed on the premise that `StepResult` carries no `variables` field and the run-detail route never emits it — true of the tree that change was written against, and no longer true once the step-progress work lands, which adds the field and serialises it with an integration test asserting the binding end to end.
+Also fixes the parameter form forgetting a workflow's last-run values: the ref that suppresses auto-populate once the operator types had no per-workflow reset, so one keystroke on any workflow stopped every other workflow pre-filling for the rest of the session (#8177) (@DaBlitzStein)
