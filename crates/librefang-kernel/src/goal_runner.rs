@@ -539,6 +539,58 @@ fn delete_persisted_run(store: &Option<GoalRunStore>, goal_id: GoalId) {
     }
 }
 
+/// The cooperative stop signal for one run, plus who raised it.
+///
+/// Both of the operator's stop paths land here, and the runner has to tell
+/// them apart when it decides whether the iteration in flight may still write
+/// the goal document (#7785 re-review):
+///
+/// - `POST /api/goals/{id}/stop` writes nothing. The iteration in flight still
+///   holds the freshest accounting anyone has, so it must land — otherwise the
+///   goal keeps the previous iteration's progress while the run row reports the
+///   higher iteration count those turns were paid for.
+/// - A terminal `PUT /api/goals/{id}` wrote the document *before* stopping, and
+///   the write it made is exactly the one this iteration would revert: the
+///   runner's own `new_status` is `InProgress` for every iteration that did not
+///   pass verification, and the `PUT` carries `progress` too (the dashboard's
+///   edit form always sends both). Neither field may be written over it.
+#[derive(Debug, Default)]
+struct StopFlag {
+    stopped: AtomicBool,
+    wrote_goal: AtomicBool,
+}
+
+impl StopFlag {
+    /// A flag that is already raised, by a stopper that wrote nothing.
+    fn raised() -> Self {
+        let flag = Self::default();
+        flag.raise(false);
+        flag
+    }
+
+    /// Raise the flag. `wrote_goal` is set first so that any thread which
+    /// observes `stopped` also observes the stopper's ownership of the
+    /// document — the reverse order would leave a window where the runner
+    /// sees the stop but not who caused it, which is the exact write this
+    /// distinction exists to prevent.
+    fn raise(&self, wrote_goal: bool) {
+        if wrote_goal {
+            self.wrote_goal.store(true, Ordering::SeqCst);
+        }
+        self.stopped.store(true, Ordering::SeqCst);
+    }
+
+    fn is_raised(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    /// Whether the caller that stopped this run had already written the goal
+    /// document itself, and therefore owns it from that point on.
+    fn stopper_wrote_goal(&self) -> bool {
+        self.wrote_goal.load(Ordering::SeqCst)
+    }
+}
+
 /// A single goal run entry: the spawned loop task plus its observable state
 /// and a cooperative stop flag.
 struct RunHandle {
@@ -551,7 +603,7 @@ struct RunHandle {
     /// run whose loop finished before that backfill could happen.
     task: Option<JoinHandle<()>>,
     state: Arc<Mutex<GoalRunState>>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopFlag>,
     /// Monotonic id for this run, used by the task's self-cleanup so it only
     /// removes its OWN registry entry — never a newer run that replaced it.
     generation: u64,
@@ -621,15 +673,25 @@ impl GoalRunner {
         // goal id. The critical section is synchronous, so this std guard never
         // spans an await point. Recover the exclusion guard rather than panic.
         let _guard = lock_goal_run_start_stop(&self.start_lock);
-        self.stop_locked(goal_id)
+        self.stop_locked(goal_id, false)
+    }
+
+    /// Stop a goal's run on behalf of a caller that has **already written the
+    /// goal document** — the terminal-status `PUT` (#7785 re-review).
+    ///
+    /// Same stop, but the iteration in flight is barred from writing the goal
+    /// afterwards; see [`StopFlag`] for why the plain stop is not.
+    pub fn stop_after_goal_write(&self, goal_id: GoalId) -> bool {
+        let _guard = lock_goal_run_start_stop(&self.start_lock);
+        self.stop_locked(goal_id, true)
     }
 
     /// Stop body assuming the caller already holds `start_lock`. Split out so
     /// `start()` can run it inside its own critical section without re-locking
     /// the non-reentrant `start_lock` (which would deadlock).
-    fn stop_locked(&self, goal_id: GoalId) -> bool {
+    fn stop_locked(&self, goal_id: GoalId, stopper_wrote_goal: bool) -> bool {
         if let Some((_, handle)) = self.runs.remove(&goal_id) {
-            handle.stop.store(true, Ordering::SeqCst);
+            handle.stop.raise(stopper_wrote_goal);
             // A recovered terminal entry has no live loop task to abort.
             if let Some(task) = handle.task {
                 task.abort();
@@ -694,8 +756,10 @@ impl GoalRunner {
         }
 
         // Replace any prior run for this goal. `stop_locked` (not `stop`)
-        // because we already hold `start_lock`, which is non-reentrant.
-        self.stop_locked(goal_id);
+        // because we already hold `start_lock`, which is non-reentrant. The
+        // predecessor's stopper wrote no goal document, and this call is about
+        // to overwrite the run state anyway.
+        self.stop_locked(goal_id, false);
         let now = Utc::now();
         let initial = GoalRunState {
             goal_id,
@@ -734,7 +798,7 @@ impl GoalRunner {
         // start time if one survived an earlier daemon restart.
         persist_new_run(&self.store, &initial);
         let state = Arc::new(Mutex::new(initial));
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(StopFlag::default());
         let generation = self.next_gen.fetch_add(1, Ordering::SeqCst);
 
         let runs = self.runs.clone();
@@ -930,7 +994,7 @@ impl GoalRunner {
                         RunHandle {
                             task: None,
                             state: Arc::new(Mutex::new(state)),
-                            stop: Arc::new(AtomicBool::new(true)),
+                            stop: Arc::new(StopFlag::raised()),
                             generation: self.next_gen.fetch_add(1, Ordering::SeqCst),
                         },
                     );
@@ -970,7 +1034,7 @@ async fn run_loop<F, Fut, L, E, Efut>(
     evaluate_goal: E,
     loop_engineering: bool,
     state: Arc<Mutex<GoalRunState>>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopFlag>,
     mut shutdown_rx: watch::Receiver<bool>,
     store: Option<GoalRunStore>,
 ) where
@@ -1017,7 +1081,7 @@ async fn run_loop<F, Fut, L, E, Efut>(
     // sweep can demote it — mirroring how workflow runs survive a restart.
     let mut interrupted_by_shutdown = false;
     let final_phase = loop {
-        if stop.load(Ordering::SeqCst) {
+        if stop.is_raised() {
             break GoalRunPhase::Stopped;
         }
         if *shutdown_rx.borrow() {
@@ -1250,19 +1314,27 @@ async fn run_loop<F, Fut, L, E, Efut>(
                     parsed.progress.map(|p| p.min(99))
                 };
                 // #7785 re-review: an operator's `PUT /api/goals/{id}` that
-                // sets a terminal status now raises this run's stop flag
+                // sets a terminal status raises this run's stop flag
                 // (`routes/goals.rs`, the interlock `delete_goal` already
                 // had). Writing the run's own status on top of that would
                 // revert the operator's choice — this iteration's
                 // `new_status` is `InProgress` whenever the work was not
                 // passed, which is exactly the case an operator marking the
-                // goal `completed` is overriding. Once the run is stopped the
-                // goal document belongs to whoever stopped it. The run row
-                // below is still persisted either way: those turns were paid
-                // for, and hiding them would leave the run API reporting a
-                // stale iteration count.
-                let stopped_externally = stop.load(Ordering::SeqCst);
-                if !stopped_externally {
+                // goal `completed` is overriding. Once THAT stop lands the
+                // goal document belongs to whoever wrote it.
+                //
+                // A plain `POST /stop` is not that: it writes nothing, so
+                // there is no operator choice on the document to protect and
+                // skipping the write would just throw away the accounting
+                // this iteration already paid for — the goal would keep the
+                // previous iteration's progress while the run row reported
+                // the higher iteration count. Hence the flag carries who
+                // raised it (`StopFlag`), not merely that it is up.
+                //
+                // The run row below is persisted in every case for the same
+                // reason: those turns happened, and hiding them would leave
+                // the run API reporting a stale iteration count.
+                if !stop.stopper_wrote_goal() {
                     patch_goal(&substrate, goal_id, new_progress, new_status);
                 }
 
@@ -1580,7 +1652,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -1630,7 +1702,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -1722,7 +1794,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -1770,7 +1842,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -1813,7 +1885,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(true)),
+            Arc::new(StopFlag::raised()),
             rx,
             None,
         )
@@ -1849,7 +1921,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -1886,7 +1958,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -1952,7 +2024,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             Some(store.clone()),
         )
@@ -2011,7 +2083,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             Some(store.clone()),
         )
@@ -2603,7 +2675,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -2669,7 +2741,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -2743,7 +2815,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -2825,7 +2897,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -2880,7 +2952,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -2929,7 +3001,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -2973,7 +3045,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3049,7 +3121,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3096,7 +3168,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3149,7 +3221,7 @@ mod tests {
             evaluate,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3200,7 +3272,7 @@ mod tests {
             evaluate,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3252,7 +3324,7 @@ mod tests {
             evaluate,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3289,7 +3361,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3333,7 +3405,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3373,7 +3445,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx.clone(),
             None,
         )
@@ -3397,7 +3469,7 @@ mod tests {
             no_evaluator,
             true,
             state2.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3452,7 +3524,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3506,7 +3578,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3546,7 +3618,8 @@ mod tests {
     /// now called by `update_goal_by_id` the way `delete_goal` always has)
     /// and to stop the run overwriting a document it no longer owns. This
     /// simulates the operator's `PUT` landing mid-iteration, which is the
-    /// window the clobber lived in.
+    /// window the clobber lived in. The sibling below covers the other stop
+    /// path — the one that wrote nothing and therefore bars nothing.
     #[tokio::test(start_paused = true)]
     async fn an_operator_stop_landing_mid_iteration_keeps_the_status_it_wrote() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
@@ -3556,7 +3629,7 @@ mod tests {
         seed_goal(&substrate, &goal);
         let (_tx, rx) = watch::channel(false);
         let state = mk_verified_state(goal.id, agent_id, verifier, 25, 1);
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(StopFlag::default());
 
         let sub = substrate.clone();
         let stop_flag = stop.clone();
@@ -3576,7 +3649,7 @@ mod tests {
                 // the run's stop flag goes up, both before this iteration's
                 // bookkeeping runs.
                 patch_goal(&sub, goal_id, Some(100), Some(GoalStatus::Completed));
-                stop_flag.store(true, Ordering::SeqCst);
+                stop_flag.raise(true);
                 Ok("still working".to_string())
             }
         };
@@ -3612,6 +3685,74 @@ mod tests {
             state.lock().await.iteration,
             1,
             "the turn was paid for, so the run row still records it"
+        );
+    }
+
+    /// #7785 review (M2): the interlock above must NOT fire for the plain
+    /// `POST /api/goals/{id}/stop`, which raises the same flag but writes
+    /// nothing to the goal document.
+    ///
+    /// There is no operator write to protect on that path, so skipping the
+    /// end-of-iteration write only throws away the accounting the run already
+    /// paid for: the goal would keep iteration N-1's progress while the run
+    /// row — persisted either way, deliberately — reports iteration N. The
+    /// sibling test above always pairs the flag with a document write, so it
+    /// passes whether the runner keys on "stopped" or on "stopped by someone
+    /// who wrote the goal"; this one only passes for the latter.
+    #[tokio::test(start_paused = true)]
+    async fn a_bare_operator_stop_still_lands_the_progress_of_the_iteration_it_interrupted() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 25);
+        let stop = Arc::new(StopFlag::default());
+
+        let stop_flag = stop.clone();
+        let send = move |_target: AgentId, _p: String| {
+            let stop_flag = stop_flag.clone();
+            async move {
+                // The operator hitting Stop while this turn is in flight: the
+                // flag goes up, and the goal document is left exactly as the
+                // previous iteration left it.
+                stop_flag.raise(false);
+                Ok::<String, String>("progress so far\nGOAL_PROGRESS: 60".to_string())
+            }
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            25,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            state.clone(),
+            stop,
+            rx,
+            None,
+        )
+        .await;
+
+        let stored = load_goal(&substrate, goal.id).expect("goal must still exist");
+        assert_eq!(
+            stored.progress, 60,
+            "a stop that wrote nothing must not cost the operator the progress \
+             of the turn it interrupted"
+        );
+        assert_eq!(
+            stored.status,
+            GoalStatus::InProgress,
+            "and the run's own status write is not overriding anyone here"
+        );
+        assert_eq!(state.lock().await.phase, GoalRunPhase::Stopped);
+        assert_eq!(
+            state.lock().await.iteration,
+            1,
+            "the run row records the iteration the goal document now agrees with"
         );
     }
 
@@ -3657,7 +3798,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3728,7 +3869,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3802,7 +3943,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )
@@ -3815,6 +3956,81 @@ mod tests {
                 "Read the quota header first".to_string(),
             ],
             "the restated lesson must be kept once, and the new one must survive with it"
+        );
+    }
+
+    /// #7785 review (m3): the dedup has two layers, and the test above only
+    /// exercises one of them.
+    ///
+    /// Within an iteration, `iteration_learnings` is REPLACED by each rework
+    /// round, so a lesson restated in a corrected reply is stored once even
+    /// with the run-level `any()` guard deleted — that test passes against
+    /// either version. Across iterations there is no replacement to lean on:
+    /// each round's surviving lessons are folded into a list that outlives it,
+    /// and only the run-level guard stops an agent that keeps restating the
+    /// same lesson from filling the 6-entry `LEARNINGS_IN_PROMPT` replay
+    /// window with copies of it. This is the case that fails without the
+    /// guard, with a duplicate at index 1.
+    #[tokio::test(start_paused = true)]
+    async fn a_lesson_repeated_in_a_later_iteration_is_stored_once() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        // No verifier: the gate is not what is under test here, and without it
+        // each iteration is exactly one generator turn.
+        let state = mk_state(goal.id, agent_id, 2);
+
+        let turn = Arc::new(AtomicU64::new(0));
+        let t = turn.clone();
+        let send = move |_target: AgentId, _p: String| {
+            let t = t.clone();
+            async move {
+                if t.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Ok::<String, String>(
+                        "GOAL_LEARNED: Backoff beats retrying immediately".to_string(),
+                    );
+                }
+                // A second iteration that re-states the first one's lesson and
+                // adds one of its own.
+                Ok("GOAL_LEARNED: Backoff beats retrying immediately\n\
+                    GOAL_LEARNED: Read the quota header first"
+                    .to_string())
+            }
+        };
+        let (tx_hook, rx_hook) = std::sync::mpsc::channel::<Vec<String>>();
+
+        run_loop(
+            goal.id,
+            agent_id,
+            2,
+            substrate.clone(),
+            send,
+            move |l: Vec<String>| {
+                let _ = tx_hook.send(l);
+            },
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(StopFlag::default()),
+            rx,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            turn.load(Ordering::SeqCst),
+            2,
+            "the fixture only means anything if both iterations actually ran"
+        );
+        assert_eq!(
+            rx_hook.try_recv().unwrap(),
+            vec![
+                "Backoff beats retrying immediately".to_string(),
+                "Read the quota header first".to_string(),
+            ],
+            "a lesson already captured in an earlier iteration must not be stored again"
         );
     }
 
@@ -3871,7 +4087,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             rx,
             None,
         )

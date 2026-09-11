@@ -807,9 +807,11 @@ pub async fn update_goal_by_id(
     // separable: an out-of-band stop order stops the run, an agent asserting
     // completion in a document still has to get past the gate.
     //
-    // The runner skips its own end-of-iteration write once this flag is up, so
-    // the status the operator chose survives instead of being reverted to
-    // `in_progress` by the iteration already in flight.
+    // The runner skips its own end-of-iteration write once stopped THIS way,
+    // so the status — and the progress — the operator chose survives instead
+    // of being reverted by the iteration already in flight. A plain
+    // `POST /stop` writes nothing and therefore does not bar that write; the
+    // two are separate entry points for exactly that reason (#7785 re-review).
     // Keyed on what this request asked for, not on the goal's resulting
     // status: re-saving a description on an already-completed goal is not an
     // operator stopping anything.
@@ -819,7 +821,17 @@ pub async fn update_goal_by_id(
         .is_some_and(|s| s == "completed" || s == "cancelled");
     if stops_the_run {
         if let Ok(goal_id) = id.parse::<GoalId>() {
-            state.kernel.stop_goal_run(goal_id);
+            // Known race, deliberately not locked: a runner that read the flag
+            // before this call and reaches `patch_goal` after the write above
+            // still overwrites the operator's choice. The window is the few
+            // microseconds between those two runner statements, and reordering
+            // the handler does not close it — the write has to land before the
+            // stop (a stop that preceded it would leave the run gone and the
+            // document unwritten if the modify then failed), so the only real
+            // fix is a lock shared between the route and the run loop. Not
+            // worth it for a lost status the operator can re-apply, on a run
+            // that is stopping either way (#7785 review, m1).
+            state.kernel.stop_goal_run_after_goal_write(goal_id);
         }
     }
 
