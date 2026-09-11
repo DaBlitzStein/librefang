@@ -138,6 +138,24 @@ impl ToolExecConfig {
     /// per-field checks (api_url scheme, credential reachability) live
     /// in the per-backend constructor where the error context is richest.
     pub fn validate(&self) -> Result<(), String> {
+        // `0` builds a `Duration::from_secs(0)`, which makes every local exec
+        // return `ExecError::Timeout("after 0s")`.
+        // Rejected rather than clamped: unlike `max_history_messages`, where a
+        // too-small value still describes a working configuration, there is no
+        // sensible timeout an operator meant by zero.
+        // This tree does not yet carry #8175's runtime half, so nothing reads
+        // the field today and a stored `0` is inert rather than fatal — which
+        // is exactly why it is worth refusing now: #8285 wires this check into
+        // `validate_config_for_reload`, and without the check the guard it adds
+        // has nothing to reject, so a `0` would sit in `config.toml` waiting to
+        // break the first boot after #8175 lands.
+        if self.default_timeout_secs == Some(0) {
+            return Err(
+                "tool_exec.default_timeout_secs is 0, which would fail every local command \
+                 immediately; omit the key to inherit tool_timeout_secs"
+                    .into(),
+            );
+        }
         match self.kind {
             BackendKind::Local | BackendKind::Docker => Ok(()),
             BackendKind::Ssh => {
