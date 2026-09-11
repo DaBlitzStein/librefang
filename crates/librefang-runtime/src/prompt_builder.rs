@@ -1391,17 +1391,30 @@ fn build_channel_section(
             .eq_ignore_ascii_case(librefang_channels::types::SYSTEM_CHANNEL_WEBUI)
         {
             section.push_str(
-                "\n\nYou are on the LibreFang web interface, which has no messaging adapter. \
-                 To share images, files, or other media you generate, include the returned \
-                 URL or file path in your reply as markdown — it is rendered directly. Do NOT \
-                 use `channel_send`; there is no channel for it to deliver to.",
+                "\n\nYou are on the LibreFang web interface. Files, images, and media you \
+                 generate are NOT delivered automatically — the browser only sees what your \
+                 reply text embeds. Include the `/api/uploads/...` URL the generating tool \
+                 returned in your response so it renders. Do NOT use `channel_send` to reply \
+                 here. Use it only to reach someone on a different channel (email, telegram, \
+                 …), naming that channel and recipient explicitly.",
             );
         } else if is_non_interactive_turn(channel) {
+            // Kept byte-identical to the same branch on #8149, which rewrites
+            // this block from a different pre-image: the two landed on
+            // contradictory instructions for the same turn — one offering
+            // `channel_send` with an explicit target, the other forbidding it
+            // outright — and only one of them can be true. It is this one:
+            // `channel_send` reads `channel` and `recipient` straight from its
+            // own input and dispatches to that adapter, so the turn's own
+            // sentinel channel never enters into it. What is genuinely
+            // impossible is replying *into* `cron` / `autonomous`, which have
+            // no adapter — so say that, and not "do not use it here".
             section.push_str(
-                "\n\nThis turn has no default channel or recipient. To send images, files, \
-                 polls, or other media, use the `channel_send` tool with an explicit real \
-                 channel (e.g. \"telegram\", \"slack\") and recipient — omitting either will \
-                 fail rather than fall back to a default.",
+                "\n\nThis is a background run: no chat is attached to it, so `channel_send` \
+                 has no default channel or recipient to fall back to, and it cannot deliver \
+                 a reply into this system channel. To reach a person, call it with an \
+                 explicit real channel (e.g. \"telegram\", \"slack\") and recipient — \
+                 omitting either fails rather than falling back to a default.",
             );
         } else if let Some(id) = sender_id {
             section.push_str(&format!(

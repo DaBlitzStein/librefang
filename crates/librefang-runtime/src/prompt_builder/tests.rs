@@ -1556,20 +1556,43 @@ fn cron_and_autonomous_keep_channel_send_but_require_an_explicit_target() {
 
 /// Nothing attaches agent-generated media to an assistant message — the
 /// only path that reaches the user is the agent embedding the returned
-/// URL/path as markdown in the reply. The webui instruction must say that,
-/// not claim media is attached automatically (#7995 review).
+/// URL in the reply. The webui instruction must say that, and name the URL
+/// contract it is talking about (`/api/uploads/<id>`, minted by
+/// `routes/media.rs`), not claim media is attached automatically
+/// (#7995 review).
 #[test]
 fn webui_states_the_true_media_delivery_mechanism() {
     let granted = vec!["channel_send".to_string()];
     let section = build_channel_section("webui", None, None, false, false, &granted);
     assert!(
-        section.contains("include the returned URL or file path in your reply as markdown"),
-        "webui must say media is delivered by embedding the URL/path, got: {section}"
+        section.contains("/api/uploads"),
+        "webui must point the agent at the actual URL contract, got: {section}"
     );
     assert!(
         !section.contains("shown to the user automatically"),
         "webui must not claim media is attached automatically, got: {section}"
     );
+}
+
+/// The instruction cron and autonomous receive must be the same one #8149
+/// writes from its own pre-image — the two commits rewrite this exact block
+/// and previously disagreed about whether `channel_send` may be used at all.
+#[test]
+fn background_run_guidance_matches_the_wording_shared_with_8149() {
+    let granted = vec!["channel_send".to_string()];
+    for channel in ["cron", "autonomous"] {
+        let section = build_channel_section(channel, Some("Paco"), None, false, false, &granted);
+        assert!(
+            section.contains("This is a background run: no chat is attached to it"),
+            "{channel}: the background-run wording must stay byte-identical across #7995 \
+             and #8149, got: {section}"
+        );
+        assert!(
+            !section.contains("image_url"),
+            "{channel}: a background turn has no default target for the media hint, got: \
+             {section}"
+        );
+    }
 }
 
 #[test]
