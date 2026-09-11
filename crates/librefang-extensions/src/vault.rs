@@ -258,6 +258,9 @@ pub struct CredentialVault {
     unlocked: bool,
     /// Cached master key (zeroed on drop) — avoids re-resolving from env/keyring.
     cached_key: Option<Zeroizing<[u8; 32]>>,
+    /// Fingerprint of `vault.enc` as of the last [`Self::reload`] that failed, cleared by the next one that succeeds.
+    /// Lets a polling caller skip an unlock attempt that cannot succeed — see [`Self::unlock_failed_for_current_file`].
+    last_unlock_failure: Option<(std::time::SystemTime, u64)>,
 }
 
 impl CredentialVault {
@@ -268,6 +271,7 @@ impl CredentialVault {
             entries: HashMap::new(),
             unlocked: false,
             cached_key: None,
+            last_unlock_failure: None,
         }
     }
 
@@ -427,7 +431,18 @@ impl CredentialVault {
     /// A long-lived cached instance therefore has to reconcile before it mutates, which is what the kernel's `vault_set` / `vault_remove` accessors use this for.
     ///
     /// A failure leaves the previous entries in place: `load` clears the map only after the ciphertext has decrypted and parsed.
+    /// It also records the file's fingerprint, so [`Self::unlock_failed_for_current_file`] can tell a polling caller not to try again until the file changes.
     pub fn reload(&mut self) -> ExtensionResult<()> {
+        let result = self.reload_inner();
+        // Fingerprint on failure only; success clears whatever a previous failure left.
+        self.last_unlock_failure = match result {
+            Ok(()) => None,
+            Err(_) => self.file_fingerprint(),
+        };
+        result
+    }
+
+    fn reload_inner(&mut self) -> ExtensionResult<()> {
         if !self.path.exists() {
             return Err(ExtensionError::Vault(
                 "Vault not initialized. Run `librefang vault init`.".to_string(),
@@ -440,6 +455,70 @@ impl CredentialVault {
         self.cached_key = Some(master_key);
         debug!("Vault unlocked with {} entries", self.entries.len());
         Ok(())
+    }
+
+    /// Path of the advisory lock file that guards a read-modify-write cycle over the vault.
+    ///
+    /// A sidecar rather than `vault.enc` itself, because [`Self::save`] replaces the vault by `rename`: a lock taken on the file would end up held against an inode no other writer is looking at any more.
+    fn lock_path(&self) -> PathBuf {
+        let mut name = self.path.clone().into_os_string();
+        name.push(".lock");
+        PathBuf::from(name)
+    }
+
+    /// Take the cross-process write lock, blocking until any other writer finishes.
+    ///
+    /// [`Self::save`] re-encrypts the whole file from `self.entries`, so two writers that each read before either wrote leave only the second one's entry — the first write disappears with no error raised anywhere and, over HTTP, after a `200`.
+    /// The kernel's in-process `RwLock` cannot cover that: `KernelOAuthProvider` opens its own [`CredentialVault`] outside it for the `mcp-oauth:*` entries, and `librefang vault set` runs in a different process entirely.
+    /// Nor is the window small enough to ignore — the reload and the save each pay an Argon2id at m=19456 KiB, t=2, so it is hundreds of milliseconds wide.
+    ///
+    /// The returned handle releases the lock when it drops.
+    /// The lock is advisory, so it only works if every writer takes it; that is why it lives inside [`Self::set`] and [`Self::remove`] rather than at their call sites.
+    fn lock_for_write(&self) -> ExtensionResult<std::fs::File> {
+        let path = self.lock_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut opts = OpenOptions::new();
+        opts.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts.open(&path)?;
+        file.lock()
+            .map_err(|e| ExtensionError::Vault(format!("Vault lock failed: {e}")))?;
+        Ok(file)
+    }
+
+    /// Re-read `vault.enc` while holding the write lock, so the map about to be rewritten includes whatever another writer added since this instance last read.
+    ///
+    /// Skipped when the file is absent: there is nothing to reconcile, and `save` is about to create it.
+    fn reconcile_under_lock(&mut self) -> ExtensionResult<()> {
+        if self.path.exists() {
+            self.reload()?;
+        }
+        Ok(())
+    }
+
+    /// Cheap identity for `vault.enc`: (mtime, len). `None` when the file is absent or unstattable.
+    fn file_fingerprint(&self) -> Option<(std::time::SystemTime, u64)> {
+        let meta = std::fs::metadata(&self.path).ok()?;
+        Some((meta.modified().ok()?, meta.len()))
+    }
+
+    /// Whether a previous [`Self::reload`] already failed against exactly the `vault.enc` that is on disk now.
+    ///
+    /// This exists for callers on a hot path. `Kernel::vault_get` runs on every channel message and twice per approvals-status request, and on a host that has a `vault.enc` but no resolvable master key — no `LIBREFANG_VAULT_KEY`, no keyring — every one of those calls otherwise re-attempts the unlock: an exclusive lock on the cached vault, an OS keyring lookup (DBus on Linux, possibly a Keychain prompt on macOS) and a `WARN` line, all to fail the same way again.
+    ///
+    /// Deliberately keyed on the file rather than on a timer: `librefang vault init` or a `rotate-key` from another process changes (mtime, len), and the very next call retries for real.
+    /// It never suppresses a first attempt, and it says nothing about whether an unlock *would* succeed — only that this exact file already refused once.
+    pub fn unlock_failed_for_current_file(&self) -> bool {
+        match (self.last_unlock_failure, self.file_fingerprint()) {
+            (Some(failed_at), Some(current)) => failed_at == current,
+            _ => false,
+        }
     }
 
     /// Get a secret from the vault.
@@ -478,6 +557,18 @@ impl CredentialVault {
         if !self.unlocked {
             return Err(ExtensionError::VaultLocked);
         }
+        // Rotation is a whole-file rewrite like `set` and `remove`, so it takes the same
+        // cross-process lock and re-reads inside it.
+        // `librefang vault rotate-key` runs in its own process against a live daemon, and
+        // without this an entry the daemon stored between this instance's unlock and the
+        // rewrite would be dropped — silently, and from the one operation whose whole point
+        // is that afterwards the old key no longer opens the file, so it could not be
+        // recovered by retrying with it.
+        // The re-read decrypts with the old key, which `resolve_master_key` returns from
+        // `cached_key`; it has to happen before the sentinel insert below, or the reload
+        // would discard it.
+        let _lock = self.lock_for_write()?;
+        self.reconcile_under_lock()?;
         // Make sure the sentinel is present so the post-rotation vault
         // verifies on next boot. Idempotent — a sentinel-bearing vault
         // gets the same insert.
@@ -520,8 +611,14 @@ impl CredentialVault {
                  the vault startup-validation sentinel (#3651)."
             )));
         }
+        // Everything from here to the `save` is one read-modify-write cycle over a file
+        // several processes write. See `lock_for_write`.
+        let _lock = self.lock_for_write()?;
         if !self.unlocked && !self.path.exists() {
+            // Nothing to reconcile against — `init` writes the file this call will then rewrite.
             self.init()?;
+        } else {
+            self.reconcile_under_lock()?;
         }
         if !self.unlocked {
             return Err(ExtensionError::VaultLocked);
@@ -537,14 +634,28 @@ impl CredentialVault {
     /// sentinel would silently regress to the pre-#3651 behaviour where a
     /// wrong-key boot is undetectable.
     pub fn remove(&mut self, key: &str) -> ExtensionResult<bool> {
-        if !self.unlocked {
-            return Err(ExtensionError::VaultLocked);
-        }
         if key == SENTINEL_KEY {
             return Err(ExtensionError::Vault(format!(
                 "Refusing to remove reserved key {SENTINEL_KEY}; this slot is owned by \
                  the vault startup-validation sentinel (#3651)."
             )));
+        }
+        // A locked handle with no file behind it can never open, and rejecting it before
+        // the lock keeps a call that does nothing from creating a lock file (and its
+        // parent directory) as a side effect — the same reason the sentinel check above
+        // runs first.
+        if !self.unlocked && !self.path.exists() {
+            return Err(ExtensionError::VaultLocked);
+        }
+        // Same read-modify-write cycle as `set`, and the same reason: a delete that
+        // rewrites a stale map also un-deletes whatever another writer added meanwhile.
+        let _lock = self.lock_for_write()?;
+        self.reconcile_under_lock()?;
+        // Checked after the reconcile, not before: a handle cached while `vault.enc` was
+        // still absent is locked but perfectly openable, and rejecting it here reported a
+        // live vault as missing.
+        if !self.unlocked {
+            return Err(ExtensionError::VaultLocked);
         }
         let removed = self.entries.remove(key).is_some();
         if removed {
@@ -640,6 +751,17 @@ impl CredentialVault {
                     "Vault sentinel missing — backfilling {SENTINEL_VALUE} \
                      (one-time migration for vaults predating #3651)"
                 );
+                // The backfill is a whole-file rewrite like any other, so it takes the
+                // same lock and re-reads under it — otherwise this one-time boot write
+                // silently drops any credential another process stored between this
+                // instance's unlock and now.
+                let _lock = self.lock_for_write()?;
+                self.reconcile_under_lock()?;
+                // The reload replaced the map; another process may have backfilled while
+                // this one waited for the lock.
+                if self.entries.get(SENTINEL_KEY).map(|v| v.as_str()) == Some(SENTINEL_VALUE) {
+                    return Ok(());
+                }
                 let master_key = self.resolve_master_key()?;
                 self.entries.insert(
                     SENTINEL_KEY.to_string(),
@@ -2174,6 +2296,232 @@ mod tests {
         assert!(vault2.get("GITHUB_TOKEN").is_none());
     }
 
+    /// A write through an instance whose map predates another writer's must not erase that writer's entry.
+    ///
+    /// `save` re-encrypts the whole file from `self.entries`, and the daemon genuinely has several writers over one `vault.enc`: the kernel's long-lived cached instance, `KernelOAuthProvider`'s fresh instance per `mcp-oauth:*` entry, and `librefang vault set` in a separate process.
+    /// Before `set` re-read under its lock, an operator storing a credential over HTTP dropped every OAuth token stored since the kernel unlocked — with no error raised anywhere, and after the route had already answered `200`.
+    #[test]
+    fn a_write_from_a_stale_instance_keeps_what_another_writer_stored() {
+        let (dir, mut kernel_instance) = test_vault();
+        let key = random_key();
+        kernel_instance.init_with_key(key.clone()).unwrap();
+        kernel_instance
+            .set(
+                "GITHUB_TOKEN".to_string(),
+                Zeroizing::new("ghp_operator".to_string()),
+            )
+            .unwrap();
+
+        // A second writer stores its own entry. `kernel_instance`'s map now predates the file.
+        let mut oauth_instance = CredentialVault::new(dir.path().join("vault.enc"));
+        oauth_instance.unlock_with_key(key.clone()).unwrap();
+        oauth_instance
+            .set(
+                "mcp-oauth:github".to_string(),
+                Zeroizing::new("refresh-token".to_string()),
+            )
+            .unwrap();
+
+        kernel_instance
+            .set(
+                "ANTHROPIC_API_KEY".to_string(),
+                Zeroizing::new("sk-ant".to_string()),
+            )
+            .unwrap();
+
+        let mut reader = CredentialVault::new(dir.path().join("vault.enc"));
+        reader.unlock_with_key(key).unwrap();
+        assert_eq!(
+            reader
+                .get("mcp-oauth:github")
+                .map(|v| v.as_str().to_string()),
+            Some("refresh-token".to_string()),
+            "the other writer's entry must survive a write through an instance that never saw it"
+        );
+        assert!(
+            reader.get("GITHUB_TOKEN").is_some(),
+            "vault: {:?}",
+            reader.list_keys()
+        );
+        assert!(
+            reader.get("ANTHROPIC_API_KEY").is_some(),
+            "vault: {:?}",
+            reader.list_keys()
+        );
+    }
+
+    /// `remove` rewrites the whole file too, so it un-deletes another writer's entry the same way `set` erased one.
+    #[test]
+    fn a_remove_from_a_stale_instance_keeps_what_another_writer_stored() {
+        let (dir, mut kernel_instance) = test_vault();
+        let key = random_key();
+        kernel_instance.init_with_key(key.clone()).unwrap();
+        kernel_instance
+            .set(
+                "GITHUB_TOKEN".to_string(),
+                Zeroizing::new("ghp_operator".to_string()),
+            )
+            .unwrap();
+
+        let mut oauth_instance = CredentialVault::new(dir.path().join("vault.enc"));
+        oauth_instance.unlock_with_key(key.clone()).unwrap();
+        oauth_instance
+            .set(
+                "mcp-oauth:github".to_string(),
+                Zeroizing::new("refresh-token".to_string()),
+            )
+            .unwrap();
+
+        assert!(kernel_instance.remove("GITHUB_TOKEN").unwrap());
+
+        let mut reader = CredentialVault::new(dir.path().join("vault.enc"));
+        reader.unlock_with_key(key).unwrap();
+        assert!(
+            reader.get("GITHUB_TOKEN").is_none(),
+            "the requested removal must actually have happened"
+        );
+        assert_eq!(
+            reader
+                .get("mcp-oauth:github")
+                .map(|v| v.as_str().to_string()),
+            Some("refresh-token".to_string()),
+            "a delete must not resurrect an entry it never saw"
+        );
+    }
+
+    /// Writers racing from separate instances must all survive.
+    ///
+    /// This is the case the kernel's `RwLock` cannot reach — `librefang vault set` runs in another process — and it is not a narrow window: each read-modify-write pays two Argon2id hashes at m=19456 KiB, t=2, so overlapping cycles are the normal case rather than a rare interleaving.
+    #[test]
+    fn concurrent_writers_from_separate_instances_all_survive() {
+        let (dir, mut vault) = test_vault();
+        let key = random_key();
+        vault.init_with_key(key.clone()).unwrap();
+        drop(vault);
+
+        let path = dir.path().join("vault.enc");
+        let writers = ["alpha", "beta", "gamma", "delta"];
+        std::thread::scope(|scope| {
+            for name in writers {
+                let path = path.clone();
+                let key = key.clone();
+                scope.spawn(move || {
+                    let mut v = CredentialVault::new(path);
+                    v.unlock_with_key(key).unwrap();
+                    v.set(name.to_string(), Zeroizing::new(format!("value-{name}")))
+                        .unwrap();
+                });
+            }
+        });
+
+        let mut reader = CredentialVault::new(path);
+        reader.unlock_with_key(key).unwrap();
+        for name in writers {
+            assert_eq!(
+                reader.get(name).map(|v| v.as_str().to_string()),
+                Some(format!("value-{name}")),
+                "writer {name} was lost; surviving keys: {:?}",
+                reader.list_keys()
+            );
+        }
+    }
+
+    /// Rotating the master key must not drop an entry another writer stored since this instance unlocked.
+    ///
+    /// `rewrap_with_new_key` re-encrypts the whole file from `self.entries`, exactly like `save` does for `set`, and `librefang vault rotate-key` runs in its own process against a live daemon.
+    /// What makes this the worst of the three whole-file rewrites is that it is unrecoverable: afterwards the old key no longer opens the file, so the lost entry cannot be read back by retrying with it.
+    #[test]
+    fn a_rotate_key_keeps_what_another_writer_stored_since_this_instance_unlocked() {
+        let (dir, mut bootstrap) = test_vault();
+        let old_key = random_key();
+        let new_key = random_key();
+        bootstrap.init_with_key(old_key.clone()).unwrap();
+        bootstrap
+            .set("PRE".to_string(), Zeroizing::new("kept".to_string()))
+            .unwrap();
+
+        let path = dir.path().join("vault.enc");
+
+        // The CLI reads the vault here; from now on its map predates the file.
+        let mut rotator = CredentialVault::new(path.clone());
+        rotator.unlock_with_key(old_key.clone()).unwrap();
+
+        // The daemon stores a credential while the operator is still typing the new key.
+        let mut daemon = CredentialVault::new(path.clone());
+        daemon.unlock_with_key(old_key).unwrap();
+        daemon
+            .set(
+                "mcp-oauth:github".to_string(),
+                Zeroizing::new("refresh-token".to_string()),
+            )
+            .unwrap();
+
+        rotator.rewrap_with_new_key(new_key.clone()).unwrap();
+
+        let mut reader = CredentialVault::new(path);
+        reader.unlock_with_key(new_key).unwrap();
+        assert_eq!(
+            reader
+                .get("mcp-oauth:github")
+                .map(|v| v.as_str().to_string()),
+            Some("refresh-token".to_string()),
+            "rotate-key dropped an entry stored after it read, and the old key can no longer recover it; surviving keys: {:?}",
+            reader.list_keys()
+        );
+        assert_eq!(
+            reader.get("PRE").map(|v| v.as_str().to_string()),
+            Some("kept".to_string()),
+            "rotation must still carry the entries it did see across to the new key"
+        );
+    }
+
+    /// A reload that failed is remembered against the exact file that refused, and forgotten as soon as that file changes.
+    ///
+    /// `Kernel::vault_get` polls: `routes/approvals.rs` calls it twice per status request and `channel_bridge.rs` once per channel message.
+    /// On a host with a `vault.enc` whose master key resolves nowhere, every one of those otherwise re-ran an OS keyring lookup — DBus on Linux, potentially a Keychain prompt on macOS — under an exclusive lock that serialised every vault read in the daemon, and logged a `WARN` each time.
+    ///
+    /// Corrupting the file stands in for the unresolvable-key case, which needs process-wide env mutation to reproduce and would race every other test in this binary.
+    #[test]
+    fn a_failed_reload_is_remembered_until_vault_enc_changes() {
+        let (dir, mut vault) = test_vault();
+        let key = random_key();
+        vault.init_with_key(key.clone()).unwrap();
+        let path = dir.path().join("vault.enc");
+        let good = std::fs::read(&path).unwrap();
+
+        let mut reader = CredentialVault::new(path.clone());
+        assert!(
+            !reader.unlock_failed_for_current_file(),
+            "nothing has been attempted yet, so nothing may be suppressed"
+        );
+
+        std::fs::write(&path, b"OFV1 not a vault").unwrap();
+        assert!(reader.unlock().is_err());
+        assert!(
+            reader.unlock_failed_for_current_file(),
+            "a failure against this exact file must be remembered"
+        );
+
+        // A different file is a different question: the memo must not answer it.
+        std::fs::write(&path, b"OFV1 also not a vault, but a different length").unwrap();
+        assert!(
+            !reader.unlock_failed_for_current_file(),
+            "`librefang vault init` or a rotate-key from another process must get a real retry"
+        );
+
+        // And a reload that succeeds clears the memo outright rather than merely outliving it.
+        // The key goes in explicitly because this handle never resolved one — that is what
+        // made the reload fail in the first place — and the test must not depend on
+        // whatever `LIBREFANG_VAULT_KEY` or the keyring happen to hold in this process.
+        std::fs::write(&path, &good).unwrap();
+        reader.unlock_with_key(key).unwrap();
+        reader.reload().unwrap();
+        assert!(
+            reader.last_unlock_failure.is_none(),
+            "a successful reload must clear the memo"
+        );
+    }
+
     #[test]
     fn save_uses_per_process_temp_and_leaves_no_staging_file() {
         let (dir, mut vault) = test_vault();
@@ -3210,11 +3558,13 @@ mod tests {
         }
     }
 
-    /// `set()` must NOT lazy-init when `vault.enc` already exists but the
-    /// handle hasn't been unlocked — that is a real "wrong key / not yet
-    /// unlocked" state and silently re-init'ing would either fail
-    /// (`init()` rejects existing files) or worse, mask a misconfigured
-    /// boot. The pre-existing `VaultLocked` error path must stay.
+    /// `set()` must NOT lazy-init when `vault.enc` already exists — it opens the existing vault instead.
+    ///
+    /// `init()` rejects an existing file, so lazy-initialising here failed permanently with "Vault already exists. Delete it first to re-initialize." — the state #8186 hit whenever anything created the vault after the kernel had cached a locked handle.
+    /// The evidence that it opened rather than replaced is the entry written before the handle was dropped: it is still there afterwards.
+    ///
+    /// A locked handle over an existing file is not by itself a misconfiguration; it is the normal state of a freshly constructed `CredentialVault`, and the master key here resolves fine.
+    /// The genuine "wrong key" case is covered by `set_over_an_existing_vault_fails_rather_than_replacing_it_when_the_key_is_wrong`.
     #[test]
     #[serial_test::serial]
     fn set_does_not_lazy_init_when_vault_file_already_present() {
@@ -3225,24 +3575,91 @@ mod tests {
             std::env::set_var(VAULT_NO_KEYRING_ENV, "1");
         }
 
-        // Materialise a vault, then drop the unlocked handle and build a
-        // fresh locked one over the same path.
+        // Materialise a vault with an entry in it, then drop the unlocked handle and
+        // build a fresh locked one over the same path.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault.enc");
         let mut bootstrap = CredentialVault::new(path.clone());
         bootstrap.init().expect("bootstrap init must succeed");
+        bootstrap
+            .set("PRE".to_string(), Zeroizing::new("kept".to_string()))
+            .expect("bootstrap write must succeed");
         drop(bootstrap);
 
-        let mut locked = CredentialVault::new(path);
+        let mut locked = CredentialVault::new(path.clone());
         assert!(locked.exists(), "precondition: vault.enc must exist");
         assert!(!locked.is_unlocked(), "precondition: handle must be locked");
 
-        let err = locked
+        locked
             .set("X".to_string(), Zeroizing::new("y".to_string()))
-            .expect_err("set() on an existing-but-locked vault must error");
-        assert!(
-            matches!(err, ExtensionError::VaultLocked),
-            "expected VaultLocked, got: {err:?}"
+            .expect("set() must open the existing vault, not re-init it");
+
+        let mut reader = CredentialVault::new(path);
+        reader.unlock().expect("reopen must succeed");
+        assert_eq!(
+            reader.get("PRE").map(|v| v.as_str().to_string()),
+            Some("kept".to_string()),
+            "the pre-existing entry proves `set` opened the vault instead of replacing it"
+        );
+        assert_eq!(
+            reader.get("X").map(|v| v.as_str().to_string()),
+            Some("y".to_string()),
+        );
+
+        unsafe {
+            std::env::remove_var(VAULT_KEY_ENV);
+            std::env::remove_var(VAULT_NO_KEYRING_ENV);
+        }
+    }
+
+    /// An existing vault whose master key does not resolve must make `set` fail, not replace the file.
+    ///
+    /// This is the misconfigured-boot case — the one where masking the error would destroy every credential in the file — and it stays a hard failure now that a locked handle over a readable vault is allowed to open itself.
+    #[test]
+    #[serial_test::serial]
+    fn set_over_an_existing_vault_fails_rather_than_replacing_it_when_the_key_is_wrong() {
+        const RIGHT_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        const WRONG_KEY_B64: &str = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=";
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.enc");
+
+        unsafe {
+            std::env::set_var(VAULT_KEY_ENV, RIGHT_KEY_B64);
+            std::env::set_var(VAULT_NO_KEYRING_ENV, "1");
+        }
+        let mut bootstrap = CredentialVault::new(path.clone());
+        bootstrap.init().expect("bootstrap init must succeed");
+        bootstrap
+            .set("PRE".to_string(), Zeroizing::new("kept".to_string()))
+            .expect("bootstrap write must succeed");
+        drop(bootstrap);
+        let before = std::fs::read(&path).unwrap();
+
+        unsafe {
+            std::env::set_var(VAULT_KEY_ENV, WRONG_KEY_B64);
+        }
+        let mut locked = CredentialVault::new(path.clone());
+        locked
+            .set("X".to_string(), Zeroizing::new("y".to_string()))
+            .expect_err("set() must not write into a vault it cannot read");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a failed set must leave vault.enc byte-identical — the alternative is losing every credential in it"
+        );
+
+        // With the right key back, the original entry is still readable.
+        unsafe {
+            std::env::set_var(VAULT_KEY_ENV, RIGHT_KEY_B64);
+        }
+        let mut reader = CredentialVault::new(path);
+        reader
+            .unlock()
+            .expect("reopen with the right key must succeed");
+        assert_eq!(
+            reader.get("PRE").map(|v| v.as_str().to_string()),
+            Some("kept".to_string()),
         );
 
         unsafe {
