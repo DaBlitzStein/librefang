@@ -646,8 +646,8 @@ export function TasksPage() {
   // counting it here would make the column/total tiles disagree with
   // what's actually on the board.
   const filteredTasks = agentFilter
-    ? allTasks.filter((t) => taskMatchesAgent(t, agentFilter, agentsById))
-    : allTasks;
+    ? validTasks.filter((t) => taskMatchesAgent(t, agentFilter, agentsById))
+    : validTasks;
 
   // Group by status
   function getColumnTasks(statuses: string[]): TaskQueueItem[] {
