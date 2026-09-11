@@ -1376,11 +1376,23 @@ fn build_channel_section(
         } else if channel.trim().eq_ignore_ascii_case("cron")
             || channel.trim().eq_ignore_ascii_case("autonomous")
         {
+            // Kept byte-identical to the same branch on #7995, which rewrites
+            // this block from a different pre-image: the two landed on
+            // contradictory instructions for the same turn. The previous
+            // wording here said "do NOT use it here" and then, in the next
+            // sentence, explained how to use it. `channel_send` reads
+            // `channel` and `recipient` straight from its own input and
+            // dispatches to that adapter, so the turn's own sentinel channel
+            // never enters into it — a background turn can reach a person on a
+            // real channel exactly like any other turn. What is genuinely
+            // impossible is replying *into* `cron` / `autonomous`, which have
+            // no adapter, so that is what this says.
             section.push_str(
-                "\n\nThis is a background run — there is no interactive chat attached for \
-                 `channel_send` to reply into. `channel_send` cannot reach this system \
-                 channel — do NOT use it here. To reach a person, target a real messaging \
-                 channel/recipient explicitly.",
+                "\n\nThis is a background run: no chat is attached to it, so `channel_send` \
+                 has no default channel or recipient to fall back to, and it cannot deliver \
+                 a reply into this system channel. To reach a person, call it with an \
+                 explicit real channel (e.g. \"telegram\", \"slack\") and recipient — \
+                 omitting either fails rather than falling back to a default.",
             );
         } else if let Some(id) = sender_id {
             section.push_str(&format!(
