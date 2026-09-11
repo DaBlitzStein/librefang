@@ -730,6 +730,7 @@ fn redacted_config_json(
     );
     set!("max_history_messages", config.max_history_messages);
     set!("max_upload_size_bytes", config.max_upload_size_bytes);
+    set!("max_concurrent_uploads", config.max_concurrent_uploads);
     set!("max_concurrent_bg_llm", config.max_concurrent_bg_llm);
     set!("max_agent_call_depth", config.max_agent_call_depth);
     set!("max_request_body_bytes", config.max_request_body_bytes);
