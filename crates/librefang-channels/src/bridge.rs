@@ -2112,7 +2112,6 @@ impl BridgeManager {
                                                 // Direct route handled this
                                                 // adapter; skip the legacy
                                                 // recipients fan-out below.
-                                                covered_by_any_adapter = true;
                                                 continue;
                                             }
                                         }
@@ -2325,23 +2324,6 @@ impl BridgeManager {
                                         );
                                     }
 
-                                    // #5002's guarantee, evaluated once: an
-                                    // approval nobody can act on must not be
-                                    // swallowed silently.
-                                    //
-                                    // Skipped when there are no channel
-                                    // adapters at all — a daemon approving
-                                    // through the dashboard or CLI is not
-                                    // misconfigured, and warning there would
-                                    // trade one false positive for another.
-                                    if !covered_by_any_adapter && !adapters.is_empty() {
-                                        warn!(
-                                            request_id = %approval.request_id,
-                                            requesting_agent = %requesting_agent,
-                                            adapters = adapters.len(),
-                                            "Approval reached no channel: no adapter has a channel_default or AgentBinding peer_id covering the requesting agent"
-                                        );
-                                    }
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
