@@ -429,6 +429,45 @@ async fn test_build_router_exposes_versioned_api_aliases() {
         .contains(&serde_json::json!("v1")));
 }
 
+/// `/dashboard` and `/dashboard/` must serve the same shell `/` serves.
+///
+/// matchit's `{*path}` capture requires at least one character, so
+/// `/dashboard/{*path}` never matched the dashboard root and both spellings
+/// answered 404 while `/dashboard/agents` answered 200.
+/// `manifest.json` points `start_url` at `/dashboard/#/overview`, so an
+/// installed PWA launched straight into that 404, and the service worker
+/// precached the same URL and cached nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn dashboard_root_serves_the_shell_for_both_slash_spellings() {
+    let harness = start_full_router("test-key").await;
+
+    async fn shell(harness: &FullRouterHarness, uri: &str) -> (StatusCode, Vec<u8>) {
+        let response = harness
+            .app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, body.to_vec())
+    }
+
+    let (root_status, root_body) = shell(&harness, "/").await;
+    assert_eq!(root_status, StatusCode::OK);
+
+    for uri in ["/dashboard", "/dashboard/"] {
+        let (status, body) = shell(&harness, uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri} must serve the shell, not 404");
+        assert_eq!(
+            body, root_body,
+            "{uri} must serve the same bytes as `/`, not a different page"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_router_path_version_beats_unknown_accept_header() {
     let harness = start_full_router("").await;

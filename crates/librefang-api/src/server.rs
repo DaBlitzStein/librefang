@@ -1976,6 +1976,13 @@ pub async fn build_router(
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
+        // matchit's `{*path}` capture needs at least one character, so the
+        // catch-all below never matches the dashboard root itself and both
+        // forms 404d.
+        // `manifest.json` declares `start_url: "/dashboard/#/overview"`, so an
+        // installed PWA launched straight into the 404.
+        .route("/dashboard", axum::routing::get(webchat::webchat_page))
+        .route("/dashboard/", axum::routing::get(webchat::webchat_page))
         .route(
             "/dashboard/{*path}",
             axum::routing::get(webchat::react_asset),

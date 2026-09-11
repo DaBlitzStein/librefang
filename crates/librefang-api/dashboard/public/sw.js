@@ -1,5 +1,6 @@
-const CACHE_NAME = "librefang-v1";
-const PRECACHE = ["/dashboard/"];
+// Bumping this name is what evicts a poisoned cache from a browser that is
+// already carrying one: `activate` deletes every cache whose name differs.
+const CACHE_NAME = "librefang-v2";
 const MAX_CACHE_ENTRIES = 200;
 
 async function trimCache(cache) {
@@ -9,40 +10,30 @@ async function trimCache(cache) {
   await Promise.all(keys.slice(0, excess).map((request) => cache.delete(request)));
 }
 
-async function precache() {
-  try {
-    const cache = await caches.open(CACHE_NAME);
-    await Promise.allSettled(
-      PRECACHE.map(async (url) => {
-        const response = await fetch(url, { cache: "reload" });
-        if (response.ok) await cache.put(url, response);
-      }),
-    );
-  } catch (error) {
-    console.warn("Service worker precache failed", error);
-  }
-}
-
-self.addEventListener("install", (e) => {
-  e.waitUntil(precache());
-});
-
-// Let an explicit update prompt activate a waiting worker. Do not take over
-// open tabs automatically while they may still reference the prior build.
-self.addEventListener("message", (e) => {
-  if (e.data?.type === "SKIP_WAITING") self.skipWaiting();
+// Take over immediately rather than waiting for every tab in scope to close.
+// A worker that waits can never replace a predecessor that is serving a broken
+// shell, because the broken shell is the page the user keeps reloading.
+self.addEventListener("install", () => {
+  self.skipWaiting();
 });
 
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches.keys().then(async (names) => {
-      await Promise.all(
-        names
-          .filter((n) => n !== CACHE_NAME)
-          .map((n) => caches.delete(n)),
-      );
+      const stale = names.filter((n) => n !== CACHE_NAME);
+      await Promise.all(stale.map((n) => caches.delete(n)));
+      await self.clients.claim();
       const cache = await caches.open(CACHE_NAME);
       await trimCache(cache);
+      // Only when a previous cache generation was actually discarded: reload
+      // the open tabs, so a browser still displaying the stale shell recovers
+      // without the user reloading twice.
+      // A first-ever install finds no other cache and leaves the page alone.
+      if (stale.length === 0) return;
+      const windows = await self.clients.matchAll({ type: "window" });
+      await Promise.all(
+        windows.map((client) => client.navigate(client.url).catch(() => undefined)),
+      );
     }),
   );
 });
@@ -58,6 +49,13 @@ self.addEventListener("fetch", (e) => {
 
   // Only cache GET requests (Cache API does not support POST)
   if (e.request.method !== "GET") return;
+
+  // Navigations: network only, never cached.
+  // The HTML shell names the hashed asset bundle of the build it came from, so
+  // a shell replayed from cache after a redeploy asks for chunks the server no
+  // longer has and renders a blank page that reloading cannot clear.
+  // Hashed assets stay cacheable because their URL changes with their content.
+  if (e.request.mode === "navigate") return;
 
   // Static assets: stale-while-revalidate
   e.respondWith(
