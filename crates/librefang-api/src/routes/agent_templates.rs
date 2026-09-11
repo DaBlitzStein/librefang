@@ -677,7 +677,7 @@ pub async fn put_agent_template_toml(
 
     match persist_agent_type(&name, &manifest) {
         Ok(rendered) => {
-            record_template_version(&state, &name, &rendered, "toml");
+            let _ = record_template_version(&state, &name, &rendered, "toml");
             let mut detail =
                 agent_type_detail(&name, TemplateSource::AgentType, &manifest, &rendered);
             if !unknown_keys.is_empty() {
