@@ -970,7 +970,22 @@ impl LibreFangKernel {
             Ok(h) => h,
             Err(_) => return None,
         };
-        let guard = read_accessor_state(&handle, "credential_vault");
+        {
+            let guard = read_accessor_state(&handle, "credential_vault");
+            if guard.is_unlocked() {
+                return guard.get(key).map(|s| s.to_string());
+            }
+            // A host with a `vault.enc` but no resolvable master key fails the unlock below on every call, and this is a hot path — `routes/approvals.rs` calls it twice per status request and `channel_bridge.rs` once per channel message.
+            // Retrying each time meant an exclusive lock that serialised every vault read in the daemon, an OS keyring lookup (DBus on Linux, potentially a Keychain prompt on macOS) and a `WARN` line, all to reach the same answer.
+            // The memo is invalidated by the file changing, so `librefang vault init` or a `rotate-key` from another process still gets a real retry on the next call.
+            if guard.unlock_failed_for_current_file() {
+                return None;
+            }
+        }
+        // The cached handle is locked exactly when `vault.enc` was absent at cache-population time, and `vault_handle` never re-checks.
+        // The file can appear afterwards — `librefang vault set` from another process, or an MCP OAuth flow writing through `KernelOAuthProvider`'s own instance — and a handle left locked would answer "no such key" for the rest of the daemon's lifetime, which reads as a missing credential rather than as a stale cache.
+        // Upgrading to the write guard costs one Argon2id KDF once; every later call takes the read fast path above.
+        let mut guard = write_accessor_state(&handle, "credential_vault");
         if !guard.is_unlocked() {
             // Vault file did not exist when the cache was populated and no
             // `set()` has initialised it yet — nothing to read.
@@ -986,15 +1001,13 @@ impl LibreFangKernel {
     /// instead of once per call. The save-time KDF inside
     /// `CredentialVault::set` still runs on every write — at-rest
     /// security is unchanged. Creates the vault if it does not exist.
+    ///
+    /// The lost-write hazard this used to guard against by re-reading here belongs to `CredentialVault::set`, which now takes a cross-process advisory lock and re-reads `vault.enc` inside it before rewriting the file.
+    /// Re-reading here as well would only pay a second Argon2id and still leave the gap the lock closes: the kernel's `RwLock` never covered `KernelOAuthProvider`'s own instance or the separate `librefang vault set` process.
+    /// Creating a missing vault likewise stays inside `set`, whose `!unlocked && !path.exists()` guard gets the file-appeared-since-boot case right; calling `init()` here instead failed permanently with "Vault already exists. Delete it first to re-initialize." once anything else had created the file.
     pub fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
         let handle = self.vault_handle()?;
         let mut guard = write_accessor_state(&handle, "credential_vault");
-        if !guard.is_unlocked() {
-            // Vault did not exist at cache-population time; create it now.
-            guard
-                .init()
-                .map_err(|e| format!("Vault init failed: {e}"))?;
-        }
         guard
             .set(key.to_string(), zeroize::Zeroizing::new(value.to_string()))
             .map_err(|e| format!("Vault write failed: {e}"))
@@ -1010,10 +1023,14 @@ impl LibreFangKernel {
     /// A vault that does not exist holds no secrets, so removing from one
     /// is `Ok(false)` rather than an error — the caller asked for the key
     /// to be absent and it is.
+    ///
+    /// "Does not exist" is a check against the file, not against `is_unlocked()`.
+    /// The two differ whenever `vault.enc` appeared after the cache was populated, and answering `Ok(false)` there told the caller a credential had been removed while it was still in the file and still resolved after the next restart.
+    /// `CredentialVault::remove` re-reads under its own lock, so a handle cached in the locked state opens there rather than needing a reconcile here first.
     pub fn vault_remove(&self, key: &str) -> Result<bool, String> {
         let handle = self.vault_handle()?;
         let mut guard = write_accessor_state(&handle, "credential_vault");
-        if !guard.is_unlocked() {
+        if !guard.exists() {
             return Ok(false);
         }
         guard
