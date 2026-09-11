@@ -34,6 +34,26 @@ default:
 build:
     cargo build --workspace --lib
 
+# Cross-compile the `librefang` binary for the aarch64 deployment hosts.
+# Uses the `release-local` profile (thin LTO): fat LTO peaks around 14 GB and
+# gets OOM-killed on this host, thin LTO stays near 2.5 GB.
+# `rusqlite` is vendored and compiles C, so the cross build needs CC and AR for
+# the target as well as the linker — the three variables below are not optional.
+# `CARGO_BUILD_JOBS` is capped because this host also runs other workloads and
+# an unbounded build starves them.
+release-aarch64 jobs="6":
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+    AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar \
+    PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_PATH="$HOME/local-pkgs/extract/usr/lib/aarch64-linux-gnu/pkgconfig" \
+    LIBRARY_PATH="$HOME/local-pkgs/extract/usr/lib/aarch64-linux-gnu:${LIBRARY_PATH:-}" \
+    RUSTFLAGS="-L native=$HOME/local-pkgs/extract/usr/lib/aarch64-linux-gnu -C link-arg=-Wl,--allow-shlib-undefined ${RUSTFLAGS:-}" \
+    CARGO_INCREMENTAL=0 \
+    CARGO_BUILD_JOBS={{jobs}} \
+    nice -n 10 cargo build --profile release-local \
+      --target aarch64-unknown-linux-gnu -p librefang-cli --bin librefang
+
 # Run all workspace tests.
 # The exported LIBREFANG_REGISTRY_OFFLINE keeps every test-booted kernel from fetching the content registry (git clone / tarball fallback) — hermetic, and it avoids the git fork storm that exhausts pid limits in containers (#6404).
 # Pass `just test 0` to re-enable the network refresh.
