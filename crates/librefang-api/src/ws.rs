@@ -919,9 +919,19 @@ async fn handle_agent_ws(
     // Track last activity for idle timeout
     let mut last_activity = std::time::Instant::now();
 
+    // Frames read off the socket while a turn was running, replayed by the loop
+    // below before it reads the socket again so ordering is preserved.
+    let mut deferred: std::collections::VecDeque<Message> = std::collections::VecDeque::new();
+
     // Main message loop with idle timeout
     loop {
-        let msg = tokio::select! {
+        // A frame read off the socket while a turn was running is dispatched by
+        // the same `match` below as a freshly-read one, and before the socket is
+        // read again, so a message sent mid-turn keeps its place in the order.
+        let msg = if let Some(queued) = deferred.pop_front() {
+            Ok(queued)
+        } else {
+            tokio::select! {
             msg = receiver.next() => {
                 match msg {
                     Some(m) => m,
@@ -945,6 +955,7 @@ async fn handle_agent_ws(
                 ).await;
                 disconnect_reason = "idle_timeout";
                 break;
+            }
             }
         };
 
@@ -1011,10 +1022,79 @@ async fn handle_agent_ws(
                 // from "proxy IP" to "real client IP" on the very first
                 // request after operators flip the flags on. No-op when the
                 // flags are off (defaults).
-                if handle_text_message(&sender, &state, agent_id, &text, &verbose, &client)
-                    .await
-                    .is_err()
-                {
+                // The turn used to be awaited here with the loop not polling
+                // `receiver`, which cost two things the client cannot work
+                // around. A liveness probe went unanswered, which is why the
+                // dashboard suppresses its own probe for the whole turn and
+                // leans on a 180 s watchdog instead. And a peer that left was
+                // invisible: switching chats tears the socket down, the daemon
+                // stayed parked in `.await` holding the session, and coming
+                // back queued behind a turn whose reader was already gone.
+                //
+                // Poll the socket alongside the turn instead. Pings are
+                // answered, every other frame is deferred so ordering is
+                // unchanged, and a peer going away ends the wait here. The
+                // agent loop is a task the kernel already spawned, so dropping
+                // this future detaches rather than cancels it: the turn
+                // finishes and persists to the session, which is what puts the
+                // answer there when the operator comes back.
+                let turn = handle_text_message(&sender, &state, agent_id, &text, &verbose, &client);
+                tokio::pin!(turn);
+                let mut peer_gone: Option<&'static str> = None;
+                let turn_outcome = loop {
+                    tokio::select! {
+                        finished = &mut turn => break finished,
+                        incoming = receiver.next() => match incoming {
+                            None => {
+                                peer_gone = Some("stream_end");
+                                break Ok(());
+                            }
+                            Some(Err(e)) => {
+                                debug!(agent_id = %id_str, conn_id = %conn_id, error = %e, "WebSocket receive error during a turn");
+                                peer_gone = Some("receive_error");
+                                break Ok(());
+                            }
+                            Some(Ok(Message::Close(_))) => {
+                                peer_gone = Some("client_close");
+                                break Ok(());
+                            }
+                            Some(Ok(Message::Ping(payload))) => {
+                                let send_failed = {
+                                    let mut s = sender.lock().await;
+                                    s.send(Message::Pong(payload)).await.is_err()
+                                };
+                                if send_failed {
+                                    peer_gone = Some("send_error");
+                                    break Ok(());
+                                }
+                            }
+                            Some(Ok(Message::Text(probe))) if is_liveness_ping(&probe) => {
+                                if send_json_or_close(&sender, &serde_json::json!({"type": "pong"}))
+                                    .await
+                                    .is_err()
+                                {
+                                    peer_gone = Some("send_error");
+                                    break Ok(());
+                                }
+                            }
+                            // Not dropped: replayed by the outer loop before it
+                            // reads the socket again, so a message sent while a
+                            // turn ran still arrives, and in order.
+                            Some(Ok(other)) => deferred.push_back(other),
+                        }
+                    }
+                };
+                if let Some(reason) = peer_gone {
+                    info!(
+                        agent_id = %id_str,
+                        conn_id = %conn_id,
+                        reason,
+                        "WebSocket peer left during a turn — detaching; the agent loop finishes and persists"
+                    );
+                    disconnect_reason = reason;
+                    break;
+                }
+                if turn_outcome.is_err() {
                     // A frame send failed inside the handler; the helper has
                     // already pushed a 1011 close frame, so just tear down the
                     // main loop with an explicit reason (#5137).
@@ -1084,6 +1164,19 @@ fn stamp_message_id(mut frame: serde_json::Value, message_id: Option<&str>) -> s
 /// already pushed a 1011 close frame — the caller MUST stop pumping the main
 /// loop in that case (#5137). Successful handling (including validation
 /// errors that were reported back to the client) returns `Ok(())`.
+/// Whether a text frame is the dashboard's `{"type":"ping"}` liveness probe.
+///
+/// Only consulted while a turn is running, where the main loop answers the
+/// probe itself instead of deferring it: a probe the daemon parks until the
+/// turn ends is one the client has already timed out on, and it closes a
+/// healthy socket mid-answer. Every other frame is deferred and replayed.
+fn is_liveness_ping(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("type")?.as_str().map(|t| t == "ping"))
+        .unwrap_or(false)
+}
+
 async fn handle_text_message(
     sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     state: &Arc<AppState>,
@@ -3208,5 +3301,32 @@ mod tests {
         assert_eq!(ws_query_param(&uri, "token").as_deref(), Some("leaked"));
         let uri: Uri = "/api/terminal/ws?cols=120".parse().unwrap();
         assert_eq!(ws_query_param(&uri, "token"), None);
+    }
+
+    /// The mid-turn branch answers this frame itself instead of deferring it,
+    /// so the predicate has to be the message *type* and nothing else. A
+    /// substring match would answer a chat message that merely says "ping" and
+    /// swallow it: the operator's message would never reach the agent, and the
+    /// client would get a `pong` it never asked for.
+    #[test]
+    fn liveness_ping_is_recognised_by_type_not_by_content() {
+        assert!(is_liveness_ping(r#"{"type":"ping"}"#));
+        assert!(is_liveness_ping(r#"{"type": "ping", "id": 7}"#));
+
+        // A real turn that happens to be about pings.
+        assert!(!is_liveness_ping(
+            r#"{"type":"message","content":"ping the server and tell me the latency"}"#
+        ));
+        assert!(!is_liveness_ping(r#"{"type":"message","content":"ping"}"#));
+        // `type` nested somewhere else must not count.
+        assert!(!is_liveness_ping(
+            r#"{"type":"command","args":{"type":"ping"}}"#
+        ));
+
+        // Shapes the loop can legitimately receive.
+        assert!(!is_liveness_ping("ping"));
+        assert!(!is_liveness_ping(""));
+        assert!(!is_liveness_ping("{not json"));
+        assert!(!is_liveness_ping(r#"{"type":42}"#));
     }
 }
