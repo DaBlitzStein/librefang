@@ -54,7 +54,7 @@ import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalett
 import { PushDrawer } from "./components/ui/PushDrawer";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
 import { useKeyboardShortcuts } from "./lib/useKeyboardShortcuts";
-import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getDashboardUsername, getStatus, getVersionInfo, getWhoami, isPasskeySupported, loginWithPasskey, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
+import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getStatus, getVersionInfo, getWhoami, isPasskeySupported, loginWithPasskey, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { EveryApiPartnerLink } from "./components/EveryApiPartnerLink";
@@ -407,10 +407,13 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     let cancelled = false;
-    getDashboardUsername().then((u) => {
+    // Not `/api/auth/dashboard-check`: it is unauthenticated and hard-codes an
+    // empty username, so it prefilled both fields blank no matter who was
+    // logged in. `/api/authz/whoami` resolves the calling credential's name.
+    getWhoami().then((w) => {
       if (cancelled) return;
-      setCurrentUsername(u);
-      setNewUsername(u);
+      setCurrentUsername(w.name);
+      setNewUsername(w.name);
     });
     return () => {
       cancelled = true;
@@ -960,8 +963,10 @@ function DashboardApp() {
       .then((s) => {
         if (!mountedRef.current) return;
         setTerminalEnabled(s.terminal_enabled !== false);
-        // `/api/status` is authenticated and returns the real machine
-        // hostname; `/api/version` is public and deliberately never does.
+        // `/api/status` is a dashboard-read route, so it requires auth
+        // whenever any is configured — which every deployment that shows a
+        // login dialog is — and it returns the real machine hostname.
+        // `/api/version` is public unconditionally and deliberately never does.
         setHostname(s.hostname ?? "");
       })
       .catch(() => {
