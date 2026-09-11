@@ -1185,6 +1185,19 @@ pub fn validate_config_for_reload(config: &KernelConfig) -> Result<(), Vec<Strin
         errors.push(format!("approval policy: {e}"));
     }
 
+    // The same check `boot` runs, which is exactly why it belongs here: without
+    // it every HTTP write path (`POST /api/config/set`, `/api/config/reload`,
+    // the budget and user/group editors — all of them route through this
+    // function) could persist a `[tool_exec]` section that the *next* daemon
+    // start rejects with `BootFailed`. The section is restart-classified, so
+    // the save answers 200 OK and the damage only lands at the restart, with
+    // the API no longer available to undo it: recovery means hand-editing
+    // `~/.librefang/config.toml` on the host. Rejecting the save is the only
+    // outcome that keeps the daemon recoverable over its own API (#8175).
+    if let Err(e) = config.tool_exec.validate() {
+        errors.push(format!("tool_exec: {e}"));
+    }
+
     // Network config: if network is enabled, shared_secret must be set
     if config.network_enabled && config.network.shared_secret.is_empty() {
         errors.push("network_enabled is true but network.shared_secret is empty".to_string());

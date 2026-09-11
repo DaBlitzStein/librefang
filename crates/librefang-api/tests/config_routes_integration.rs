@@ -742,6 +742,77 @@ async fn config_set_writes_allowlisted_path_to_tempdir_toml() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn config_set_writes_a_usable_tool_exec_default_timeout() {
+    // Positive control for the rejection test below: the allowlisted path is
+    // still writable, so the new guard rejects the broken value only.
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "tool_exec.default_timeout_secs", "value": 45}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a usable timeout must still be writable, got {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        h.state.kernel.config_ref().tool_exec.default_timeout_secs,
+        Some(45)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_rejects_a_zero_tool_exec_default_timeout() {
+    // `ToolExecConfig::validate()` rejects `Some(0)` and is fatal at boot, but
+    // the HTTP write path never consulted it: the API answered 200 OK, wrote
+    // the value to `config.toml`, and the section is restart-classified, so
+    // the damage only surfaced at the next daemon start — which then aborted
+    // with `Invalid [tool_exec] config`, leaving no way to undo it over an API
+    // that no longer comes up. Rejecting the save is the only recovery that
+    // does not require editing `~/.librefang/config.toml` on the host.
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "tool_exec.default_timeout_secs", "value": 0}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a zero tool-exec timeout must be refused, got {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // And nothing was persisted, so a restart still boots.
+    let written = std::fs::read_to_string(h.home.join("config.toml")).unwrap_or_default();
+    let parsed: toml::Value = toml::from_str(&written).expect("valid toml");
+    let persisted = parsed
+        .get("tool_exec")
+        .and_then(|t| t.get("default_timeout_secs"));
+    assert!(
+        persisted.is_none(),
+        "the rejected value must not reach config.toml, wrote: {written}"
+    );
+    assert!(
+        h.state
+            .kernel
+            .config_ref()
+            .tool_exec
+            .validate()
+            .is_ok(),
+        "the live config must still be one the next boot accepts"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn config_set_rejects_non_allowlisted_path() {
     let h = boot_router_with_api_key(API_KEY).await;
     // `api_key` is excluded from the allowlist for security.
