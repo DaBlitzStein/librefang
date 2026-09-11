@@ -1832,7 +1832,7 @@
     "rerun_started": "已用相同参数重新运行",
     "rerun_failed": "重跑失败",
     "starting": "启动中…",
-    "step_executing": "步骤 {{current}}/{{total}} 执行中…",
+    "steps_executed": "已执行 {{total}} 个步骤中的 {{executed}} 个…",
     "step_output": "输出",
     "step_pending": "等待中…"
   },

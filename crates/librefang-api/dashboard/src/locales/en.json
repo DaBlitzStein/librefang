@@ -1832,7 +1832,7 @@
     "rerun_started": "Re-run started with the same parameters",
     "rerun_failed": "Re-run failed",
     "starting": "Starting…",
-    "step_executing": "Step {{current}}/{{total}} executing…",
+    "steps_executed": "{{executed}} of {{total}} steps executed…",
     "step_output": "Output",
     "step_pending": "Pending…"
   },

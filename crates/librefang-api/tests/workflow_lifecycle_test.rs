@@ -884,13 +884,20 @@ async fn run_detail_exposes_per_step_error_for_failed_step() {
     );
 }
 
-/// `GET /api/workflows/runs/{run_id}` reports `total_steps` from the
-/// workflow definition and `current_step_index` as the completed-step
-/// count. Both were previously absent from this payload entirely, which
-/// left the dashboard's live progress bar (#7997) permanently reading
-/// "Starting…" at 0% no matter how far the run had actually gotten.
+/// `GET /api/workflows/runs/{run_id}` reports `total_steps` from the workflow
+/// definition, which the dashboard's live progress bar (#7997) needs and which
+/// was previously absent from this payload entirely.
+///
+/// It deliberately does **not** report `current_step_index`. This endpoint used
+/// to emit `step_results.len()` under that name and call it the step now
+/// executing; even here, on two steps that each run once, that is 2 against a
+/// total of 2 — "step 3 of 2" the moment the run finishes. A `StepMode::Loop`
+/// pushes one result per iteration and makes it arbitrarily larger than the
+/// total. #8177 adds the tracked index the total actually bounds; shipping a
+/// second field of the same name computed differently would give one name two
+/// meanings on two endpoints of the same resource (#7997 review).
 #[tokio::test(flavor = "multi_thread")]
-async fn run_detail_reports_total_steps_and_current_step_index() {
+async fn run_detail_reports_total_steps_and_no_derived_step_index() {
     use librefang_kernel::workflow::{
         ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
     };
@@ -957,9 +964,10 @@ async fn run_detail_reports_total_steps_and_current_step_index() {
         detail["total_steps"], 2,
         "total_steps must come from the workflow definition: {detail:?}"
     );
-    assert_eq!(
-        detail["current_step_index"], 2,
-        "current_step_index must equal the completed-step count: {detail:?}"
+    assert!(
+        detail.get("current_step_index").is_none(),
+        "this endpoint must not derive a step index from the execution count — \
+         it reads 2 of 2 here, and more than the total for any looping step: {detail:?}"
     );
 }
 

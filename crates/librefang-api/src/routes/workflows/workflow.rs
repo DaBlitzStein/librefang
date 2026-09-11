@@ -798,12 +798,20 @@ pub async fn get_workflow_run(
                 .get_workflow(run.workflow_id)
                 .await
                 .map(|w| w.steps.len());
-            // Steps before this index are in `step_results`; the step at
-            // this index is the one currently executing (when the run is
-            // still active). Cheap to compute because it is exactly the
-            // completed-step count — no separate "current step" field is
-            // tracked on `WorkflowRun` for this to drift out of sync with.
-            let current_step_index = run.step_results.len();
+            // No `current_step_index` here on purpose.
+            //
+            // It used to be `step_results.len()`, described as the index of the step now
+            // executing. That only holds for a workflow whose steps run once each:
+            // `StepMode::Loop` pushes one result per iteration, so a one-step workflow looping
+            // five times reported index 5 against a total of 1, and the dashboard rendered
+            // "step 6 of 1" with the bar at 500%. `StepMode::Conditional` breaks it the other
+            // way by skipping steps without pushing a result.
+            //
+            // #8177 adds `current_step_index` as a tracked field with `live_step_index()`
+            // gating the read on `WorkflowRunState::Running`, which is the value `total_steps`
+            // actually bounds and the only one safe to render as a fraction. Emitting a second,
+            // differently-computed field of the same name from this endpoint would ship two
+            // meanings for one name on two endpoints of the same resource (#7997 review).
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -833,7 +841,6 @@ pub async fn get_workflow_run(
                         "error": s.error,
                     })).collect::<Vec<_>>(),
                     "total_steps": total_steps,
-                    "current_step_index": current_step_index,
                 })),
             )
         }

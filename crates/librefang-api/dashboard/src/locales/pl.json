@@ -1838,7 +1838,7 @@
     "rerun_started": "Uruchomienie ponowne rozpoczęte z tymi samymi parametrami",
     "rerun_failed": "Uruchomienie ponowne nie powiodło się",
     "starting": "Uruchamianie…",
-    "step_executing": "Krok {{current}}/{{total}} w toku…",
+    "steps_executed": "Wykonano {{executed}} z {{total}} kroków…",
     "step_output": "Wynik",
     "step_pending": "Oczekiwanie…"
   },

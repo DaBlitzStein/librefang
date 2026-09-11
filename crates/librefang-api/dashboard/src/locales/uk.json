@@ -1838,7 +1838,7 @@
     "rerun_started": "Повторний запуск розпочато з тими самими параметрами",
     "rerun_failed": "Не вдалося повторити запуск",
     "starting": "Запуск…",
-    "step_executing": "Крок {{current}}/{{total}} виконується…",
+    "steps_executed": "Виконано {{executed}} з {{total}} кроків…",
     "step_output": "Результат",
     "step_pending": "Очікування…"
   },

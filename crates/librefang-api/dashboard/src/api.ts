@@ -2940,7 +2940,6 @@ export interface WorkflowRunDetail {
   completed_at?: string | null;
   step_results: WorkflowStepResult[];
   total_steps?: number;
-  current_step_index?: number;
 }
 
 /** Per-step preview returned by dry-run. */

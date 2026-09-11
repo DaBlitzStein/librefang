@@ -1831,7 +1831,7 @@
     "rerun_started": "동일한 매개변수로 다시 실행 시작됨",
     "rerun_failed": "재실행 실패",
     "starting": "시작 중…",
-    "step_executing": "단계 {{current}}/{{total}} 실행 중…",
+    "steps_executed": "{{total}}단계 중 {{executed}}단계 실행됨…",
     "step_output": "출력",
     "step_pending": "대기 중…"
   },
