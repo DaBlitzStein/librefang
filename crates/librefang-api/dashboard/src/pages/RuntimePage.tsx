@@ -250,9 +250,12 @@ export function RuntimePage() {
   ];
 
   const providersCount = snapshot?.providers?.length ?? 0;
-  // Same predicate the Providers page counts with, so the two tiles cannot
-  // report different numbers for the same word in the same second.
-  const configuredProviders = snapshot?.providers?.filter(p => isProviderConfigured(p.auth_status)).length ?? 0;
+  // Counted exactly as the Providers page counts its header pill — including
+  // the suppression check — so the two tiles cannot report different numbers
+  // for the same word in the same second. A suppressed provider is one the
+  // operator removed; it is not configured anywhere.
+  const configuredProviders = snapshot?.providers
+    ?.filter(p => p.suppressed !== true && isProviderConfigured(p.auth_status)).length ?? 0;
   const channelsCount = snapshot?.channels?.length ?? 0;
   const configuredChannels = snapshot?.channels?.filter(c => c.configured).length ?? 0;
   const resourceSummary = [

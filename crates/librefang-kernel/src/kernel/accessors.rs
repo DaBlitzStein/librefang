@@ -613,6 +613,15 @@ impl LibreFangKernel {
                                 }
                             });
                             kernel.model_catalog_update(|catalog| {
+                                // Mid-flight suppression gate, the same one
+                                // `record_key_validation` applies on the other
+                                // branch. The list this task was built from
+                                // already excludes suppressed providers; this
+                                // covers a "Remove key" that lands while the
+                                // probe is in the air.
+                                if catalog.is_suppressed(&id) {
+                                    return;
+                                }
                                 if let Some(status) = status {
                                     catalog.set_provider_auth_status(&id, status);
                                 }

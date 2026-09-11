@@ -1807,8 +1807,13 @@ export function ProvidersPage() {
     [providers, pickerMatchesSearch],
   );
   // Everything the grid does not show: unconfigured, or suppressed at any
-  // status. The two lists are complements, so a provider is always in exactly
-  // one of them and none can fall through the gap.
+  // status. No provider is ever in both lists, but the suppressed ones are in
+  // NEITHER until `showSuppressed` is ticked — that is the design, and the
+  // `suppressedCount > 0` guard on the toggle below is the only thing that
+  // makes it recoverable. Which is why that count must stay unconditioned on
+  // auth status: an earlier revision narrowed it to unconfigured-and-suppressed
+  // and stranded any suppressed provider that `detect_auth` had promoted, with
+  // no toggle to reveal it.
   const pickerProviders = useMemo(
     () => [...providers]
       .filter(p => p.suppressed === true || !isProviderConfigured(p.auth_status))
@@ -2063,17 +2068,35 @@ export function ProvidersPage() {
             <Server className="h-6 w-6" />
           </div>
           <div className="max-w-md space-y-2">
+            {/* "…yet" asserts never-configured. Once suppression can empty
+                this list, that reads as config loss to someone who has just
+                removed a provider, so the all-hidden case says what actually
+                happened and opens the picker with the hidden entries already
+                showing. */}
             <h2 className="text-base font-bold text-text-main">
-              {t("providers.empty_title", { defaultValue: "No providers configured yet" })}
+              {suppressedCount > 0
+                ? t("providers.empty_all_suppressed_title", { defaultValue: "Every provider is hidden" })
+                : t("providers.empty_title", { defaultValue: "No providers configured yet" })}
             </h2>
             <p className="text-sm text-text-dim leading-relaxed">
-              {t("providers.empty_body", {
-                defaultValue: "Connect OpenAI, Anthropic, Gemini, Groq, or any other LLM provider so agents can route prompts and consume models.",
-              })}
+              {suppressedCount > 0
+                ? t("providers.empty_all_suppressed_body", {
+                  defaultValue: "You removed every configured provider. They are still here — reveal them to bring one back.",
+                })
+                : t("providers.empty_body", {
+                  defaultValue: "Connect OpenAI, Anthropic, Gemini, Groq, or any other LLM provider so agents can route prompts and consume models.",
+                })}
             </p>
           </div>
-          <Button variant="primary" size="md" onClick={openPicker} leftIcon={<Plus className="h-4 w-4" />}>
-            {t("providers.connect_first", { defaultValue: "Connect a provider" })}
+          <Button
+            variant="primary"
+            size="md"
+            onClick={() => { if (suppressedCount > 0) setShowSuppressed(true); openPicker(); }}
+            leftIcon={<Plus className="h-4 w-4" />}
+          >
+            {suppressedCount > 0
+              ? t("providers.empty_all_suppressed_cta", { defaultValue: "Show hidden providers" })
+              : t("providers.connect_first", { defaultValue: "Connect a provider" })}
           </Button>
         </Card>
       ) : filteredProviders.length === 0 ? (
@@ -2363,7 +2386,7 @@ export function ProvidersPage() {
           )}
           {pickerProviders.length === 0 ? (
             <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-              {pickerSearch
+              {pickerSearch && suppressedCount === 0
                 ? t("providers.no_results")
                 : suppressedCount > 0
                   // Everything left is hidden by the operator's own suppression,
