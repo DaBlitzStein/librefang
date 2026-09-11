@@ -1731,6 +1731,93 @@ fn switching_provider_also_drops_the_old_endpoints_capacity_limits() {
     kernel.shutdown();
 }
 
+/// The same five-field clear also runs on the boot restore path, under a branch
+/// whose first disjunct — `is_default_provider && is_default_model` — is true for
+/// a row that is *already* on the `default` sentinel. There the two assignments
+/// above it restate what is there and no endpoint moves, so clearing is not
+/// repointing hygiene: it is data loss on a path that runs on every restart.
+///
+/// Without the gate an operator's hand-set window, output cap and
+/// `[model.extra_params]` on any agent inheriting the global model are nulled by
+/// the next daemon restart and made permanent by the following `save_agent`.
+#[test]
+fn restarting_keeps_the_overrides_of_an_agent_already_on_the_default_sentinel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-boot-restore-overrides");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let agent_id = {
+        let kernel =
+            LibreFangKernel::boot_with_config(config.clone()).expect("first boot should succeed");
+        let id = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "sentinel-overrides-agent".to_string(),
+                    source_template: None,
+                    description: "inherits the global model, with deliberate overrides".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    model: ModelConfig {
+                        mode: librefang_types::agent::ModelMode::Fixed,
+                        router_override: None,
+                        // Already the sentinel: the restore branch restates these.
+                        provider: "default".to_string(),
+                        model: "default".to_string(),
+                        context_window: Some(32_000),
+                        max_output_tokens: Some(8_000),
+                        extra_params: std::collections::BTreeMap::from([(
+                            "enable_memory".to_string(),
+                            serde_json::json!(true),
+                        )]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("agent should spawn");
+        kernel.shutdown();
+        id
+    };
+
+    // Second boot over the same home — the restore the deploy's restart performs.
+    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot should succeed");
+    let restored = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("the agent should be restored");
+
+    assert_eq!(
+        restored.manifest.model.context_window,
+        Some(32_000),
+        "a restart must not null a window the operator set on an agent that never moved endpoints"
+    );
+    assert_eq!(
+        restored.manifest.model.max_output_tokens,
+        Some(8_000),
+        "same for the output cap: nothing repointed, so nothing is stale"
+    );
+    assert!(
+        restored
+            .manifest
+            .model
+            .extra_params
+            .contains_key("enable_memory"),
+        "extra_params is provider-specific, but this agent's provider did not change: {:?}",
+        restored.manifest.model.extra_params
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_hand_activation_does_not_seed_runtime_tool_filters() {
     let tmp = tempfile::tempdir().unwrap();
