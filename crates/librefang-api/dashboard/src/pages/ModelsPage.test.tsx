@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   ModelsPage,
@@ -261,6 +261,14 @@ function renderPage() {
 }
 
 describe("ModelsPage", () => {
+
+  // The three token fields in this modal are the shared `ModelParamField`, so
+  // their rung labels ("8K", "32K"…) repeat across them. Scope every query to
+  // the field's own container rather than the modal.
+  function ladderFor(label: string): HTMLElement {
+    return screen.getByRole("group", { name: label });
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     // Reset persisted Zustand state that affects filtering visibility.
@@ -536,22 +544,21 @@ describe("ModelsPage", () => {
     expect(useUIStore.getState().toasts).toEqual([]);
   });
 
-  it("saves context_window when the override is enabled and omits it when untouched", async () => {
+  it("saves context_window when a rung is picked and omits it while on inherit", async () => {
     setLoaded();
     const { update } = setMutationDefaults();
     renderPage();
     fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
 
-    const ctxSwitch = () => screen.getByRole("switch", { name: "models.context_window" });
-    expect(ctxSwitch()).toHaveAttribute("aria-checked", "false");
-    fireEvent.click(ctxSwitch());
-    expect(ctxSwitch()).toHaveAttribute("aria-checked", "true");
+    const ctx = ladderFor("model_param.context_window");
+    // Inherit is where an untouched field sits — a rung you can point at
+    // rather than a toggle whose off position is a number nobody chose.
+    expect(within(ctx).getByRole("button", { name: "model_param.inherit" }))
+      .toHaveAttribute("aria-pressed", "true");
 
-    fireEvent.change(
-      screen.getAllByLabelText("models.context_window")
-        .find((el): el is HTMLInputElement => el instanceof HTMLInputElement && el.type === "range")!,
-      { target: { value: "262144" } },
-    );
+    fireEvent.click(within(ctx).getByRole("button", { name: "256K" }));
+    expect(within(ctx).getByRole("button", { name: "256K" }))
+      .toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() =>
@@ -582,13 +589,8 @@ describe("ModelsPage", () => {
     renderPage();
     fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
 
-    const outSwitch = () => screen.getByRole("switch", { name: "models.max_output" });
-    fireEvent.click(outSwitch());
-    fireEvent.change(
-      screen.getAllByLabelText("models.max_output")
-        .find((el): el is HTMLInputElement => el instanceof HTMLInputElement && el.type === "range")!,
-      { target: { value: "16384" } },
-    );
+    const out = ladderFor("model_param.max_output_tokens");
+    fireEvent.click(within(out).getByRole("button", { name: "16K" }));
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() =>
@@ -612,21 +614,23 @@ describe("ModelsPage", () => {
     renderPage();
     fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
 
-    const slider = screen.getAllByLabelText("models.context_window")
-      .find((el): el is HTMLInputElement => el instanceof HTMLInputElement && el.type === "range")!;
-    // Before the toggle: the display falls back to the default, not to the 1024 floor.
-    expect(slider.value).toBe("128000");
+    const ctx = ladderFor("model_param.context_window");
+    // The sentinel is never a selected rung: the field sits on inherit.
+    expect(within(ctx).getByRole("button", { name: "model_param.inherit" }))
+      .toHaveAttribute("aria-pressed", "true");
 
-    fireEvent.click(screen.getByRole("switch", { name: "models.context_window" }));
+    fireEvent.click(within(ctx).getByRole("button", { name: "128K" }));
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() =>
       expect(update.mutateAsync).toHaveBeenCalledWith(
         expect.objectContaining({
-          overrides: expect.objectContaining({ context_window: 128000 }),
+          overrides: expect.objectContaining({ context_window: 131072 }),
         }),
       ),
     );
+    const { overrides } = update.mutateAsync.mock.calls[0][0];
+    expect(overrides.context_window).not.toBe(0);
   });
 
   it("requires double-click to delete a custom model (confirm-then-delete)", () => {

@@ -77,11 +77,16 @@ export function StepLadderInput({
     }`;
 
   return (
+    // `role="group"` + `aria-labelledby`, not `<label for>`: the rungs are a
+    // set of buttons, and a <label> pointing at the <div> that holds them is
+    // not an association any browser or assistive technology honours — the
+    // element is non-labellable, so the control announced itself as an
+    // unnamed group.
     <div className="space-y-1.5">
-      <label htmlFor={id} className="text-xs font-bold text-text-dim">
+      <span id={`${id}-label`} className="block text-xs font-bold text-text-dim">
         {label}
-      </label>
-      <div id={id} className="flex flex-wrap gap-1.5">
+      </span>
+      <div id={id} role="group" aria-labelledby={`${id}-label`} className="flex flex-wrap gap-1.5">
         <button
           type="button"
           aria-pressed={value.trim() === ""}

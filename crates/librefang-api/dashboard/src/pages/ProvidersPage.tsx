@@ -23,6 +23,7 @@ import { Modal } from "../components/ui/Modal";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
+import { ModelParamField } from "../components/ui/ModelParamField";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
@@ -151,7 +152,6 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault }: {
           type="text"
           value={selectedModel}
           onChange={e => setSelectedModel(e.target.value)}
-          placeholder={t("providers.model_name_placeholder")}
           className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
         />
       )}
@@ -178,7 +178,7 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault }: {
  * `provider:model_id`, so it is reachable after creation and survives a
  * registry sync — which is what `context_window` could not do before.
  */
-function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, catalogValue, label, placeholder, savedMessage, hintDefault, hintOverride, addToast }: {
+function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, catalogValue, label, savedMessage, hintDefault, hintOverride, addToast }: {
   overrideKey: string;
   overrides: ModelOverrides | undefined;
   overridesLoading: boolean;
@@ -187,7 +187,6 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
   /** The catalog value this field reverts to, or undefined when unknown. */
   catalogValue?: number;
   label: string;
-  placeholder: string;
   savedMessage: string;
   hintDefault: string;
   hintOverride: string;
@@ -241,19 +240,24 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
 
   return (
     <div className="space-y-1">
-      <label className="text-[10px] font-bold text-text-dim uppercase">{label}</label>
-      <div className="flex gap-2">
-        <input
-          type="number"
-          min={1}
-          step={1}
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          placeholder={catalogValue != null ? String(catalogValue) : placeholder}
-          aria-label={label}
-          className={`flex-1 rounded-xl border bg-main px-3 py-2 text-sm font-mono outline-none focus:ring-1 ${invalid ? "border-error focus:border-error focus:ring-error/20" : "border-border-subtle focus:border-brand focus:ring-brand/20"}`}
-          aria-invalid={invalid || undefined}
-        />
+      <div className="flex items-end gap-2">
+        {/*
+          The same control the agent editor and the model settings use. It was
+          a bare number box here, so the operator got rungs in one place, a
+          slider in another and free text in the third for one parameter.
+          Clearing it is still how an override is reverted — which is exactly
+          the ladder's inherit rung, so the semantics carried over unchanged.
+        */}
+        <div className="flex-1">
+          <ModelParamField
+            param={field === "context_window" ? "context_window" : "max_tokens"}
+            label={label}
+            value={input}
+            onChange={setInput}
+            cap={undefined}
+            warning={invalid ? t("providers.limit_invalid") : undefined}
+          />
+        </div>
         <Button
           variant="secondary"
           onClick={handleSave}
@@ -266,9 +270,6 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
           {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
         </Button>
       </div>
-      {invalid && (
-        <p className="text-[10px] text-error">{t("providers.limit_invalid")}</p>
-      )}
       <p className="text-[10px] text-text-dim/60 leading-snug">
         {overrideValue != null
           ? hintOverride
@@ -349,7 +350,6 @@ function ProviderModelLimitsSection({ providerId, addToast }: {
             field="context_window"
             catalogValue={catalogWindow}
             label={t("providers.context_window")}
-            placeholder={t("providers.context_window_placeholder")}
             savedMessage={t("providers.context_window_saved")}
             hintDefault={t("providers.context_window_hint_default")}
             hintOverride={t("providers.context_window_hint_override", { value: catalogWindow != null ? catalogWindow.toLocaleString() : "-" })}
@@ -363,7 +363,6 @@ function ProviderModelLimitsSection({ providerId, addToast }: {
             field="max_tokens"
             catalogValue={catalogMaxOut}
             label={t("providers.max_tokens")}
-            placeholder={t("providers.max_tokens_placeholder")}
             savedMessage={t("providers.max_tokens_saved")}
             hintDefault={t("providers.max_tokens_hint_default")}
             hintOverride={t("providers.max_tokens_hint_override", { value: catalogMaxOut != null ? catalogMaxOut.toLocaleString() : "-" })}
@@ -1349,14 +1348,12 @@ function CreateProviderWizard({
         {step === 0 && (
           <>
             <Input label={t("providers.wizard_id_label") + " *"} value={id}
-              onChange={(e) => { setId(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "")); setErrors(prev => prev.filter(e2 => e2 !== "id")); }}
-              placeholder={t("providers.wizard_id_placeholder")} className={errors.includes("id") ? "border-error" : ""} />
+              onChange={(e) => { setId(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "")); setErrors(prev => prev.filter(e2 => e2 !== "id")); }} className={errors.includes("id") ? "border-error" : ""} />
             {errors.includes("id") && <p className="text-[10px] text-error -mt-2">{t("providers.wizard_id_required")}</p>}
             <p className="text-[10px] text-text-dim/60 -mt-2">{t("providers.wizard_id_hint")}</p>
 
             <Input label={t("providers.wizard_base_url_label") + " *"} value={baseUrl}
-              onChange={(e) => { setBaseUrl(e.target.value); setErrors(prev => prev.filter(e2 => e2 !== "base_url")); }}
-              placeholder={t("providers.wizard_base_url_placeholder")} className={errors.includes("base_url") ? "border-error" : ""} />
+              onChange={(e) => { setBaseUrl(e.target.value); setErrors(prev => prev.filter(e2 => e2 !== "base_url")); }} className={errors.includes("base_url") ? "border-error" : ""} />
             {errors.includes("base_url") && <p className="text-[10px] text-error -mt-2">{t("providers.wizard_base_url_required")}</p>}
 
             <Input label={t("providers.wizard_api_key_label")} type="password" value={apiKey}
@@ -2245,7 +2242,6 @@ export function ProvidersPage() {
             <div>
               <label htmlFor={`${cfgFieldId}-proxy-url`} className="text-[10px] font-bold text-text-dim uppercase">{t("providers.proxy_url")} <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
               <input id={`${cfgFieldId}-proxy-url`} type="text" value={config.proxyInput} onChange={e => config.setProxyInput(e.target.value)}
-                placeholder={t("providers.proxy_url_placeholder")}
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
             </div>
 
