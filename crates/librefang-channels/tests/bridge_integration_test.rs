@@ -3602,6 +3602,18 @@ async fn test_approval_direct_route_failure_does_not_claim_coverage() {
         !aggregate.contains("no adapter has a channel_default"),
         "routing is configured here — the operator must not be sent to channel_default, got: {aggregate}"
     );
+    // The remedy varies per occurrence, so it belongs in a field: interpolated
+    // into the message it splits one condition into three strings and every
+    // backend that aggregates by message loses the count (#8228 review).
+    assert!(
+        aggregate.contains("message=\"Approval reached no channel\""),
+        "the event message must stay a constant; the varying remedy belongs in its \
+         own field, got: {aggregate}"
+    );
+    assert!(
+        aggregate.contains("remedy="),
+        "the remedy must still reach the operator, as a field, got: {aggregate}"
+    );
 
     manager.stop().await;
 }
