@@ -1178,6 +1178,99 @@ async fn goal_run_pause_and_resume_reject_a_malformed_id() {
     }
 }
 
+/// The discriminator for the resume-cap fix: start with a non-default cap,
+/// pause, then resume through `POST /api/goals/{id}/resume` — which
+/// dispatches with no body — and the resumed run must still carry the
+/// operator's cap, not the compiled default of 25 (#7973 review).
+///
+/// Also pins the paused timestamps: while paused, `state()`'s checkpoint
+/// fallback serves the persisted `paused_at` / `started_at`, so two
+/// consecutive `GET /run` polls must agree instead of re-minting both
+/// stamps on every read (#7973 review).
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_resume_through_the_route_keeps_the_operator_cap() {
+    let h = boot().await;
+    let agent = "11111111-1111-1111-1111-111111111111";
+    let goal = create_goal(
+        &h,
+        serde_json::json!({
+            "title": "Resume cap",
+            "agent_id": agent,
+            // Fastest allowed cadence so the pause lands between turns.
+            "tick_interval_secs": 1,
+        }),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    // The operator's explicit, non-default cap.
+    let (ss, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/goals/{id}/start"),
+        Some(serde_json::json!({"max_iterations": 100})),
+    )
+    .await;
+    assert_eq!(ss, StatusCode::OK, "start failed: {body:?}");
+    assert_eq!(body["run"]["max_iterations"].as_u64(), Some(100));
+    let original_started_at = body["run"]["started_at"].as_str().unwrap().to_string();
+
+    // Pause is cooperative — the loop finishes its turn, checkpoints, and
+    // exits, so poll until the phase actually lands on `paused`.
+    let (ps, pause) = json_request(&h, Method::POST, &format!("/api/goals/{id}/pause"), None).await;
+    assert_eq!(ps, StatusCode::OK);
+    assert_eq!(pause["paused"].as_bool(), Some(true));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let paused_run = loop {
+        let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+        if run["run"]["phase"].as_str() == Some("paused") {
+            break run["run"].clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pause never reached the paused phase: {run:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+
+    // While paused the timestamps come from the checkpoint: two consecutive
+    // polls must be byte-identical on both stamps.
+    let (_, run_a) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    let (_, run_b) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    assert_eq!(
+        run_a["run"]["started_at"].as_str(),
+        run_b["run"]["started_at"].as_str(),
+        "paused started_at must not be re-minted per poll: {run_a:?} vs {run_b:?}"
+    );
+    assert_eq!(
+        run_a["run"]["updated_at"].as_str(),
+        run_b["run"]["updated_at"].as_str(),
+        "paused updated_at must not be re-minted per poll: {run_a:?} vs {run_b:?}"
+    );
+
+    // The resumed run keeps the operator's cap (not the default 25) and the
+    // original run's start time.
+    let (rs, resumed) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/resume"), None).await;
+    assert_eq!(rs, StatusCode::OK, "resume failed: {resumed:?}");
+    assert_eq!(resumed["run"]["phase"].as_str(), Some("running"));
+    assert_eq!(resumed["run"]["max_iterations"].as_u64(), Some(100));
+    assert_eq!(
+        resumed["run"]["started_at"].as_str(),
+        paused_run["started_at"].as_str(),
+        "resume must restore the paused run's original started_at"
+    );
+    assert_eq!(
+        resumed["run"]["started_at"].as_str(),
+        Some(original_started_at.as_str()),
+        "the whole pause/resume cycle keeps the run's original start time"
+    );
+
+    // Clean up the live loop.
+    json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
+}
+
 // ---------------------------------------------------------------------------
 // Configurable cadence
 // ---------------------------------------------------------------------------

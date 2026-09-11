@@ -11,7 +11,7 @@
 
 use librefang_channels::types::SenderContext;
 use librefang_types::agent::AgentId;
-use librefang_types::goal::{GoalId, GoalRunState, DEFAULT_GOAL_MAX_ITERATIONS};
+use librefang_types::goal::{GoalId, GoalRunState};
 
 use super::{LibreFangKernel, SYSTEM_CHANNEL_AUTONOMOUS};
 use crate::MemorySubsystemApi;
@@ -30,7 +30,10 @@ impl LibreFangKernel {
         agent_id: AgentId,
         max_iterations: Option<u32>,
     ) -> bool {
-        let max = max_iterations.unwrap_or(DEFAULT_GOAL_MAX_ITERATIONS).max(1);
+        // An explicit cap is clamped here; an omitted one stays `None` so the
+        // runner can prefer a pause checkpoint's own cap on a resume (see
+        // `GoalRunner::start`) before falling back to the compiled default.
+        let max = max_iterations.map(|n| n.max(1));
         let substrate = self.substrate_ref().clone();
 
         // The tick closure drives a real agent turn, which needs an owned
@@ -50,7 +53,7 @@ impl LibreFangKernel {
                 // Trusted internal system path — reuse the autonomous-channel
                 // sentinel so the RBAC resolver applies the system carve-out
                 // (see background_lifecycle.rs).
-                let sender = goal_tick_sender_context(aid, goal_id, SYSTEM_CHANNEL_AUTONOMOUS);
+                let sender = goal_tick_sender_context(aid, goal_id);
                 match k.send_message_with_sender_context(aid, &msg, &sender).await {
                     Ok(r) => Ok(r.response),
                     Err(e) => Err(e.to_string()),
@@ -133,16 +136,12 @@ impl LibreFangKernel {
 /// and they still do, since the scope is a function of the goal rather than
 /// of the tick. What changes is only that a *different* goal no longer lands
 /// on that same id.
-fn goal_tick_sender_context(
-    agent_id: AgentId,
-    goal_id: GoalId,
-    display_name: &str,
-) -> SenderContext {
+fn goal_tick_sender_context(agent_id: AgentId, goal_id: GoalId) -> SenderContext {
     SenderContext {
         channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
         user_id: agent_id.to_string(),
         chat_id: Some(goal_id.to_string()),
-        display_name: display_name.to_string(),
+        display_name: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
         is_internal_system: true,
         ..Default::default()
     }
@@ -174,8 +173,8 @@ mod goal_session_scope_tests {
         let goal_a = GoalId::new();
         let goal_b = GoalId::new();
 
-        let ctx_a = goal_tick_sender_context(agent, goal_a, SYSTEM_CHANNEL_AUTONOMOUS);
-        let ctx_b = goal_tick_sender_context(agent, goal_b, SYSTEM_CHANNEL_AUTONOMOUS);
+        let ctx_a = goal_tick_sender_context(agent, goal_a);
+        let ctx_b = goal_tick_sender_context(agent, goal_b);
 
         assert_ne!(
             derived_session_id(&ctx_a, agent),
@@ -193,8 +192,8 @@ mod goal_session_scope_tests {
         let agent = AgentId::new();
         let goal = GoalId::new();
 
-        let first = goal_tick_sender_context(agent, goal, SYSTEM_CHANNEL_AUTONOMOUS);
-        let second = goal_tick_sender_context(agent, goal, SYSTEM_CHANNEL_AUTONOMOUS);
+        let first = goal_tick_sender_context(agent, goal);
+        let second = goal_tick_sender_context(agent, goal);
 
         assert_eq!(
             derived_session_id(&first, agent),
@@ -210,8 +209,8 @@ mod goal_session_scope_tests {
         let agent_a = AgentId::new();
         let agent_b = AgentId::new();
 
-        let ctx_a = goal_tick_sender_context(agent_a, goal, SYSTEM_CHANNEL_AUTONOMOUS);
-        let ctx_b = goal_tick_sender_context(agent_b, goal, SYSTEM_CHANNEL_AUTONOMOUS);
+        let ctx_a = goal_tick_sender_context(agent_a, goal);
+        let ctx_b = goal_tick_sender_context(agent_b, goal);
 
         assert_ne!(
             derived_session_id(&ctx_a, agent_a),
