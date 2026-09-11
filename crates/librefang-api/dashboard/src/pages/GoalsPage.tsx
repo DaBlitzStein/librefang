@@ -565,7 +565,8 @@ export function GoalsPage() {
                 <label htmlFor="goal-create-description" className="sr-only">{t("goals.goal_desc_placeholder")}</label>
                 <textarea id="goal-create-description" value={createDraft.description} onChange={e => setCreateDraft({...createDraft, description: e.target.value})} placeholder={t("goals.goal_desc_placeholder")} className={`${inputClass} resize-none`} rows={3} />
                 <label htmlFor="goal-create-agent" className="sr-only">{t("goals.assigned_agent")}</label>
-                <select id="goal-create-agent" value={createDraft.agent_id} onChange={e => setCreateDraft({...createDraft, agent_id: e.target.value})} className={inputClass}>
+                {/* Picking the agent that is already the verifier drops the verifier: the option below is filtered out for that pair, so keeping the id would leave a blank select carrying a value the backend rejects with a 400. */}
+                <select id="goal-create-agent" value={createDraft.agent_id} onChange={e => setCreateDraft({...createDraft, agent_id: e.target.value, verify_agent_id: createDraft.verify_agent_id === e.target.value ? "" : createDraft.verify_agent_id})} className={inputClass}>
                   <option value="">{t("goals.no_agent_selected")}</option>
                   {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
                 </select>
@@ -617,7 +618,8 @@ export function GoalsPage() {
                             <label htmlFor="goal-edit-progress" className="sr-only">{t("goals.progress")}</label>
                             <input id="goal-edit-progress" type="number" value={editDraft.progress} onChange={e => setEditDraft({...editDraft, progress: Number(e.target.value)})} className={inputClass} min={0} max={100} style={{ width: "80px" }} />
                             <label htmlFor="goal-edit-agent" className="sr-only">{t("goals.assigned_agent")}</label>
-                            <select id="goal-edit-agent" value={editDraft.agent_id} onChange={e => setEditDraft({...editDraft, agent_id: e.target.value})} className={`${inputClass} flex-1 min-w-[120px]`}>
+                            {/* Same rule as the create form: reassigning the goal to its own verifier clears the verifier instead of leaving a blank select. */}
+                            <select id="goal-edit-agent" value={editDraft.agent_id} onChange={e => setEditDraft({...editDraft, agent_id: e.target.value, verify_agent_id: editDraft.verify_agent_id === e.target.value ? "" : editDraft.verify_agent_id})} className={`${inputClass} flex-1 min-w-[120px]`}>
                               <option value="">{t("goals.no_agent_selected")}</option>
                               {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
                             </select>
