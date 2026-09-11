@@ -989,7 +989,16 @@ impl LibreFangKernel {
         if !guard.is_unlocked() {
             // Vault file did not exist when the cache was populated and no
             // `set()` has initialised it yet — nothing to read.
-            return None;
+            if !guard.exists() {
+                return None;
+            }
+            // It does exist now, so the lock is stale rather than meaningful:
+            // unlock once here instead of answering "no such key" for the rest
+            // of the daemon's lifetime.
+            if let Err(e) = guard.unlock() {
+                warn!(error = %e, "vault_get: cached handle could not be unlocked after vault.enc appeared");
+                return None;
+            }
         }
         guard.get(key).map(|s| s.to_string())
     }
