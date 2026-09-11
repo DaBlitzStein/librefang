@@ -49,7 +49,6 @@ pub mod task_queue;
 pub mod terminal;
 pub mod tools_sessions;
 pub mod users;
-pub mod vault;
 pub mod webhooks;
 pub mod workflows;
 
@@ -105,7 +104,6 @@ pub use task_queue::*;
 pub use terminal::*;
 pub use tools_sessions::*;
 pub use users::*;
-pub use vault::*;
 pub use webhooks::*;
 pub use workflows::*;
 

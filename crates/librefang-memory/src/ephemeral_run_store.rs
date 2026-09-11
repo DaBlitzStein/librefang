@@ -295,11 +295,12 @@ pub(crate) fn execute_ephemeral_run_agent_deletes(
     tx: &rusqlite::Transaction<'_>,
     agent_id: &str,
 ) -> LibreFangResult<()> {
-    crate::agent_tables::execute_agent_deletes(
-        tx,
-        agent_id,
-        crate::agent_tables::AgentTableGroup::EphemeralRun,
+    tx.execute(
+        "DELETE FROM ephemeral_runs WHERE parent_agent_id = ?1",
+        rusqlite::params![agent_id],
     )
+    .map_err(LibreFangError::memory)?;
+    Ok(())
 }
 
 #[cfg(test)]
