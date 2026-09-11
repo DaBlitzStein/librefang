@@ -76,31 +76,21 @@ fn warn_if_concurrency_fields_changed(
 }
 
 /// Clear the overrides that describe the *previous* provider's endpoint —
-/// its credentials, its capacity limits, and its non-standard request
-/// parameters — so a provider change never leaves them attached to the new
-/// one (#7781 review).
+/// its credentials and its capacity limits — so a provider change never
+/// leaves them attached to the new one (#7781 review).
 ///
 /// Shared by every path that repoints an agent at a different provider:
 /// [`AgentRegistry::switch_model_provider`] (the dashboard's model picker,
-/// via `set_agent_model`), the model router's `apply_routed_profile` /
-/// `apply_tier_routed_model`, and the boot-time normalisation of a restored
-/// legacy agent back to the `default` sentinel. One list of fields, so a
-/// future addition cannot be cleared on one path and forgotten on the other —
-/// which is exactly how `context_window` / `max_output_tokens` came to be
-/// dropped by the router and kept by the picker.
-///
-/// The fields left alone are the ones that mean the same thing on any
-/// endpoint: `max_tokens`, the four sampling knobs, `system_prompt`, and the
-/// router's own `mode` / `router_override`. `extra_params` is not one of
-/// them — it is flattened verbatim into the request body and is
-/// provider-specific by definition (Qwen's `enable_memory` has no meaning to
-/// Anthropic, which rejects the unknown key rather than ignoring it).
+/// via `set_agent_model`) and the model router's `apply_routed_profile` /
+/// `apply_tier_routed_model`. One list of fields, so a future addition
+/// cannot be cleared on one path and forgotten on the other — which is
+/// exactly how `context_window` / `max_output_tokens` came to be dropped by
+/// the router and kept by the picker.
 pub(crate) fn clear_stale_provider_overrides(model: &mut librefang_types::agent::ModelConfig) {
     model.api_key_env = None;
     model.base_url = None;
     model.context_window = None;
     model.max_output_tokens = None;
-    model.extra_params.clear();
 }
 
 impl AgentRegistry {

@@ -13,8 +13,8 @@
 
 use super::*;
 use crate::kernel::llm_drivers::resolve_effective_fallbacks;
-use crate::kernel::prompt_context::{attach_current_time_msg, current_time_precise_for_prompt};
 use crate::registry::clear_stale_provider_overrides;
+use crate::kernel::prompt_context::{attach_current_time_msg, current_time_precise_for_prompt};
 use crate::MeteringSubsystemApi;
 use librefang_skills::SkillError;
 
