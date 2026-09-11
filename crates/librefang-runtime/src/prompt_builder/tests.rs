@@ -1486,6 +1486,25 @@ fn current_time_message_absent_when_unset() {
 // #7995 review).
 
 #[test]
+fn webui_is_matched_the_same_way_the_system_channel_predicate_matches() {
+    // The webui arm used to compare exactly while the arm three lines below it trimmed and
+    // lowercased, so a `"WebUI"` fell past the first and into the second — telling a live
+    // browser session "This turn has no default channel or recipient" (#7995 review).
+    let granted = vec!["channel_send".to_string()];
+    for spelling in ["webui", "WebUI", " webui ", "WEBUI"] {
+        let section = build_channel_section(spelling, None, None, false, false, &granted);
+        assert!(
+            section.contains("Do NOT use `channel_send`"),
+            "{spelling:?} must take the webui arm, got: {section}"
+        );
+        assert!(
+            !section.contains("no default channel or recipient"),
+            "{spelling:?} must not be described as a background turn, got: {section}"
+        );
+    }
+}
+
+#[test]
 fn webui_suppresses_the_channel_send_recipient_instruction() {
     let granted = vec!["channel_send".to_string()];
     let section = build_channel_section(

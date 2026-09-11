@@ -1266,6 +1266,31 @@ fn build_user_section(user_name: Option<&str>) -> String {
     }
 }
 
+/// Channels whose turn has nobody waiting on the reply.
+///
+/// Deliberately its own list rather than a test against
+/// [`RESERVED_SYSTEM_CHANNEL_NAMES`](librefang_channels::types::RESERVED_SYSTEM_CHANNEL_NAMES),
+/// which answers the different question of which names would collide with a kernel `SessionId`.
+/// `webui` is in that reserved set and a live browser session *is* waiting, so deriving this
+/// predicate from it would mean a future interactive surface added to the reserved list silently
+/// starts telling a real user their turn is a background one (#8149 review).
+/// The strings are still declared once, in `librefang-channels`.
+const NON_INTERACTIVE_TURN_CHANNELS: &[&str] = &[
+    librefang_channels::types::SYSTEM_CHANNEL_CRON,
+    librefang_channels::types::SYSTEM_CHANNEL_AUTONOMOUS,
+];
+
+/// Whether this turn was fired by the scheduler rather than by someone waiting for an answer.
+///
+/// Normalises the same way `is_reserved_system_channel` does, so the two comparisons in
+/// `build_channel_section` cannot disagree about what `" Cron "` is.
+fn is_non_interactive_turn(channel: &str) -> bool {
+    let channel = channel.trim();
+    NON_INTERACTIVE_TURN_CHANNELS
+        .iter()
+        .any(|c| channel.eq_ignore_ascii_case(c))
+}
+
 fn build_channel_section(
     channel: &str,
     sender_name: Option<&str>,
@@ -1361,14 +1386,17 @@ fn build_channel_section(
         .iter()
         .any(|t| t == "channel_send" || t == "*");
     if has_channel_send {
-        if channel == "webui" {
+        if channel
+            .trim()
+            .eq_ignore_ascii_case(librefang_channels::types::SYSTEM_CHANNEL_WEBUI)
+        {
             section.push_str(
                 "\n\nYou are on the LibreFang web interface, which has no messaging adapter. \
                  To share images, files, or other media you generate, include the returned \
                  URL or file path in your reply as markdown — it is rendered directly. Do NOT \
                  use `channel_send`; there is no channel for it to deliver to.",
             );
-        } else if crate::channel_registry::is_system_channel(channel) {
+        } else if is_non_interactive_turn(channel) {
             section.push_str(
                 "\n\nThis turn has no default channel or recipient. To send images, files, \
                  polls, or other media, use the `channel_send` tool with an explicit real \
