@@ -35,6 +35,7 @@ function Harness({
   initialState,
   invalidFields = new Set(),
   models = [{ provider: "openai", id: "gpt-4o" }],
+  providers = [{ name: "openai" }],
 }: {
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
@@ -42,13 +43,14 @@ function Harness({
   initialState?: ManifestFormState;
   invalidFields?: Set<string>;
   models?: HarnessModel[];
+  providers?: { name: string }[];
 }) {
   const [state, setState] = useState<ManifestFormState>(() => initialState ?? emptyManifestForm());
   return (
     <AgentManifestForm
       value={state}
       onChange={setState}
-      providers={[{ name: "openai" }]}
+      providers={providers}
       models={models}
       invalidFields={invalidFields}
       extras={emptyManifestExtras()}
@@ -58,6 +60,47 @@ function Harness({
     />
   );
 }
+
+describe("AgentManifestForm — provider selection", () => {
+  // The caller passes only providers that can serve a request, so an agent
+  // assigned to one whose key was rejected (or whose local service is down)
+  // would face a `required` <select> with no matching <option>: React sets
+  // selectedIndex -1 and the field renders blank, unable to show or re-pick
+  // the provider the agent is actually on.
+  it("lists the provider the agent already uses even when it is not selectable anew", () => {
+    const state = emptyManifestForm();
+    state.model = { ...state.model, provider: "deepseek", model: "deepseek-chat" };
+
+    render(<Harness initialState={state} providers={[{ name: "openai" }]} />);
+
+    // `Field` renders its label as an unassociated <span> (#5246), so the
+    // select has no accessible name to query by — anchor on its own placeholder
+    // option instead.
+    const select = screen
+      .getByRole("option", { name: "agents.form.select_provider" })
+      .closest("select") as HTMLSelectElement;
+    expect(select).toHaveValue("deepseek");
+    expect(
+      within(select).getByRole("option", { name: "deepseek" }),
+    ).toBeInTheDocument();
+    expect(within(select).getByRole("option", { name: "openai" })).toBeInTheDocument();
+  });
+
+  it("does not duplicate a current provider that is already offered", () => {
+    const state = emptyManifestForm();
+    state.model = { ...state.model, provider: "openai", model: "gpt-4o" };
+
+    render(<Harness initialState={state} providers={[{ name: "openai" }]} />);
+
+    // `Field` renders its label as an unassociated <span> (#5246), so the
+    // select has no accessible name to query by — anchor on its own placeholder
+    // option instead.
+    const select = screen
+      .getByRole("option", { name: "agents.form.select_provider" })
+      .closest("select") as HTMLSelectElement;
+    expect(within(select).getAllByRole("option", { name: "openai" })).toHaveLength(1);
+  });
+});
 
 describe("AgentManifestForm — validation feedback", () => {
   it("opens scheduling errors and exposes the cron error to assistive technology", () => {

@@ -10,7 +10,7 @@ import type {
 } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
-import { isProviderAvailable } from "../lib/status";
+import { isProviderConfigured } from "../lib/status";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -250,7 +250,9 @@ export function RuntimePage() {
   ];
 
   const providersCount = snapshot?.providers?.length ?? 0;
-  const configuredProviders = snapshot?.providers?.filter(p => isProviderAvailable(p.auth_status)).length ?? 0;
+  // Same predicate the Providers page counts with, so the two tiles cannot
+  // report different numbers for the same word in the same second.
+  const configuredProviders = snapshot?.providers?.filter(p => isProviderConfigured(p.auth_status)).length ?? 0;
   const channelsCount = snapshot?.channels?.length ?? 0;
   const configuredChannels = snapshot?.channels?.filter(c => c.configured).length ?? 0;
   const resourceSummary = [
