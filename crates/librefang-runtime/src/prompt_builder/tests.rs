@@ -1537,19 +1537,59 @@ fn cron_and_autonomous_keep_channel_send_but_require_an_explicit_target() {
 
 /// Nothing attaches agent-generated media to an assistant message — the
 /// only path that reaches the user is the agent embedding the returned
-/// URL/path as markdown in the reply. The webui instruction must say that,
-/// not claim media is attached automatically (#7995 review).
+/// URL in the reply. The webui instruction must say that, and name the URL
+/// contract it is talking about (`/api/uploads/<id>`, minted by
+/// `uploaded_file.rs`), not claim media is attached automatically
+/// (#7995 review).
 #[test]
 fn webui_states_the_true_media_delivery_mechanism() {
     let granted = vec!["channel_send".to_string()];
     let section = build_channel_section("webui", None, None, false, false, &granted);
     assert!(
-        section.contains("include the returned URL or file path in your reply as markdown"),
-        "webui must say media is delivered by embedding the URL/path, got: {section}"
+        section.contains("/api/uploads"),
+        "webui must point the agent at the actual URL contract, got: {section}"
     );
     assert!(
         !section.contains("shown to the user automatically"),
         "webui must not claim media is attached automatically, got: {section}"
+    );
+}
+
+/// The webui arm is matched before the system-channel arm, so it has to
+/// normalize the same way `is_system_channel` does — otherwise a `"WebUI"`
+/// falls through to the background-run guidance written for cron and
+/// autonomous (#7995 review).
+#[test]
+fn webui_match_is_case_and_whitespace_insensitive() {
+    let granted = vec!["channel_send".to_string()];
+    for channel in ["WebUI", " webui ", "WEBUI"] {
+        let section =
+            build_channel_section(channel, Some("Paco"), Some("127.0.0.1"), false, false, &granted);
+        assert!(
+            section.contains("/api/uploads"),
+            "{channel} must get the webui guidance, got: {section}"
+        );
+        assert!(
+            !section.contains("background run"),
+            "{channel} must not get the background-run guidance, got: {section}"
+        );
+    }
+}
+
+/// The instruction cron and autonomous receive must be the same one #8149
+/// writes from its own pre-image — the two commits rewrite this exact block
+/// and previously disagreed about whether `channel_send` may be used at all.
+#[test]
+fn background_run_guidance_matches_the_wording_shared_with_8149() {
+    let granted = vec!["channel_send".to_string()];
+    let section = build_channel_section("cron", Some("Paco"), None, false, false, &granted);
+    assert!(
+        section.contains("This is a background run: no chat is attached to it"),
+        "the background-run wording must stay byte-identical across #7995 and #8149, got: {section}"
+    );
+    assert!(
+        !section.contains("image_url"),
+        "a background turn has no default target for the media hint, got: {section}"
     );
 }
 
