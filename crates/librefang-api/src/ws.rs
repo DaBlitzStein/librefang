@@ -921,7 +921,18 @@ async fn handle_agent_ws(
 
     // Frames read off the socket while a turn was running, replayed by the loop
     // below before it reads the socket again so ordering is preserved.
+    //
+    // Bounded by bytes, not by count: deferring is what removed the
+    // backpressure that used to cap this. While a turn ran the daemon stopped
+    // reading, so the kernel socket buffer capped what a peer could have
+    // outstanding; reading into a queue instead means a peer can push into
+    // process memory as fast as it likes, and `WebSocketUpgrade` here never
+    // calls `max_message_size`, so tungstenite's 64 MiB default frame ceiling
+    // applies. The budget is one minute of full-size messages at the
+    // configured rate limit, which no honest client reaches.
+    const MAX_DEFERRED_BYTES: usize = 64 * 1024 * 16;
     let mut deferred: std::collections::VecDeque<Message> = std::collections::VecDeque::new();
+    let mut deferred_bytes: usize = 0;
 
     // Main message loop with idle timeout
     loop {
@@ -929,6 +940,7 @@ async fn handle_agent_ws(
         // the same `match` below as a freshly-read one, and before the socket is
         // read again, so a message sent mid-turn keeps its place in the order.
         let msg = if let Some(queued) = deferred.pop_front() {
+            deferred_bytes = deferred_bytes.saturating_sub(frame_len(&queued));
             Ok(queued)
         } else {
             tokio::select! {
@@ -1024,12 +1036,13 @@ async fn handle_agent_ws(
                 // flags are off (defaults).
                 // The turn used to be awaited here with the loop not polling
                 // `receiver`, which cost two things the client cannot work
-                // around. A liveness probe went unanswered, which is why the
-                // dashboard suppresses its own probe for the whole turn and
-                // leans on a 180 s watchdog instead. And a peer that left was
-                // invisible: switching chats tears the socket down, the daemon
-                // stayed parked in `.await` holding the session, and coming
-                // back queued behind a turn whose reader was already gone.
+                // around. A liveness probe went unanswered — no client in this
+                // tree sends one yet, precisely because there was no point, and
+                // the dashboard falls back to a 180 s inactivity watchdog. And a
+                // peer that left was invisible: navigating away from a chat
+                // tears the socket down, the daemon stayed parked in `.await`,
+                // and the connection task — with the `WsConnectionGuard` slot it
+                // holds — outlived its reader until the turn ended on its own.
                 //
                 // Poll the socket alongside the turn instead. Pings are
                 // answered, every other frame is deferred so ordering is
@@ -1058,29 +1071,91 @@ async fn handle_agent_ws(
                                 peer_gone = Some("client_close");
                                 break Ok(());
                             }
+                            // `try_lock`, never `lock().await`. The turn holds this
+                            // same mutex across its own `.await` while it writes a
+                            // frame, and the body of a `select!` branch runs outside
+                            // the macro's poll — so awaiting the lock here would stop
+                            // polling `turn`, and the task that owns the lock would
+                            // never run again. A peer whose socket has stopped
+                            // draining is exactly when both happen at once. Busy
+                            // means "answer it after the turn", which is what the
+                            // code did before this branch existed.
                             Some(Ok(Message::Ping(payload))) => {
-                                let send_failed = {
-                                    let mut s = sender.lock().await;
-                                    s.send(Message::Pong(payload)).await.is_err()
-                                };
-                                if send_failed {
-                                    peer_gone = Some("send_error");
-                                    break Ok(());
+                                match sender.try_lock() {
+                                    Ok(mut s) => {
+                                        if s.send(Message::Pong(payload)).await.is_err() {
+                                            drop(s);
+                                            close_ws_server_error(&sender, "server send failed")
+                                                .await;
+                                            peer_gone = Some("send_error");
+                                            break Ok(());
+                                        }
+                                        last_activity = std::time::Instant::now();
+                                    }
+                                    Err(_) => deferred.push_back(Message::Ping(payload)),
                                 }
                             }
                             Some(Ok(Message::Text(probe))) if is_liveness_ping(&probe) => {
-                                if send_json_or_close(&sender, &serde_json::json!({"type": "pong"}))
-                                    .await
-                                    .is_err()
-                                {
-                                    peer_gone = Some("send_error");
-                                    break Ok(());
+                                match sender.try_lock() {
+                                    Ok(mut s) => {
+                                        let pong = serde_json::json!({"type": "pong"}).to_string();
+                                        if s.send(Message::Text(pong.into())).await.is_err() {
+                                            drop(s);
+                                            close_ws_server_error(&sender, "server send failed")
+                                                .await;
+                                            peer_gone = Some("send_error");
+                                            break Ok(());
+                                        }
+                                        // A probe answered mid-turn is proof the link
+                                        // carries traffic, so it counts as activity.
+                                        // Without this a turn longer than the idle
+                                        // timeout closes the socket the moment it
+                                        // ends, however many probes were answered.
+                                        last_activity = std::time::Instant::now();
+                                    }
+                                    Err(_) => deferred.push_back(Message::Text(probe)),
                                 }
                             }
                             // Not dropped: replayed by the outer loop before it
                             // reads the socket again, so a message sent while a
                             // turn ran still arrives, and in order.
-                            Some(Ok(other)) => deferred.push_back(other),
+                            //
+                            // Bounded, because deferring is what removed the
+                            // backpressure that used to cap this. Before, a turn
+                            // meant the daemon stopped reading and the kernel socket
+                            // buffer capped what a peer could have outstanding; now
+                            // it drains into process memory as fast as the peer
+                            // pushes, and tungstenite's default frame ceiling is
+                            // 64 MiB.
+                            Some(Ok(other)) => {
+                                deferred_bytes = deferred_bytes.saturating_add(frame_len(&other));
+                                if deferred_bytes > MAX_DEFERRED_BYTES {
+                                    warn!(
+                                        agent_id = %id_str,
+                                        conn_id = %conn_id,
+                                        deferred_bytes,
+                                        limit = MAX_DEFERRED_BYTES,
+                                        "WebSocket peer queued more mid-turn than the deferral budget allows"
+                                    );
+                                    // Best-effort, and `try_lock` for the same
+                                    // reason as the probe branches: the turn may
+                                    // be holding the sink. We are tearing the
+                                    // connection down either way.
+                                    if let Ok(mut s) = sender.try_lock() {
+                                        let _ = s
+                                            .send(Message::Close(Some(CloseFrame {
+                                                code: 1009,
+                                                reason:
+                                                    "too much data queued while a turn was running"
+                                                        .into(),
+                                            })))
+                                            .await;
+                                    }
+                                    peer_gone = Some("deferred_overflow");
+                                    break Ok(());
+                                }
+                                deferred.push_back(other);
+                            }
                         }
                     }
                 };
@@ -1164,7 +1239,20 @@ fn stamp_message_id(mut frame: serde_json::Value, message_id: Option<&str>) -> s
 /// already pushed a 1011 close frame — the caller MUST stop pumping the main
 /// loop in that case (#5137). Successful handling (including validation
 /// errors that were reported back to the client) returns `Ok(())`.
-/// Whether a text frame is the dashboard's `{"type":"ping"}` liveness probe.
+/// Payload size of a frame, for the mid-turn deferral budget.
+///
+/// A close frame carries no payload worth accounting for — the loop is about to
+/// end anyway — so it counts as zero.
+fn frame_len(msg: &Message) -> usize {
+    match msg {
+        Message::Text(t) => t.len(),
+        Message::Binary(b) => b.len(),
+        Message::Ping(p) | Message::Pong(p) => p.len(),
+        Message::Close(_) => 0,
+    }
+}
+
+/// Whether a text frame is a client's `{"type":"ping"}` liveness probe.
 ///
 /// Only consulted while a turn is running, where the main loop answers the
 /// probe itself instead of deferring it: a probe the daemon parks until the
