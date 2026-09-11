@@ -132,6 +132,24 @@ describe("DashboardApp authed bootstrap", () => {
     expect(screen.queryByText("OP")).not.toBeInTheDocument();
   });
 
+  // The hostname is the third of the three values this fix is about, and the
+  // only one nothing read back: `getStatus` was mocked with it and no test
+  // opened the menu that renders it, so moving it back onto `/api/version` —
+  // which never sends it — would not have failed anything.
+  it("shows the daemon's hostname in the user menu after logging in", async () => {
+    render(<App />);
+
+    await logIn();
+
+    // `roleLine` joins the auth mode and the hostname and is rendered by both
+    // `UserMenuPanel` sites, hence `getAllByText`. An empty hostname is dropped
+    // by the `.filter(Boolean)`, leaving the bare mode — the pre-fix rendering.
+    await waitFor(() =>
+      expect(screen.getAllByText("credentials · myhost").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryByText("credentials")).not.toBeInTheDocument();
+  });
+
   it("does not re-run the auth probe after a login succeeds", async () => {
     render(<App />);
 
