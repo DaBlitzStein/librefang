@@ -103,7 +103,7 @@ type DashboardRoute =
 type NavItem = { to: DashboardRoute; label: string; icon: NavIcon };
 type NavGroup = { key: string; label: string; items: NavItem[] };
 
-export function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: (user?: string) => void }) {
+export function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
   const { t } = useTranslation();
   const [key, setKey] = useState("");
   const [username, setUsername] = useState("");
@@ -178,7 +178,7 @@ export function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthen
           setErrorKey("invalid_totp");
           return;
         }
-        onAuthenticated(username.trim());
+        onAuthenticated();
         return;
       }
 
@@ -198,7 +198,7 @@ export function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthen
         return;
       }
 
-      onAuthenticated(username.trim());
+      onAuthenticated();
     } catch {
       setErrorKey("invalid");
     } finally {
@@ -613,7 +613,9 @@ function UserMenuPanel({
   t,
 }: UserMenuPanelProps) {
   const initials = (username || "U").slice(0, 2).toUpperCase();
-  const roleLine = hostname || "";
+  const roleLine = [authMode !== "none" ? authMode : null, hostname]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className="rounded-xl border border-border-subtle bg-surface shadow-2xl backdrop-blur-md p-1.5 w-[260px]">
@@ -920,6 +922,10 @@ function DashboardApp() {
   const [authNeeded, setAuthNeeded] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [authMode, setAuthMode] = useState<AuthMode>("none");
+  // Bumped by every successful (re)authentication so the bootstrap effect
+  // below re-runs and fetches the authed-only endpoints (username,
+  // terminal_enabled) that could not resolve before login (#8096 review).
+  const [authEpoch, setAuthEpoch] = useState(0);
   const [appVersion, setAppVersion] = useState("");
   const [hostname, setHostname] = useState("");
   const [username, setUsername] = useState("");
@@ -1018,7 +1024,7 @@ function DashboardApp() {
       cancelled = true;
       setOnUnauthorized(null);
     };
-  }, [setTerminalEnabled]);
+  }, [setTerminalEnabled, authEpoch]);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -1160,8 +1166,8 @@ function DashboardApp() {
       <div className="flex h-screen items-center justify-center bg-main text-slate-900 dark:text-slate-100">
         <AuthDialog
           mode={authMode}
-          onAuthenticated={(user) => {
-            if (user) setUsername(user);
+          onAuthenticated={() => {
+            setAuthEpoch((e) => e + 1);
             setAuthNeeded(false);
             void navigate({ to: "/overview", replace: true });
           }}
@@ -1372,10 +1378,12 @@ function DashboardApp() {
                 <span className="hidden xl:inline">{t("nav.console", { defaultValue: "Console" })}</span>
               </Link>
             ) : null}
-            {/* Avatar button — top-right, visible only below lg where the
-                sidebar is off-screen. On lg+ the sidebar's user-row provides
-                the same menu. */}
-            <div className="relative lg:hidden">
+            {/* Avatar button — top-right pattern from the design canvas
+                (`shell.jsx::TopBar`, "user-menu" variant). Visible on every
+                breakpoint so the menu is always one click away from the
+                topbar; the sidebar's user-row dropdown is the secondary
+                "user-menu-sidebar" variant. */}
+            <div className="relative">
               <button
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
                 className={`flex h-7 w-7 items-center justify-center rounded-full transition-colors duration-200 active:scale-95 ${

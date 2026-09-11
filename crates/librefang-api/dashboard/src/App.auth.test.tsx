@@ -1,13 +1,19 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AuthDialog } from "./App";
+import { App, AuthDialog } from "./App";
 import {
+  checkDashboardAuthMode,
   clearApiKey,
   dashboardLogin,
+  getDashboardUsername,
+  getStatus,
+  getVersionInfo,
   setApiKey,
+  setOnUnauthorized,
   verifyStoredAuth,
 } from "./api";
+import { useUIStore } from "./lib/store";
 
 vi.mock("react-i18next", async () => {
   const actual = await vi.importActual<typeof import("react-i18next")>(
@@ -29,6 +35,44 @@ vi.mock("motion/react", async () => {
     motion: { div: MotionDiv },
   };
 });
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ children }: { children: React.ReactNode }) => children,
+  Outlet: () => null,
+  useNavigate: () => () => Promise.resolve(),
+  useRouterState: ({
+    select,
+  }: {
+    select?: (state: { location: { pathname: string } }) => unknown;
+  }) =>
+    select
+      ? select({ location: { pathname: "/" } })
+      : { location: { pathname: "/" } },
+}));
+
+vi.mock("./components/ui/CommandPalette", () => ({
+  CommandPalette: () => null,
+  useCommandPalette: () => ({ isOpen: false, setIsOpen: () => undefined }),
+}));
+
+vi.mock("./lib/useKeyboardShortcuts", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("./lib/useKeyboardShortcuts")
+  >()),
+  useKeyboardShortcuts: () => undefined,
+}));
+
+vi.mock("./components/NotificationCenter", () => ({
+  NotificationCenter: () => null,
+}));
+
+vi.mock("./components/OfflineBanner", () => ({
+  OfflineBanner: () => null,
+}));
+
+vi.mock("./components/EveryApiPartnerLink", () => ({
+  EveryApiPartnerLink: () => null,
+}));
 
 vi.mock("./api", () => ({
   changePassword: vi.fn(),
@@ -153,5 +197,59 @@ describe("AuthDialog", () => {
     expect(totpSubmit).toBeDisabled();
     await user.type(screen.getByPlaceholderText("000000"), "123456");
     expect(totpSubmit).toBeEnabled();
+  });
+});
+
+describe("DashboardApp auth bootstrap", () => {
+  beforeEach(() => {
+    vi.mocked(clearApiKey).mockReset();
+    vi.mocked(dashboardLogin).mockReset();
+    vi.mocked(setApiKey).mockReset();
+    vi.mocked(verifyStoredAuth).mockReset();
+    vi.mocked(checkDashboardAuthMode).mockReset();
+    vi.mocked(getStatus).mockReset();
+    vi.mocked(getDashboardUsername).mockReset();
+    vi.mocked(getVersionInfo).mockReset();
+    vi.mocked(setOnUnauthorized).mockReset();
+    useUIStore.setState({
+      terminalEnabled: false,
+      setTerminalEnabled: () => useUIStore.setState({ terminalEnabled: true }),
+    });
+  });
+
+  it("refetches the daemon username and terminal policy after a fresh login", async () => {
+    const user = userEvent.setup();
+    vi.mocked(checkDashboardAuthMode).mockResolvedValue("credentials");
+    // Pre-login the stored-auth probe fails; post-login (bootstrap rerun) it succeeds.
+    vi.mocked(verifyStoredAuth).mockResolvedValueOnce(false);
+    vi.mocked(verifyStoredAuth).mockResolvedValueOnce(true);
+    vi.mocked(dashboardLogin).mockResolvedValue({ ok: true });
+    vi.mocked(getStatus).mockResolvedValue({ terminal_enabled: true });
+    vi.mocked(getDashboardUsername).mockResolvedValue("operator");
+    vi.mocked(getVersionInfo).mockResolvedValue({});
+
+    render(<App />);
+
+    // Unauthenticated bootstrap: no username yet, so the avatar shows the
+    // fallback icon and the username endpoint has not resolved a name.
+    await screen.findByPlaceholderText("auth.username_placeholder");
+    expect(vi.mocked(getDashboardUsername)).not.toHaveBeenCalled();
+
+    await user.type(
+      screen.getByPlaceholderText("auth.username_placeholder"),
+      "operator",
+    );
+    await user.type(
+      screen.getByPlaceholderText("auth.password_placeholder"),
+      "password",
+    );
+    await user.click(screen.getByRole("button", { name: "auth.submit" }));
+
+    // The login callback bumps the auth epoch, the bootstrap effect re-runs,
+    // and the authed-only endpoints resolve: the avatar shows initials and
+    // the daemon's terminal policy replaces the pre-login fail-open default.
+    expect(await screen.findByText("OP")).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(getStatus)).toHaveBeenCalled());
+    expect(useUIStore.getState().terminalEnabled).toBe(true);
   });
 });
