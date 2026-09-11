@@ -2295,12 +2295,24 @@ impl BridgeManager {
                                             .map(|s| s.to_string())
                                             .collect::<Vec<_>>()
                                             .join("; ");
+                                        // `remedy` is a field, not part of the
+                                        // message: it takes four different
+                                        // values above, and interpolating a
+                                        // varying value into the event
+                                        // *message* splits one condition into
+                                        // four distinct strings, so every log
+                                        // backend that groups by message stops
+                                        // being able to count how often this
+                                        // fires. The four fields below are
+                                        // already structured for that reason;
+                                        // `remedy` was the exception.
                                         warn!(
                                             request_id = %approval.request_id,
                                             requesting_agent = %requesting_agent,
                                             adapters = adapters.len(),
                                             skipped = %considered,
-                                            "Approval reached no channel: {remedy}"
+                                            remedy = %remedy,
+                                            "Approval reached no channel"
                                         );
                                     }
                                 }
