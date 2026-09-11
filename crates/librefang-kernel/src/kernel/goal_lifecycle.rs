@@ -193,6 +193,17 @@ impl LibreFangKernel {
         self.workflows.goal_runner.stop(goal_id)
     }
 
+    /// Stop an active goal run on behalf of a caller that has already written
+    /// the goal document itself (#7785 re-review).
+    ///
+    /// The iteration in flight is barred from writing the goal afterwards, so
+    /// it cannot revert the terminal status — and the progress — the caller
+    /// just persisted. Use [`Self::goal_run_stop`] for a stop that touched
+    /// nothing; that one still lets the in-flight iteration land its work.
+    pub fn goal_run_stop_after_goal_write(&self, goal_id: GoalId) -> bool {
+        self.workflows.goal_runner.stop_after_goal_write(goal_id)
+    }
+
     /// Snapshot the observable state of a goal's run, if one is active.
     pub fn goal_run_status(&self, goal_id: GoalId) -> Option<GoalRunState> {
         self.workflows.goal_runner.state(goal_id)

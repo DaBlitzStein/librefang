@@ -368,6 +368,48 @@ describe("GoalsPage", () => {
     });
   });
 
+  // #7785 review (m3): the verifier dropdown filters out the assigned agent,
+  // but picking the verifier FIRST and then assigning the goal to that same
+  // agent left the now-filtered id in the draft. The select rendered blank
+  // (no option matches its value) while the submit still carried the
+  // forbidden pair, so the operator got a 400 with nothing on screen
+  // explaining it. The blank select is why the DOM value proves nothing here
+  // — with the bug it is blank too; what discriminates is the payload.
+  it("drops the verifier when the goal is reassigned to that same agent", async () => {
+    useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { create } = setMutations();
+    renderPage();
+
+    fireEvent.change(
+      screen.getByPlaceholderText("goals.goal_title_placeholder"),
+      { target: { value: "Self-verification trap" } },
+    );
+    fireEvent.click(screen.getByLabelText("goals.loop_engineering"));
+    fireEvent.change(screen.getByLabelText("goals.verifier_agent"), {
+      target: { value: "a-reviewer" },
+    });
+    // Now assign the goal itself to the agent already chosen as verifier.
+    fireEvent.change(screen.getByLabelText("goals.assigned_agent"), {
+      target: { value: "a-reviewer" },
+    });
+
+    const submitBtn = screen
+      .getAllByText("goals.create_goal")
+      .map((el) => el.closest("button"))
+      .find((b): b is HTMLButtonElement => !!b && b.type === "submit");
+    fireEvent.click(submitBtn!);
+
+    await Promise.resolve();
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0]).toMatchObject({
+      title: "Self-verification trap",
+      agent_id: "a-reviewer",
+    });
+    expect(create.mock.calls[0][0]).not.toHaveProperty("verify_agent_id");
+  });
+
   it("marks a loop-engineered goal in the tree and leaves a plain one unmarked", () => {
     useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
 
