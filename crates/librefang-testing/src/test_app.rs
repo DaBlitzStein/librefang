@@ -298,6 +298,22 @@ impl TestAppState {
                 cfg.api_key_hash.trim().to_string(),
             )
         };
+        // Mirrors `kernel::boot`, which loads the media provider order from the
+        // catalog right after constructing the cache. Without this the harness
+        // hands every test the five compiled-in built-ins while production
+        // serves whatever the registry declares, so a test over
+        // `GET /media/providers` would pass against a list production never
+        // produces.
+        let media_drivers = librefang_runtime::media::MediaDriverCache::new();
+        // `KernelApi` is called through its path rather than imported: bringing
+        // the trait into scope makes `set_self_handle` resolve to the
+        // by-value `Arc<Self>` trait method and moves the caller's kernel.
+        media_drivers.load_providers_from_registry(
+            librefang_kernel::KernelApi::model_catalog_ref(&*kernel)
+                .load()
+                .list_providers(),
+        );
+
         // Rooted at the test's temp home so a transparent api_key upgrade hint
         // (#6613) lands there rather than in the process CWD.
         let master_key = Arc::new(librefang_api::middleware::MasterKeyState::new(
@@ -326,7 +342,7 @@ impl TestAppState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(master_plaintext)),
             master_key,
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            media_drivers,
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             config_write_lock: tokio::sync::Mutex::new(()),
             pending_a2a_agents: dashmap::DashMap::new(),
