@@ -101,6 +101,13 @@ function setMutations(opts: {
   return { create, update, del };
 }
 
+// `t` is mocked as `key:{options}`, so a label asked for with a `defaultValue` renders as the whole serialised pair.
+function openTemplatesTab(): void {
+  fireEvent.click(
+    screen.getByText('goals.template_library:{"defaultValue":"Templates"}'),
+  );
+}
+
 function renderPage(): void {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
@@ -173,6 +180,9 @@ describe("GoalsPage", () => {
     );
     renderPage();
 
+    // The template grid moved behind its own tab so the empty page can keep the create form; the landing tab is "my goals" whether or not any exist.
+    openTemplatesTab();
+
     expect(screen.getByText("goals.pick_template")).toBeInTheDocument();
     expect(screen.getByText("Launch")).toBeInTheDocument();
     expect(screen.getByText("Define mission")).toBeInTheDocument();
@@ -216,6 +226,7 @@ describe("GoalsPage", () => {
     const { create } = setMutations();
     renderPage();
 
+    openTemplatesTab();
     fireEvent.click(screen.getByText("goals.use_template"));
 
     // Flush the allSettled batch.
@@ -617,5 +628,122 @@ describe("GoalsPage run phase is rendered once per row", () => {
     expect(
       screen.getAllByText('goals.run_phase_stopped:{"defaultValue":"stopped"}'),
     ).toHaveLength(1);
+  });
+});
+
+// A fresh daemon has no goals, and the `goals.length === 0` branch used to draw the template grid and nothing else — the create form, the KPIs, the global progress card and the tree all lived exclusively in the populated branch.
+// Three daemons on one host, running the same binary and the same bundle byte for byte, showed different Goals screens purely because one of them happened to hold a goal.
+// On the two empty ones the only way to get a goal was to accept one of six canned templates, and when `GET /api/goals/templates` failed there was no action on the page at all.
+describe("GoalsPage keeps every create path reachable with zero goals", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setMutations();
+    useGoalRunMock.mockReturnValue(makeQuery({ running: false }));
+  });
+
+  it("renders the create form when there are no goals", () => {
+    useGoalsMock.mockReturnValue(makeQuery<GoalItem[]>([]));
+    useGoalTemplatesMock.mockReturnValue(
+      makeQuery<GoalTemplate[]>([SAMPLE_TEMPLATE]),
+    );
+    renderPage();
+
+    expect(document.querySelector("#goal-create-title")).not.toBeNull();
+  });
+
+  it("offers both a create and a templates action from the empty state", () => {
+    useGoalsMock.mockReturnValue(makeQuery<GoalItem[]>([]));
+    useGoalTemplatesMock.mockReturnValue(
+      makeQuery<GoalTemplate[]>([SAMPLE_TEMPLATE]),
+    );
+    renderPage();
+
+    const empty = screen.getByRole("status");
+    expect(within(empty).getByText("goals.create_goal")).toBeInTheDocument();
+    expect(
+      within(empty).getByText(
+        'goals.browse_templates:{"defaultValue":"Browse templates"}',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // `useGoalTemplates` has no error branch on this page, so a failed template fetch is indistinguishable from an empty one: `templates` is `[]` either way.
+  // The empty state must still offer the action that does not depend on that query.
+  it("still offers the create action when no templates loaded", () => {
+    useGoalsMock.mockReturnValue(makeQuery<GoalItem[]>([]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    renderPage();
+
+    const empty = screen.getByRole("status");
+    expect(within(empty).getByText("goals.create_goal")).toBeInTheDocument();
+    expect(
+      within(empty).queryByText(/goals\.browse_templates/),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector("#goal-create-title")).not.toBeNull();
+  });
+
+  // The empty page and the populated page are the same page: switching to the templates tab reaches the grid that used to be the whole empty branch.
+  it("reaches the template grid from the templates tab", () => {
+    useGoalsMock.mockReturnValue(makeQuery<GoalItem[]>([]));
+    useGoalTemplatesMock.mockReturnValue(
+      makeQuery<GoalTemplate[]>([SAMPLE_TEMPLATE]),
+    );
+    renderPage();
+
+    expect(screen.queryByText("goals.use_template")).not.toBeInTheDocument();
+    openTemplatesTab();
+    expect(screen.getByText("Launch")).toBeInTheDocument();
+    expect(screen.getByText("goals.use_template")).toBeInTheDocument();
+  });
+
+  // The regression guard for the restructure itself: everything the populated branch shipped has to survive the move into a tab panel, and the KPI/progress pair must stay out of the empty page (four zeroes are noise).
+  it("keeps the populated page whole inside the goals tab", () => {
+    const assigned: GoalItem = { ...COMPLETED_GOAL, id: "g-assigned", status: "in_progress", agent_id: "a1" };
+    useGoalsMock.mockReturnValue(
+      makeQuery([PARENT_GOAL, CHILD_GOAL, COMPLETED_GOAL, assigned]),
+    );
+    useGoalTemplatesMock.mockReturnValue(
+      makeQuery<GoalTemplate[]>([SAMPLE_TEMPLATE]),
+    );
+    renderPage();
+
+    // Two tabs, the goals one selected — no auto-switch to templates on a page that has goals or on one that does not.
+    const tabs = within(screen.getByRole("tablist")).getAllByRole("tab");
+    expect(tabs).toHaveLength(2);
+    expect(tabs[0]).toHaveAttribute("aria-selected", "true");
+
+    // KPI row and global progress card.
+    expect(screen.getByText("goals.total")).toBeInTheDocument();
+    expect(screen.getByText("goals.overall_progress")).toBeInTheDocument();
+    expect(screen.getByText("25%")).toBeInTheDocument();
+    expect(screen.getByText("goals.clear_all")).toBeInTheDocument();
+
+    // Create form and tree.
+    expect(document.querySelector("#goal-create-title")).not.toBeNull();
+    expect(screen.getByText("goals.goal_tree")).toBeInTheDocument();
+    expect(screen.getByText("Parent goal")).toBeInTheDocument();
+
+    // Run controls keep both of their shapes: no agent prompts for one, an assigned goal can start.
+    expect(screen.getAllByTitle("goals.run_needs_agent").length).toBeGreaterThan(0);
+    expect(screen.getByTitle("goals.run_start")).toBeInTheDocument();
+
+    // Row actions.
+    expect(screen.getAllByTitle("common.edit").length).toBeGreaterThan(0);
+    expect(screen.getAllByTitle("common.delete").length).toBeGreaterThan(0);
+    expect(screen.getAllByTitle("goals.toggle_reset").length).toBeGreaterThan(0);
+
+    // The header action is unconditional — it is the one Workflows gates on `hasWorkflows`.
+    expect(screen.getByTitle("goals.create_goal (n)")).toBeInTheDocument();
+  });
+
+  it("keeps the header create action on the empty page", () => {
+    useGoalsMock.mockReturnValue(makeQuery<GoalItem[]>([]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    renderPage();
+
+    expect(screen.getByTitle("goals.create_goal (n)")).toBeInTheDocument();
+    // Four counters reading zero are noise, and the loading-skeleton test already fixes that `goals.total` stays away from a page with no data.
+    expect(screen.queryByText("goals.total")).not.toBeInTheDocument();
+    expect(screen.queryByText("goals.overall_progress")).not.toBeInTheDocument();
   });
 });
