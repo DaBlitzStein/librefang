@@ -217,7 +217,7 @@ describe("buildModelConfigPatch", () => {
   });
 
   // The five parameters the drawer could not reach before. The route has
-  // accepted them as tri-state all along (`AgentConfigPatch` in
+  // accepted them as tri-state all along (`PatchAgentConfigRequest` in
   // routes/agents/config.rs); only the form was missing.
   it("sends every sampling parameter the operator pinned", () => {
     const persisted = { provider: "openai", model: "gpt-4o" };

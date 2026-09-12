@@ -19,10 +19,12 @@
  * for each.
  *
  * One table rather than five copies of the same three lines, and it is the
- * single place the client's idea of a valid range lives. The bounds mirror the
- * doc comments on `AgentConfigPatch` in `routes/agents/config.rs`: sending a
- * value outside them is a 400, so catching it here is the difference between a
- * disabled Save and a failed request.
+ * single place the client's idea of a valid range lives. The bounds mirror what
+ * `patch_agent_config` validates on `PatchAgentConfigRequest`
+ * (`routes/agents/config.rs`): a range table covers the four float fields, and
+ * the three integer ones are rejected only at zero. Sending a value outside
+ * them is a 400, so catching it here is the difference between a disabled Save
+ * and a failed request.
  */
 const NUMERIC_FIELDS = {
   max_tokens: { min: 1, max: Number.POSITIVE_INFINITY, integer: true },
