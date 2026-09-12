@@ -248,6 +248,13 @@ impl MediaDriverCache {
         *write_media_state(&self.media_providers, "media_providers") = media_provs;
     }
 
+    /// The media provider IDs this cache knows about, in preference order.
+    ///
+    /// This is the same list [`detect_for_capability`](Self::detect_for_capability) picks from, which is the point of exposing it: a surface that enumerates media providers from its own hardcoded list can disagree with the list auto-detection actually uses, and then the daemon selects a provider the UI never showed.
+    pub fn media_provider_ids(&self) -> Vec<String> {
+        read_media_state(&self.media_providers, "media_providers").clone()
+    }
+
     /// Get or create a cached driver for the given provider.
     ///
     /// If `base_url` is `None`, the cache checks its `provider_urls` map
