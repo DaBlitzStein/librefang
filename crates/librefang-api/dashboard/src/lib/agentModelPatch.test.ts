@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { buildModelConfigPatch } from "./agentModelPatch";
+import {
+  buildModelConfigPatch,
+  emptyModelNumerics,
+  seedModelNumerics,
+  MODEL_NUMERIC_FIELDS,
+  type ModelDraft,
+} from "./agentModelPatch";
 
 // startModelEdit seeds an empty string when the backend sends `null`, so a
-// draft that reflects "no user edit" carries empty strings for both knobs.
-const draftOf = (
-  over: Partial<{ provider: string; model: string; max_tokens: string; temperature: string }> = {},
-) => ({
+// draft that reflects "no user edit" carries empty strings for every knob.
+const draftOf = (over: Partial<ModelDraft> = {}): ModelDraft => ({
   provider: "anthropic",
   model: "claude-sonnet",
-  max_tokens: "",
-  temperature: "",
+  ...emptyModelNumerics(),
   ...over,
 });
 
@@ -211,5 +214,94 @@ describe("buildModelConfigPatch", () => {
 
     expect(patch).toEqual({});
     expect(patch).not.toHaveProperty("max_tokens");
+  });
+
+  // The five parameters the drawer could not reach before. The route has
+  // accepted them as tri-state all along (`AgentConfigPatch` in
+  // routes/agents/config.rs); only the form was missing.
+  it("sends every sampling parameter the operator pinned", () => {
+    const persisted = { provider: "openai", model: "gpt-4o" };
+    const draft = draftOf({
+      provider: "openai",
+      model: "gpt-4o",
+      top_p: "0.9",
+      frequency_penalty: "-0.5",
+      presence_penalty: "1.25",
+      context_window: "200000",
+      max_output_tokens: "8192",
+    });
+
+    const { patch } = buildModelConfigPatch(draft, persisted);
+
+    expect(patch).toEqual({
+      top_p: 0.9,
+      frequency_penalty: -0.5,
+      presence_penalty: 1.25,
+      context_window: 200000,
+      max_output_tokens: 8192,
+    });
+  });
+
+  it("keeps the sign on a negative penalty", () => {
+    // The penalties are the only fields with a negative half, and losing the
+    // sign silently persists the opposite of what was asked for.
+    const { patch } = buildModelConfigPatch(
+      draftOf({ frequency_penalty: "-1.5", presence_penalty: "-0.25" }),
+      { provider: "anthropic", model: "claude-sonnet" },
+    );
+    expect(patch).toMatchObject({ frequency_penalty: -1.5, presence_penalty: -0.25 });
+  });
+
+  it("clears a pinned parameter when its box is emptied", () => {
+    const { patch } = buildModelConfigPatch(draftOf({ top_p: "" }), {
+      provider: "anthropic",
+      model: "claude-sonnet",
+      top_p: 0.5,
+    });
+    // `null`, not absent: absent would leave the pinned 0.5 in place, and the
+    // empty box is a deliberate "hand this back to the model's setting".
+    expect(patch).toEqual({ top_p: null });
+  });
+
+  it("refuses the whole draft when one field is out of range", () => {
+    // Partially applying it would save the fields that parsed and silently
+    // drop the one that did not.
+    for (const [field, bad] of [
+      ["top_p", "1.5"],
+      ["frequency_penalty", "-3"],
+      ["presence_penalty", "9"],
+      ["temperature", "2.5"],
+      ["context_window", "0"],
+    ] as const) {
+      const { patch } = buildModelConfigPatch(draftOf({ [field]: bad }), undefined);
+      expect(patch, `${field}=${bad} must invalidate the draft`).toBeNull();
+    }
+  });
+
+  it("does not clear an inherited parameter just because the provider changed", () => {
+    // Switching provider resets these server-side, so a `null` here would be
+    // an edit the operator never made.
+    const { patch } = buildModelConfigPatch(
+      draftOf({ provider: "anthropic", model: "claude-sonnet" }),
+      { provider: "openai", model: "gpt-4o", top_p: 0.8, presence_penalty: 0.2 },
+    );
+    expect(patch).toEqual({ provider: "anthropic", model: "claude-sonnet" });
+  });
+});
+
+describe("seedModelNumerics", () => {
+  it("turns a null on the wire into the inherit state, not a compiled default", () => {
+    // Seeding a number here is what used to make an untouched field look like
+    // a deliberate choice and pin it on the next save (#5917).
+    const seeded = seedModelNumerics({ provider: "openai", model: "gpt-4o" });
+    for (const field of MODEL_NUMERIC_FIELDS) {
+      expect(seeded[field], field).toBe("");
+    }
+  });
+
+  it("carries a pinned zero through rather than reading it as absent", () => {
+    const seeded = seedModelNumerics({ temperature: 0, presence_penalty: 0 });
+    expect(seeded.temperature).toBe("0");
+    expect(seeded.presence_penalty).toBe("0");
   });
 });

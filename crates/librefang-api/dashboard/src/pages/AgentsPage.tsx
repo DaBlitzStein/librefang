@@ -37,7 +37,12 @@ import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch } from "lucide-react";
-import { buildModelConfigPatch } from "../lib/agentModelPatch";
+import {
+  buildModelConfigPatch,
+  emptyModelNumerics,
+  seedModelNumerics,
+  type ModelDraft,
+} from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -52,6 +57,7 @@ import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
 import { AgentManifestForm } from "../components/AgentManifestForm";
+import { ModelParamField } from "../components/ui/ModelParamField";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
@@ -347,7 +353,11 @@ export function AgentsPage() {
   const [tomlParseError, setTomlParseError] = useState<string | null>(null);
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
-  const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
+  const [modelDraft, setModelDraft] = useState<ModelDraft>({
+    provider: "",
+    model: "",
+    ...emptyModelNumerics(),
+  });
   // Inline-rename state for the detail/edit modal header. The agent name is
   // the primary identifier in the UI and was previously read-only — now
   // clicking the title swaps it for an input and PATCHes /agents/{id}.
@@ -502,9 +512,7 @@ export function AgentsPage() {
       // An empty field is the inherit state, so a `null` from the backend seeds
       // an empty box rather than the compiled default. Seeding 4096 / 0.7 here
       // is what used to make an untouched field look like a deliberate choice.
-      max_tokens: detailAgent?.model?.max_tokens == null ? "" : String(detailAgent.model.max_tokens),
-      temperature:
-        detailAgent?.model?.temperature == null ? "" : String(detailAgent.model.temperature),
+      ...seedModelNumerics(detailAgent?.model),
     });
     setEditingModel(true);
   }
@@ -2748,26 +2756,65 @@ export function AgentsPage() {
                             ))}
                           </datalist>
                         </DetailRow>
-                        <DetailRow label={t("agents.max_tokens")}>
-                          <input
-                            type="number"
-                            min={1}
-                            value={modelDraft.max_tokens}
-                            onChange={e => setModelDraft(d => ({ ...d, max_tokens: e.target.value }))}
-                            className="w-44 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right"
-                          />
-                        </DetailRow>
-                        <DetailRow label={t("agents.temperature")}>
-                          <input
-                            type="number"
-                            min={0}
-                            max={2}
-                            step={0.1}
+                        {/*
+                          The same `ModelParamField` the create form and the
+                          model settings drawer use, rather than a second set of
+                          hand-rolled number boxes. One parameter, one control:
+                          a bare `<input type="number">` stated neither the
+                          usual value nor the ceiling, so setting a temperature
+                          meant knowing that 0.7 is typical and 2 is the limit,
+                          while the identical parameter elsewhere in the app was
+                          a labelled ladder.
+
+                          Every field is tri-state, and `""` is the third state:
+                          it means the agent has no opinion and the model's own
+                          setting applies. That is why an untouched row must stay
+                          empty (#5917).
+                        */}
+                        <div className="space-y-3 py-1">
+                          <ModelParamField
+                            param="temperature"
                             value={modelDraft.temperature}
-                            onChange={e => setModelDraft(d => ({ ...d, temperature: e.target.value }))}
-                            className="w-44 px-2 py-1 rounded-md border border-border-subtle bg-surface text-sm font-mono outline-none focus:border-brand text-right"
+                            onChange={next => setModelDraft(d => ({ ...d, temperature: next }))}
                           />
-                        </DetailRow>
+                          <ModelParamField
+                            param="top_p"
+                            value={modelDraft.top_p}
+                            onChange={next => setModelDraft(d => ({ ...d, top_p: next }))}
+                          />
+                          <ModelParamField
+                            param="frequency_penalty"
+                            value={modelDraft.frequency_penalty}
+                            onChange={next => setModelDraft(d => ({ ...d, frequency_penalty: next }))}
+                          />
+                          <ModelParamField
+                            param="presence_penalty"
+                            value={modelDraft.presence_penalty}
+                            onChange={next => setModelDraft(d => ({ ...d, presence_penalty: next }))}
+                          />
+                          {/*
+                            Below the sampling rows and separated, because these
+                            are endpoint limits rather than preferences: what the
+                            model may read and emit, not how it should sound.
+                          */}
+                          <div className="pt-2 border-t border-border-subtle/40 space-y-3">
+                            <ModelParamField
+                              param="max_tokens"
+                              value={modelDraft.max_tokens}
+                              onChange={next => setModelDraft(d => ({ ...d, max_tokens: next }))}
+                            />
+                            <ModelParamField
+                              param="context_window"
+                              value={modelDraft.context_window}
+                              onChange={next => setModelDraft(d => ({ ...d, context_window: next }))}
+                            />
+                            <ModelParamField
+                              param="max_output_tokens"
+                              value={modelDraft.max_output_tokens}
+                              onChange={next => setModelDraft(d => ({ ...d, max_output_tokens: next }))}
+                            />
+                          </div>
+                        </div>
                         <div className="flex justify-end gap-2 pt-1">
                           <button
                             onClick={cancelModelEdit}
