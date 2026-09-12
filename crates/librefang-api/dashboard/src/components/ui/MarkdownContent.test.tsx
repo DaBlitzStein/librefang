@@ -196,6 +196,12 @@ describe("MermaidDiagram — fitting the chat column", () => {
     // And the container is what scrolls when the diagram still cannot shrink.
     expect(box.className).toContain("overflow-x-auto");
     expect(box.className).toContain("min-w-0");
+    // Bounded in height too, so a tall diagram is a thumbnail in the
+    // transcript rather than a page of its own.
+    expect(box.className).toContain("[&>svg]:!max-h-64");
+    // Released from mermaid's `width="100%"`, or the height cap would squash
+    // the diagram instead of scaling it.
+    expect(box.className).toContain("[&>svg]:!w-auto");
   });
 
   it("opens the diagram full size on demand, and not before", async () => {
