@@ -122,6 +122,12 @@ pub struct ReloadPlan {
     pub hot_actions: Vec<HotAction>,
     /// Fields that changed but are no-ops (informational only).
     pub noop_changes: Vec<String>,
+    /// Whether [`crate::LibreFangKernel::reload_config`] actually swapped the freshly-read config into the live `ArcSwap` — and therefore whether the `hot_actions` above were applied at all.
+    ///
+    /// [`build_reload_plan`] leaves this `false`: the diff alone cannot know, because the answer also depends on the `[reload] mode` that was in force when the reload started.
+    /// `reload_config` sets it at the one place that performs the swap, so every caller reads the kernel's own decision instead of re-deriving it from [`should_store_config`] against a `mode` it re-read at a different instant.
+    /// Callers that publish state derived from the live config — the HTTP auth tables, the reload response's `hot_actions_applied` — must gate on this: under `mode = "off"` / `"restart"` the plan is a preview of what a restart would do, not a record of what happened.
+    pub config_stored: bool,
 }
 
 impl ReloadPlan {
@@ -284,6 +290,8 @@ pub fn build_reload_plan_with_caps(
         restart_reasons: Vec::new(),
         hot_actions: Vec::new(),
         noop_changes: Vec::new(),
+        // Set by `reload_config` if and when it performs the swap; a plan that was only diffed has applied nothing.
+        config_stored: false,
     };
 
     // ----- Restart-required fields -----
@@ -2202,6 +2210,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(!plan.has_changes());
 
@@ -2211,6 +2220,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec!["language: en -> de".to_string()],
+            config_stored: false,
         };
         assert!(plan.has_changes());
 
@@ -2220,6 +2230,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::UpdateCronConfig],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(plan.has_changes());
 
@@ -2229,6 +2240,7 @@ mod tests {
             restart_reasons: vec!["api_listen changed".to_string()],
             hot_actions: vec![],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(plan.has_changes());
     }
@@ -2240,6 +2252,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(plan.is_hot_reloadable());
 
@@ -2248,6 +2261,7 @@ mod tests {
             restart_reasons: vec!["api_listen changed".to_string()],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(!plan.is_hot_reloadable());
     }
@@ -2297,6 +2311,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(!should_apply_hot(ReloadMode::Off, &plan));
     }
@@ -2308,6 +2323,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(!should_apply_hot(ReloadMode::Restart, &plan));
     }
@@ -2319,6 +2335,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(should_apply_hot(ReloadMode::Hybrid, &plan));
         assert!(should_apply_hot(ReloadMode::Hot, &plan));
@@ -2331,6 +2348,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(!should_apply_hot(ReloadMode::Hybrid, &plan));
     }
@@ -2348,6 +2366,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec!["max_history_messages".to_string()],
+            config_stored: false,
         };
         // `should_apply_hot` is false (no hot actions) — that was the bug:
         // gating the swap on it left read-live edits unapplied.
@@ -2366,6 +2385,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec!["max_history_messages".to_string()],
+            config_stored: false,
         };
         // Off / Restart must not apply runtime changes even with pending diffs.
         assert!(!should_store_config(ReloadMode::Off, &plan));
@@ -2379,6 +2399,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(!should_store_config(ReloadMode::Hot, &plan));
         assert!(!should_store_config(ReloadMode::Hybrid, &plan));
