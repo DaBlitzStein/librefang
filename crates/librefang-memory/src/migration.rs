@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 59;
+const SCHEMA_VERSION: u32 = 60;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -290,6 +290,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(57, migrate_v57);
     run_step!(58, migrate_v58);
     run_step!(59, migrate_v59);
+    run_step!(60, migrate_v60);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1391,6 +1392,46 @@ fn migrate_v59(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (59, datetime('now'), 'Persist workflow_runs.total_steps so run progress survives restart')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 60: make `manifest_versions` present wherever the cascade expects it.
+///
+/// [`migrate_v58`] creates the table, but only for a database climbing *through*
+/// 58. Pre-release builds numbered several different tables 58 — one machine's
+/// v58 audit row reads `Create template_versions table`, another's reads
+/// `Agent manifest version history table` — so a database can sit at 58 or 59
+/// with the number recorded and this table absent.
+///
+/// That matters because `manifest_versions` is in `AGENT_SCOPED_TABLES`, and
+/// the cascade issues its `DELETE` unconditionally: on such a database,
+/// removing an agent would fail with "no such table". An error deleting an
+/// agent is worse than the retention leak the cascade entry closes, so rather
+/// than teach the cascade to tolerate a missing table — which would blunt
+/// `agent_cascade_purges_every_agent_keyed_table` for every other entry — this
+/// step makes the invariant true: at 60, the table exists.
+///
+/// Idempotent, and on the machines that already have it the only observable
+/// change is the version stamp and an audit row.
+fn migrate_v60(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS manifest_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id        TEXT NOT NULL,
+            agent_name      TEXT NOT NULL DEFAULT '',
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            manifest_toml   TEXT NOT NULL,
+            change_source   TEXT NOT NULL DEFAULT 'unknown',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_manifest_versions_agent_id
+            ON manifest_versions(agent_id, timestamp DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (60, datetime('now'), 'Ensure manifest_versions exists on databases a pre-release build stamped past 58 without it')",
         [],
     )?;
     Ok(())
@@ -4369,16 +4410,23 @@ mod tests {
         // Stand where the pre-release build left it: the column is there and
         // the stamp is ahead of anything this binary wrote itself.
         assert!(try_column_exists(&conn, "workflow_runs", "total_steps").unwrap());
+        // Pragma and audit ladder agree at 59, which is the real state on the
+        // machine that failed: its `MAX(version)` and `user_version` were both
+        // 59. Rewinding only the pragma manufactures the inconsistency
+        // `InconsistentLadder` already refuses, which is a different test.
+        conn.execute("DELETE FROM migrations WHERE version > 59", [])
+            .unwrap();
         conn.pragma_update(None, "user_version", 59i64).unwrap();
 
         run_migrations(&conn).expect("a database stamped at 59 must still open");
-        assert_eq!(get_schema_version(&conn).unwrap(), 59);
+        // And is carried the rest of the way rather than left where it was.
+        assert_eq!(get_schema_version(&conn).unwrap(), 60);
     }
 
     /// The other half: a database that stopped at 57 climbs to 59 without
     /// tripping over a column v56 already added.
     #[test]
-    fn v58_and_v59_are_no_ops_when_their_changes_are_already_present() {
+    fn the_forward_compat_steps_are_no_ops_when_their_changes_are_already_present() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         // A database that genuinely stopped at 57: the pragma and the audit
@@ -4389,8 +4437,9 @@ mod tests {
             .unwrap();
         conn.pragma_update(None, "user_version", 57i64).unwrap();
 
-        run_migrations(&conn).expect("re-running 58 and 59 over their own result must not fail");
-        assert_eq!(get_schema_version(&conn).unwrap(), 59);
+        run_migrations(&conn)
+            .expect("re-running the forward-compat steps over their own result must not fail");
+        assert_eq!(get_schema_version(&conn).unwrap(), 60);
 
         // Exactly one of each, not a duplicate from the second pass.
         for (kind, name) in [
@@ -4408,11 +4457,40 @@ mod tests {
         }
     }
 
+    /// The hazard v60 exists for.
+    ///
+    /// Pre-release builds numbered different tables 58 — one machine's audit
+    /// row for 58 reads `Create template_versions table`, another's reads the
+    /// manifest one — so a database can be stamped at 59 with
+    /// `manifest_versions` absent. That table is in the agent cascade, whose
+    /// `DELETE` is unconditional, so removing an agent there would fail with
+    /// "no such table".
     #[test]
-    fn v58_and_v59_record_their_audit_rows_under_their_own_versions() {
+    fn a_database_stamped_past_58_without_manifest_versions_gets_it() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
-        for v in [58i64, 59i64] {
+
+        // Stand where such a machine stands: stamped past 58, table gone.
+        conn.execute_batch("DROP TABLE manifest_versions").unwrap();
+        conn.execute("DELETE FROM migrations WHERE version > 59", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 59i64).unwrap();
+        assert!(!try_table_exists(&conn, "manifest_versions").unwrap());
+
+        run_migrations(&conn).expect("must migrate rather than refuse");
+
+        assert!(
+            try_table_exists(&conn, "manifest_versions").unwrap(),
+            "the cascade issues an unconditional DELETE against this table, so it has to be here"
+        );
+        assert_eq!(get_schema_version(&conn).unwrap(), 60);
+    }
+
+    #[test]
+    fn the_forward_compat_steps_record_their_audit_rows_under_their_own_versions() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        for v in [58i64, 59i64, 60i64] {
             let description: String = conn
                 .query_row(
                     "SELECT description FROM migrations WHERE version = ?1",
