@@ -1016,7 +1016,16 @@
     "everyapi_base_url": "URL bramki (opcjonalnie)",
     "everyapi_connecting": "Łączenie…",
     "everyapi_connect_action": "Połącz",
-    "everyapi_connected": "EveryAPI połączone"
+    "everyapi_connected": "EveryAPI połączone",
+    "key_rejected": "Klucz odrzucony",
+    "show_suppressed_one": "Pokaż {{count}} ukrytego dostawcę",
+    "show_suppressed_few": "Pokaż {{count}} ukrytych dostawców",
+    "show_suppressed_many": "Pokaż {{count}} ukrytych dostawców",
+    "show_suppressed_other": "Pokaż {{count}} ukrytego dostawcy",
+    "all_suppressed": "Wszyscy pozostali dostawcy są ukryci",
+    "empty_all_suppressed_title": "Wszyscy dostawcy są ukryci",
+    "empty_all_suppressed_body": "Usunięto wszystkich skonfigurowanych dostawców. Nadal tu są — pokaż ich, aby przywrócić.",
+    "empty_all_suppressed_cta": "Pokaż ukrytych dostawców"
   },
   "channels": {
     "add": "Dodaj",

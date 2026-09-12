@@ -784,7 +784,11 @@ export function AgentsPage() {
   }, [skillsQuery.data]);
 
   const configuredProviders = useMemo(
-    () => (providersQuery.data ?? []).filter(p => isProviderAvailable(p.auth_status)),
+    // Suppression excluded as well as availability: a provider the operator
+    // removed is absent from the Providers page, and offering it here would
+    // let an agent be bound to something with no card, no badge and no way to
+    // manage it.
+    () => (providersQuery.data ?? []).filter(p => p.suppressed !== true && isProviderAvailable(p.auth_status)),
     [providersQuery.data],
   );
 

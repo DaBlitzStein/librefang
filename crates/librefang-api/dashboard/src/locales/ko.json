@@ -1013,7 +1013,13 @@
     "everyapi_base_url": "게이트웨이 URL (선택)",
     "everyapi_connecting": "연결 중…",
     "everyapi_connect_action": "연결",
-    "everyapi_connected": "EveryAPI 연결됨"
+    "everyapi_connected": "EveryAPI 연결됨",
+    "key_rejected": "키가 거부됨",
+    "show_suppressed_other": "숨겨진 제공자 {{count}}개 표시",
+    "all_suppressed": "남은 제공자가 모두 숨겨져 있습니다",
+    "empty_all_suppressed_title": "모든 제공자가 숨겨져 있습니다",
+    "empty_all_suppressed_body": "구성된 제공자를 모두 제거했습니다. 아직 남아 있으니 다시 표시해 복구하세요.",
+    "empty_all_suppressed_cta": "숨겨진 제공자 표시"
   },
   "channels": {
     "add": "추가",

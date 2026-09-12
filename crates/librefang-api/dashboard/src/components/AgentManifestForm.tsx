@@ -80,6 +80,14 @@ export function AgentManifestForm({
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
+  // The provider the agent already runs on stays selectable even when the
+  // caller filtered it out of `providers` (rejected key, local service down).
+  const providerOptions = useMemo(() => {
+    const current = value.model.provider;
+    if (!current || providers.some((p) => p.name === current)) return providers;
+    return [...providers, { name: current }];
+  }, [providers, value.model.provider]);
+
   // Curried setters for the nested-state update boilerplate.
   const update = (patch: Partial<ManifestFormState>): void => onChange({ ...value, ...patch });
   const updateModel = (patch: Partial<ManifestFormState["model"]>): void =>
@@ -231,7 +239,13 @@ export function AgentManifestForm({
               className={inputClass}
             >
               <option value="">{t("agents.form.select_provider")}</option>
-              {providers.map((p) => (
+              {/* The option list is "providers you could pick", which excludes
+                  one whose key was rejected or whose local service is down. The
+                  agent may already be assigned to exactly that provider, and a
+                  controlled <select> with no matching <option> renders blank on
+                  a `required` field — so the current value is always listed,
+                  even when it is not something you would newly choose. */}
+              {providerOptions.map((p) => (
                 <option key={p.name} value={p.name}>
                   {p.name}
                 </option>

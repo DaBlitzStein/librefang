@@ -442,6 +442,99 @@ fn google_api_key_alias_still_recognised_for_gemini() {
     }
 }
 
+/// A key the daemon inherited from its environment must not undo a removal.
+///
+/// `delete_provider_key` unsets the variable in the daemon's own process, but
+/// it cannot unset one exported by a shell profile, a systemd unit or a Docker
+/// `-e`: the next boot inherits it again. Before this guard, `detect_auth`
+/// promoted the provider straight back to `Configured`, which is the
+/// "it came back on its own" report — and after the Providers page learned to
+/// hide suppressed entries, it came back invisibly, still feeding
+/// `GET /api/models` and the agent model picker.
+#[test]
+fn detect_auth_does_not_promote_a_suppressed_provider_from_an_inherited_key() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Ask the catalog which provider and which variable rather than assuming
+    // a name — the registry owns that mapping and it is not this test's
+    // subject. `gemini` is excluded because its alias path is already covered
+    // separately and would confuse a failure here.
+    let mut catalog = test_catalog();
+    let (id, key_env) = catalog
+        .list_providers()
+        .iter()
+        .find(|p| {
+            p.key_required
+                && !p.api_key_env.is_empty()
+                && p.api_key_env != "GITHUB_TOKEN"
+                && p.id != "gemini"
+        })
+        .map(|p| (p.id.clone(), p.api_key_env.clone()))
+        .expect("the registry must ship at least one key_required provider");
+
+    let prev = std::env::var(&key_env).ok();
+    // SAFETY: single-threaded section guarded by ENV_LOCK.
+    unsafe { std::env::set_var(&key_env, "inherited-from-the-environment") };
+
+    catalog.detect_auth();
+    assert_eq!(
+        catalog.get_provider(&id).unwrap().auth_status,
+        AuthStatus::Configured,
+        "sanity: {key_env} alone configures {id}",
+    );
+
+    catalog.suppress_provider(&id);
+    catalog.detect_auth();
+    assert_eq!(
+        catalog.get_provider(&id).unwrap().auth_status,
+        AuthStatus::Missing,
+        "a suppressed provider stays removed even with its key still in the environment",
+    );
+
+    // SAFETY: single-threaded section guarded by ENV_LOCK.
+    unsafe {
+        if let Some(v) = prev {
+            std::env::set_var(&key_env, v);
+        } else {
+            std::env::remove_var(&key_env);
+        }
+    }
+}
+
+/// The validation task has two branches that write auth status, and the
+/// OpenRouter one runs on every normal pass because `probe_api_key` fetches
+/// that model list unauthenticated. Excluding suppressed providers from the
+/// work list is what covers both branches at once.
+#[test]
+fn providers_needing_validation_skips_suppressed_providers() {
+    let mut catalog = test_catalog();
+    catalog.set_provider_auth_status("openai", AuthStatus::Configured);
+    catalog.set_provider_auth_status("openrouter", AuthStatus::Configured);
+
+    let before: Vec<String> = catalog
+        .providers_needing_validation()
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect();
+    assert!(before.contains(&"openrouter".to_string()));
+
+    catalog.suppress_provider("openrouter");
+
+    let after: Vec<String> = catalog
+        .providers_needing_validation()
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect();
+    assert!(
+        !after.contains(&"openrouter".to_string()),
+        "a suppressed provider must not be handed to background key validation",
+    );
+    assert!(
+        after.contains(&"openai".to_string()),
+        "and the rest of the work list is untouched",
+    );
+}
+
 /// Regression for #4803: pressing "remove key" on a CLI provider
 /// (claude-code, codex-cli, gemini-cli, qwen-code) calls
 /// `suppress_provider` + `detect_auth`. Pre-fix `detect_auth` ignored
