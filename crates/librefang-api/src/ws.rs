@@ -1945,7 +1945,7 @@ async fn handle_command(
             .reset_session(agent_id, ResetScope::Agent)
             .await
         {
-            Ok(()) => {
+            Ok(_) => {
                 serde_json::json!({"type": "command_result", "command": "reset", "message": "Session reset. Chat history cleared."})
             }
             Err(e) => serde_json::json!({"type": "error", "content": format!("Reset failed: {e}")}),
@@ -1955,7 +1955,7 @@ async fn handle_command(
             .reboot_session(agent_id, ResetScope::Agent)
             .await
         {
-            Ok(()) => {
+            Ok(_) => {
                 serde_json::json!({"type": "command_result", "command": "reboot", "message": "Session rebooted. Context cleared."})
             }
             Err(e) => {
