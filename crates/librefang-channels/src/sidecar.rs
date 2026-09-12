@@ -674,7 +674,23 @@ struct SpawnCtx {
 async fn parse_secrets_env(path: &Path) -> Vec<(String, String)> {
     let content = match tokio::fs::read_to_string(path).await {
         Ok(s) => s,
-        Err(_) => return Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            // Absent is ordinary; present-but-unreadable is not, and it is
+            // indistinguishable from absent to every caller. That matters
+            // most for `build_spawn_env`, which builds the *withheld* list
+            // from this result: an unreadable file withholds nothing and
+            // every sibling's namespaced secret is inherited again, silently.
+            // Keep returning empty rather than failing the spawn — that is a
+            // behaviour change an operator has to opt into — but say so.
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "Could not read sidecar secrets file; its per-instance secrets will be \
+                 neither applied nor withheld for this spawn"
+            );
+            return Vec::new();
+        }
     };
     parse_secrets_env_contents(&content)
 }
@@ -721,20 +737,32 @@ fn strip_matching_outer_quotes(s: &str) -> &str {
 }
 
 /// Build the final environment for the child by layering, in order:
-///   1. `secrets.env` from `home_dir` — lowest priority. Each entry is
-///      applied only when the parent process env does NOT already have
-///      that key, matching the dotenv loader's "system env wins"
-///      precedence (`librefang_extensions::dotenv`). The child inherits
+///   1. `secrets.env` then `.env`, both from `home_dir` — lowest
+///      priority, and in that order because the dotenv loader documents
+///      `.env` as winning over `secrets.env`
+///      (`librefang_extensions::dotenv`). Each entry is applied only when
+///      the parent process env does NOT already have that key, matching
+///      the same loader's "system env wins" precedence. The child inherits
 ///      the parent env by default, so we must avoid overwriting it.
 ///   2. `ctx_env` — explicit `[sidecar_channels.env]` from config.toml.
-///      Wins over `secrets.env` (operator-explicit overrides), matching
+///      Wins over both files (operator-explicit overrides), matching
 ///      the dotenv loader's precedence where explicit values dominate
 ///      the file-loaded fallback.
 ///
-/// Returned list is the set of `(key, value)` pairs to apply via
+/// `SpawnEnv::apply` is the set of `(key, value)` pairs to apply via
 /// `Command::env`, with both layers merged. The parent env is NOT
-/// returned here — the spawned child already inherits it via
+/// returned there — the spawned child already inherits it via
 /// `Command::env_clear` not being called.
+///
+/// `SpawnEnv::withheld` is the set of keys that must be *unset* on the
+/// child via `Command::env_remove`. Declining to re-emit a key is not
+/// enough to keep it away from the child: the daemon loads both files
+/// into its own process environment at boot
+/// (`librefang_extensions::dotenv`), so every instance's
+/// `<PREFIX>__KEY` is already there and the child inherits it. Both
+/// files, not just `secrets.env` — a foreign namespaced key placed in
+/// `.env` is inherited identically, and scanning only one of them
+/// closed the front door while leaving this one open.
 /// Uppercase + non-alphanumeric→`_` form of a sidecar instance `name`, used as the
 /// `<PREFIX>__<KEY>` namespace for per-instance secrets in `secrets.env` (#6169).
 ///
@@ -832,16 +860,43 @@ pub fn warn_secret_prefix_collisions(names: &[String]) -> usize {
     collisions.len()
 }
 
+/// One spawn's environment decisions: pairs to set on the child, and keys
+/// the child must not inherit from the daemon's own environment.
+struct SpawnEnv {
+    apply: Vec<(String, String)>,
+    withheld: Vec<String>,
+}
+
+/// Apply `SpawnEnv` to `cmd`.
+///
+/// Removals go first: an operator's explicit `[sidecar_channels.env]` entry
+/// may name a key that `secrets.env` also namespaces, and the explicit value
+/// must survive. `Command` replays these in call order, so setting after
+/// removing keeps that precedence.
+fn apply_spawn_env(cmd: &mut Command, withheld: &[String], env_map: &HashMap<String, String>) {
+    for k in withheld {
+        cmd.env_remove(k);
+    }
+    for (k, v) in env_map {
+        cmd.env(k, v);
+    }
+}
+
 async fn build_spawn_env(
     home_dir: &Path,
     instance_name: &str,
     ctx_env: &HashMap<String, String>,
-) -> Vec<(String, String)> {
+) -> SpawnEnv {
     let mut merged: HashMap<String, String> = HashMap::new();
-    let secrets_path = home_dir.join("secrets.env");
+    let mut withheld: Vec<String> = Vec::new();
+    // `.env` last so it wins, matching the dotenv loader's documented
+    // order. Both are read because the daemon loads both into its own
+    // environment, so a key from either reaches the child by inheritance.
+    let mut entries = parse_secrets_env(&home_dir.join("secrets.env")).await;
+    entries.extend(parse_secrets_env(&home_dir.join(".env")).await);
     let prefix = format!("{}__", instance_secret_prefix(instance_name));
     let mut instance_scoped: HashMap<String, String> = HashMap::new();
-    for (k, v) in parse_secrets_env(&secrets_path).await {
+    for (k, v) in entries {
         if let Some(bare) = k.strip_prefix(prefix.as_str()) {
             // Per-instance secret (`<NAME>__KEY`): scoped to this instance; wins over
             // the global bare key and the parent env so two sidecars can hold their
@@ -855,12 +910,19 @@ async fn build_spawn_env(
             // namespaced secret from a global key that merely contains `__`. Both are
             // intentionally withheld from the child: a bare global secret in
             // secrets.env must not contain `__` (see librefang.toml.example).
+            //
+            // Not re-emitting the key is not enough. The daemon loaded this same
+            // file into its own environment at boot, so the child inherits the key
+            // regardless; it has to be removed explicitly at spawn.
             debug!(
                 key = %k,
                 instance = %instance_name,
                 expected_prefix = %prefix,
-                "Withholding namespaced secrets.env key from sidecar instance"
+                "Withholding another instance's namespaced secrets.env key; removing it \
+                 from this sidecar's child environment so the daemon's inherited copy \
+                 cannot reach it"
             );
+            withheld.push(k);
             continue;
         } else if std::env::var(&k).is_err() {
             // Global secrets.env: parent process env wins (dotenv precedence).
@@ -875,7 +937,10 @@ async fn build_spawn_env(
     for (k, v) in ctx_env {
         merged.insert(k.clone(), v.clone());
     }
-    merged.into_iter().collect()
+    SpawnEnv {
+        apply: merged.into_iter().collect(),
+        withheld,
+    }
 }
 
 /// Bare program name of the bundled Rust Telegram sidecar binary, without
@@ -989,10 +1054,8 @@ async fn spawn_once(
     // loader — still reach the child without a daemon restart. The
     // parent process env is the highest precedence and the child
     // already inherits it via the default `Command` setup.
-    let mut env_map: HashMap<String, String> = build_spawn_env(&ctx.home_dir, &ctx.name, &ctx.env)
-        .await
-        .into_iter()
-        .collect();
+    let spawn_env = build_spawn_env(&ctx.home_dir, &ctx.name, &ctx.env).await;
+    let mut env_map: HashMap<String, String> = spawn_env.apply.iter().cloned().collect();
     // Embedded-SDK fallback: when the spawn command is a Python
     // interpreter that cannot already `import librefang.sidecar`, put
     // the daemon-bundled copy on PYTHONPATH so a fresh user with just
@@ -1012,9 +1075,7 @@ async fn spawn_once(
     ) {
         env_map.insert("PYTHONPATH".to_string(), composed);
     }
-    for (k, v) in &env_map {
-        cmd.env(k, v);
-    }
+    apply_spawn_env(&mut cmd, &spawn_env.withheld, &env_map);
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -4068,7 +4129,7 @@ mod tests {
 
         let ctx_env: HashMap<String, String> = HashMap::new();
         let merged = build_spawn_env(tmp.path(), "test", &ctx_env).await;
-        let got: HashMap<_, _> = merged.into_iter().collect();
+        let got: HashMap<_, _> = merged.apply.into_iter().collect();
         assert_eq!(
             got.get("LIBREFANG_TEST_BSE_SECRETS_ONLY")
                 .map(|s| s.as_str()),
@@ -4092,7 +4153,7 @@ mod tests {
 
         let ctx_env: HashMap<String, String> = HashMap::new();
         let merged = build_spawn_env(tmp.path(), "test", &ctx_env).await;
-        let got: HashMap<_, _> = merged.into_iter().collect();
+        let got: HashMap<_, _> = merged.apply.into_iter().collect();
         // The merge skipped the secrets.env entry because the parent
         // env already had the key; the child still inherits the parent
         // env (we don't call env_clear), so the *effective* value is
@@ -4129,7 +4190,7 @@ mod tests {
             "from_config".to_string(),
         );
         let merged = build_spawn_env(tmp.path(), "test", &ctx_env).await;
-        let got: HashMap<_, _> = merged.into_iter().collect();
+        let got: HashMap<_, _> = merged.apply.into_iter().collect();
         assert_eq!(
             got.get("LIBREFANG_TEST_BSE_CTX_WINS").map(|s| s.as_str()),
             Some("from_config"),
@@ -4144,7 +4205,7 @@ mod tests {
         let mut ctx_env: HashMap<String, String> = HashMap::new();
         ctx_env.insert("FOO".to_string(), "bar".to_string());
         let merged = build_spawn_env(tmp.path(), "test", &ctx_env).await;
-        let got: HashMap<_, _> = merged.into_iter().collect();
+        let got: HashMap<_, _> = merged.apply.into_iter().collect();
         assert_eq!(got.get("FOO").map(|s| s.as_str()), Some("bar"));
     }
 
@@ -4165,7 +4226,7 @@ mod tests {
         }
         let ctx_env: HashMap<String, String> = HashMap::new();
         let merged = build_spawn_env(tmp.path(), "agent-a", &ctx_env).await;
-        let got: HashMap<_, _> = merged.into_iter().collect();
+        let got: HashMap<_, _> = merged.apply.into_iter().collect();
         assert_eq!(
             got.get("LIBREFANG_TEST_BSE_PI").map(|s| s.as_str()),
             Some("for_a"),
@@ -4181,6 +4242,11 @@ mod tests {
     async fn build_spawn_env_other_instance_namespaced_secret_does_not_leak() {
         // A different instance's `<NAME>__KEY` secret must not reach this child,
         // neither under the bare name nor under the namespaced name.
+        //
+        // This covers only half of "does not leak": it clears the parent value
+        // first, so it says nothing about the key the child *inherits*. That is
+        // the half that was failing in production —
+        // `spawn_env_removes_inherited_foreign_namespaced_secret` below covers it.
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join("secrets.env"),
@@ -4193,11 +4259,119 @@ mod tests {
         }
         let ctx_env: HashMap<String, String> = HashMap::new();
         let merged = build_spawn_env(tmp.path(), "agent-a", &ctx_env).await;
-        let got: HashMap<_, _> = merged.into_iter().collect();
+        let got: HashMap<_, _> = merged.apply.into_iter().collect();
         assert!(
             !got.contains_key("LIBREFANG_TEST_BSE_LEAK")
                 && !got.contains_key("AGENT_B__LIBREFANG_TEST_BSE_LEAK"),
             "agent-b's namespaced secret must not leak into agent-a's child env"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_env_removes_inherited_foreign_namespaced_secret() {
+        // The daemon loads all of `secrets.env` into its OWN environment at boot,
+        // so `AGENT_B__…` is present in the parent process and every child
+        // inherits it. Declining to re-emit the key therefore isolates nothing:
+        // measured on a live host, the `telegram` sidecar held both
+        // `LAFORGE__TELEGRAM_BOT_TOKEN` and `MERCAMAN__TELEGRAM_BOT_TOKEN` while
+        // the daemon logged that it was withholding them. The spawn has to
+        // remove the key explicitly.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("secrets.env"),
+            "AGENT_B__LIBREFANG_TEST_INHERITED_LEAK=for_b\n",
+        )
+        .unwrap();
+        // SAFETY: test-local key; stands in for the daemon's dotenv load.
+        unsafe {
+            std::env::set_var(
+                "AGENT_B__LIBREFANG_TEST_INHERITED_LEAK",
+                "inherited_from_daemon",
+            );
+        }
+
+        let ctx_env: HashMap<String, String> = HashMap::new();
+        let spawn_env = build_spawn_env(tmp.path(), "agent-a", &ctx_env).await;
+        let env_map: HashMap<String, String> = spawn_env.apply.iter().cloned().collect();
+        let mut cmd = Command::new("does-not-need-to-exist");
+        apply_spawn_env(&mut cmd, &spawn_env.withheld, &env_map);
+        let unset = cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "AGENT_B__LIBREFANG_TEST_INHERITED_LEAK" && v.is_none());
+
+        // SAFETY: cleanup of the key we just set.
+        unsafe {
+            std::env::remove_var("AGENT_B__LIBREFANG_TEST_INHERITED_LEAK");
+        }
+        assert!(
+            unset,
+            "agent-b's namespaced secret must be unset on agent-a's child, not merely \
+             left unassigned — the child inherits the daemon's copy otherwise"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_env_removes_foreign_namespaced_secret_from_dot_env() {
+        // `load_dotenv` reads `~/.librefang/.env` into the daemon's own
+        // environment as well, ahead of `secrets.env` in its documented
+        // precedence. A foreign `<PREFIX>__KEY` placed there is inherited by
+        // every child exactly like one from `secrets.env`, so building the
+        // withheld list from a single file shut the front door and left this
+        // one open.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join(".env"),
+            "AGENT_B__LIBREFANG_TEST_DOTENV_LEAK=for_b\n",
+        )
+        .unwrap();
+        // SAFETY: test-local key; stands in for the daemon's dotenv load.
+        unsafe {
+            std::env::set_var(
+                "AGENT_B__LIBREFANG_TEST_DOTENV_LEAK",
+                "inherited_from_daemon",
+            );
+        }
+
+        let ctx_env: HashMap<String, String> = HashMap::new();
+        let spawn_env = build_spawn_env(tmp.path(), "agent-a", &ctx_env).await;
+        let env_map: HashMap<String, String> = spawn_env.apply.iter().cloned().collect();
+        let mut cmd = Command::new("does-not-need-to-exist");
+        apply_spawn_env(&mut cmd, &spawn_env.withheld, &env_map);
+        let unset = cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "AGENT_B__LIBREFANG_TEST_DOTENV_LEAK" && v.is_none());
+
+        // SAFETY: cleanup of the key we just set.
+        unsafe {
+            std::env::remove_var("AGENT_B__LIBREFANG_TEST_DOTENV_LEAK");
+        }
+        assert!(
+            unset,
+            "a foreign namespaced secret in .env must be unset on the child too"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_env_withholds_nothing_without_namespaced_keys() {
+        // The single-instance case, which the removal must not break: a bare
+        // key and no `<PREFIX>__` anywhere. Removals run before the merge, so
+        // an over-eager withheld list would strip the very token the adapter
+        // needs and the child would start without it.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("secrets.env"),
+            "LIBREFANG_TEST_BARE_ONLY=value\n",
+        )
+        .unwrap();
+
+        let ctx_env: HashMap<String, String> = HashMap::new();
+        let spawn_env = build_spawn_env(tmp.path(), "solo", &ctx_env).await;
+        assert!(
+            spawn_env.withheld.is_empty(),
+            "nothing to withhold when no key carries the `__` namespace: {:?}",
+            spawn_env.withheld
         );
     }
 
