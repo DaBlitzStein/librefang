@@ -801,6 +801,16 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 /// and unmistakable in `git log` / log output (`r00t…`).
 pub const ROOT_API_KEY_USER_ID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-72006f0074a0");
 
+/// Audit-log identity for a restored session row that carries no `user_name`.
+///
+/// A sentinel for the same reason [`ROOT_API_KEY_USER_ID`] is one:
+/// `UserId::from_name("anonymous")` would collide with a real
+/// `[users] name = "anonymous"` in `config.toml` and attribute these requests
+/// to that account. Such a session is denied everything above the Viewer floor,
+/// so this id only ever reaches the audit row for the denial.
+pub const UNATTRIBUTED_SESSION_USER_ID: uuid::Uuid =
+    uuid::uuid!("00000000-0000-0000-0000-616e6f6e0000");
+
 /// Resolved language code extracted from the `Accept-Language` header.
 ///
 /// Inserted into request extensions by the [`accept_language`] middleware so
@@ -1780,7 +1790,9 @@ pub async fn auth(
                 // a session cookie that must retain its role attribution.
                 let session_attribution = {
                     let sessions = auth_state.active_sessions.read().await;
-                    sessions.get(&token_str).cloned()
+                    sessions
+                        .get(&crate::password_hash::hash_device_token(&token_str))
+                        .cloned()
                 };
                 if let Some(session) = session_attribution {
                     if let (Some(name), Some(role_str)) = (session.user_name, session.user_role) {
@@ -2170,30 +2182,53 @@ pub async fn auth(
                 crate::password_hash::DEFAULT_SESSION_TTL_SECS,
             )
         });
-        if let Some(session) = sessions.get(token_str).cloned() {
+        if let Some(session) = sessions
+            .get(&crate::password_hash::hash_device_token(token_str))
+            .cloned()
+        {
             drop(sessions);
-            // If the session was issued by a credential flow that carried
-            // identity (dashboard_login attaches `user_name` + `user_role`),
-            // rebuild the AuthenticatedApiUser extension so RBAC-gated
-            // handlers (audit/query, per-user budget writes) can see the
-            // role. Legacy sessions persisted before attribution was added
-            // load with both fields `None` and continue through as
-            // trusted-anonymous — preserves the pre-fix behaviour for any
-            // session sitting in `~/.librefang/sessions.json` from older
-            // builds.
-            if let (Some(name), Some(role_str)) = (session.user_name, session.user_role) {
-                let role = UserRole::from_str_role(&role_str);
-                let user_id = UserId::from_name(&name);
-                // Enforce the same RBAC gate as the per-user-API-key branch:
-                // a session's role must be allowed to reach this endpoint.
-                if !user_role_allows_request(role, &method, path) {
-                    let lang = request
-                        .extensions()
-                        .get::<RequestLanguage>()
-                        .map(|rl| rl.0)
-                        .unwrap_or(i18n::DEFAULT_LANGUAGE);
-                    return rbac_denied_response(&auth_state, &method, path, role, user_id, lang);
-                }
+            // A session issued by a credential flow carries identity
+            // (`dashboard_login` attaches `user_name` + `user_role`), which
+            // rebuilds the AuthenticatedApiUser extension so RBAC-gated
+            // handlers (audit/query, per-user budget writes) can see the role.
+            //
+            // A row that carries neither — written before attribution existed,
+            // or edited by hand — is evaluated at `Viewer`, the floor. The gate
+            // itself runs either way. It used to sit inside the `if let`, so an
+            // unattributed row skipped owner-only writes, privileged GETs and
+            // the non-GET check entirely and fell straight through to the
+            // handler.
+            //
+            // That fail-open was reachable before this change, not merely
+            // latent: `load_sessions` discarded the HASHED rows and kept the
+            // cleartext-keyed ones, and a daemon old enough to predate
+            // attribution also predates #5494, so it wrote cleartext keys. Its
+            // unattributed rows loaded and authenticated with the gate skipped.
+            // `try_from_str_role` and not `from_str_role`: the lax variant
+            // resolves anything unrecognised to `User`, so a row carrying
+            // `""` or a typo like `"vewer"` would land ABOVE the floor while
+            // this code claims to be applying one. The strict variant is what
+            // the channel-role translators already use for the same reason
+            // (`auth.rs:70-74`).
+            let role = session
+                .user_role
+                .as_deref()
+                .and_then(UserRole::try_from_str_role)
+                .unwrap_or(UserRole::Viewer);
+            let user_id = session
+                .user_name
+                .as_deref()
+                .map(UserId::from_name)
+                .unwrap_or(UserId(UNATTRIBUTED_SESSION_USER_ID));
+            if !user_role_allows_request(role, &method, path) {
+                let lang = request
+                    .extensions()
+                    .get::<RequestLanguage>()
+                    .map(|rl| rl.0)
+                    .unwrap_or(i18n::DEFAULT_LANGUAGE);
+                return rbac_denied_response(&auth_state, &method, path, role, user_id, lang);
+            }
+            if let Some(name) = session.user_name {
                 request.extensions_mut().insert(AuthenticatedApiUser {
                     name,
                     role,

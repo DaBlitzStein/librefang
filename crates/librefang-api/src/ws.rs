@@ -532,7 +532,9 @@ pub async fn agent_ws(
                     crate::password_hash::DEFAULT_SESSION_TTL_SECS,
                 )
             });
-            let session = sessions.get(token_str).cloned();
+            let session = sessions
+                .get(&crate::password_hash::hash_device_token(token_str))
+                .cloned();
             session_auth = session.is_some();
             if let Some(session) = session {
                 if let (Some(name), Some(role)) = (session.user_name, session.user_role) {
