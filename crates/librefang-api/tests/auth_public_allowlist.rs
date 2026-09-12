@@ -132,6 +132,15 @@ async fn boot_router_strict_reads() -> RouterHarness {
     }
 }
 
+/// Mirror of `middleware::matches_route`'s `PublicMatch::SingleSegment` arm: `route` (which ends in `/`) plus exactly one more segment.
+fn matches_single_segment(route: &str, path: &str) -> bool {
+    route
+        .strip_suffix('/')
+        .and_then(|base| path.strip_prefix(base))
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|segment| !segment.is_empty() && !segment.contains('/'))
+}
+
 /// Returns `true` if `path` is unconditionally public on GET requests — i.e.
 /// it appears in `PUBLIC_ROUTES_ALWAYS`, `PUBLIC_ROUTES_GET_ONLY`, or is
 /// handled by the dedicated `is_mcp_oauth_callback` guard in the middleware
@@ -141,6 +150,7 @@ fn is_in_always_public(path: &str) -> bool {
         let ok = match r.match_kind {
             PublicMatch::Exact => path == r.path,
             PublicMatch::Prefix => path.starts_with(r.path),
+            PublicMatch::SingleSegment => matches_single_segment(r.path, path),
         };
         if ok {
             return true;
@@ -154,6 +164,7 @@ fn is_in_always_public(path: &str) -> bool {
         let ok = match r.match_kind {
             PublicMatch::Exact => path == r.path,
             PublicMatch::Prefix => path.starts_with(r.path),
+            PublicMatch::SingleSegment => matches_single_segment(r.path, path),
         };
         if ok {
             return true;
@@ -173,6 +184,7 @@ fn is_in_dashboard_reads(path: &str) -> bool {
         let ok = match r.match_kind {
             PublicMatch::Exact => path == r.path,
             PublicMatch::Prefix => path.starts_with(r.path),
+            PublicMatch::SingleSegment => matches_single_segment(r.path, path),
         };
         if ok {
             return true;
@@ -236,7 +248,11 @@ const fn re(path: &'static str, expect: Expect) -> RouteEntry {
 /// Paths with dynamic segments use a representative concrete value.
 const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     // Always-public (in PUBLIC_ROUTES_ALWAYS or PUBLIC_ROUTES_GET_ONLY)
-    re("/", Expect::AlwaysPublic),
+    //
+    // `/` has no row here.
+    // It serves the SPA shell, which is conditionally public: reachable when no dashboard password is configured, answered with the login page when one is (#8261).
+    // None of the three classifications above can express that, and it is already how the rest of the shell is treated — no `/dashboard/<spa-route>` path appears in this table either.
+    // Both halves are pinned in `tests/dashboard_shell_gate_test.rs`.
     re("/favicon.ico", Expect::AlwaysPublic),
     re("/logo.png", Expect::AlwaysPublic),
     re("/.well-known/agent.json", Expect::AlwaysPublic),
@@ -319,7 +335,6 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/mcp/catalog", Expect::DashboardRead),
     re("/api/mcp/health", Expect::DashboardRead),
     re("/api/config", Expect::DashboardRead),
-    re("/api/mcp/servers", Expect::DashboardRead),
     re("/api/models", Expect::DashboardRead),
     re("/api/models/aliases", Expect::DashboardRead),
     re("/api/network/status", Expect::DashboardRead),
@@ -341,6 +356,33 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     // state are sensitive. Only /auth/callback is public (via is_mcp_oauth_callback).
     re("/api/mcp/servers/test-srv", Expect::Authed),
     re("/api/mcp/servers/test-srv/auth/status", Expect::Authed),
+    // #8304: `/api/mcp/servers` came out of PUBLIC_ROUTES_DASHBOARD_READS —
+    // it returns each server's transport verbatim (stdio `command`/`args`,
+    // or an SSE/HTTP `url` with its query string, where a remote MCP
+    // endpoint's credential normally lives) — and is now gated to Admin by
+    // `min_role_for_privileged_get`, so it belongs with its `{name}` sibling
+    // above rather than in the dashboard-reads group below.
+    re("/api/mcp/servers", Expect::Authed),
+    // The `/api/hands/` prefix used to publish everything under an item, in the same class as the `/api/cron/` removal: the linked agent session (every message plus tool inputs and results), the raw HAND.toml with its authored prompt, the instance config, and a live browser screenshot the handler takes by driving the agent's browser on a GET.
+    // Only the item read itself (`/api/hands/{id}`, above) stays in the dashboard-read group.
+    re("/api/hands/my-hand/manifest", Expect::Authed),
+    re("/api/hands/my-hand/settings", Expect::Authed),
+    re(
+        "/api/hands/instances/00000000-0000-0000-0000-000000000001/session",
+        Expect::Authed,
+    ),
+    re(
+        "/api/hands/instances/00000000-0000-0000-0000-000000000001/browser",
+        Expect::Authed,
+    ),
+    re(
+        "/api/hands/instances/00000000-0000-0000-0000-000000000001/status",
+        Expect::Authed,
+    ),
+    re(
+        "/api/hands/instances/00000000-0000-0000-0000-000000000001/stats",
+        Expect::Authed,
+    ),
     re("/api/agents/some-id/session", Expect::Authed),
     re("/api/agents/some-id/metrics", Expect::Authed),
     re("/api/agents/some-id/logs", Expect::Authed),
@@ -687,5 +729,75 @@ async fn auth_providers_open_mode_returns_names_only() {
     assert!(
         p.get("scopes").is_none(),
         "open-mode anonymous response must NOT include `scopes`; got {p:?}"
+    );
+}
+
+/// The `require_auth_for_reads` derivation has two halves — the configured flag and "is any credential configured" — and the second half must be evaluated live.
+/// `api_key` hot-reloads: `POST /api/config/reload` and the config-file watcher both push the new value into the shared `api_key_lock` via `refresh_master_credential`, and `build_reload_plan` classifies the field as effective immediately, so the response reports `restart_required: false`.
+/// With the whole derivation snapshotted at boot, an operator who booted without credentials and then added an `api_key` kept every dashboard read anonymous until the daemon restarted, and nothing told them.
+#[tokio::test(flavor = "multi_thread")]
+async fn dashboard_reads_close_when_an_api_key_arrives_via_reload() {
+    let harness = boot_router_with_api_key("").await;
+
+    // Open mode: no credential of any kind, so the dashboard-reads allowlist is public.
+    let before = get_status(harness.app.clone(), "/api/status").await;
+    assert_ne!(
+        before,
+        StatusCode::UNAUTHORIZED,
+        "with no auth configured /api/status must be readable anonymously, got {before}"
+    );
+
+    // Exactly what a config reload does once `api_key` is set on disk.
+    *harness._state.api_key_lock.write().await = "reloaded-secret-key".to_string();
+
+    let after = get_status(harness.app.clone(), "/api/status").await;
+    assert_eq!(
+        after,
+        StatusCode::UNAUTHORIZED,
+        "an api_key added by config reload must close the dashboard-reads allowlist \
+         without a daemon restart, got {after}"
+    );
+
+    // The reloaded key authenticates the same read, so the lockdown is not a lockout.
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/status")
+        .header("Authorization", "Bearer reloaded-secret-key")
+        .body(Body::empty())
+        .unwrap();
+    let authed = harness.app.clone().oneshot(req).await.unwrap().status();
+    assert_ne!(
+        authed,
+        StatusCode::UNAUTHORIZED,
+        "the reloaded api_key must authenticate the read it just closed, got {authed}"
+    );
+}
+
+/// Same derivation, the other credential kind that reaches the middleware without a restart.
+/// `dashboard_user` / `dashboard_pass` / `dashboard_pass_hash` are classified `HotAction::UpdateDashboardCredentials` with no restart flag, and `server::refresh_dashboard_auth_flag` pushes the re-derived value into the shared handle on `POST /api/config/reload`, on the config-file watcher tick, and on a dashboard credential change.
+/// While the middleware held a boot-time `bool`, an operator whose remediation was "add a dashboard password and reload" kept the reads allowlist open, the `/dashboard/*` shell public, and the fail-closed no-auth branch disarmed.
+#[tokio::test(flavor = "multi_thread")]
+async fn dashboard_reads_close_when_dashboard_credentials_arrive_via_reload() {
+    let harness = boot_router_with_api_key("").await;
+
+    let before = get_status(harness.app.clone(), "/api/status").await;
+    assert_ne!(
+        before,
+        StatusCode::UNAUTHORIZED,
+        "with no auth configured /api/status must be readable anonymously, got {before}"
+    );
+
+    // Exactly what a reload does once `dashboard_user` + `dashboard_pass` are set on disk.
+    harness
+        ._state
+        .dashboard_auth_enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let after = get_status(harness.app.clone(), "/api/status").await;
+    assert_eq!(
+        after,
+        StatusCode::UNAUTHORIZED,
+        "dashboard credentials added by config reload must close the dashboard-reads \
+         allowlist without a daemon restart, got {after}"
     );
 }

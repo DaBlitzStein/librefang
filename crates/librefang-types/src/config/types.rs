@@ -1575,13 +1575,13 @@ pub struct DockerSandboxConfig {
     /// Container lifecycle scope. Default: session.
     #[serde(default)]
     pub scope: DockerScope,
-    /// Cooldown before reusing a released container (seconds). Default: 300.
+    /// Settling time before a container released by one agent may be handed to a different agent; applies to scope = shared only, and never to an agent re-acquiring its own container. Default: 300.
     #[serde(default = "default_reuse_cool_secs")]
     pub reuse_cool_secs: u64,
-    /// Idle timeout — destroy containers after N seconds of inactivity. Default: 86400 (24h).
+    /// Idle timeout — destroy pooled containers after N seconds of inactivity; 0 disables. Default: 86400 (24h).
     #[serde(default = "default_docker_idle_timeout")]
     pub idle_timeout_secs: u64,
-    /// Maximum age before forced destruction (seconds). Default: 604800 (7 days).
+    /// Maximum age, measured from container creation rather than from the last release, before forced destruction (seconds); 0 disables. Default: 604800 (7 days).
     #[serde(default = "default_docker_max_age")]
     pub max_age_secs: u64,
     /// Paths blocked from bind mounting.
@@ -2344,12 +2344,12 @@ pub enum DockerSandboxMode {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DockerScope {
-    /// Container per session (destroyed when session ends).
+    /// Container per (agent, session), reused by every tool call in that session.
     #[default]
     Session,
-    /// Container per agent (reused across sessions).
+    /// Container per agent, reused across that agent's sessions.
     Agent,
-    /// Shared container pool.
+    /// Container per (config, workspace), reused by any agent that mounts the same workspace.
     Shared,
 }
 
@@ -4238,6 +4238,14 @@ pub struct KernelConfig {
     /// Enterprise deployments may need larger file uploads.
     #[serde(default = "default_max_upload_size_bytes")]
     pub max_upload_size_bytes: usize,
+    /// Maximum number of `POST /api/agents/{id}/upload` requests allowed to be
+    /// mid-flight at once (default: 8).
+    /// `upload_file` extracts `axum::body::Bytes`, buffering the whole body in
+    /// RAM before the handler runs, so uncapped concurrency at `max_upload_size_bytes`
+    /// costs `concurrent_requests * max_upload_size_bytes` in RSS. This bounds
+    /// worst-case peak RAM from the upload path to `max_concurrent_uploads * max_upload_size_bytes`.
+    #[serde(default = "default_max_concurrent_uploads")]
+    pub max_concurrent_uploads: usize,
     /// Maximum number of concurrent background LLM calls across all agents.
     /// Increase on high-core servers that can handle more parallel inference.
     #[serde(default = "default_max_concurrent_bg_llm")]
@@ -5530,6 +5538,11 @@ fn default_tool_timeout_secs() -> u64 {
 /// Default maximum upload size in bytes (10 MB).
 fn default_max_upload_size_bytes() -> usize {
     10 * 1024 * 1024
+}
+
+/// Default maximum number of concurrent in-flight uploads (8).
+fn default_max_concurrent_uploads() -> usize {
+    8
 }
 
 /// Default maximum concurrent background LLM calls.
@@ -6977,6 +6990,7 @@ impl Default for KernelConfig {
             tool_timeout_secs: default_tool_timeout_secs(),
             tool_timeouts: std::collections::BTreeMap::new(),
             max_upload_size_bytes: default_max_upload_size_bytes(),
+            max_concurrent_uploads: default_max_concurrent_uploads(),
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),

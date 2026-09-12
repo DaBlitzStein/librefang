@@ -27,18 +27,6 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         .route("/media/transcribe", axum::routing::post(transcribe_audio))
 }
 
-// ── Known media providers (mirrors MEDIA_PROVIDER_ORDER in runtime) ─────
-
-/// Built-in media provider names, in preference order, for
-/// `GET /media/providers` to report configuration status against.
-///
-/// This is a **display list, not an allowlist**: `create_media_driver` also
-/// serves user-defined providers that have `provider_urls.<name>` configured,
-/// via the generic OpenAI-compatible driver. Gating a route on membership here
-/// would reject those.
-/// Keep in sync with `librefang_kernel::media::MEDIA_PROVIDER_ORDER`.
-const KNOWN_MEDIA_PROVIDERS: &[&str] = &["openai", "gemini", "elevenlabs", "minimax", "google_tts"];
-
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Convert a `MediaError` into an [`ApiErrorResponse`].
@@ -541,11 +529,25 @@ impl Drop for TempUploadGuard {
 // ── GET /media/providers ────────────────────────────────────────────────
 
 /// List available media providers with their capabilities and config status.
+///
+/// The provider list comes from [`MediaDriverCache::media_provider_ids`], which the kernel loads from the registry at boot — the same list auto-detection picks from.
+/// It used to be a five-name constant in this file, and the two inventories had already drifted apart in both directions: `byteplus` declares image and video generation in the registry and was invisible here, so the daemon could auto-select a provider the dashboard never listed.
 pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Registry-declared capabilities, for providers that have no built-in
+    // driver. `create_media_driver` fails for those unless a `provider_urls`
+    // entry gives it a base URL, but the provider is still real and the
+    // dashboard needs to know which functions it would serve once configured.
+    let catalog = state.kernel.model_catalog_ref().load();
+    let declared: std::collections::HashMap<&str, &[String]> = catalog
+        .list_providers()
+        .iter()
+        .map(|p| (p.id.as_str(), p.media_capabilities.as_slice()))
+        .collect();
+
     let mut providers = Vec::new();
 
-    for &name in KNOWN_MEDIA_PROVIDERS {
-        match state.media_drivers.get_or_create(name, None) {
+    for name in state.media_drivers.media_provider_ids() {
+        match state.media_drivers.get_or_create(&name, None) {
             Ok(driver) => {
                 providers.push(serde_json::json!({
                     "name": driver.provider_name(),
@@ -554,12 +556,13 @@ pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl In
                 }));
             }
             Err(_) => {
-                // Provider could not be instantiated (should not happen for known providers)
+                // No built-in driver and no `provider_urls.<name>` base URL, so
+                // there is nothing to ask `is_configured()`. That is an
+                // unconfigured provider, not a broken one.
                 providers.push(serde_json::json!({
                     "name": name,
                     "configured": false,
-                    "capabilities": [],
-                    "error": "driver instantiation failed",
+                    "capabilities": declared.get(name.as_str()).copied().unwrap_or(&[]),
                 }));
             }
         }

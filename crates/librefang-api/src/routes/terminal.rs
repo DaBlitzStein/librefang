@@ -458,7 +458,7 @@ pub(super) async fn authorize_terminal_request(
                     crate::password_hash::DEFAULT_SESSION_TTL_SECS,
                 )
             });
-            sessions.contains_key(token_str)
+            sessions.contains_key(&crate::password_hash::hash_device_token(token_str))
         };
         let user_key_auth = !session_auth
             && user_api_keys
@@ -2083,6 +2083,7 @@ mod hash_only_terminal_auth_tests {
             // Empty, which is the whole point: a hash carries no plaintext.
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             master_key,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             config_write_lock: tokio::sync::Mutex::new(()),
             pending_a2a_agents: dashmap::DashMap::new(),

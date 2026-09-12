@@ -236,6 +236,7 @@ audit-failed = Перевірка цілісності аудиторськог�
 
 # --- Health ---
 health-ok = Демон здоровий
+health-degraded = Демон доступний, але повідомляє про несправну підсистему
 health-not-running = Демон не запущений.
 
 # --- Channel setup ---
@@ -2111,6 +2112,9 @@ tui-agents-title-templates = Шаблони
 tui-agents-title-custom-name = Власний — Ім'я
 tui-agents-title-custom-desc = Власний — Опис
 tui-agents-title-custom-prompt = Власний — Системний промпт
+tui-agents-detail-tokens = Обсяг токенів  ($ оновити)
+tui-agents-detail-tokens-injected = введено
+tui-agents-token-usage-failed = Не вдалося завантажити обсяг токенів
 tui-agents-title-custom-tools = Власний — Інструменти
 tui-agents-title-custom-skills = Власний — Скіли
 tui-agents-title-custom-mcp = Власний — MCP-сервери
@@ -2145,7 +2149,7 @@ tui-agents-opt-create-new = Створити нового агента
 
 tui-agents-hints-filter =   [Введення] Фільтр  [Enter] Застосувати  [Esc] Скасувати пошук
 tui-agents-hints-list =   [↑↓] Навігація  [Enter] Деталі  [/] Пошук  [Esc] Назад
-tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [p] Параметри моделі  [c] Чат  [k] Зупинити  [Esc] Назад
+tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [p] Параметри моделі  [$] Токени  [c] Чат  [k] Зупинити  [Esc] Назад
 tui-agents-title-model-params = Параметри моделі
 tui-agents-prompt-model-params = Налаштування цього агента мають перевагу над налаштуваннями моделі. `inherit` означає налаштування моделі.
 tui-agents-hints-model-params =   [←→] Змінити  [i] Успадкувати  [e] Своє значення  [Enter] Зберегти  [Esc] Скасувати
@@ -2618,3 +2622,32 @@ tui-memory-config-requires-daemon = Налаштування пам'яті на�
 tui-memory-config-fetch-failed = Не вдалося прочитати налаштування пам'яті: { $error }
 tui-goals-run-requires-daemon = Стан запуску надходить з API демона — недоступний, коли TUI підключено в межах процесу.
 tui-goals-run-fetch-failed = Не вдалося прочитати стан запуску для { $id }: { $error }
+
+# config_editor.rs — загальний редактор секцій конфігурації (#8165)
+tui-settings-tab-config = 6 Конфігурація
+tui-settings-hints-config =   [↑↓] Навігація  [Enter] Відкрити секцію  [r] Оновити
+tui-settings-hints-config-fields =   [↑↓] Навігація  [Enter] Редагувати / Перемкнути  [Esc] Назад  [r] Оновити
+tui-settings-config-loading = Завантаження конфігурації…
+tui-settings-config-empty = Секції конфігурації недоступні. Демон має бути запущений.
+tui-settings-config-select-section = Оберіть секцію ліворуч і натисніть [Enter], щоб побачити її налаштування.
+tui-settings-config-header-section = Секція
+tui-settings-config-header-setting = Налаштування
+tui-settings-config-header-value = Значення
+tui-settings-config-unset = не задано
+tui-settings-config-on = увімк
+tui-settings-config-off = вимк
+tui-settings-config-readonly = лише читання
+tui-settings-config-readonly-msg = { $path } доступне лише для читання — змініть ~/.librefang/config.toml напряму.
+tui-settings-config-complex = { $path } містить список або таблицю — змініть ~/.librefang/config.toml напряму.
+tui-settings-config-invalid = Це не є коректним значенням для { $path }.
+tui-settings-config-redacted = { $path } показано приховано — введіть нове значення повністю; порожній рядок тут не приймається.
+tui-settings-config-prompt = Задати { $path } (порожнє значення очищає):
+tui-mod-config-value-saved = Збережено { $path }
+tui-mod-config-value-saved-restart = Збережено { $path } — перезапустіть демон, щоб зміни набули чинності
+tui-mod-config-value-saved-reload-failed = { $path } збережено у config.toml, але перезавантаження не вдалося: { $error }
+tui-event-config-schema-failed = Не вдалося завантажити схему конфігурації
+tui-event-config-schema-unreadable = Демон відповів, але не вдалося прочитати схему конфігурації: { $error }
+tui-event-config-failed = Не вдалося завантажити поточну конфігурацію
+tui-event-config-unreadable = Демон відповів, але не вдалося прочитати поточну конфігурацію: { $error }
+tui-event-config-set-failed = Не вдалося зберегти { $path }
+tui-event-config-need-daemon = Редагування конфігурації потребує запущеного демона

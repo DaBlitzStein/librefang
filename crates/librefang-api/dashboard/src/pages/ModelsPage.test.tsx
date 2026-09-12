@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   ModelsPage,
@@ -261,6 +261,14 @@ function renderPage() {
 }
 
 describe("ModelsPage", () => {
+
+  // The three token fields in this modal are the shared `ModelParamField`, so
+  // their rung labels ("8K", "32K"…) repeat across them. Scope every query to
+  // the field's own container rather than the modal.
+  function ladderFor(label: string): HTMLElement {
+    return screen.getByRole("group", { name: label });
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     // Reset persisted Zustand state that affects filtering visibility.
@@ -491,27 +499,32 @@ describe("ModelsPage", () => {
     renderPage();
     fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
 
-    const temperatureRange = () =>
-      screen
-        .getAllByLabelText("models.temperature")
-        .find(
-          (element): element is HTMLInputElement =>
-            element instanceof HTMLInputElement && element.type === "range",
-        )!;
-    await waitFor(() => expect(temperatureRange().value).toBe("0.2"));
+    // Temperature is a rung ladder here, same as in the agent editor, so the
+    // selected value is the pressed rung rather than a range input's `value`.
+    const temperatureField = () =>
+      screen.getByText("model_param.temperature").closest("div") as HTMLElement;
+    const expectRung = async (rung: string) =>
+      waitFor(() =>
+        expect(within(temperatureField()).getByRole("button", { name: rung })).toHaveAttribute(
+          "aria-pressed",
+          "true",
+        ),
+      );
+
+    await expectRung("0.2");
 
     overrides = { temperature: 0.5 };
     fireEvent.change(screen.getByPlaceholderText("models.search_placeholder"), {
       target: { value: "g" },
     });
-    await waitFor(() => expect(temperatureRange().value).toBe("0.5"));
+    await expectRung("0.5");
 
-    fireEvent.change(temperatureRange(), { target: { value: "0.9" } });
+    fireEvent.click(within(temperatureField()).getByRole("button", { name: "1.5" }));
     overrides = { temperature: 0.7 };
     fireEvent.change(screen.getByPlaceholderText("models.search_placeholder"), {
       target: { value: "gp" },
     });
-    await waitFor(() => expect(temperatureRange().value).toBe("0.9"));
+    await expectRung("1.5");
   });
 
   it("does not apply settings-save effects after the drawer unmounts", async () => {
@@ -536,22 +549,21 @@ describe("ModelsPage", () => {
     expect(useUIStore.getState().toasts).toEqual([]);
   });
 
-  it("saves context_window when the override is enabled and omits it when untouched", async () => {
+  it("saves context_window when a rung is picked and omits it while on inherit", async () => {
     setLoaded();
     const { update } = setMutationDefaults();
     renderPage();
     fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
 
-    const ctxSwitch = () => screen.getByRole("switch", { name: "models.context_window" });
-    expect(ctxSwitch()).toHaveAttribute("aria-checked", "false");
-    fireEvent.click(ctxSwitch());
-    expect(ctxSwitch()).toHaveAttribute("aria-checked", "true");
+    const ctx = ladderFor("model_param.context_window");
+    // Inherit is where an untouched field sits — a rung you can point at
+    // rather than a toggle whose off position is a number nobody chose.
+    expect(within(ctx).getByRole("button", { name: "model_param.inherit" }))
+      .toHaveAttribute("aria-pressed", "true");
 
-    fireEvent.change(
-      screen.getAllByLabelText("models.context_window")
-        .find((el): el is HTMLInputElement => el instanceof HTMLInputElement && el.type === "range")!,
-      { target: { value: "262144" } },
-    );
+    fireEvent.click(within(ctx).getByRole("button", { name: "256K" }));
+    expect(within(ctx).getByRole("button", { name: "256K" }))
+      .toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() =>
@@ -582,13 +594,8 @@ describe("ModelsPage", () => {
     renderPage();
     fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
 
-    const outSwitch = () => screen.getByRole("switch", { name: "models.max_output" });
-    fireEvent.click(outSwitch());
-    fireEvent.change(
-      screen.getAllByLabelText("models.max_output")
-        .find((el): el is HTMLInputElement => el instanceof HTMLInputElement && el.type === "range")!,
-      { target: { value: "16384" } },
-    );
+    const out = ladderFor("model_param.max_output_tokens");
+    fireEvent.click(within(out).getByRole("button", { name: "16K" }));
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() =>
@@ -600,33 +607,96 @@ describe("ModelsPage", () => {
     );
   });
 
-  it("treats a zero context_window as unknown and offers the default, never 0", async () => {
-    // `ModelCatalogEntry::context_window` is a `u64` with `#[serde(default)]` and no
-    // `skip_serializing_if`, so an unknown window arrives as `0` on the wire, not as
-    // `undefined` — `??` would let it through. The type's own doc is explicit:
-    // "Consumers MUST treat `0` as unknown and supply their own default." Enabling the
-    // override on such a model must post the default, not write the sentinel back as
-    // if the operator had chosen it.
-    setLoaded([{ ...sampleModels[0], id: "zero-window", context_window: 0 }]);
+  // A `0` is how these fields say "unknown" on the wire (`ModelCatalogEntry`'s
+  // counts are `u64` with `#[serde(default)]`), and `model_catalog.rs` filters
+  // it out with the comment "so a cleared dashboard field cannot pin a model's
+  // window to zero tokens". The drawer must not present one as a setting the
+  // operator chose, from either direction.
+  it("does not present a stored zero override as an active setting", async () => {
+    setLoaded();
+    useModelOverridesMock.mockReturnValue({
+      data: { context_window: 0, max_output_tokens: 0, max_tokens: 0 },
+      isLoading: false,
+    });
     const { update } = setMutationDefaults();
     renderPage();
     fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
 
-    const slider = screen.getAllByLabelText("models.context_window")
-      .find((el): el is HTMLInputElement => el instanceof HTMLInputElement && el.type === "range")!;
-    // Before the toggle: the display falls back to the default, not to the 1024 floor.
-    expect(slider.value).toBe("128000");
+    for (const label of [
+      "model_param.context_window",
+      "model_param.max_output_tokens",
+      "model_param.max_tokens",
+    ]) {
+      expect(
+        within(ladderFor(label)).getByRole("button", { name: "model_param.inherit" }),
+        `${label} must read as inherit, not as an override of 0`,
+      ).toHaveAttribute("aria-pressed", "true");
+    }
 
-    fireEvent.click(screen.getByRole("switch", { name: "models.context_window" }));
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() => expect(update.mutateAsync).toHaveBeenCalled());
+    const { overrides } = update.mutateAsync.mock.calls[0][0];
+    expect(overrides).not.toHaveProperty("context_window");
+    expect(overrides).not.toHaveProperty("max_output_tokens");
+    expect(overrides).not.toHaveProperty("max_tokens");
+  });
+
+  // The slider this replaced clamped to its `min`; a free-text field does not,
+  // and `min="1"` is only checked on form submit, which this drawer never does.
+  // `PUT /api/models/overrides/{id}` stores what it is given and the OpenAI
+  // driver puts `max_tokens` on the wire verbatim.
+  it.each(["0", "-5", "1.5"])("refuses a custom value of %s rather than saving it", async (typed) => {
+    setLoaded();
+    const { update } = setMutationDefaults();
+    renderPage();
+    fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
+
+    const field = ladderFor("model_param.max_tokens");
+    fireEvent.click(within(field).getByRole("button", { name: "model_param.custom" }));
+    fireEvent.change(
+      screen.getByLabelText("model_param.max_tokens — model_param.custom"),
+      { target: { value: typed } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => expect(update.mutateAsync).toHaveBeenCalled());
+    const { overrides } = update.mutateAsync.mock.calls[0][0];
+    expect(overrides).not.toHaveProperty("max_tokens");
+  });
+
+  it("saves max_tokens when a rung is picked", async () => {
+    setLoaded();
+    const { update } = setMutationDefaults();
+    renderPage();
+    fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
+
+    fireEvent.click(
+      within(ladderFor("model_param.max_tokens")).getByRole("button", { name: "8K" }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() =>
       expect(update.mutateAsync).toHaveBeenCalledWith(
-        expect.objectContaining({
-          overrides: expect.objectContaining({ context_window: 128000 }),
-        }),
+        expect.objectContaining({ overrides: expect.objectContaining({ max_tokens: 8192 }) }),
       ),
     );
+  });
+
+  // Entering custom from inherit used to emit the smallest rung, which flipped
+  // the override on and armed Save with a number nobody picked.
+  it("does not enable an override merely by opening the custom field", async () => {
+    setLoaded();
+    const { update } = setMutationDefaults();
+    renderPage();
+    fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
+
+    fireEvent.click(
+      within(ladderFor("model_param.context_window")).getByRole("button", { name: "model_param.custom" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => expect(update.mutateAsync).toHaveBeenCalled());
+    expect(update.mutateAsync.mock.calls[0][0].overrides).not.toHaveProperty("context_window");
   });
 
   it("requires double-click to delete a custom model (confirm-then-delete)", () => {

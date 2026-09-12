@@ -23,7 +23,7 @@ use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
-use librefang_testing::{MockKernelBuilder, TestAppState};
+use librefang_testing::{CatalogSeed, MockKernelBuilder, TestAppState};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -93,8 +93,12 @@ async fn boot_clears_provider_credentials_from_the_environment() {
 }
 
 async fn boot() -> Harness {
+    boot_with_catalog(None).await
+}
+
+async fn boot_with_catalog(seed: Option<CatalogSeed>) -> Harness {
     clear_media_provider_env();
-    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
+    let mut builder = MockKernelBuilder::new().with_config(|cfg| {
         cfg.default_model = librefang_types::config::DefaultModelConfig {
             provider: "ollama".to_string(),
             model: "test-model".to_string(),
@@ -104,7 +108,11 @@ async fn boot() -> Harness {
             extra_params: std::collections::BTreeMap::new(),
             cli_profile_dirs: Vec::new(),
         };
-    }));
+    });
+    if let Some(seed) = seed {
+        builder = builder.with_catalog_seed(seed);
+    }
+    let test = TestAppState::with_builder(builder);
     let state = test.state.clone();
     let app = Router::new()
         .nest("/api", routes::media::router())
@@ -418,6 +426,65 @@ async fn media_providers_lists_all_known_with_unconfigured_status() {
             "unexpected configured=true with no API keys: {p}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn media_providers_lists_registry_declared_providers_with_no_builtin_driver() {
+    // `byteplus` is the real case this guards: it declares image and video
+    // generation in `librefang/librefang-registry`, has no compiled-in driver,
+    // and was absent from the five-name constant this route used to enumerate.
+    // `detect_for_capability` could already select it — so the daemon could
+    // pick a provider the dashboard never listed.
+    let providers = vec![
+        librefang_types::model_catalog::ProviderInfo {
+            id: "byteplus".to_string(),
+            display_name: "BytePlus".to_string(),
+            api_key_env: "BYTEPLUS_API_KEY".to_string(),
+            media_capabilities: vec!["image_generation".into(), "video_generation".into()],
+            ..Default::default()
+        },
+        librefang_types::model_catalog::ProviderInfo {
+            id: "anthropic".to_string(),
+            display_name: "Anthropic".to_string(),
+            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            media_capabilities: Vec::new(),
+            ..Default::default()
+        },
+    ];
+    let h = boot_with_catalog(Some((providers, Vec::new()))).await;
+    let (status, body) = json_request(&h, Method::GET, "/api/media/providers", None).await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    let listed = body["providers"].as_array().expect("providers array");
+    let names: Vec<&str> = listed.iter().filter_map(|p| p["name"].as_str()).collect();
+
+    assert!(
+        names.contains(&"byteplus"),
+        "registry provider declaring media_capabilities is missing from: {names:?}"
+    );
+    // A provider with no compiled-in driver still has to report which
+    // functions it would serve, or the dashboard cannot file it under a tab.
+    let byteplus = listed
+        .iter()
+        .find(|p| p["name"] == "byteplus")
+        .expect("byteplus entry");
+    assert_eq!(
+        byteplus["capabilities"],
+        serde_json::json!(["image_generation", "video_generation"]),
+        "declared capabilities lost: {byteplus}"
+    );
+    assert_eq!(byteplus["configured"], false, "got: {byteplus}");
+
+    // `google_tts` has a working driver and no registry entry at all. Reading
+    // the list from the registry must not drop it.
+    assert!(
+        names.contains(&"google_tts"),
+        "built-in driver without a registry entry was dropped: {names:?}"
+    );
+    // A provider that declares no media capabilities is not a media provider.
+    assert!(
+        !names.contains(&"anthropic"),
+        "non-media provider leaked into the media list: {names:?}"
+    );
 }
 
 // ── POST /media/transcribe ──────────────────────────────────────────────

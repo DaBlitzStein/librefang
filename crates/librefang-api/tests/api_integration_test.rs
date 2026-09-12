@@ -119,7 +119,7 @@ async fn start_test_server_with_builder(builder: MockKernelBuilder) -> TestServe
         api_key_lock: state.api_key_lock.clone(),
         master_key: state.master_key.clone(),
         active_sessions: state.active_sessions.clone(),
-        dashboard_auth_enabled: false,
+        dashboard_auth_enabled: state.dashboard_auth_enabled.clone(),
         user_api_keys: state.user_api_keys.clone(),
         require_auth_for_reads: false,
         allow_no_auth: false,
@@ -2107,7 +2107,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         api_key_lock: state.api_key_lock.clone(),
         master_key: state.master_key.clone(),
         active_sessions: state.active_sessions.clone(),
-        dashboard_auth_enabled: false,
+        dashboard_auth_enabled: state.dashboard_auth_enabled.clone(),
         user_api_keys: state.user_api_keys.clone(),
         require_auth_for_reads: false,
         // Tests synthesize requests without ConnectInfo, so opt in to the
@@ -3630,7 +3630,7 @@ async fn start_test_server_with_rbac_users(
         api_key_lock: state.api_key_lock.clone(),
         master_key: state.master_key.clone(),
         active_sessions: state.active_sessions.clone(),
-        dashboard_auth_enabled: false,
+        dashboard_auth_enabled: state.dashboard_auth_enabled.clone(),
         user_api_keys: state.user_api_keys.clone(),
         require_auth_for_reads: false,
         // Anonymous-rejection tests rely on this — we synthesize requests
@@ -3930,7 +3930,7 @@ async fn start_test_server_with_full_user_configs(
         api_key_lock: state.api_key_lock.clone(),
         master_key: state.master_key.clone(),
         active_sessions: state.active_sessions.clone(),
-        dashboard_auth_enabled: false,
+        dashboard_auth_enabled: state.dashboard_auth_enabled.clone(),
         user_api_keys: state.user_api_keys.clone(),
         require_auth_for_reads: false,
         allow_no_auth: true,
@@ -6287,4 +6287,105 @@ async fn test_message_rejects_malformed_session_id() {
         Some("invalid_session_id"),
         "error code must be stable for scripted callers: {body}"
     );
+}
+
+/// #8287: while a turn runs the loop now reads the socket instead of parking, so
+/// a second message sent before the first turn settles is *deferred* rather than
+/// left in the kernel buffer. Deferring is where a frame can be lost — a branch
+/// that dropped it instead of queueing it would compile, pass every unit test,
+/// and silently swallow the operator's message.
+///
+/// Both messages must reach the session, in the order they were sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_sent_while_a_turn_runs_is_not_lost_and_keeps_its_order() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let harness = start_full_router("").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = harness.app.clone();
+    let _server_task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let base_url = format!("http://{addr}");
+
+    let spawn = client
+        .post(format!("{base_url}/api/agents"))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spawn.status(), StatusCode::CREATED);
+    let spawn_json: serde_json::Value = spawn.json().await.unwrap();
+    let agent_id = spawn_json["agent_id"].as_str().unwrap();
+
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/api/agents/{agent_id}/ws"))
+            .await
+            .unwrap();
+    let connected = socket.next().await.unwrap().unwrap();
+    assert!(connected.to_text().unwrap().contains("connected"));
+
+    // Back to back, with no read in between: the second lands while the first
+    // turn is still in flight, which is the window this guards.
+    for (id, content) in [("deferral-first", "first"), ("deferral-second", "second")] {
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "message",
+                    "content": content,
+                    "message_id": id,
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    // Read the socket, not the session: the test kernel is driverless, so a turn
+    // ends in an error frame and never records a user message. What the deferral
+    // has to guarantee is that BOTH turns are dispatched — a branch that dropped
+    // the queued frame would answer the first `message_id` and never the second.
+    //
+    // `message_id` is echoed on every terminal frame of its turn (#6390), which
+    // is what makes the two distinguishable.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut order: Vec<String> = Vec::new();
+    while order.len() < 2 {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "both turns must be dispatched; a dropped deferral shows up as the second \
+             message_id never coming back. Seen so far: {order:?}"
+        );
+        let frame = match tokio::time::timeout(remaining, socket.next()).await {
+            Ok(Some(Ok(f))) => f,
+            Ok(Some(Err(e))) => panic!("socket error while waiting for turns: {e}"),
+            Ok(None) => panic!("socket closed before both turns were dispatched: {order:?}"),
+            Err(_) => continue,
+        };
+        let Ok(text) = frame.to_text() else { continue };
+        for id in ["deferral-first", "deferral-second"] {
+            if text.contains(id) && !order.iter().any(|seen| seen == id) {
+                order.push(id.to_string());
+            }
+        }
+    }
+
+    assert_eq!(
+        order,
+        vec!["deferral-first".to_string(), "deferral-second".to_string()],
+        "the deferred message must be replayed after the turn that was already \
+         running, not ahead of it"
+    );
+
+    socket.close(None).await.unwrap();
 }

@@ -34,8 +34,9 @@ If the file is owned by your deployment rather than by LibreFang, see [managed-c
      `self.config.load()` on every message or request. The ArcSwap
      config swap makes the edit effective on the next use with no extra
      action; the planner records it as informational only.
-3. Hot actions are applied according to the configured `[reload] mode`
-   (`off` / `restart` / `hot` / `hybrid`) — see `should_apply_hot`.
+3. The configured `[reload] mode` (`off` / `restart` / `hot` / `hybrid`) decides whether any of that is applied — see `should_store_config`, which is the gate `reload_config` actually uses.
+   Under `hot` / `hybrid` a plan carrying any change swaps the new config in and runs its hot actions; under `off` / `restart` nothing is applied and the plan is only a preview of what a restart would do.
+   The response distinguishes the two: `config_applied` is `false` and `hot_actions_applied` is empty whenever the mode withheld the swap, with the reason in `warnings` and `status` reported as `partial`.
 
 When `restart_required` is set, the dashboard / API response says so
 explicitly. A field that is `Ignore`/`noop` is **not** a failure — it
@@ -91,6 +92,7 @@ classified differently — the row note spells out which is which.
 | `allowed_mount_roots` | R | Host directories under which workspace mounts may resolve. |
 | `max_request_body_bytes` | R | Global request-body size cap (router safety net). |
 | `max_upload_size_bytes` | R | Maximum upload size in bytes. |
+| `max_concurrent_uploads` | R | Max in-flight `/upload` requests (sizes a `Semaphore` built once at router construction). |
 | `rate_limit` | R | API and WebSocket rate-limiting config. |
 
 ### Auth / RBAC / dashboard
@@ -99,16 +101,16 @@ classified differently — the row note spells out which is which.
 |---|---|---|
 | `api_key` | N | API bearer key, resolved from `LIBREFANG_API_KEY` / `vault:KEY` / the literal value (effective immediately via config swap). |
 | `api_key_hash` | N | Hash of the API bearer key, `$sha256$…` (recommended, from `librefang hash-api-key`) or `$argon2id$…` (effective immediately via config swap). |
-| `dashboard_user` | H | Dashboard login username (config swap suffices). |
+| `dashboard_user` | H | Dashboard login username (config swap suffices, and the auth middleware re-derives "dashboard credentials are configured" from the new value). **Exception:** on a passkey-enabled daemon the WebAuthn engine's principal is bound at boot, so after a rename registration answers `409 principal_mismatch` for the new name and an existing credential still mints a session under the old one until the daemon restarts — see `docs/architecture/passkey-webauthn.md`. |
 | `dashboard_pass` | H | Dashboard login password. |
 | `dashboard_pass_hash` | H | Argon2id hash of the dashboard password. |
 | `passkey_enabled` | R | Opt-in flag for passkey (WebAuthn/FIDO2) login — the route gating is fixed at boot. |
 | `passkey_rp_id` | R | WebAuthn Relying Party ID — the `Webauthn` instance is built once at boot. |
 | `passkey_rp_origin` | R | WebAuthn Relying Party origin — baked into the `Webauthn` instance at boot. |
-| `users` | H | RBAC user list — rebuilds the `AuthManager`. |
+| `users` | H | RBAC user list — rebuilds the `AuthManager` and republishes the HTTP per-user bearer table, so deleting a `[[users]]` block revokes that key on the REST surface too, not only on the WS / terminal upgrades. |
 | `groups` | N | User groups (#7745) — membership and conferred roles are resolved from the live config on every lookup, so the config swap is the whole of the reload. |
 | `default_owner` | N | Fleet-wide fallback owner for artifacts created by a turn with no authenticated caller (#7744) — parsed from the live config at each creation. Changing it does not rewrite owners already recorded. |
-| `require_auth_for_reads` | R | Whether the dashboard-reads allowlist requires auth. |
+| `require_auth_for_reads` | R | Whether the dashboard-reads allowlist requires auth. Changing the flag itself needs a restart, but only the flag: the middleware re-evaluates "is any credential configured" on every request from the live credential handles, so adding the first `api_key` / `api_key_hash` or the first dashboard username/password closes the allowlist as soon as the reload refreshes them — no restart. The one credential kind that does not participate is `[[users]]`: the middleware's per-user key table is replaced by the `/api/users*` and device-pairing writes, not by a reload, so a hand-edited `[[users]]` block reaches the `AuthManager` (see the `users` row) but not the read gate until the daemon restarts. |
 | `external_auth_proxy` | R | Acknowledges an external auth proxy is in front. |
 | `channel_role_mapping` | R | Maps platform-native channel roles to LibreFang roles. |
 | `external_auth` | H/N | OAuth2/OIDC provider config. **IdP-identity** changes (`enabled`, `issuer_url`, per-provider `id`/`issuer_url`/`jwks_uri` — see `external_auth_idp_changed`) are **H**: they emit `ReloadExternalAuth` to flush the OIDC discovery + JWKS caches, no restart. **Non-IdP** sub-fields (`session_ttl_secs`, `allowed_domains`, `redirect_url`, scopes, audience, `require_email_verified`, `role_map`, `group_map`, `claim_paths`) are **N**: the OAuth layer reads them live from the ArcSwap config on every request (`oauth.rs`: `config_ref()` / `config_snapshot()`), so a bare config swap makes them effective on the next request — no restart, no cache eviction. |
@@ -177,8 +179,8 @@ classified differently — the row note spells out which is which.
 | `sidecar_channels` | H | Sidecar (external-process) channel adapters (same hot action). |
 | `webhook_triggers` | H | Webhook trigger (external event injection) config. |
 | `max_cron_jobs` | H | Cron scheduler max total jobs across agents. |
-| `queue` | H | Message-queue config — resizes the lane semaphores. |
-| `triggers` | N | Event-trigger system config (cooldowns, depth limits). |
+| `queue` | H/N/R | Message-queue config. `concurrency` is **H**: the reload resizes the live lane semaphores. `max_depth_per_agent` / `max_depth_global` / `task_ttl_secs` are **N**: they are reported straight off the live config by `GET /api/queue/status` and `GET /api/config`, so the swap is the whole of applying them. `task_queue_retention_days` is **R**: the retention sweep captures it at boot. Splitting the section this way is what makes a queue edit land at all — while only `concurrency` was classified, an edit to any other field matched no branch, so the plan carried no change, `should_store_config` discarded the reloaded config and the reload answered "no changes detected". |
+| `triggers` | H/N | Event-trigger system config. `cooldown_secs` / `max_per_event` are **H**: `TriggerEngine` copies them into its own fields when it is built at boot, so the reload pushes the new pair into the running engine (`HotAction::UpdateTriggersConfig`). `max_depth` / `max_workflow_secs` are **N**: they are read from the live config on every event and every workflow run. While the whole section was classified **N**, a cooldown or per-event-budget edit was reported as already effective and triggers went on firing at the boot-time values until the daemon restarted. |
 | `auto_reply` | R | Auto-reply background engine config. |
 | `broadcast` | R | Broadcast routing config. |
 | `cron_session_max_tokens` | N | Cron session token-prune threshold. |

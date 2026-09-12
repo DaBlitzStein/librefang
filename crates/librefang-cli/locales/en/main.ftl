@@ -234,6 +234,7 @@ audit-failed = Audit trail integrity check FAILED.
 
 # --- Health ---
 health-ok = Daemon is healthy
+health-degraded = Daemon is reachable but reporting a degraded subsystem
 health-not-running = Daemon is not running.
 
 # --- Channel setup ---
@@ -2095,6 +2096,9 @@ tui-agents-title-templates = Templates
 tui-agents-title-custom-name = Custom — Name
 tui-agents-title-custom-desc = Custom — Description
 tui-agents-title-custom-prompt = Custom — System Prompt
+tui-agents-detail-tokens = Token footprint  ($ to refresh)
+tui-agents-detail-tokens-injected = injected
+tui-agents-token-usage-failed = Could not load the token footprint
 tui-agents-title-custom-tools = Custom — Tools
 tui-agents-title-custom-skills = Custom — Skills
 tui-agents-title-custom-mcp = Custom — MCP Servers
@@ -2129,7 +2133,7 @@ tui-agents-opt-create-new = Create new agent
 
 tui-agents-hints-filter =   [Type] Filter  [Enter] Accept  [Esc] Cancel search
 tui-agents-hints-list =   [↑↓] Navigate  [Enter] Detail  [/] Search  [Esc] Back
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [p] Model params  [c] Chat  [k] Kill  [Esc] Back
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [p] Model params  [$] Tokens  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-title-model-params = Model parameters
 tui-agents-prompt-model-params = This agent's own settings win over the model's. `inherit` means the model's setting applies.
 tui-agents-hints-model-params =   [←→] Change  [i] Inherit  [e] Custom value  [Enter] Save  [Esc] Cancel
@@ -2596,3 +2600,32 @@ tui-memory-config-requires-daemon = Memory settings come from the daemon API —
 tui-memory-config-fetch-failed = Could not read the memory settings: { $error }
 tui-goals-run-requires-daemon = Run state comes from the daemon API — not available when the TUI is attached in-process.
 tui-goals-run-fetch-failed = Could not read the run state for { $id }: { $error }
+
+# config_editor.rs — generic config-section editor (#8165)
+tui-settings-tab-config = 6 Configuration
+tui-settings-hints-config =   [↑↓] Navigate  [Enter] Open section  [r] Refresh
+tui-settings-hints-config-fields =   [↑↓] Navigate  [Enter] Edit / Toggle  [Esc] Back  [r] Refresh
+tui-settings-config-loading = Loading configuration…
+tui-settings-config-empty = No configuration sections available. The daemon must be running.
+tui-settings-config-select-section = Pick a section on the left and press [Enter] to see its settings.
+tui-settings-config-header-section = Section
+tui-settings-config-header-setting = Setting
+tui-settings-config-header-value = Value
+tui-settings-config-unset = not set
+tui-settings-config-on = on
+tui-settings-config-off = off
+tui-settings-config-readonly = read-only
+tui-settings-config-readonly-msg = { $path } is read-only here — edit ~/.librefang/config.toml directly to change it.
+tui-settings-config-complex = { $path } holds a list or a table — edit ~/.librefang/config.toml directly to change it.
+tui-settings-config-invalid = That is not a valid value for { $path }.
+tui-settings-config-redacted = { $path } is shown redacted — type the new value in full; an empty entry is refused here.
+tui-settings-config-prompt = Set { $path } (empty clears it):
+tui-mod-config-value-saved = Saved { $path }
+tui-mod-config-value-saved-restart = Saved { $path } — restart the daemon for it to take effect
+tui-mod-config-value-saved-reload-failed = Saved { $path } to config.toml, but the reload failed: { $error }
+tui-event-config-schema-failed = Failed to load the configuration schema
+tui-event-config-schema-unreadable = The daemon answered, but its configuration schema could not be read: { $error }
+tui-event-config-failed = Failed to load the current configuration
+tui-event-config-unreadable = The daemon answered, but the current configuration could not be read: { $error }
+tui-event-config-set-failed = Failed to save { $path }
+tui-event-config-need-daemon = Editing configuration needs a running daemon

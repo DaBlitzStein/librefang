@@ -249,19 +249,22 @@ impl TestAppState {
             kernel.substrate_ref().pool(),
         ));
 
-        // Passkey (#5981) — store always wired; engine built only when the
-        // test config opts in via `passkey_enabled`, mirroring production.
+        // Passkey (#5981) — store always wired; the engine is built only when the test config opts in via `passkey_enabled` and names a dashboard principal, mirroring production.
         let passkey_store: Arc<dyn librefang_memory::passkey_store::PasskeyStore + Send + Sync> =
             Arc::new(librefang_memory::passkey_store::SqlitePasskeyStore::new(
                 kernel.substrate_ref().pool(),
             ));
         let passkey_engine = {
             let cfg = kernel.config_ref();
-            if cfg.passkey_enabled {
+            // Both preconditions `server::build_router` applies, so a test cannot pass against an engine production would never have built.
+            // The principal is the *trimmed* `dashboard_user`, because `routes::passkey`'s registration guard compares the caller against it exactly.
+            // An empty principal leaves the engine `None` — the routes answer 503 rather than enrolling credentials for a login with no identity to mint a session for.
+            let principal = cfg.dashboard_user.trim();
+            if cfg.passkey_enabled && !principal.is_empty() {
                 librefang_api::passkey::PasskeyEngine::new(
                     &cfg.passkey_rp_id,
                     &cfg.passkey_rp_origin,
-                    &cfg.dashboard_user,
+                    principal,
                 )
                 .ok()
                 .map(Arc::new)
@@ -291,13 +294,33 @@ impl TestAppState {
         // One `config_ref()` for both fields, so the pair comes from a single
         // generation exactly as `refresh_master_credential` takes them from a
         // single `ApiAuthSnapshot`.
-        let (master_plaintext, master_hash) = {
+        let (master_plaintext, master_hash, has_dashboard_credentials) = {
             let cfg = kernel.config_ref();
             (
                 cfg.api_key.trim().to_string(),
                 cfg.api_key_hash.trim().to_string(),
+                // Same predicate as `server::has_dashboard_credentials`, minus the env / `vault:` indirection the paragraph above explains this harness does not apply.
+                !cfg.dashboard_user.trim().is_empty()
+                    && (!cfg.dashboard_pass_hash.trim().is_empty()
+                        || !cfg.dashboard_pass.trim().is_empty()),
             )
         };
+        // Mirrors `kernel::boot`, which loads the media provider order from the
+        // catalog right after constructing the cache. Without this the harness
+        // hands every test the five compiled-in built-ins while production
+        // serves whatever the registry declares, so a test over
+        // `GET /media/providers` would pass against a list production never
+        // produces.
+        let media_drivers = librefang_runtime::media::MediaDriverCache::new();
+        // `KernelApi` is called through its path rather than imported: bringing
+        // the trait into scope makes `set_self_handle` resolve to the
+        // by-value `Arc<Self>` trait method and moves the caller's kernel.
+        media_drivers.load_providers_from_registry(
+            librefang_kernel::KernelApi::model_catalog_ref(&*kernel)
+                .load()
+                .list_providers(),
+        );
+
         // Rooted at the test's temp home so a transparent api_key upgrade hint
         // (#6613) lands there rather than in the process CWD.
         let master_key = Arc::new(librefang_api::middleware::MasterKeyState::new(
@@ -325,8 +348,11 @@ impl TestAppState {
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(master_plaintext)),
             master_key,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(
+                has_dashboard_credentials,
+            )),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            media_drivers,
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             config_write_lock: tokio::sync::Mutex::new(()),
             pending_a2a_agents: dashmap::DashMap::new(),

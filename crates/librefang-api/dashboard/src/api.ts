@@ -27,9 +27,10 @@ export interface StatusResponse {
   api_listen?: string;
   home_dir?: string;
   log_level?: string;
-  /** Machine hostname. Only populated on authenticated endpoints
-   *  (`/api/status`, `/api/dashboard/snapshot`) — `/api/version` is public
-   *  and deliberately omits it. */
+  /** Machine hostname. Populated on `/api/status` and
+   *  `/api/dashboard/snapshot`, which are dashboard-read routes and so
+   *  require auth whenever any is configured — `/api/version` is public
+   *  unconditionally and deliberately omits it. */
   hostname?: string;
   network_enabled?: boolean;
   terminal_enabled?: boolean;
@@ -1466,6 +1467,8 @@ export interface AgentDetail {
   auto_evolve?: boolean;
   /** Template this agent was spawned from, if any (#8018). */
   source_template?: string;
+  /** Tokens the daemon injects into every request for this agent — identity, tools, skills (#7976). */
+  injected_footprint_tokens?: number;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
@@ -2279,8 +2282,10 @@ function sanitizeFilenameForHeader(name: string): string {
 
 // Upload a chat attachment for an agent. Body is the raw file bytes; backend
 // expects `Content-Type` to match the file MIME and `X-Filename` for the
-// original name. Server-side limits: 10MB and an exact MIME allowlist
-// (image/audio/text/pdf) — callers should still pre-validate to fail fast.
+// original name. Server-side limits: the operator-configurable
+// `max_upload_size_bytes` (10MB default, read via `GET /api/config`) and an
+// exact MIME allowlist (image/audio/text/pdf) — callers should still
+// pre-validate to fail fast.
 export async function uploadAgentFile(agentId: string, file: File): Promise<AgentFileUploadResult> {
   const response = await fetchWithTimeout(
     `/api/agents/${encodeURIComponent(agentId)}/upload`,
@@ -2916,6 +2921,15 @@ export interface WorkflowStepResult {
   duration_ms: number;
   /** Step-level failure message; present on the step that failed. */
   error?: string;
+  /**
+   * Variable bindings live at this step, as `routes/workflows/workflow.rs`
+   * serialises them from `StepResult::variables`.
+   *
+   * Optional because a run recorded before the field existed carries no
+   * snapshot; every current construction site populates it through
+   * `snapshot_variables`.
+   */
+  variables?: Record<string, string>;
 }
 
 /** Full detail for a single workflow run. */
@@ -3224,6 +3238,18 @@ export async function getVersionInfo(): Promise<VersionResponse> {
 
 export async function getStatus(): Promise<StatusResponse> {
   return get<StatusResponse>("/api/status");
+}
+
+export interface WhoamiResponse {
+  name: string;
+}
+
+/** The calling credential's own resolved identity — `GET /api/authz/whoami`.
+ *  Authenticated, unlike `/api/auth/dashboard-check`, so `name` is always
+ *  the real login rather than the empty string that endpoint deliberately
+ *  sends to anonymous callers. */
+export async function getWhoami(): Promise<WhoamiResponse> {
+  return get<WhoamiResponse>("/api/authz/whoami");
 }
 
 export async function getQueueStatus(): Promise<QueueStatusResponse> {

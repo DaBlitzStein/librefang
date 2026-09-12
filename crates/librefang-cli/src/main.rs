@@ -32,6 +32,8 @@ pub(crate) mod mcp;
 pub mod progress;
 pub mod table;
 pub(crate) mod templates;
+#[cfg(test)]
+pub(crate) mod test_env_lock;
 pub(crate) mod tui;
 pub(crate) mod ui;
 
