@@ -12,7 +12,23 @@
 /// SAME `SessionId` as the cron-fire path, so two write streams could
 /// interleave into one session history. The `is_internal_cron` flag
 /// gated behaviour but not SessionId derivation.
-pub const RESERVED_SYSTEM_CHANNEL_NAMES: &[&str] = &["cron", "autonomous", "webui"];
+pub const RESERVED_SYSTEM_CHANNEL_NAMES: &[&str] = &[
+    SYSTEM_CHANNEL_CRON,
+    SYSTEM_CHANNEL_AUTONOMOUS,
+    SYSTEM_CHANNEL_WEBUI,
+];
+
+/// A cron job firing on a schedule. No interactive surface waits on the reply.
+pub const SYSTEM_CHANNEL_CRON: &str = "cron";
+
+/// A background autonomous tick. No interactive surface waits on the reply.
+pub const SYSTEM_CHANNEL_AUTONOMOUS: &str = "autonomous";
+
+/// The dashboard chat. Reserved because it derives a `SessionId` like the
+/// others, but unlike them a live user *is* waiting on the reply — which is why
+/// callers that care about that distinction must name this constant rather than
+/// test membership of [`RESERVED_SYSTEM_CHANNEL_NAMES`].
+pub const SYSTEM_CHANNEL_WEBUI: &str = "webui";
 
 /// Returns true when `name` would collide with a kernel-internal
 /// system channel (case-insensitive). Used by `channel_type_str` to
