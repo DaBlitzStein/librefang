@@ -2916,6 +2916,15 @@ export interface WorkflowStepResult {
   duration_ms: number;
   /** Step-level failure message; present on the step that failed. */
   error?: string;
+  /**
+   * Variable bindings live at this step, as `routes/workflows/workflow.rs`
+   * serialises them from `StepResult::variables`.
+   *
+   * Optional because a run recorded before the field existed carries no
+   * snapshot; every current construction site populates it through
+   * `snapshot_variables`.
+   */
+  variables?: Record<string, string>;
 }
 
 /** Full detail for a single workflow run. */
