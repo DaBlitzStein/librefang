@@ -531,6 +531,33 @@ impl LibreFangKernel {
         });
     }
 
+    /// Write a key-validation outcome into the catalog, unless the operator
+    /// suppressed the provider while the probe was in flight.
+    ///
+    /// The suppression gate mirrors the one the local probe loop already has
+    /// (`provider_probe.rs`, #4803). Without it, the sequence "save a key →
+    /// Remove key" can end with the validation spawned by the save landing
+    /// *after* the removal, restoring an auth status for a provider the
+    /// operator has just taken out — and the dashboard shows it again.
+    ///
+    /// Extracted from the spawned task purely so it can be tested: the task
+    /// itself owns a real `probe_api_key` HTTP call with no seam to inject at.
+    fn record_key_validation(
+        catalog: &mut librefang_runtime::model_catalog::ModelCatalog,
+        provider_id: &str,
+        status: librefang_types::model_catalog::AuthStatus,
+        available_models: &[String],
+    ) {
+        if catalog.is_suppressed(provider_id) {
+            return;
+        }
+        catalog.set_provider_auth_status(provider_id, status);
+        if !available_models.is_empty() {
+            // Store available models so downstream can check whether a configured model actually exists.
+            catalog.set_provider_available_models(provider_id, available_models.to_vec());
+        }
+    }
+
     /// Spawn background tasks to validate API keys for every `Configured` provider.
     ///
     /// Called at daemon boot and whenever a new key is set via the dashboard.
@@ -586,6 +613,15 @@ impl LibreFangKernel {
                                 }
                             });
                             kernel.model_catalog_update(|catalog| {
+                                // Mid-flight suppression gate, the same one
+                                // `record_key_validation` applies on the other
+                                // branch. The list this task was built from
+                                // already excludes suppressed providers; this
+                                // covers a "Remove key" that lands while the
+                                // probe is in the air.
+                                if catalog.is_suppressed(&id) {
+                                    return;
+                                }
                                 if let Some(status) = status {
                                     catalog.set_provider_auth_status(&id, status);
                                 }
@@ -664,14 +700,12 @@ impl LibreFangKernel {
                             };
                             tracing::info!(provider = %id, valid, "provider key validation result");
                             kernel.model_catalog_update(|catalog| {
-                                catalog.set_provider_auth_status(&id, status);
-                                if !available_models.is_empty() {
-                                    // Store available models so downstream can check whether a configured model actually exists.
-                                    catalog.set_provider_available_models(
-                                        &id,
-                                        available_models.clone(),
-                                    );
-                                }
+                                Self::record_key_validation(
+                                    catalog,
+                                    &id,
+                                    status,
+                                    &available_models,
+                                );
                             });
                         }
                     })
@@ -968,6 +1002,12 @@ impl LibreFangKernel {
             if guard.is_unlocked() {
                 return guard.get(key).map(|s| s.to_string());
             }
+            // A host with a `vault.enc` but no resolvable master key fails the unlock below on every call, and this is a hot path — `routes/approvals.rs` calls it twice per status request and `channel_bridge.rs` once per channel message.
+            // Retrying each time meant an exclusive lock that serialised every vault read in the daemon, an OS keyring lookup (DBus on Linux, potentially a Keychain prompt on macOS) and a `WARN` line, all to reach the same answer.
+            // The memo is invalidated by the file changing, so `librefang vault init` or a `rotate-key` from another process still gets a real retry on the next call.
+            if guard.unlock_failed_for_current_file() {
+                return None;
+            }
         }
         // The cached handle is locked exactly when `vault.enc` was absent at cache-population time, and `vault_handle` never re-checks.
         // The file can appear afterwards — `librefang vault set` from another process, or an MCP OAuth flow writing through `KernelOAuthProvider`'s own instance — and a handle left locked would answer "no such key" for the rest of the daemon's lifetime, which reads as a missing credential rather than as a stale cache.
@@ -985,25 +1025,6 @@ impl LibreFangKernel {
         guard.get(key).map(|s| s.to_string())
     }
 
-    /// Reconcile the cached in-memory vault with `vault.enc` before mutating it.
-    ///
-    /// `CredentialVault::save` re-encrypts the whole file from the instance's own map, so mutating a map that predates an out-of-band write erases that write.
-    /// The daemon has more than one writer: `KernelOAuthProvider` opens a fresh `CredentialVault` per call for the `mcp-oauth:*` entries, and `librefang vault set` runs in a separate process.
-    /// Without this, an operator storing a `GITHUB_TOKEN` over HTTP would silently drop every OAuth client secret and token stored since the kernel first unlocked, dropping the affected MCP servers back to `NeedsAuth`.
-    ///
-    /// A missing file is not an error — the caller decides whether that means "create it" (`vault_set`) or "nothing to remove" (`vault_remove`).
-    /// The re-read costs one Argon2id KDF, which the `save` on the very next line pays again regardless; the hot read path in `vault_get` is untouched.
-    fn reconcile_cached_vault(
-        guard: &mut librefang_extensions::vault::CredentialVault,
-    ) -> Result<(), String> {
-        if !guard.exists() {
-            return Ok(());
-        }
-        guard
-            .reload()
-            .map_err(|e| format!("Vault unlock failed: {e}"))
-    }
-
     /// Write a secret to the encrypted vault.
     ///
     /// Uses the cached, already-unlocked vault when available (#3598) so
@@ -1012,12 +1033,12 @@ impl LibreFangKernel {
     /// `CredentialVault::set` still runs on every write — at-rest
     /// security is unchanged. Creates the vault if it does not exist.
     ///
-    /// Re-reads the file first, so a write never clobbers entries another writer added since this kernel unlocked — see `reconcile_cached_vault`.
-    /// Creating a missing vault is left to `CredentialVault::set`, whose own `!unlocked && !path.exists()` guard is the one that gets the file-appeared-since-boot case right; calling `init()` here instead failed permanently with "Vault already exists. Delete it first to re-initialize." once anything else had created the file.
+    /// The lost-write hazard this used to guard against by re-reading here belongs to `CredentialVault::set`, which now takes a cross-process advisory lock and re-reads `vault.enc` inside it before rewriting the file.
+    /// Re-reading here as well would only pay a second Argon2id and still leave the gap the lock closes: the kernel's `RwLock` never covered `KernelOAuthProvider`'s own instance or the separate `librefang vault set` process.
+    /// Creating a missing vault likewise stays inside `set`, whose `!unlocked && !path.exists()` guard gets the file-appeared-since-boot case right; calling `init()` here instead failed permanently with "Vault already exists. Delete it first to re-initialize." once anything else had created the file.
     pub fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
         let handle = self.vault_handle()?;
         let mut guard = write_accessor_state(&handle, "credential_vault");
-        Self::reconcile_cached_vault(&mut guard)?;
         guard
             .set(key.to_string(), zeroize::Zeroizing::new(value.to_string()))
             .map_err(|e| format!("Vault write failed: {e}"))
@@ -1036,12 +1057,11 @@ impl LibreFangKernel {
     ///
     /// "Does not exist" is a check against the file, not against `is_unlocked()`.
     /// The two differ whenever `vault.enc` appeared after the cache was populated, and answering `Ok(false)` there told the caller a credential had been removed while it was still in the file and still resolved after the next restart.
+    /// `CredentialVault::remove` re-reads under its own lock, so a handle cached in the locked state opens there rather than needing a reconcile here first.
     pub fn vault_remove(&self, key: &str) -> Result<bool, String> {
         let handle = self.vault_handle()?;
         let mut guard = write_accessor_state(&handle, "credential_vault");
-        Self::reconcile_cached_vault(&mut guard)?;
-        if !guard.is_unlocked() {
-            // `reconcile_cached_vault` unlocks whenever the file is there, so this is the genuinely-no-vault case.
+        if !guard.exists() {
             return Ok(false);
         }
         guard
@@ -1855,5 +1875,69 @@ mod tests {
         Arc::try_unwrap(kernel_arc)
             .unwrap_or_else(|_| panic!("kernel Arc still has outstanding refs"))
             .shutdown();
+    }
+
+    // ── record_key_validation ────────────────────────────────────────────
+    //
+    // The spawned validation task owns a real `probe_api_key` HTTP call, so
+    // the outcome-application step is tested directly instead.
+
+    fn catalog_with_provider(
+        id: &str,
+        auth_status: librefang_types::model_catalog::AuthStatus,
+    ) -> librefang_runtime::model_catalog::ModelCatalog {
+        librefang_runtime::model_catalog::ModelCatalog::from_entries(
+            Vec::new(),
+            vec![librefang_types::model_catalog::ProviderInfo {
+                id: id.to_string(),
+                display_name: id.to_string(),
+                api_key_env: "TEST_API_KEY".to_string(),
+                base_url: "https://example.invalid/v1".to_string(),
+                auth_status,
+                ..Default::default()
+            }],
+        )
+    }
+
+    #[test]
+    fn key_validation_records_its_outcome_on_an_ordinary_provider() {
+        use librefang_types::model_catalog::AuthStatus;
+        let mut catalog = catalog_with_provider("acme", AuthStatus::Configured);
+
+        LibreFangKernel::record_key_validation(
+            &mut catalog,
+            "acme",
+            AuthStatus::InvalidKey,
+            &["acme-large".to_string()],
+        );
+
+        assert_eq!(
+            catalog.get_provider("acme").map(|p| p.auth_status),
+            Some(AuthStatus::InvalidKey),
+        );
+    }
+
+    /// A validation spawned by "save key" must not land after the operator has
+    /// since removed that key: suppression is the record of that intent, and
+    /// writing an auth status over it puts the provider back on the dashboard.
+    #[test]
+    fn key_validation_does_not_resurrect_a_provider_suppressed_mid_flight() {
+        use librefang_types::model_catalog::AuthStatus;
+        let mut catalog = catalog_with_provider("acme", AuthStatus::Missing);
+        catalog.suppress_provider("acme");
+
+        LibreFangKernel::record_key_validation(
+            &mut catalog,
+            "acme",
+            AuthStatus::ValidatedKey,
+            &["acme-large".to_string()],
+        );
+
+        assert_eq!(
+            catalog.get_provider("acme").map(|p| p.auth_status),
+            Some(AuthStatus::Missing),
+            "suppressed provider kept the status `delete_provider_key` left it on",
+        );
+        assert!(catalog.is_suppressed("acme"), "suppression itself survives");
     }
 }

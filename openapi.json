@@ -4254,6 +4254,9 @@
           "401": {
             "description": "Not authenticated"
           },
+          "409": {
+            "description": "Caller is not the passkey principal"
+          },
           "503": {
             "description": "Passkey login not enabled"
           }
@@ -4293,6 +4296,9 @@
           },
           "401": {
             "description": "Not authenticated"
+          },
+          "409": {
+            "description": "Caller is not the passkey principal"
           },
           "503": {
             "description": "Passkey login not enabled"
@@ -14690,7 +14696,7 @@
           "workflows"
         ],
         "summary": "POST /api/workflows/:id/run — Execute a workflow.",
-        "description": "By default (no query params) this is **asynchronous**: the run is spawned\nin the background and a 202 is returned immediately with `{\"run_id\":\"...\"}`.\nThe caller can poll `GET /api/workflows/runs/{run_id}` to track progress.\n\nWith `?wait=true` the request blocks until completion (original behavior,\nkept for backward compat). With `?wait=true&timeout_ms=N` the block is\ncapped at N milliseconds; if the run hasn't finished, 202 is returned\nand the run continues in the background.",
+        "description": "By default (no query params) this is **asynchronous**: the run is spawned\nin the background and a 202 is returned immediately with `{\"run_id\":\"...\"}`.\nThe caller can poll `GET /api/workflows/runs/{run_id}` to track progress.\n\nWith `?wait=true` the request blocks until the executor returns (original behavior, kept for backward compat).\nWith `?wait=true&timeout_ms=N` the block is capped at N milliseconds; if the run hasn't finished, 202 is returned and the run continues in the background.\n\n\"The executor returned\" is not the same as \"the workflow finished\": a run that reaches a `mode = \"approval\"` / `mode = \"operator\"` step suspends there, and a suspended run answers `202 {\"status\":\"paused\"}` with the pause reason rather than `200 {\"status\":\"completed\"}`.\nIts `output` is the artifact put in front of the reviewer, not the workflow's result.",
         "operationId": "run_workflow",
         "parameters": [
           {
@@ -14730,6 +14736,7 @@
           "workflows"
         ],
         "summary": "GET /api/workflows/:id/runs — List runs for the workflow named in the path.",
+        "description": "`steps_completed` and `total_steps` are deliberately not a fraction, and a client that renders them as one will be wrong in both directions.\n`steps_completed` counts *executions* — the entries in `step_results` — while `total_steps` counts the steps the workflow *defines*.\nA `StepMode::Loop` step pushes one result per iteration, so a one-step workflow looping five times reports `steps_completed: 5, total_steps: 1`; a `StepMode::Conditional` step that is skipped pushes none, so a fully completed four-step workflow can report `steps_completed: 2, total_steps: 4`.\nThe field `total_steps` actually bounds is `current_step_index`, which is an index into the workflow's step list; that pair is the one safe to render as \"step 2 of 4\".",
         "operationId": "list_workflow_runs",
         "parameters": [
           {
@@ -14744,7 +14751,7 @@
         ],
         "responses": {
           "200": {
-            "description": "List workflow runs",
+            "description": "List workflow runs; `steps_completed` counts step executions (a loop step contributes one per iteration) while `total_steps` counts defined steps — the two are not a fraction",
             "content": {
               "application/json": {
                 "schema": {
@@ -16817,7 +16824,7 @@
           },
           "has_policy": {
             "type": "boolean",
-            "description": "True when the user has any per-user tool policy configured —\neither an allow/deny list, tool-category overrides, or\nper-channel rules. Summary only; the contents stay behind\n`/api/users/{name}/policy`."
+            "description": "True when the user has any per-user tool policy configured — either an allow/deny list, tool-category overrides, or per-channel rules.\nSummary only; the contents are served by `GET /api/users/{name}/policy`, which is on the same generic GET rule as this list rather than behind a higher role floor — see the module docs."
           },
           "name": {
             "type": "string"

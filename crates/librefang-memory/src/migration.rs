@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 55;
+const SCHEMA_VERSION: u32 = 57;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -281,6 +281,14 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // prior configuration from the dashboard.
     run_step!(55, migrate_v55);
 
+    // v56: persist workflow_runs.total_steps so a run recovered after a
+    // daemon restart reports real progress instead of "step X of 0".
+    run_step!(56, migrate_v56);
+
+    // v57: narrow the `memories_fts_au` trigger to the columns it mirrors.
+    // As created by v50 it fired on every UPDATE of `memories`, including the per-fragment access bump every recall performs and the bulk confidence decay each consolidation sweep runs — rebuilding FTS rows whose content was byte-identical before and after.
+    run_step!(57, migrate_v57);
+
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
     // applied DDL without recording its audit row — operator tooling
@@ -363,6 +371,23 @@ fn try_column_exists(
         }
     }
     Ok(false)
+}
+
+/// Whether `table` exists at all.
+///
+/// [`try_column_exists`] cannot answer this: `PRAGMA table_info` on a missing
+/// table yields zero rows, so an absent table and an absent column are
+/// indistinguishable through it — and a migration that reads `false` as "add
+/// the column" then fails the `ALTER` outright. A migration whose target table
+/// was created below the schema version a database is stamped at (so its
+/// `CREATE TABLE` step never ran) needs this distinction.
+fn try_table_exists(conn: &Connection, table: &str) -> Result<bool, rusqlite::Error> {
+    let found: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |row| row.get(0),
+    )?;
+    Ok(found > 0)
 }
 
 #[cfg(test)]
@@ -1232,6 +1257,73 @@ fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (55, datetime('now'), 'Template (agent-type) version history table')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 56: persist `workflow_runs.total_steps`.
+///
+/// The workflow_runs table (v37) never stored the run's step count, so
+/// `row_to_workflow_run` hardcoded `total_steps: 0` on reload — a run
+/// recovered after a daemon restart reported "step X of 0" in the API and
+/// dashboard. Store the actual value so progress survives a restart.
+/// `try_column_exists` keeps the ADD COLUMN idempotent.
+fn migrate_v56(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // A database stamped at or above v37 without ever running v37's DDL has no
+    // `workflow_runs` table to alter. It has no runs to lose progress on either,
+    // so skipping is correct — and unlike v49, which has the same shape, this
+    // migration sits above the version such databases are stamped at, so it is
+    // the first one that would actually hit the missing table.
+    if try_table_exists(conn, "workflow_runs")?
+        && !try_column_exists(conn, "workflow_runs", "total_steps")?
+    {
+        conn.execute(
+            "ALTER TABLE workflow_runs ADD COLUMN total_steps INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (56, datetime('now'), 'Persist workflow_runs.total_steps so run progress survives restart')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v57: only re-index `memories_fts` when an indexed column actually changed.
+///
+/// [`migrate_v50`] created `memories_fts_au` as a bare `AFTER UPDATE ON memories`, with no column list and no `WHEN` guard, so it fired for every UPDATE the crate performs — including ones that cannot change either indexed column.
+/// Two of those are hot.
+/// `SemanticStore::bump_recall_access_counts` issues one `UPDATE memories SET access_count = access_count + 1, accessed_at = ?` per returned fragment at the end of every recall, and `ConsolidationEngine::consolidate` opens each sweep with a single bulk `UPDATE memories SET confidence = MAX(0.1, confidence * ?)` over every stale row.
+/// Each affected row paid a full FTS delete plus re-insert that produced a byte-identical index.
+///
+/// The cost is worse than one wasted delete/insert pair per row.
+/// `memory_id` is declared `UNINDEXED` and an fts5 virtual table carries no secondary index, so `DELETE FROM memories_fts WHERE memory_id = old.id` cannot seek — SQLite plans it as a full scan of the FTS content.
+/// That makes any multi-row UPDATE on `memories` quadratic in store size, and because the decay sweep is a single statement holding SQLite's one write slot, a large store can hold that slot past the 5 s `busy_timeout` and make concurrent memory and session writes fail with `database is locked`.
+///
+/// The `WHEN` clause names both mirrored columns rather than relying on `AFTER UPDATE OF content`: `agent_id` is mirrored into the index too, and an `OF` list alone would still fire for a write that sets a listed column to the value it already held.
+/// `IS NOT` rather than `<>` keeps the comparison correct if either column ever becomes nullable.
+///
+/// `CREATE TRIGGER IF NOT EXISTS` cannot express this — the v50 trigger already occupies the name — so the old one is dropped first.
+/// No rebuild is needed: the index rows this stops rewriting were being rewritten to the value they already had.
+fn migrate_v57(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        DROP TRIGGER IF EXISTS memories_fts_au;
+
+        CREATE TRIGGER memories_fts_au AFTER UPDATE ON memories
+        WHEN new.content IS NOT old.content OR new.agent_id IS NOT old.agent_id
+        BEGIN
+            DELETE FROM memories_fts WHERE memory_id = old.id;
+            INSERT INTO memories_fts (memory_id, agent_id, content)
+            VALUES (new.id, new.agent_id, new.content);
+        END;
+        ",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (57, datetime('now'), 'Guard memories_fts_au with a WHEN clause so the recall access bump and the decay sweep stop rebuilding identical memories_fts rows')",
         [],
     )?;
     Ok(())
@@ -3284,6 +3376,65 @@ mod tests {
             )
             .expect("a row written before the index existed must be backfilled");
         assert_eq!(id, "old");
+    }
+
+    /// v56: the FTS sync trigger must ignore UPDATEs that cannot change an indexed column, and must still fire for the ones that can.
+    ///
+    /// `total_changes()` counts rows written by trigger programs as well as by the statement itself, and an fts5 write touches several shadow-table rows, so the access bump below reports a delta of 1 when the trigger stays asleep and well over 1 when it runs.
+    /// That is the whole regression: every recall ends in one `UPDATE memories SET access_count = access_count + 1` per returned fragment, and each consolidation sweep issues one bulk confidence UPDATE across every stale row.
+    #[test]
+    fn test_migrate_v56_access_bump_leaves_the_fts_index_alone() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted) \
+             VALUES ('m1', 'agent-1', 'the release train leaves on Thursday', 'conversation', 'agent_memory', 1.0, '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 0, 0)",
+            [],
+        )
+        .unwrap();
+
+        // The recall access bump, verbatim from `SemanticStore::bump_recall_access_counts`.
+        let before = conn.total_changes();
+        conn.execute(
+            "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = 'm1'",
+            ["2026-07-20T00:00:00+00:00"],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.total_changes() - before,
+            1,
+            "an access bump changes neither content nor agent_id, so it must write exactly the one `memories` row and nothing in `memories_fts`"
+        );
+
+        // A genuine content edit must still re-index, or the guard would have traded write amplification for a silently stale index.
+        let before_edit = conn.total_changes();
+        conn.execute(
+            "UPDATE memories SET content = 'the postgres primary lives in Frankfurt' WHERE id = 'm1'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.total_changes() - before_edit > 1,
+            "a content edit must still fire the trigger"
+        );
+
+        let fresh: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?1",
+                ["\"postgres\""],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fresh, 1, "the new content must be searchable");
+        let stale: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?1",
+                ["\"thursday\""],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 0, "the replaced content must be gone from the index");
     }
 
     #[test]

@@ -16,6 +16,7 @@ use std::time::Duration;
 use super::screens::{
     audit::AuditEntry,
     channels::{ChannelAdapterInfo, ChannelFieldInfo, ChannelInstance, ConfigureRequest},
+    config_editor::{parse_config_sections, ConfigSection},
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
     goals::GoalInfo,
@@ -65,6 +66,24 @@ pub enum FetchFailure {
     /// The request went out and did not come back usable — transport error,
     /// non-success status, or a body that would not decode.
     Error(String),
+}
+
+/// How much of a `POST /api/config/set` write is actually in effect.
+///
+/// The endpoint answers HTTP 200 for all three, so `is_success()` alone cannot
+/// tell them apart — and the two that are not a clean apply are exactly the ones
+/// an operator must be told about, because the value on screen after the refetch
+/// is read from the live kernel config rather than from `config.toml`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigSaveOutcome {
+    /// Written to `config.toml` and hot-reloaded — what is on screen is live.
+    Applied,
+    /// Written and accepted, but the running kernel keeps the old value until a
+    /// restart (`applied_partial` / `restart_required`).
+    RestartRequired,
+    /// Written to `config.toml`, but the hot-reload failed and the live value is
+    /// still the old one. Carries the daemon's `reload_error`.
+    ReloadFailed(String),
 }
 
 // ── AppEvent ────────────────────────────────────────────────────────────────
@@ -258,6 +277,14 @@ pub enum AppEvent {
     ModelLimitsSaved(String),
     /// One model's operator capacity limits were dropped back to the catalog.
     ModelLimitsReset(String),
+    /// Config sections resolved from the schema plus the live values (#8165).
+    ConfigSectionsLoaded(Vec<ConfigSection>),
+    /// One `POST /api/config/set` write landed; carries the config path and how
+    /// much of the write is actually in effect.
+    ConfigValueSaved {
+        path: String,
+        outcome: ConfigSaveOutcome,
+    },
     /// Backup archives listed.
     BackupsLoaded(Vec<BackupInfo>),
     /// A new archive was written.
@@ -347,6 +374,16 @@ pub enum AppEvent {
     },
     /// Agent channel allowlist updated.
     AgentChannelsUpdated(String),
+    /// Agent token usage loaded.
+    ///
+    /// Carries the id it was fetched for: the two HTTP calls behind it are
+    /// sequential, so a selection change can land between the request and the
+    /// answer, and figures with no id on them paint under whatever name is on
+    /// screen when they arrive.
+    AgentTokenUsageLoaded {
+        agent_id: String,
+        usage: crate::tui::screens::agents::AgentTokenUsage,
+    },
     /// The agent's current inference parameters, plus the model's own limits so
     /// the editor's ladders can stop where the endpoint does. A `null` in
     /// `model` is the inherit state and stays `null` here.
@@ -2249,6 +2286,101 @@ pub fn spawn_update_agent_channels(
     });
 }
 
+pub fn spawn_fetch_agent_token_usage(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let (base_url, api_key) = match backend {
+            BackendRef::Daemon { base_url, api_key } => (base_url, api_key),
+            BackendRef::InProcess(kernel) => {
+                let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) else {
+                    return;
+                };
+                let aid = librefang_types::agent::AgentId(uuid);
+                let Some(entry) = kernel.agent_registry_ref().get(aid) else {
+                    return;
+                };
+                let tools = kernel.available_tools(aid);
+                let total_tokens = librefang_kernel::compactor::estimate_token_count(
+                    &[],
+                    Some(&entry.manifest.model.system_prompt),
+                    Some(tools.as_slice()),
+                ) as u64;
+                let recent = librefang_kernel::KernelApi::memory_substrate(kernel.as_ref())
+                    .usage()
+                    .list_agent_events_recent(aid, 5)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| (r.model, r.input_tokens, r.output_tokens, r.cost_usd))
+                    .collect();
+                let usage = crate::tui::screens::agents::AgentTokenUsage {
+                    total_tokens,
+                    recent,
+                };
+                let _ = tx.send(AppEvent::AgentTokenUsageLoaded { agent_id, usage });
+                return;
+            }
+        };
+        let client = make_daemon_client(api_key.as_deref());
+        let mut usage = crate::tui::screens::agents::AgentTokenUsage::default();
+        match daemon_response(
+            client
+                .get(format!("{base_url}/api/agents/{agent_id}"))
+                .send(),
+            || crate::i18n::t("tui-agents-token-usage-failed"),
+        )
+        .and_then(|r| r.json::<serde_json::Value>().map_err(|e| e.to_string()))
+        {
+            Ok(body) => match body["injected_footprint_tokens"].as_u64() {
+                Some(n) => usage.total_tokens = n,
+                None => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-agents-token-usage-failed",
+                    )));
+                    return;
+                }
+            },
+            Err(message) => {
+                let _ = tx.send(AppEvent::FetchError(message));
+                return;
+            }
+        }
+        match daemon_response(
+            client
+                .get(format!("{base_url}/api/agents/{agent_id}/events?limit=5"))
+                .send(),
+            || crate::i18n::t("tui-agents-token-usage-failed"),
+        )
+        .and_then(|r| r.json::<serde_json::Value>().map_err(|e| e.to_string()))
+        {
+            Ok(body) => {
+                usage.recent = body["events"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| {
+                                Some((
+                                    c["model"].as_str()?.to_string(),
+                                    c["input_tokens"].as_u64().unwrap_or(0),
+                                    c["output_tokens"].as_u64().unwrap_or(0),
+                                    c["cost_usd"].as_f64().unwrap_or(0.0),
+                                ))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+            Err(message) => {
+                let _ = tx.send(AppEvent::FetchError(message));
+                return;
+            }
+        }
+        let _ = tx.send(AppEvent::AgentTokenUsageLoaded { agent_id, usage });
+    });
+}
+
 // ── New screen spawn functions ───────────────────────────────────────────────
 
 /// Build a blocking reqwest client for daemon calls.
@@ -2989,7 +3121,9 @@ fn workspace_agents_dir() -> std::path::PathBuf {
 /// Operator-authored agent types, one flat `{name}.toml` each — the same directory
 /// `POST`/`PUT /api/templates` writes (#7740).
 fn agent_types_dir() -> std::path::PathBuf {
-    librefang_kernel::config::librefang_home().join("agent-types")
+    librefang_types::agent_type_store::agent_types_dir_in(
+        &librefang_kernel::config::librefang_home(),
+    )
 }
 
 /// Resolve one agent type's manifest path, agent-types first.
@@ -3783,6 +3917,131 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
 }
 
 /// Fetch the backup archives the daemon holds.
+/// Load the config editor: the schema that says which sections and fields
+/// exist, and the redacted config that says what they currently hold (#8165).
+///
+/// Both in one thread and one event, because a section list without values
+/// (or values without the writable verdict) is not a state the screen can draw.
+pub fn spawn_fetch_config_sections(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let schema = daemon_response(
+                client.get(format!("{base_url}/api/config/schema")).send(),
+                || crate::i18n::t("tui-event-config-schema-failed"),
+            );
+            // A body this parser cannot read is not an empty schema: swallowing it
+            // renders "No configuration sections available. The daemon must be
+            // running." — pointing the operator at the one thing that is not wrong,
+            // since the daemon answered. Report what actually failed instead.
+            let schema: serde_json::Value = match schema {
+                Ok(resp) => match resp.json::<serde_json::Value>() {
+                    Ok(body) => body,
+                    Err(error) => {
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                            "tui-event-config-schema-unreadable",
+                            &[("error", &error.to_string())],
+                        )));
+                        return;
+                    }
+                },
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                    return;
+                }
+            };
+            let values =
+                daemon_response(client.get(format!("{base_url}/api/config")).send(), || {
+                    crate::i18n::t("tui-event-config-failed")
+                });
+            let values: serde_json::Value = match values {
+                Ok(resp) => match resp.json::<serde_json::Value>() {
+                    Ok(body) => body,
+                    Err(error) => {
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                            "tui-event-config-unreadable",
+                            &[("error", &error.to_string())],
+                        )));
+                        return;
+                    }
+                },
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                    return;
+                }
+            };
+            let _ = tx.send(AppEvent::ConfigSectionsLoaded(parse_config_sections(
+                &schema, &values,
+            )));
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-config-need-daemon",
+            )));
+        }
+    });
+}
+
+/// Write one config leaf through `POST /api/config/set`.
+///
+/// The path allowlist, the secret scrub and the on-disk merge all live behind
+/// that endpoint, so this is the same write the dashboard performs — including
+/// its refusals, which arrive here as the error text the daemon wrote.
+pub fn spawn_set_config_value(
+    backend: BackendRef,
+    path: String,
+    value: serde_json::Value,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let outcome = daemon_response(
+                client
+                    .post(format!("{base_url}/api/config/set"))
+                    .json(&serde_json::json!({"path": path, "value": value}))
+                    .send(),
+                || crate::i18n::t_args("tui-event-config-set-failed", &[("path", &path)]),
+            );
+            match outcome {
+                Ok(resp) => {
+                    // The endpoint answers 200 for three different outcomes, and the
+                    // refetch below reads the live kernel config rather than the
+                    // file — so on a failed reload the list comes back showing the
+                    // *old* value under a "Saved" message, with the reason discarded.
+                    // An unreadable body cannot be classified, and the write did
+                    // return 2xx, so it is reported as a plain apply.
+                    let body = resp
+                        .json::<serde_json::Value>()
+                        .unwrap_or(serde_json::Value::Null);
+                    let outcome = match body["status"].as_str() {
+                        Some("saved_reload_failed") => ConfigSaveOutcome::ReloadFailed(
+                            body["reload_error"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        ),
+                        Some("applied_partial") => ConfigSaveOutcome::RestartRequired,
+                        _ if body["restart_required"].as_bool().unwrap_or(false) => {
+                            ConfigSaveOutcome::RestartRequired
+                        }
+                        _ => ConfigSaveOutcome::Applied,
+                    };
+                    let _ = tx.send(AppEvent::ConfigValueSaved { path, outcome });
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-config-need-daemon",
+            )));
+        }
+    });
+}
+
 pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
@@ -4184,9 +4443,8 @@ pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<A
 
 /// Fetch user groups (#7745).
 ///
-/// `GET /api/groups` is Admin-or-above; the write verbs are Owner-only and the
-/// screen does not offer them, so a Viewer-scoped TUI degrades to an empty list
-/// rather than a wall of permission errors.
+/// `GET /api/groups` is admitted for every authenticated role by the middleware's generic GET rule, not gated at Admin, so a Viewer-scoped TUI sees the same roster any other role does.
+/// The write verbs are Owner-only and this screen does not offer them, so no role hits a wall of permission errors here.
 pub fn spawn_fetch_groups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
@@ -5405,6 +5663,29 @@ mod tests {
         }
     }
 
+    /// A tiny raw-socket stand-in for a daemon that answers exactly one
+    /// request with a fixed JSON body, then closes. Enough to exercise how a
+    /// caller parses a *response shape*, which `unreachable_daemon` cannot —
+    /// that one only ever produces a transport error.
+    fn one_shot_json_server(body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf); // request content is irrelevant here
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
     /// A memory-config fetch that cannot reach the daemon must say so.
     ///
     /// Before #8141 this returned without sending anything, and the Memory
@@ -5447,6 +5728,34 @@ mod tests {
                 );
             }
             _ => panic!("expected GoalRunFailed, got another AppEvent"),
+        }
+    }
+
+    /// A `200` whose body has no `injected_footprint_tokens` (an older
+    /// daemon, or a future key rename) must not be read as a confident
+    /// zero — that is indistinguishable from a real zero footprint, which is
+    /// exactly the number the operator pressed `$` to see.
+    #[test]
+    fn token_usage_fetch_reports_a_missing_footprint_field_rather_than_a_fake_zero() {
+        let base_url = one_shot_json_server(r#"{"id":"agent-1"}"#);
+        let (tx, rx) = mpsc::channel();
+        spawn_fetch_agent_token_usage(
+            BackendRef::Daemon {
+                base_url,
+                api_key: None,
+            },
+            "agent-1".to_string(),
+            tx,
+        );
+
+        let ev = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a 200 missing injected_footprint_tokens must still produce an event");
+        match ev {
+            AppEvent::FetchError(reason) => {
+                assert!(!reason.is_empty(), "the failure must carry a reason");
+            }
+            _ => panic!("expected FetchError, got another AppEvent"),
         }
     }
 
@@ -6027,5 +6336,165 @@ mod tests {
             message.contains("skill not found on registry"),
             "why it failed: {message}"
         );
+    }
+
+    // ── Config editor: what the daemon's 200 actually meant ─────────────────
+
+    /// A one-shot HTTP server that answers `responses` in order and then stops.
+    ///
+    /// The config paths are exercised through the real `spawn_*` functions rather
+    /// than through an extracted classifier, so deleting the classification from
+    /// the production path fails these tests rather than leaving them green.
+    fn serve(responses: Vec<(u16, &'static str)>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for (status, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                // Read just enough to let the client finish sending; the request
+                // itself does not matter to what is being asserted.
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {status} OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        base
+    }
+
+    fn daemon(base_url: String) -> BackendRef {
+        BackendRef::Daemon {
+            base_url,
+            api_key: None,
+        }
+    }
+
+    fn next_event(rx: &mpsc::Receiver<AppEvent>) -> AppEvent {
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the fetch thread must send exactly one event")
+    }
+
+    /// `unwrap_or_default()` on a `serde_json::Value` yields `Null`, so a 200 with
+    /// a body this parser cannot read became an empty schema — and the screen then
+    /// said "No configuration sections available. The daemon must be running."
+    /// The daemon *is* running; it answered. The operator was pointed at the one
+    /// thing that was not wrong.
+    #[test]
+    fn an_unreadable_schema_body_reports_the_parse_failure_not_an_empty_schema() {
+        // A valid second response is queued deliberately. Without it, the old
+        // `unwrap_or_default()` code reaches a closed listener on the `/api/config`
+        // request and reports *that* failure — the test would then pass against the
+        // very code it exists to catch.
+        let base = serve(vec![(200, "this is not json at all"), (200, "{}")]);
+        let (tx, rx) = mpsc::channel();
+
+        spawn_fetch_config_sections(daemon(base), tx);
+
+        match next_event(&rx) {
+            AppEvent::FetchError(message) => assert!(
+                !message.is_empty(),
+                "the deserialisation detail must reach the operator"
+            ),
+            AppEvent::ConfigSectionsLoaded(sections) => panic!(
+                "an unreadable body must not pass for an empty schema, got {} sections",
+                sections.len()
+            ),
+            _ => panic!("expected FetchError"),
+        }
+    }
+
+    /// Same swallow one hunk down, on `GET /api/config`.
+    #[test]
+    fn an_unreadable_config_body_reports_the_parse_failure() {
+        let base = serve(vec![(200, "{}"), (200, "<html>proxy error</html>")]);
+        let (tx, rx) = mpsc::channel();
+
+        spawn_fetch_config_sections(daemon(base), tx);
+
+        match next_event(&rx) {
+            AppEvent::FetchError(message) => {
+                assert!(!message.is_empty(), "the reason must reach the operator")
+            }
+            _ => panic!("an unreadable /api/config body must not pass for empty values"),
+        }
+    }
+
+    /// `POST /api/config/set` answers **200** for `saved_reload_failed`. The TUI
+    /// reported "Saved {path}" and refetched — and `GET /api/config` reads the live
+    /// kernel config, not the file, so the list came back showing the *old* value
+    /// under a success message with `reload_error` discarded.
+    #[test]
+    fn a_failed_reload_is_not_reported_as_a_clean_save() {
+        let base = serve(vec![(
+            200,
+            r#"{"status":"saved_reload_failed","reload_error":"port 4545 already bound"}"#,
+        )]);
+        let (tx, rx) = mpsc::channel();
+
+        spawn_set_config_value(daemon(base), "api.port".to_string(), 4545.into(), tx);
+
+        match next_event(&rx) {
+            AppEvent::ConfigValueSaved { path, outcome } => {
+                assert_eq!(path, "api.port");
+                assert_eq!(
+                    outcome,
+                    ConfigSaveOutcome::ReloadFailed("port 4545 already bound".to_string()),
+                    "the daemon's reload_error must survive to the status line"
+                );
+            }
+            _ => panic!("expected ConfigValueSaved"),
+        }
+    }
+
+    /// `applied_partial` — saved, restart required — was reported identically to a
+    /// clean apply.
+    #[test]
+    fn a_restart_required_save_says_so_rather_than_claiming_it_is_live() {
+        let base = serve(vec![(
+            200,
+            r#"{"status":"applied_partial","restart_required":true}"#,
+        )]);
+        let (tx, rx) = mpsc::channel();
+
+        spawn_set_config_value(daemon(base), "api.bind".to_string(), "0.0.0.0".into(), tx);
+
+        match next_event(&rx) {
+            AppEvent::ConfigValueSaved { outcome, .. } => assert_eq!(
+                outcome,
+                ConfigSaveOutcome::RestartRequired,
+                "a save that needs a restart must not read as live"
+            ),
+            _ => panic!("expected ConfigValueSaved"),
+        }
+    }
+
+    /// The clean case still reads as a clean save, so the discrimination is not
+    /// just "always warn".
+    #[test]
+    fn a_clean_apply_is_still_reported_as_applied() {
+        let base = serve(vec![(200, r#"{"status":"applied"}"#)]);
+        let (tx, rx) = mpsc::channel();
+
+        spawn_set_config_value(
+            daemon(base),
+            "skills.auto_update".to_string(),
+            true.into(),
+            tx,
+        );
+
+        match next_event(&rx) {
+            AppEvent::ConfigValueSaved { outcome, .. } => {
+                assert_eq!(outcome, ConfigSaveOutcome::Applied)
+            }
+            _ => panic!("expected ConfigValueSaved"),
+        }
     }
 }

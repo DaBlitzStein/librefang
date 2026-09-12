@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, instrument, warn};
 
+use super::text_recovery;
 use super::TIMEOUT_PARTIAL_OUTPUT_MARKER;
 
 /// Maximum retries for rate-limited or overloaded API calls.
@@ -152,6 +153,35 @@ fn should_count_against_circuit_breaker(error: &LlmError) -> bool {
     }
 }
 
+/// Classify a terminal LLM failure into the user-facing error and account it
+/// against the provider circuit breaker when it says something about that
+/// provider's health.
+///
+/// `call_with_retry` and `stream_with_retry` share this so the two cannot drift
+/// apart on which failures the breaker counts — the pairing of the
+/// `should_count_against_circuit_breaker` verdict with the log wording and the
+/// `record_retry_failure` call lives in exactly one place.
+fn classify_terminal_llm_error(
+    error: &LlmError,
+    base_log_message: &str,
+    provider: Option<&str>,
+    cooldown: Option<&ProviderCooldown>,
+) -> LibreFangError {
+    let counts_against_breaker = should_count_against_circuit_breaker(error);
+    let log_message = if counts_against_breaker {
+        base_log_message.to_string()
+    } else {
+        format!(
+            "{base_log_message} (unsupported-parameter rejection, not counted against circuit breaker)"
+        )
+    };
+    let (is_billing, err) = build_user_facing_llm_error(error, &log_message);
+    if counts_against_breaker {
+        record_retry_failure(provider, cooldown, is_billing);
+    }
+    err
+}
+
 fn build_user_facing_llm_error(
     error: &LlmError,
     classification_log_message: &str,
@@ -253,11 +283,12 @@ pub(super) async fn call_with_retry(
                 );
             }
             Err(e) => {
-                let (is_billing, err) = build_user_facing_llm_error(&e, "LLM error classified");
-                if should_count_against_circuit_breaker(&e) {
-                    record_retry_failure(provider, cooldown, is_billing);
-                }
-                return Err(err);
+                return Err(classify_terminal_llm_error(
+                    &e,
+                    "LLM error classified",
+                    provider,
+                    cooldown,
+                ));
             }
         }
     }
@@ -277,6 +308,16 @@ pub(super) struct StreamWithRetryResult {
     /// TextDelta forwarding was stopped early and the partial response
     /// must be treated as a silent drop (system-prompt regurgitation).
     pub(super) cascade_leak_aborted: bool,
+    /// #8236: set when the response opened with a known tool-call marker
+    /// and never resolved to real trailing content before the stream
+    /// ended — the incremental markup-withholding guard held every byte of
+    /// it back rather than forward the raw syntax live, so the caller has
+    /// nothing on the wire yet for this turn. `None` when nothing was ever
+    /// withheld, or it resolved (real content followed) and was already
+    /// flushed to `tx` as one delta. The caller must send its own follow-up
+    /// delta with whatever the post-stream guard decides this turn's text
+    /// should be — see `replace_unrecoverable_tool_call_reply`.
+    pub(super) withheld_markup: Option<String>,
 }
 
 /// Stream an LLM completion with retry logic and an incremental cascade-leak
@@ -333,12 +374,13 @@ pub(super) async fn stream_with_retry(
                     actual_model: None,
                 },
                 cascade_leak_aborted: true,
+                withheld_markup: None,
             });
         }
 
         // Same rationale as call_with_retry: the permit covers the driver round-trip and the join of the forwarding task, and is released at the end of this block — before any backoff sleep in the match below.
         // Binding it at loop-body scope instead would keep the slot until the end of the iteration, i.e. across the sleep inside `handle_retryable_llm_error`.
-        let (driver_result, cascade_leak_aborted, content_emitted, text_emitted) = {
+        let (driver_result, cascade_leak_aborted, content_emitted, text_emitted, withheld_markup) = {
             let _permit = LLM_CONCURRENCY
                 .acquire()
                 .await
@@ -360,6 +402,14 @@ pub(super) async fn stream_with_retry(
                 // Whether any observable output reached the caller's `tx` on this attempt (drives the no-retry-after-content guard below).
                 let mut content_emitted = false;
                 let mut text_emitted = false;
+                // #8236: withholds a delta while the response so far still
+                // might resolve to pure, unparseable tool-call markup (see
+                // `text_recovery::replace_unrecoverable_tool_call_reply`).
+                // Forwarding it live would show the raw `<function=...>`
+                // syntax before the post-stream guard ever gets to decide.
+                // `None` = nothing withheld right now (either never a
+                // candidate, or already resolved and flushed).
+                let mut markup_buffer: Option<String> = None;
                 while let Some(event) = proxy_rx.recv().await {
                     match &event {
                         StreamEvent::TextDelta { text } if !leak_fired => {
@@ -383,16 +433,79 @@ pub(super) async fn stream_with_retry(
                                 leak_fired = true;
                                 // Stop forwarding TextDelta — do not send this
                                 // token to the wire. Other event types continue.
+                                // Whatever was still withheld dies with the
+                                // rest of this (silently dropped) turn.
+                                markup_buffer = None;
                                 continue;
                             }
-                            // Forward the delta; ignore send errors (client gone).
-                            if !text.is_empty() {
-                                content_emitted = true;
-                                text_emitted = true;
+                            // #8236: append to the candidate buffer if one is
+                            // already open, else open one when this delta's
+                            // text could be the start of a known opener.
+                            //
+                            // The buffer is anchored to the *first* text of the
+                            // attempt (`!text_emitted`). Opening one later would
+                            // withhold a suffix of a reply whose earlier deltas
+                            // already went out, and the caller's catch-up send
+                            // re-emits the whole text — delivering the opening
+                            // prose twice. It would also be pointless: the
+                            // honest-reply guard only ever replaces a reply that
+                            // is markup end to end, which this one is not.
+                            if let Some(buf) = markup_buffer.as_mut() {
+                                buf.push_str(text);
+                            } else if !text.is_empty()
+                                && !text_emitted
+                                && text_recovery::could_be_tool_call_opener(text.trim_start())
+                            {
+                                markup_buffer = Some(text.clone());
+                            } else {
+                                // Not a candidate — forward immediately, as
+                                // before #8236.
+                                let _ = outer_tx
+                                    .send(StreamEvent::TextDelta { text: text.clone() })
+                                    .await;
+                                // Both flags mean "bytes the caller has already
+                                // seen": they gate the no-retry-after-content
+                                // guard and the timed-out partial-text replay,
+                                // and a retry/replay only duplicates output that
+                                // actually reached `tx`. Marking a *withheld*
+                                // delta suppressed both for a turn where nothing
+                                // had been emitted at all.
+                                if !text.is_empty() {
+                                    content_emitted = true;
+                                    text_emitted = true;
+                                }
                             }
-                            let _ = outer_tx
-                                .send(StreamEvent::TextDelta { text: text.clone() })
-                                .await;
+
+                            // Re-evaluate every time the buffer changes (also
+                            // covers a driver that hands the whole reply over
+                            // in a single chunk): flush once it is ruled out
+                            // as an opener, or once real trailing content
+                            // resolves it.
+                            if let Some(buf) = markup_buffer.as_ref() {
+                                let trimmed = buf.trim_start();
+                                let ruled_out = !text_recovery::could_be_tool_call_opener(trimmed);
+                                let resolved_with_content = !ruled_out
+                                    && text_recovery::TOOL_CALL_OPENERS
+                                        .iter()
+                                        .any(|o| trimmed.starts_with(o))
+                                    && matches!(
+                                        text_recovery::replace_unrecoverable_tool_call_reply(
+                                            trimmed
+                                        ),
+                                        std::borrow::Cow::Borrowed(_)
+                                    );
+                                if ruled_out || resolved_with_content {
+                                    let flushed = markup_buffer.take().unwrap_or_default();
+                                    let flushed_empty = flushed.is_empty();
+                                    let _ = outer_tx
+                                        .send(StreamEvent::TextDelta { text: flushed })
+                                        .await;
+                                    if !flushed_empty {
+                                        content_emitted = true;
+                                        text_emitted = true;
+                                    }
+                                }
+                            }
                         }
                         StreamEvent::TextDelta { .. } => {
                             // leak_fired: swallow remaining text tokens silently.
@@ -414,7 +527,7 @@ pub(super) async fn stream_with_retry(
                         }
                     }
                 }
-                (leak_fired, content_emitted, text_emitted)
+                (leak_fired, content_emitted, text_emitted, markup_buffer)
             });
 
             // Drive the LLM stream, then join the forwarding task exactly once.
@@ -423,13 +536,14 @@ pub(super) async fn stream_with_retry(
             let driver_result = driver.stream(request.clone(), proxy_tx).await;
             // proxy_tx is dropped when driver returns (moved into driver.stream).
             // forward_task drains the proxy channel and finishes.
-            let (cascade_leak_aborted, content_emitted, text_emitted) =
-                forward_task.await.unwrap_or((false, false, false));
+            let (cascade_leak_aborted, content_emitted, text_emitted, withheld_markup) =
+                forward_task.await.unwrap_or((false, false, false, None));
             (
                 driver_result,
                 cascade_leak_aborted,
                 content_emitted,
                 text_emitted,
+                withheld_markup,
             )
         };
         // Propagate to the sticky flag so any retry iteration short-circuits.
@@ -445,6 +559,7 @@ pub(super) async fn stream_with_retry(
                 return Ok(StreamWithRetryResult {
                     response,
                     cascade_leak_aborted,
+                    withheld_markup,
                 });
             }
             Err(LlmError::RateLimited { retry_after_ms, .. }) if !content_emitted_sticky => {
@@ -529,12 +644,12 @@ pub(super) async fn stream_with_retry(
                     .await;
                     continue;
                 }
-                let (is_billing, err) =
-                    build_user_facing_llm_error(&e, "LLM stream error classified");
-                if should_count_against_circuit_breaker(&e) {
-                    record_retry_failure(provider, cooldown, is_billing);
-                }
-                return Err(err);
+                return Err(classify_terminal_llm_error(
+                    &e,
+                    "LLM stream error classified",
+                    provider,
+                    cooldown,
+                ));
             }
         }
     }
@@ -659,6 +774,220 @@ mod tests {
                 last_activity: "text_delta".to_string(),
             })
         }
+    }
+
+    /// A streaming driver that hands the caller-provided chunks to `stream()`
+    /// one delta at a time — used to exercise the #8236 markup-withholding
+    /// buffer against a driver that splits a known opener across several
+    /// small deltas, the way character-by-character local-model streaming
+    /// does. `stop_reason` is reported once every chunk has been sent.
+    struct ChunkedTextThenEnd {
+        chunks: Vec<&'static str>,
+        stop_reason: StopReason,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmDriver for ChunkedTextThenEnd {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            unreachable!("this mock is only exercised through stream()")
+        }
+
+        async fn stream(
+            &self,
+            _req: CompletionRequest,
+            tx: mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            for chunk in &self.chunks {
+                tx.send(StreamEvent::TextDelta {
+                    text: chunk.to_string(),
+                })
+                .await
+                .unwrap();
+            }
+            let full_text: String = self.chunks.concat();
+            Ok(CompletionResponse {
+                content: vec![librefang_types::message::ContentBlock::Text {
+                    text: full_text,
+                    provider_metadata: None,
+                }],
+                stop_reason: self.stop_reason,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+                actual_provider: None,
+                actual_model: None,
+            })
+        }
+    }
+
+    /// Regression (#8236 review, run_streaming.rs:1011): a known opener
+    /// arriving one token at a time — the shape a local model streams in —
+    /// must stay withheld across every delta until it is ruled out or
+    /// resolved by real trailing content, not just when the whole reply
+    /// arrives as a single chunk (the non-streaming loop test already
+    /// covers that shape via `DirectiveDriver`'s single-shot default
+    /// `stream()`). No text ever reaches `tx` here because the opener never
+    /// closes into anything but more markup.
+    #[tokio::test]
+    async fn withholds_pure_markup_reply_split_across_many_small_deltas() {
+        let driver = ChunkedTextThenEnd {
+            chunks: vec![
+                "<",
+                "func",
+                "tion=",
+                "shell_exec",
+                ">",
+                "<param",
+                "eter=command>",
+                "ls",
+                "</parameter",
+                ">",
+                "</function>",
+            ],
+            stop_reason: StopReason::EndTurn,
+        };
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = stream_with_retry(&driver, CompletionRequest::default(), tx, None, None)
+            .await
+            .expect("stream should complete");
+
+        let mut forwarded = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let StreamEvent::TextDelta { text } = event {
+                forwarded.push(text);
+            }
+        }
+        assert!(
+            forwarded.is_empty(),
+            "no delta must reach the wire while the opener never resolves, got: {forwarded:?}"
+        );
+        assert_eq!(
+            result.withheld_markup.as_deref(),
+            Some("<function=shell_exec><parameter=command>ls</parameter></function>"),
+            "the full candidate text must be reported so the caller can decide what to show"
+        );
+    }
+
+    /// Counterpart: the same one-token-at-a-time delivery, but real prose
+    /// follows the closed call. The buffer must flush the withheld text
+    /// (and only stop withholding) once that trailing content resolves it —
+    /// a streaming client must still see it, just slightly delayed instead
+    /// of token-by-token from the very first chunk.
+    #[tokio::test]
+    async fn flushes_withheld_markup_once_trailing_prose_resolves_it() {
+        let driver = ChunkedTextThenEnd {
+            chunks: vec![
+                "<function=",
+                "shell_exec>",
+                "<parameter=command>ls</parameter>",
+                "</function>",
+                "\nHere ",
+                "is your answer.",
+            ],
+            stop_reason: StopReason::EndTurn,
+        };
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = stream_with_retry(&driver, CompletionRequest::default(), tx, None, None)
+            .await
+            .expect("stream should complete");
+
+        let mut forwarded = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let StreamEvent::TextDelta { text } = event {
+                forwarded.push_str(&text);
+            }
+        }
+        assert_eq!(
+            forwarded,
+            "<function=shell_exec><parameter=command>ls</parameter></function>\nHere is your answer.",
+            "once resolved, the withheld text must reach the wire in full"
+        );
+        assert!(
+            result.withheld_markup.is_none(),
+            "nothing should be left withheld once it resolved and was flushed"
+        );
+    }
+
+    /// A driver whose first attempt withholds everything it emits (a bare
+    /// opener) and then fails retryably; the second attempt answers normally.
+    struct WithheldMarkupThenOverloaded {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmDriver for WithheldMarkupThenOverloaded {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            unreachable!("this mock is only exercised through stream()")
+        }
+
+        async fn stream(
+            &self,
+            _req: CompletionRequest,
+            tx: mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                // `could_be_tool_call_opener` accepts this prefix, so the
+                // forwarding task withholds it — nothing reaches `tx`.
+                tx.send(StreamEvent::TextDelta {
+                    text: "<function=shell_exec".to_string(),
+                })
+                .await
+                .unwrap();
+                return Err(LlmError::Overloaded { retry_after_ms: 0 });
+            }
+            tx.send(StreamEvent::TextDelta {
+                text: "Recovered answer.".to_string(),
+            })
+            .await
+            .unwrap();
+            Ok(CompletionResponse {
+                content: vec![librefang_types::message::ContentBlock::Text {
+                    text: "Recovered answer.".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+                actual_provider: None,
+                actual_model: None,
+            })
+        }
+    }
+
+    /// Regression (#8236 review M4): the no-retry-after-content guard exists
+    /// because a retry re-streams a second response onto the same `tx`. A
+    /// delta the #8236 buffer *withheld* never reached `tx`, so it cannot be
+    /// duplicated — but the flags were set before the withhold/forward
+    /// decision, so any reply starting with a candidate opener (including a
+    /// bare `<` or a leading newline) turned an ordinary Overloaded into a
+    /// hard error instead of a retry.
+    #[tokio::test]
+    async fn retries_after_a_retryable_error_when_every_delta_was_withheld() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let driver = WithheldMarkupThenOverloaded {
+            attempts: attempts.clone(),
+        };
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = stream_with_retry(&driver, CompletionRequest::default(), tx, None, None)
+            .await
+            .expect("a retryable error with nothing on the wire must be retried, not surfaced");
+
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "the driver must have been called a second time"
+        );
+        assert_eq!(result.response.text(), "Recovered answer.");
+
+        let mut forwarded = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let StreamEvent::TextDelta { text } = event {
+                forwarded.push_str(&text);
+            }
+        }
+        assert_eq!(
+            forwarded, "Recovered answer.",
+            "the abandoned attempt's withheld markup must not reach the wire either"
+        );
     }
 
     /// Regression (#6512 review [2]): once observable content has reached the caller's `tx`, a retryable mid-stream error (Overloaded / RateLimited / transient) must NOT be retried — a retry re-streams a second full response onto the same `tx`, concatenating a duplicate/garbled answer.

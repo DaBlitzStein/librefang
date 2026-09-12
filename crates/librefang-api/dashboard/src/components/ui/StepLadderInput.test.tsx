@@ -3,7 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it } from "vitest";
 import { StepLadderInput } from "./StepLadderInput";
-import { MAX_OUTPUT_TOKENS_LADDER } from "../../lib/modelParamLadders";
+import {
+  MAX_OUTPUT_TOKENS_LADDER,
+  PENALTY_LADDER,
+  TEMPERATURE_LADDER,
+} from "../../lib/modelParamLadders";
 
 function Harness({ initial = "", cap }: { initial?: string; cap?: number }) {
   const [value, setValue] = useState(initial);
@@ -112,5 +116,79 @@ describe("StepLadderInput", () => {
     for (const button of screen.getAllByRole("button")) {
       expect(button).not.toBeDisabled();
     }
+  });
+});
+
+/**
+ * A call site that stores the parsed number instead of the typed text.
+ *
+ * This is what the model settings drawer does — its reducer holds
+ * `temperature: number` rather than the string the field emits. These guard
+ * that a fractional and a negative value survive that round trip, which is the
+ * shape the token-count parameters never exercised: every prefix of "128000"
+ * is already a whole number, so `String(Number(x))` returned what was typed.
+ */
+function NumericHarness({ ladder }: { ladder: readonly number[] }) {
+  const [num, setNum] = useState<number | null>(null);
+  return (
+    <>
+      <StepLadderInput
+        label="Temperature"
+        value={num === null ? "" : String(num)}
+        onChange={(next) => {
+          if (next.trim() === "") {
+            setNum(null);
+            return;
+          }
+          const parsed = Number(next);
+          // The drawer refuses a value it cannot store, exactly as here.
+          if (!Number.isFinite(parsed)) return;
+          setNum(parsed);
+        }}
+        ladder={ladder}
+        inheritLabel="inherit"
+        customLabel="custom"
+        min={-2}
+        max={2}
+        step={0.01}
+      />
+      <output data-testid="value">{num === null ? "<empty>" : String(num)}</output>
+    </>
+  );
+}
+
+describe("StepLadderInput — custom entry against a value-parsing call site", () => {
+  it("lets a decimal be typed one character at a time", async () => {
+    render(<NumericHarness ladder={TEMPERATURE_LADDER} />);
+    await userEvent.click(screen.getByRole("button", { name: "custom" }));
+
+    const field = screen.getByRole("spinbutton", { name: "Temperature — custom" });
+    await userEvent.type(field, "0.65");
+
+    expect(field).toHaveValue(0.65);
+    expect(screen.getByTestId("value")).toHaveTextContent("0.65");
+  });
+
+  it("lets a negative penalty be typed, whose first character is not a number", async () => {
+    render(<NumericHarness ladder={PENALTY_LADDER} />);
+    await userEvent.click(screen.getByRole("button", { name: "custom" }));
+
+    const field = screen.getByRole("spinbutton", { name: "Temperature — custom" });
+    await userEvent.type(field, "-1.25");
+
+    expect(field).toHaveValue(-1.25);
+    expect(screen.getByTestId("value")).toHaveTextContent("-1.25");
+  });
+
+  it("accepts a value the old hardcoded min would have marked invalid", async () => {
+    render(<NumericHarness ladder={TEMPERATURE_LADDER} />);
+    await userEvent.click(screen.getByRole("button", { name: "custom" }));
+
+    const field = screen.getByRole("spinbutton", { name: "Temperature — custom" });
+    // `min="1"` is right for a token count and wrong for a temperature: 0 is a
+    // deliberate setting, not an empty field.
+    expect(field).toHaveAttribute("min", "-2");
+    await userEvent.type(field, "0");
+    expect(field).toBeValid();
   });
 });

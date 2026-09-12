@@ -630,7 +630,16 @@ impl ModelCatalog {
             // auto-detect it as "Configured".  Users who actually want these
             // providers will authenticate via the dashboard OAuth flow, which
             // validates access before marking the provider as configured.
-            let has_key = if provider.api_key_env == "GITHUB_TOKEN" {
+            //
+            // `suppressed` gates this the same way it gates the alias path
+            // below and the CLI / keyless branches above. Without it, a
+            // provider the operator removed is promoted straight back to
+            // `Configured` on the next boot by any credential left in the
+            // environment — a shell profile, a systemd unit, a Docker `-e`.
+            // That is the "it came back on its own" report: `delete_provider_key`
+            // unsets the process variable, but nothing can unset the one the
+            // daemon inherits, so suppression is the only record of intent.
+            let has_key = if suppressed || provider.api_key_env == "GITHUB_TOKEN" {
                 false
             } else {
                 std::env::var(&provider.api_key_env).is_ok_and(|v| !v.trim().is_empty())
@@ -676,11 +685,20 @@ impl ModelCatalog {
     ///
     /// Returns `(provider_id, base_url, api_key_env)` for every provider
     /// whose current auth status is `Configured` (key present, not yet validated).
+    ///
+    /// Suppressed providers are excluded. Filtering here rather than at each
+    /// write-back site is what makes the exclusion total: the validation task
+    /// has two branches that write auth status, and the OpenRouter one is
+    /// taken on every normal run because `probe_api_key` fetches that model
+    /// list unauthenticated, so `model_list_fetched` is true with or without a
+    /// key. A guard on only the other branch would never fire for it.
     pub fn providers_needing_validation(&self) -> Vec<(String, String, String)> {
         self.providers
             .iter()
             .filter(|p| {
-                p.auth_status == AuthStatus::Configured || p.auth_status == AuthStatus::AutoDetected
+                !self.suppressed_providers.contains(&p.id)
+                    && (p.auth_status == AuthStatus::Configured
+                        || p.auth_status == AuthStatus::AutoDetected)
             })
             .map(|p| (p.id.clone(), p.base_url.clone(), p.api_key_env.clone()))
             .collect()

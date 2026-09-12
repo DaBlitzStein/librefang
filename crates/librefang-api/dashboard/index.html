@@ -8,9 +8,11 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="LibreFang" />
     <meta name="theme-color" content="#020617" />
-    <link rel="manifest" href="manifest.json" crossorigin="use-credentials" />
-    <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
-    <link rel="apple-touch-icon" href="icon-192.png" />
+    <!-- These live in `public/`, which Vite copies verbatim without rewriting references into it, so they have to be written against the `/dashboard/` base by hand — unlike the script and CSS below, which Vite does rewrite. -->
+    <!-- The relative forms resolved against whichever URL served the shell, and the same file is served at both `/` and `/dashboard/<route>`, so which of them 404d depended on how the operator happened to enter. -->
+    <link rel="manifest" href="/dashboard/manifest.json" crossorigin="use-credentials" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/dashboard/icon-192.png" />
+    <link rel="apple-touch-icon" href="/dashboard/icon-192.png" />
     <title>LibreFang Dashboard</title>
   </head>
   <body>
@@ -18,7 +20,7 @@
     <script type="module" src="/src/main.tsx"></script>
     <script>
       if ("serviceWorker" in navigator) {
-        navigator.serviceWorker.register("sw.js").catch(() => {});
+        navigator.serviceWorker.register("/dashboard/sw.js").catch(() => {});
       }
     </script>
   </body>

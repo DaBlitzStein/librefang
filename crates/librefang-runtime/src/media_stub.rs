@@ -27,6 +27,10 @@ impl MediaDriverCache {
 
     pub fn load_providers_from_registry(&self, _registry: &impl std::any::Any) {}
 
+    pub fn media_provider_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     pub fn clear(&self) {}
 
     pub fn update_provider_urls<I>(&self, _urls: I) {}

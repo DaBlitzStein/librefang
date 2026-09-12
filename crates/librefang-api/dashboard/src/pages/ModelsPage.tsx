@@ -17,7 +17,6 @@ import {
   mediaEndpointDraftFrom,
   mediaEndpointHasVoiceAndFormat,
 } from "../lib/mediaModelEndpoints";
-import { SliderInput } from "../components/ui/SliderInput";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
@@ -32,6 +31,11 @@ import {
   Brain, Tag, Settings, Mic, Volume2, Image as ImageIcon, Video, Server,
 } from "lucide-react";
 import { modelKey } from "../lib/hiddenModels";
+import {
+  ModelParamField,
+  isValidParamValue,
+  type ModelParamName,
+} from "../components/ui/ModelParamField";
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -253,7 +257,13 @@ export function settingsStateFromOverrides(
     ...(overrides.top_p != null
       ? { topP: overrides.top_p, topPEnabled: true }
       : {}),
-    ...(overrides.max_tokens != null
+    // `> 0`, not `!= null`. `ModelCatalogEntry`'s token counts use `0` as
+    // "unknown" on the wire, and `model_catalog.rs` filters the same way for
+    // `context_window` / `max_output_tokens` with the comment "so a cleared
+    // dashboard field cannot pin a model's window to zero tokens". Hydrating a
+    // stored `0` as an active override would show the operator a setting the
+    // runtime reads as absent.
+    ...(overrides.max_tokens != null && overrides.max_tokens > 0
       ? { maxTokens: overrides.max_tokens, maxTokensEnabled: true }
       : {}),
     ...(overrides.frequency_penalty != null
@@ -270,10 +280,10 @@ export function settingsStateFromOverrides(
     visionOverride: boolToOverride(overrides.supports_vision),
     streamingOverride: boolToOverride(overrides.supports_streaming),
     thinkingOverride: boolToOverride(overrides.supports_thinking),
-    ...(overrides.context_window != null
+    ...(overrides.context_window != null && overrides.context_window > 0
       ? { contextWindow: overrides.context_window, contextWindowEnabled: true }
       : {}),
-    ...(overrides.max_output_tokens != null
+    ...(overrides.max_output_tokens != null && overrides.max_output_tokens > 0
       ? {
           maxOutputTokens: overrides.max_output_tokens,
           maxOutputTokensEnabled: true,
@@ -1365,6 +1375,69 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
   const [state, dispatch] = useReducer(settingsReducer, settingsInitial);
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  // `ModelParamField` speaks one value where this reducer keeps two: the number
+  // and an "is there an override at all" flag. Empty is the inherit rung, which
+  // is the same thing the flag used to say.
+  //
+  // The range guard is load-bearing, and is the floor the slider used to
+  // enforce by clamping. `PUT /api/models/overrides/{id}` persists what it is
+  // given, `InferenceParams` does not filter `max_tokens` the way it filters
+  // `context_window` and `max_output_tokens`, and the OpenAI driver puts it on
+  // the wire verbatim — so a `0` typed here reaches the provider as
+  // `"max_tokens": 0` for every agent on that model.
+  // What counts as in-range is `isValidParamValue`'s answer rather than this
+  // drawer's, so the agent editor and this one cannot disagree about whether a
+  // temperature of 3 is storable.
+  const setLadderField = useCallback(
+    (
+      param: ModelParamName,
+      field:
+        | "contextWindow"
+        | "maxOutputTokens"
+        | "maxTokens"
+        | "temperature"
+        | "topP"
+        | "freqPenalty"
+        | "presPenalty",
+      enabledField:
+        | "contextWindowEnabled"
+        | "maxOutputTokensEnabled"
+        | "maxTokensEnabled"
+        | "tempEnabled"
+        | "topPEnabled"
+        | "freqEnabled"
+        | "presEnabled",
+      next: string,
+    ) => {
+      const trimmed = next.trim();
+      if (trimmed === "") {
+        dispatch({ type: "SET_FIELD", field: enabledField, value: false });
+        return;
+      }
+      // A half-typed value ("12" on its way to "128000") is kept; an
+      // out-of-range one is refused outright rather than stored and saved.
+      // `min`/`max` on the input do not do this — HTML checks them on form
+      // submit, which this drawer never performs.
+      if (!isValidParamValue(param, trimmed)) return;
+      dispatch({ type: "SET_FIELD", field, value: Number(trimmed) });
+      dispatch({ type: "SET_FIELD", field: enabledField, value: true });
+    },
+    [],
+  );
+  // The old sliders showed the catalog figure even while inheriting, and
+  // seeded an override from it. The ladder shows nothing on the inherit rung,
+  // so the number the operator is about to override has to be stated — else
+  // correcting a 200 000-token window means already knowing it is 200 000.
+  // `0` is the wire's "unknown" for these fields, so it is not a number.
+  const catalogHint = useCallback(
+    (declared?: number): string | undefined =>
+      declared && declared > 0
+        ? t("models.catalog_value", { value: declared.toLocaleString() })
+        : undefined,
+    [t],
+  );
+
   const lastHydratedRef = useRef<SettingsState | null>(null);
 
   useEffect(() => {
@@ -1520,85 +1593,70 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
         <div className="space-y-3">
           <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.parameters")}</label>
 
-          <SliderInput
-            label={t("models.context_window")}
-            value={state.contextWindowEnabled ? state.contextWindow : (model.context_window || 128000)}
-            onChange={(v) => dispatch({ type: "SET_FIELD", field: "contextWindow", value: Math.round(v) })}
-            min={1024} max={2097152} step={1024}
-            enabled={state.contextWindowEnabled}
-            onToggle={(v) => {
-              dispatch({ type: "SET_FIELD", field: "contextWindowEnabled", value: v });
-              if (v && state.contextWindow === settingsInitial.contextWindow) {
-                dispatch({ type: "SET_FIELD", field: "contextWindow", value: model.context_window || 128000 });
-              }
-            }}
-            ticks={[32768, 131072, 524288, 1048576, 2097152]}
-            formatTick={(v) =>
-              v >= 1048576 ? `${Math.round(v / 1048576)}M` : `${Math.round(v / 1024)}K`
+          {/*
+            The same control the agent editor and the per-provider override
+            use. It replaces a 1024-step slider spanning 1 Ki to 2 Mi, on which
+            landing exactly on 131072 was a matter of pixels — and where the
+            "off" state was a separate toggle rather than a rung you could
+            point at.
+          */}
+          <ModelParamField
+            param="context_window"
+            value={state.contextWindowEnabled ? String(state.contextWindow) : ""}
+            onChange={(next) =>
+              setLadderField("context_window", "contextWindow", "contextWindowEnabled", next)
+            }
+            hint={catalogHint(model.context_window)}
+          />
+
+          <ModelParamField
+            param="max_output_tokens"
+            value={state.maxOutputTokensEnabled ? String(state.maxOutputTokens) : ""}
+            onChange={(next) =>
+              setLadderField("max_output_tokens", "maxOutputTokens", "maxOutputTokensEnabled", next)
+            }
+            hint={catalogHint(model.max_output_tokens)}
+          />
+
+          {/*
+            Sampling parameters on the same rungs the agent editor offers. They
+            were 0.01-step sliders with a separate on/off switch, so the same
+            temperature was a slider here and a bare number box there, and
+            "inherit" was a toggle in one and an empty field in the other.
+          */}
+          <ModelParamField
+            param="temperature"
+            value={state.tempEnabled ? String(state.temperature) : ""}
+            onChange={(next) => setLadderField("temperature", "temperature", "tempEnabled", next)}
+          />
+
+          <ModelParamField
+            param="top_p"
+            value={state.topPEnabled ? String(state.topP) : ""}
+            onChange={(next) => setLadderField("top_p", "topP", "topPEnabled", next)}
+          />
+
+          <ModelParamField
+            param="max_tokens"
+            value={state.maxTokensEnabled ? String(state.maxTokens) : ""}
+            onChange={(next) => setLadderField("max_tokens", "maxTokens", "maxTokensEnabled", next)}
+            hint={catalogHint(model.max_output_tokens)}
+          />
+
+          <ModelParamField
+            param="frequency_penalty"
+            value={state.freqEnabled ? String(state.freqPenalty) : ""}
+            onChange={(next) =>
+              setLadderField("frequency_penalty", "freqPenalty", "freqEnabled", next)
             }
           />
 
-          <SliderInput
-            label={t("models.max_output")}
-            value={
-              state.maxOutputTokensEnabled
-                ? state.maxOutputTokens
-                : (model.max_output_tokens || 8192)
+          <ModelParamField
+            param="presence_penalty"
+            value={state.presEnabled ? String(state.presPenalty) : ""}
+            onChange={(next) =>
+              setLadderField("presence_penalty", "presPenalty", "presEnabled", next)
             }
-            onChange={(v) =>
-              dispatch({ type: "SET_FIELD", field: "maxOutputTokens", value: Math.round(v) })
-            }
-            min={256} max={131072} step={256}
-            enabled={state.maxOutputTokensEnabled}
-            onToggle={(v) => {
-              dispatch({ type: "SET_FIELD", field: "maxOutputTokensEnabled", value: v });
-              if (v && state.maxOutputTokens === settingsInitial.maxOutputTokens) {
-                dispatch({
-                  type: "SET_FIELD",
-                  field: "maxOutputTokens",
-                  value: model.max_output_tokens || 8192,
-                });
-              }
-            }}
-          />
-
-          <SliderInput
-            label={t("models.temperature")}
-            value={state.temperature} onChange={(v) => dispatch({ type: "SET_FIELD", field: "temperature", value: v })}
-            min={0} max={2} step={0.01}
-            enabled={state.tempEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "tempEnabled", value: v })}
-          />
-
-          <SliderInput
-            label={t("models.top_p")}
-            value={state.topP} onChange={(v) => dispatch({ type: "SET_FIELD", field: "topP", value: v })}
-            min={0} max={1} step={0.01}
-            enabled={state.topPEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "topPEnabled", value: v })}
-          />
-
-          <SliderInput
-            label={t("models.max_tokens_param")}
-            value={state.maxTokens} onChange={(v) => dispatch({ type: "SET_FIELD", field: "maxTokens", value: Math.round(v) })}
-            min={256} max={1048576} step={256}
-            enabled={state.maxTokensEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "maxTokensEnabled", value: v })}
-            ticks={[256, 32768, 131072, 1048576]}
-            formatTick={(v) => v >= 1048576 ? "1M" : v >= 1024 ? `${Math.round(v/1024)}K` : String(v)}
-          />
-
-          <SliderInput
-            label={t("models.frequency_penalty")}
-            value={state.freqPenalty} onChange={(v) => dispatch({ type: "SET_FIELD", field: "freqPenalty", value: v })}
-            min={-2} max={2} step={0.01}
-            enabled={state.freqEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "freqEnabled", value: v })}
-            ticks={[-2, 0, 2]}
-          />
-
-          <SliderInput
-            label={t("models.presence_penalty")}
-            value={state.presPenalty} onChange={(v) => dispatch({ type: "SET_FIELD", field: "presPenalty", value: v })}
-            min={-2} max={2} step={0.01}
-            enabled={state.presEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "presEnabled", value: v })}
-            ticks={[-2, 0, 2]}
           />
 
           {/* Reasoning Effort */}

@@ -725,6 +725,13 @@
       "format": "uint",
       "minimum": 0.0
     },
+    "max_concurrent_uploads": {
+      "description": "Maximum number of `POST /api/agents/{id}/upload` requests allowed to be mid-flight at once (default: 8). `upload_file` extracts `axum::body::Bytes`, buffering the whole body in RAM before the handler runs, so uncapped concurrency at `max_upload_size_bytes` costs `concurrent_requests * max_upload_size_bytes` in RSS. This bounds worst-case peak RAM from the upload path to `max_concurrent_uploads * max_upload_size_bytes`.",
+      "default": 8,
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0.0
+    },
     "max_cron_jobs": {
       "description": "Cron scheduler max total jobs across all agents. Default: 500.",
       "default": 500,
@@ -1744,7 +1751,7 @@
       ],
       "properties": {
         "agent_pattern": {
-          "description": "Glob pattern matching agent names (e.g. \"social-*\", \"*\").",
+          "description": "Glob pattern matching agent names (e.g. \"social-*\", \"*\").\n\nMatched against the agent's name and, for the benefit of a rule written against a specific registered agent, against its id as well — the notification path identifies agents by id, and a name is only available while the agent is registered.",
           "type": "string"
         },
         "channels": {
@@ -3480,7 +3487,7 @@
           "type": "boolean"
         },
         "idle_timeout_secs": {
-          "description": "Idle timeout — destroy containers after N seconds of inactivity. Default: 86400 (24h).",
+          "description": "Idle timeout — destroy pooled containers after N seconds of inactivity; 0 disables. Default: 86400 (24h).",
           "default": 86400,
           "type": "integer",
           "format": "uint64",
@@ -3492,7 +3499,7 @@
           "type": "string"
         },
         "max_age_secs": {
-          "description": "Maximum age before forced destruction (seconds). Default: 604800 (7 days).",
+          "description": "Maximum age, measured from container creation rather than from the last release, before forced destruction (seconds); 0 disables. Default: 604800 (7 days).",
           "default": 604800,
           "type": "integer",
           "format": "uint64",
@@ -3530,7 +3537,7 @@
           "type": "boolean"
         },
         "reuse_cool_secs": {
-          "description": "Cooldown before reusing a released container (seconds). Default: 300.",
+          "description": "Settling time before a container released by one agent may be handed to a different agent; applies to scope = shared only, and never to an agent re-acquiring its own container. Default: 300.",
           "default": 300,
           "type": "integer",
           "format": "uint64",
@@ -3599,21 +3606,21 @@
       "description": "Docker container lifecycle scope.",
       "oneOf": [
         {
-          "description": "Container per session (destroyed when session ends).",
+          "description": "Container per (agent, session), reused by every tool call in that session.",
           "type": "string",
           "enum": [
             "session"
           ]
         },
         {
-          "description": "Container per agent (reused across sessions).",
+          "description": "Container per agent, reused across that agent's sessions.",
           "type": "string",
           "enum": [
             "agent"
           ]
         },
         {
-          "description": "Shared container pool.",
+          "description": "Container per (config, workspace), reused by any agent that mounts the same workspace.",
           "type": "string",
           "enum": [
             "shared"

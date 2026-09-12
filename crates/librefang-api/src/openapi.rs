@@ -603,6 +603,23 @@ use crate::types;
 )]
 pub struct ApiDoc;
 
+/// `/api/*` paths that are deliberately **not** mounted under `/api/v1`.
+///
+/// `build_router` nests `api_v1_routes()` at both `/api` and `/api/v1`, so
+/// duplicating an `/api/*` path into `/api/v1/*` is correct for everything
+/// defined there. It is wrong for the handful of routes registered directly on
+/// the app: those exist only under `/api`, and a blind copy advertises a route
+/// the router answers with a 404.
+///
+/// Version discovery is unversioned by design — it is the one endpoint a
+/// client has to reach *before* it knows which version to ask for
+/// (`server.rs`: "API version discovery endpoint (not versioned itself)").
+///
+/// `tests/dead_route_audit_test.rs` dispatches every path of the **served**
+/// spec against the real router, so a route that belongs here and is missing
+/// fails CI instead of reaching clients.
+const UNVERSIONED_API_PATHS: &[&str] = &["/api/versions"];
+
 /// GET /api/openapi.json — Serve the auto-generated OpenAPI specification.
 ///
 /// The spec includes paths for both `/api/*` (unversioned) and `/api/v1/*`
@@ -637,6 +654,9 @@ pub async fn openapi_spec() -> impl IntoResponse {
     if let Some(paths) = spec.get("paths").and_then(|p| p.as_object()).cloned() {
         let mut v1_entries: Vec<(String, serde_json::Value)> = Vec::new();
         for (path, ops) in &paths {
+            if UNVERSIONED_API_PATHS.contains(&path.as_str()) {
+                continue;
+            }
             if let Some(suffix) = path.strip_prefix("/api/") {
                 let v1_path = format!("/api/v1/{suffix}");
                 if !paths.contains_key(&v1_path) {

@@ -24,11 +24,8 @@ librefang agent new [<TEMPLATE>]
 
 **行为：**
 
-- 从以下位置发现模板：`~/.librefang/workspaces/agents/`（由注册表同步预装）、以及 `LIBREFANG_AGENTS_DIR`（环境变量覆盖）。
-- 每个模板是一个包含 `agent.toml` 清单的目录。
-  直接放入这些目录的扁平 `<name>.toml` 文件会被跳过，因为发现逻辑先按 `is_dir()` 过滤，之后才会查看任何文件。
-- 通过仪表板、`agent_type_create` 工具或 `save-as-agent-type` 创建的 agent 类型改为写入 `~/.librefang/agent-types/<name>.toml`（#7758），而本选择器不会扫描该目录。
-  守护进程仍能解析它们——`agent_spawn` 与工作流步骤的 `{"type": ...}` 会优先搜索 `agent-types/`——因此请通过守护进程而非 `agent new` 来生成这类 agent。
+- 模板来自三个来源，按优先级从高到低：`LIBREFANG_AGENTS_DIR`（环境变量覆盖）、`~/.librefang/agent-types/<name>.toml`（仪表板编辑器与 `agent_type_create` 写入的规范存储）、以及 `~/.librefang/workspaces/agents/`（assistant 为预装，其余由仪表板安装）。前两者与守护进程自身解析模板的顺序一致；该环境变量只是 CLI 侧的覆盖，守护进程从不读取它。
+- 模板要么是 `agent-types/` 中的扁平 `<name>.toml`，要么是另外两个来源中包含 `agent.toml` 清单的目录。
 - 守护进程模式下：发送 `POST /api/agents` 请求附带清单内容。Agent 将被持久化。
 - 独立模式下：启动进程内核。Agent 是临时的。
 
@@ -1225,7 +1222,7 @@ channel adapter 暴露的命令（`/agents`、`/new`、`/usage`、`/triggers`、
 | `librefang start` | 启动 daemon。 | `--foreground`(不 fork)、`--log-file <path>` |
 | `librefang stop` | 停止运行中的 daemon。 | — |
 | `librefang restart` | 重启 daemon。 | `--tail`(跟新日志)、`--foreground` |
-| `librefang health` | 快速就绪探针。 | `--json` |
+| `librefang health` | 存活探针；daemon 报告子系统异常时退出码为 1。 | `--json` |
 | `librefang status` | 显示 kernel 与 provider 状态。 | `--watch <secs>`(刷新循环) |
 | `librefang logs` | tail daemon 日志。 | `--lines <n>`、`--follow` / `-f` |
 | `librefang tui` | 启动交互终端 dashboard。 | — |

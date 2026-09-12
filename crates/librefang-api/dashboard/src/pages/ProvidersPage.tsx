@@ -5,7 +5,7 @@ import { memo, useId, useMemo, useRef, useState, useCallback, useEffect, useRedu
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { ApiActionResponse, ProviderItem } from "../api";
-import { isCliProvider, isProviderAvailable } from "../lib/status";
+import { isCliProvider, isProviderAvailable, isProviderConfigured, isProviderKeyRejected, isProviderOffline } from "../lib/status";
 import { useCredentialPools, useProviders, useProviderStatus } from "../lib/queries/providers";
 import type { CredentialPoolStatus, CredentialPoolKeySnapshot, ModelOverrides } from "../api";
 import { useModels, useModelOverrides } from "../lib/queries/models";
@@ -23,6 +23,7 @@ import { Modal } from "../components/ui/Modal";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
+import { ModelParamField } from "../components/ui/ModelParamField";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
@@ -89,6 +90,11 @@ function getAuthBadge(status?: string): { variant: BadgeVariant; label: string }
       return { variant: "error", label: "INVALID" };
     case "cli_not_installed":
       return { variant: "error", label: "CLI N/A" };
+    // A configured local provider whose service is down. It reaches the
+    // details modal now that the page keeps it on the grid, and the `default`
+    // arm would have labelled it SETUP — wrong for something already set up.
+    case "local_offline":
+      return { variant: "warning", label: "OFFLINE" };
     case "missing":
     default:
       return { variant: "warning", label: "SETUP" };
@@ -132,6 +138,7 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault }: {
         <div className="w-full h-10 rounded-xl bg-bg-subtle animate-pulse" />
       ) : models.length > 0 ? (
         <select
+          aria-label={t("providers.set_as_default")}
           value={selectedModel}
           onChange={e => setSelectedModel(e.target.value)}
           className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
@@ -144,9 +151,12 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault }: {
       ) : (
         <input
           type="text"
+          // The label above is a bare <label> with no `htmlFor`, so this is the
+          // field's only accessible name until that is fixed for the whole form.
+          aria-label={t("providers.set_as_default")}
+          placeholder={t("providers.model_name_placeholder")}
           value={selectedModel}
           onChange={e => setSelectedModel(e.target.value)}
-          placeholder={t("providers.model_name_placeholder")}
           className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
         />
       )}
@@ -166,14 +176,15 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault }: {
 /**
  * One numeric limit on one model, editable at any time (#7774).
  *
- * Both limits the operator can correct share this shape: a field seeded from
- * the value currently in force, a placeholder showing the catalog value, and a
- * blank-or-equal-to-catalog input that clears the override rather than pinning
- * a duplicate. The override lives in `model_overrides.json`, keyed by
- * `provider:model_id`, so it is reachable after creation and survives a
- * registry sync — which is what `context_window` could not do before.
+ * Both limits the operator can correct share this shape: the shared
+ * `ModelParamField` seeded from the value currently in force, with the catalog
+ * value named in the hint below it, and an inherit rung that clears the
+ * override rather than pinning a duplicate of the catalog default. The override
+ * lives in `model_overrides.json`, keyed by `provider:model_id`, so it is
+ * reachable after creation and survives a registry sync — which is what
+ * `context_window` could not do before.
  */
-function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, catalogValue, label, placeholder, savedMessage, hintDefault, hintOverride, addToast }: {
+function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, catalogValue, label, savedMessage, hintDefault, hintOverride, addToast }: {
   overrideKey: string;
   overrides: ModelOverrides | undefined;
   overridesLoading: boolean;
@@ -182,7 +193,6 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
   /** The catalog value this field reverts to, or undefined when unknown. */
   catalogValue?: number;
   label: string;
-  placeholder: string;
   savedMessage: string;
   hintDefault: string;
   hintOverride: string;
@@ -236,19 +246,24 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
 
   return (
     <div className="space-y-1">
-      <label className="text-[10px] font-bold text-text-dim uppercase">{label}</label>
-      <div className="flex gap-2">
-        <input
-          type="number"
-          min={1}
-          step={1}
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          placeholder={catalogValue != null ? String(catalogValue) : placeholder}
-          aria-label={label}
-          className={`flex-1 rounded-xl border bg-main px-3 py-2 text-sm font-mono outline-none focus:ring-1 ${invalid ? "border-error focus:border-error focus:ring-error/20" : "border-border-subtle focus:border-brand focus:ring-brand/20"}`}
-          aria-invalid={invalid || undefined}
-        />
+      <div className="flex items-end gap-2">
+        {/*
+          The same control the agent editor and the model settings use. It was
+          a bare number box here, so the operator got rungs in one place, a
+          slider in another and free text in the third for one parameter.
+          Clearing it is still how an override is reverted — which is exactly
+          the ladder's inherit rung, so the semantics carried over unchanged.
+        */}
+        <div className="flex-1">
+          <ModelParamField
+            param={field === "context_window" ? "context_window" : "max_tokens"}
+            label={label}
+            value={input}
+            onChange={setInput}
+            cap={undefined}
+            warning={invalid ? t("providers.limit_invalid") : undefined}
+          />
+        </div>
         <Button
           variant="secondary"
           onClick={handleSave}
@@ -261,9 +276,6 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
           {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
         </Button>
       </div>
-      {invalid && (
-        <p className="text-[10px] text-error">{t("providers.limit_invalid")}</p>
-      )}
       <p className="text-[10px] text-text-dim/60 leading-snug">
         {overrideValue != null
           ? hintOverride
@@ -344,7 +356,6 @@ function ProviderModelLimitsSection({ providerId, addToast }: {
             field="context_window"
             catalogValue={catalogWindow}
             label={t("providers.context_window")}
-            placeholder={t("providers.context_window_placeholder")}
             savedMessage={t("providers.context_window_saved")}
             hintDefault={t("providers.context_window_hint_default")}
             hintOverride={t("providers.context_window_hint_override", { value: catalogWindow != null ? catalogWindow.toLocaleString() : "-" })}
@@ -358,7 +369,6 @@ function ProviderModelLimitsSection({ providerId, addToast }: {
             field="max_tokens"
             catalogValue={catalogMaxOut}
             label={t("providers.max_tokens")}
-            placeholder={t("providers.max_tokens_placeholder")}
             savedMessage={t("providers.max_tokens_saved")}
             hintDefault={t("providers.max_tokens_hint_default")}
             hintOverride={t("providers.max_tokens_hint_override", { value: catalogMaxOut != null ? catalogMaxOut.toLocaleString() : "-" })}
@@ -577,6 +587,8 @@ interface ProviderCardProps {
 const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onConfigure, onDelete }: ProviderCardProps) {
   const { t } = useTranslation();
   const isConfigured = isProviderAvailable(p.auth_status);
+  const keyRejected = isProviderKeyRejected(p.auth_status);
+  const isOffline = isProviderOffline(p.auth_status);
   const isCli = isCliProvider(p);
 
   if (viewMode === "list") {
@@ -602,6 +614,10 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
                 <Badge variant={p.reachable === true ? "success" : p.reachable === false ? "error" : "default"} className="shrink-0">
                   {p.reachable === true ? t("providers.online") : p.reachable === false ? t("providers.offline") : t("providers.not_checked")}
                 </Badge>
+              ) : keyRejected ? (
+                <Badge variant="error" className="shrink-0">{t("providers.key_rejected")}</Badge>
+              ) : isOffline ? (
+                <Badge variant="warning" className="shrink-0">{t("providers.offline")}</Badge>
               ) : (
                 <Badge variant="warning" className="shrink-0">{t("common.setup")}</Badge>
               )}
@@ -715,6 +731,10 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
             <Badge variant={p.reachable === true ? "success" : p.reachable === false ? "error" : "default"}>
               {p.reachable === true ? t("providers.online") : p.reachable === false ? t("providers.offline") : t("providers.not_checked")}
             </Badge>
+          ) : keyRejected ? (
+            <Badge variant="error">{t("providers.key_rejected")}</Badge>
+          ) : isOffline ? (
+            <Badge variant="warning">{t("providers.offline")}</Badge>
           ) : (
             <Badge variant="warning">{t("common.setup")}</Badge>
           )}
@@ -1107,7 +1127,10 @@ function EveryApiConnectDrawer({ isOpen, onClose, addToast }: {
         <Input
           label={t("providers.everyapi_relay_key", { defaultValue: "Relay key" })}
           type="password"
-          autoComplete="off"
+          name="everyapi-relay-key"
+          autoComplete="new-password"
+          data-1p-ignore
+          data-lpignore="true"
           value={relayKey}
           onChange={(e) => setRelayKey(e.target.value)}
           onBlur={() => setTouched(true)}
@@ -1331,17 +1354,16 @@ function CreateProviderWizard({
         {step === 0 && (
           <>
             <Input label={t("providers.wizard_id_label") + " *"} value={id}
-              onChange={(e) => { setId(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "")); setErrors(prev => prev.filter(e2 => e2 !== "id")); }}
-              placeholder={t("providers.wizard_id_placeholder")} className={errors.includes("id") ? "border-error" : ""} />
+              onChange={(e) => { setId(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "")); setErrors(prev => prev.filter(e2 => e2 !== "id")); }} className={errors.includes("id") ? "border-error" : ""} />
             {errors.includes("id") && <p className="text-[10px] text-error -mt-2">{t("providers.wizard_id_required")}</p>}
             <p className="text-[10px] text-text-dim/60 -mt-2">{t("providers.wizard_id_hint")}</p>
 
             <Input label={t("providers.wizard_base_url_label") + " *"} value={baseUrl}
-              onChange={(e) => { setBaseUrl(e.target.value); setErrors(prev => prev.filter(e2 => e2 !== "base_url")); }}
-              placeholder={t("providers.wizard_base_url_placeholder")} className={errors.includes("base_url") ? "border-error" : ""} />
+              onChange={(e) => { setBaseUrl(e.target.value); setErrors(prev => prev.filter(e2 => e2 !== "base_url")); }} className={errors.includes("base_url") ? "border-error" : ""} />
             {errors.includes("base_url") && <p className="text-[10px] text-error -mt-2">{t("providers.wizard_base_url_required")}</p>}
 
             <Input label={t("providers.wizard_api_key_label")} type="password" value={apiKey}
+              name="new-provider-api-key" autoComplete="new-password" data-1p-ignore data-lpignore="true"
               onChange={(e) => setApiKey(e.target.value)} placeholder={t("providers.wizard_api_key_placeholder")} />
             <p className="text-[10px] text-text-dim/60 -mt-2">{t("providers.wizard_api_key_hint")}</p>
 
@@ -1670,6 +1692,7 @@ export function ProvidersPage() {
   // for new providers lives behind the Add picker.
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerSearch, setPickerSearch] = useState("");
+  const [showSuppressed, setShowSuppressed] = useState(false);
   const [everyApiOpen, setEveryApiOpen] = useState(false);
   useCreateShortcut(() => { setPickerSearch(""); setPickerOpen(true); });
   const [deleteConfirmProvider, setDeleteConfirmProvider] = useState<ProviderItem | null>(null);
@@ -1696,7 +1719,10 @@ export function ProvidersPage() {
 
   const providers = useMemo(() => providersQuery.data ?? [], [providersQuery.data]);
   const currentDefaultProvider = statusQuery.data?.default_provider ?? "";
-  const configuredCount = useMemo(() => providers.filter(p => isProviderAvailable(p.auth_status)).length, [providers]);
+  const configuredCount = useMemo(
+    () => providers.filter(p => p.suppressed !== true && isProviderConfigured(p.auth_status)).length,
+    [providers],
+  );
 
   useEffect(() => {
     if (!providersQuery.data) return;
@@ -1709,10 +1735,24 @@ export function ProvidersPage() {
 
   // Configured providers are the main page content. Filter/sort applies
   // to those only; the unconfigured catalog lives behind the Add picker.
+  //
+  // The predicate is `isProviderConfigured`, not `isProviderAvailable`: a
+  // provider whose key the endpoint rejected is still one the operator set up,
+  // and dropping it from this list is what made a provider disappear from the
+  // page entirely after a single bad save — recoverable only by finding it
+  // again inside the Add picker.
+  //
+  // Suppression is the one thing that does remove a provider from here, and
+  // that is the operator's own instruction. It cuts across auth status: the
+  // registry recreates every built-in provider TOML on boot and `detect_auth`
+  // can promote a suppressed entry back to `configured` off a stray env var,
+  // so filtering on status alone lets a provider you removed reappear on the
+  // page after an unrelated restart.
   const filteredProviders = useMemo(
     () => [...providers]
       .filter(p => {
-        if (!isProviderAvailable(p.auth_status)) return false;
+        if (p.suppressed === true) return false;
+        if (!isProviderConfigured(p.auth_status)) return false;
         const searchMatch = !search || (p.display_name || p.id).toLowerCase().includes(search.toLowerCase()) || p.id.toLowerCase().includes(search.toLowerCase());
         let statusMatch = true;
         if (filterStatus === "reachable") statusMatch = p.reachable === true;
@@ -1749,14 +1789,41 @@ export function ProvidersPage() {
   const showGroupHeaders = codingAgentProviders.length > 0 && apiProviders.length > 0;
 
   // Catalog of unconfigured providers, surfaced in the Add picker.
+  //
+  // Suppressing a provider is the operator saying "I do not use this one", so
+  // it stays out of the picker until they ask to see it. The daemon keeps
+  // returning it — suppression is a flag on the entry, and the registry
+  // recreates the built-in TOML on every boot by design — so hiding it here is
+  // the only place the choice can be honoured, and the toggle below is how it
+  // comes back.
+  //
+  // The count is scoped by the same search term as the list, so the toggle
+  // never promises entries a live filter would hide anyway.
+  const pickerMatchesSearch = useCallback(
+    (p: ProviderItem) => !pickerSearch
+      || (p.display_name || p.id).toLowerCase().includes(pickerSearch.toLowerCase())
+      || p.id.toLowerCase().includes(pickerSearch.toLowerCase()),
+    [pickerSearch],
+  );
+  const suppressedCount = useMemo(
+    () => providers.filter(p => p.suppressed === true && pickerMatchesSearch(p)).length,
+    [providers, pickerMatchesSearch],
+  );
+  // Everything the grid does not show: unconfigured, or suppressed at any
+  // status. No provider is ever in both lists, but the suppressed ones are in
+  // NEITHER until `showSuppressed` is ticked — that is the design, and the
+  // `suppressedCount > 0` guard on the toggle below is the only thing that
+  // makes it recoverable. Which is why that count must stay unconditioned on
+  // auth status: an earlier revision narrowed it to unconfigured-and-suppressed
+  // and stranded any suppressed provider that `detect_auth` had promoted, with
+  // no toggle to reveal it.
   const pickerProviders = useMemo(
     () => [...providers]
-      .filter(p => !isProviderAvailable(p.auth_status))
-      .filter(p => !pickerSearch
-        || (p.display_name || p.id).toLowerCase().includes(pickerSearch.toLowerCase())
-        || p.id.toLowerCase().includes(pickerSearch.toLowerCase()))
+      .filter(p => p.suppressed === true || !isProviderConfigured(p.auth_status))
+      .filter(p => showSuppressed || p.suppressed !== true)
+      .filter(pickerMatchesSearch)
       .sort((a, b) => (a.display_name || a.id).localeCompare(b.display_name || b.id)),
-    [providers, pickerSearch],
+    [providers, pickerMatchesSearch, showSuppressed],
   );
 
   // EveryAPI is not a built-in provider, so it is absent from `providers` entirely until a registry entry exists — not merely unconfigured.
@@ -1934,7 +2001,12 @@ export function ProvidersPage() {
       {/* Search & Controls */}
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="flex-1">
+          {/* A name that reads as a filter, plus `autoComplete="off"`. Firefox
+              pairs a text box with a nearby password field by DOM proximity —
+              there is no <form> here — decides the two are a login, and fills
+              this one with the site's saved username. */}
           <Input value={search} onChange={(e) => handleSearch(e.target.value)} placeholder={t("common.search")}
+            name="provider-filter" autoComplete="off"
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
               <button onClick={() => dispatch({ type: "SEARCH", value: "" })} className="hover:text-text-main" aria-label={t("common.clear_search")}>
@@ -1999,17 +2071,35 @@ export function ProvidersPage() {
             <Server className="h-6 w-6" />
           </div>
           <div className="max-w-md space-y-2">
+            {/* "…yet" asserts never-configured. Once suppression can empty
+                this list, that reads as config loss to someone who has just
+                removed a provider, so the all-hidden case says what actually
+                happened and opens the picker with the hidden entries already
+                showing. */}
             <h2 className="text-base font-bold text-text-main">
-              {t("providers.empty_title", { defaultValue: "No providers configured yet" })}
+              {suppressedCount > 0
+                ? t("providers.empty_all_suppressed_title", { defaultValue: "Every provider is hidden" })
+                : t("providers.empty_title", { defaultValue: "No providers configured yet" })}
             </h2>
             <p className="text-sm text-text-dim leading-relaxed">
-              {t("providers.empty_body", {
-                defaultValue: "Connect OpenAI, Anthropic, Gemini, Groq, or any other LLM provider so agents can route prompts and consume models.",
-              })}
+              {suppressedCount > 0
+                ? t("providers.empty_all_suppressed_body", {
+                  defaultValue: "You removed every configured provider. They are still here — reveal them to bring one back.",
+                })
+                : t("providers.empty_body", {
+                  defaultValue: "Connect OpenAI, Anthropic, Gemini, Groq, or any other LLM provider so agents can route prompts and consume models.",
+                })}
             </p>
           </div>
-          <Button variant="primary" size="md" onClick={openPicker} leftIcon={<Plus className="h-4 w-4" />}>
-            {t("providers.connect_first", { defaultValue: "Connect a provider" })}
+          <Button
+            variant="primary"
+            size="md"
+            onClick={() => { if (suppressedCount > 0) setShowSuppressed(true); openPicker(); }}
+            leftIcon={<Plus className="h-4 w-4" />}
+          >
+            {suppressedCount > 0
+              ? t("providers.empty_all_suppressed_cta", { defaultValue: "Show hidden providers" })
+              : t("providers.connect_first", { defaultValue: "Connect a provider" })}
           </Button>
         </Card>
       ) : filteredProviders.length === 0 ? (
@@ -2126,7 +2216,12 @@ export function ProvidersPage() {
                     <span className="normal-case font-normal text-text-dim/50"> ({t("providers.optional")})</span>
                   )}
                 </label>
+                {/* `autoComplete="new-password"`, not `"off"`: Firefox ignores
+                    `off` on password inputs by design, and filled this one with
+                    the site's saved password — which the save handler then wrote
+                    over the operator's real API key in `secrets.env`. */}
                 <input id={`${cfgFieldId}-api-key`} type="password" value={config.keyInput} onChange={e => config.setKeyInput(e.target.value)}
+                  name={`${config.provider.id}-api-key`} autoComplete="new-password" data-1p-ignore data-lpignore="true"
                   placeholder={config.hasStoredKey ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
                   className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
                 {config.provider.key_required === false && (
@@ -2268,6 +2363,8 @@ export function ProvidersPage() {
             value={pickerSearch}
             onChange={(e) => setPickerSearch(e.target.value)}
             placeholder={t("common.search")}
+            name="provider-picker-filter"
+            autoComplete="off"
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={pickerSearch && (
               <button
@@ -2279,11 +2376,27 @@ export function ProvidersPage() {
               </button>
             )}
           />
+          {suppressedCount > 0 && (
+            <label className="flex items-center gap-2 text-[11px] text-text-dim cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showSuppressed}
+                onChange={(e) => setShowSuppressed(e.target.checked)}
+                className="accent-brand"
+              />
+              {t("providers.show_suppressed", { count: suppressedCount })}
+            </label>
+          )}
           {pickerProviders.length === 0 ? (
             <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-              {pickerSearch
+              {pickerSearch && suppressedCount === 0
                 ? t("providers.no_results")
-                : t("providers.all_configured", { defaultValue: "All available providers are already configured." })}
+                : suppressedCount > 0
+                  // Everything left is hidden by the operator's own suppression,
+                  // so "all configured" would flatly contradict the Show-hidden
+                  // toggle rendered right above this box.
+                  ? t("providers.all_suppressed", { defaultValue: "Every remaining provider is hidden" })
+                  : t("providers.all_configured", { defaultValue: "All available providers are already configured." })}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">

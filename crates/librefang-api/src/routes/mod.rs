@@ -296,10 +296,20 @@ pub struct AppState {
     /// takes effect on the next request. Always refreshed together with
     /// `api_key_lock` via `crate::server::refresh_master_credential`.
     pub master_key: Arc<crate::middleware::MasterKeyState>,
-    /// Shared per-user API key snapshot — same Arc the auth middleware
-    /// reads from, so swapping the inner Vec via `rotate_user_key` (or any
-    /// future user-mutation endpoint) makes the change visible to the very
-    /// next request without a daemon restart.
+    /// Whether dashboard username/password auth is configured — the same Arc the auth middleware reads on every request.
+    ///
+    /// Live rather than a boot snapshot because `dashboard_user` / `dashboard_pass` / `dashboard_pass_hash` are hot-reloadable (`HotAction::UpdateDashboardCredentials`, no restart flag).
+    /// Refreshed by [`crate::server::refresh_dashboard_auth_flag`] at boot, on `POST /api/config/reload`, on a config-file change, and on a dashboard credential change — the same four sites as `api_key_lock` / `master_key`.
+    pub dashboard_auth_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared per-user API key snapshot — the same Arc the auth middleware reads from, so replacing the inner Vec makes the change visible to the very next request without a daemon restart.
+    ///
+    /// The invariant every writer owes this field: **its contents equal the `[[users]]` entries carrying an `api_key_hash`, plus every paired device** — `crate::server::user_api_key_table` spells that union, and `crate::server::refresh_auth_tables` republishes it after a reload that advanced the live config.
+    /// A writer that rebuilds only one half revokes the other, silently and until the daemon restarts, because the middleware consults nothing else.
+    ///
+    /// `build_router` seeds it from `user_api_key_table` at boot; after that exactly four sites write it, and a fifth would be a bug.
+    /// `crate::server::refresh_auth_tables` rebuilds the union after a config reload that advanced the live config, and is what every reload path calls.
+    /// `users::persist_identity_sections` rebuilds it too, from the `[[users]]` rows it has just persisted plus the pairing store, and is the single path behind every `/api/users` and `/api/groups` mutation — `rotate_user_key` included, which reaches it through `persist_users` and does not touch this field itself.
+    /// `pairing_complete` and `pairing_remove_device` are the only two allowed to narrow rather than rebuild, each scoped to the one `device:` row it owns.
     pub user_api_keys: Arc<tokio::sync::RwLock<Vec<crate::middleware::ApiUserAuth>>>,
     /// Media generation driver cache for image/TTS/video/music.
     pub media_drivers: librefang_kernel::media::MediaDriverCache,

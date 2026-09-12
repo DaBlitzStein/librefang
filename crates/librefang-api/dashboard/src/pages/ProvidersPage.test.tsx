@@ -182,6 +182,7 @@ function DrawerSlot(): React.ReactNode {
 
 describe("ProvidersPage", () => {
   let testMutateAsync: ReturnType<typeof vi.fn>;
+  let enableProviderMutateAsync: ReturnType<typeof vi.fn>;
   let connectEveryApiMutateAsync: ReturnType<typeof vi.fn>;
   let setDiscoveryMutateAsync: ReturnType<typeof vi.fn>;
   let updateOverridesMutateAsync: ReturnType<typeof vi.fn>;
@@ -219,9 +220,8 @@ describe("ProvidersPage", () => {
     useDeleteProviderKeyMock.mockReturnValue(
       stubMutation(vi.fn().mockResolvedValue(undefined)),
     );
-    useEnableProviderMock.mockReturnValue(
-      stubMutation(vi.fn().mockResolvedValue(undefined)),
-    );
+    enableProviderMutateAsync = vi.fn().mockResolvedValue(undefined);
+    useEnableProviderMock.mockReturnValue(stubMutation(enableProviderMutateAsync));
     useSetProviderUrlMock.mockReturnValue(
       stubMutation(vi.fn().mockResolvedValue(undefined)),
     );
@@ -345,6 +345,236 @@ describe("ProvidersPage", () => {
     expect(within(drawer).getByText("Groq")).toBeInTheDocument();
     expect(within(drawer).queryByText("OpenAI")).not.toBeInTheDocument();
     expect(within(drawer).queryByText("Anthropic")).not.toBeInTheDocument();
+  });
+
+  // ── A rejected key must not make the provider disappear ───────────────
+  //
+  // Saving a key the endpoint answers 401/403 to lands the entry on
+  // `AuthStatus::InvalidKey`, which `is_available()` reports as false. While
+  // the page partitioned on availability, that single save removed the
+  // provider from the grid outright: the operator saw "Authentication failed
+  // (HTTP 401/403)" and then an empty space where the provider had been, with
+  // the only way back buried in the Add picker.
+
+  const REJECTED: ProviderItem = {
+    id: "deepseek",
+    display_name: "DeepSeek",
+    auth_status: "invalid_key",
+    reachable: false,
+    model_count: 0,
+    key_required: true,
+    base_url: "https://api.deepseek.com",
+  };
+
+  it("keeps a provider on the page after its key is rejected", async () => {
+    useProvidersMock.mockReturnValue({
+      data: [...PROVIDERS, REJECTED],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    // On the page, flagged as broken — not vanished.
+    expect(screen.getByText("DeepSeek")).toBeInTheDocument();
+    const card = screen.getByRole("group", { name: "DeepSeek" });
+    expect(within(card).getByText("providers.key_rejected")).toBeInTheDocument();
+
+    // And it must not double as an "unconfigured" entry in the Add picker.
+    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
+    const drawer = await screen.findByTestId("drawer-slot");
+    expect(within(drawer).queryByText("DeepSeek")).not.toBeInTheDocument();
+  });
+
+  // ── Suppressed providers stay out of sight until asked for ────────────
+  //
+  // Suppression is the operator saying "I do not use this one". The daemon
+  // keeps returning the entry — the registry recreates every built-in TOML on
+  // boot by design — so the picker is the only place the choice can be
+  // honoured, and the toggle is how it is reversed.
+
+  const SUPPRESSED: ProviderItem = {
+    id: "vertex-ai",
+    display_name: "Vertex AI",
+    auth_status: "missing",
+    reachable: false,
+    model_count: 0,
+    key_required: true,
+    suppressed: true,
+  };
+
+  // A local provider whose service went down reaches `local_offline`, which
+  // `is_available()` also reports as false — the same vanish, triggered by a
+  // restart of the box rather than by a bad key.
+  it("keeps a local provider on the page while its service is down", () => {
+    useProvidersMock.mockReturnValue({
+      data: [...PROVIDERS, {
+        id: "ollama",
+        display_name: "Ollama",
+        auth_status: "local_offline",
+        reachable: false,
+        model_count: 16,
+        key_required: false,
+        base_url: "http://127.0.0.1:11434",
+      } satisfies ProviderItem],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    const card = screen.getByRole("group", { name: "Ollama" });
+    expect(within(card).getByText("providers.offline")).toBeInTheDocument();
+  });
+
+  // The one measured on a live daemon: `vertex-ai` sat at `suppressed: true`
+  // and an unrelated restart promoted it from `missing` to `configured` off a
+  // stray credential env var, which put a provider the operator had removed
+  // back on the page. Suppression has to cut across auth status.
+  it("keeps a suppressed provider off the page even once it looks configured", async () => {
+    const suppressedButConfigured: ProviderItem = {
+      ...SUPPRESSED,
+      auth_status: "configured",
+    };
+    useProvidersMock.mockReturnValue({
+      data: [...PROVIDERS, suppressedButConfigured],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    expect(screen.queryByText("Vertex AI")).not.toBeInTheDocument();
+
+    // And it is still recoverable through the same one toggle.
+    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
+    const drawer = await screen.findByTestId("drawer-slot");
+    expect(within(drawer).queryByText("Vertex AI")).not.toBeInTheDocument();
+    fireEvent.click(within(drawer).getByLabelText("providers.show_suppressed"));
+    expect(within(drawer).getByText("Vertex AI")).toBeInTheDocument();
+  });
+
+  it("offers Re-enable for a suppressed provider that now reads as configured", async () => {
+    const suppressedButConfigured: ProviderItem = { ...SUPPRESSED, auth_status: "configured" };
+    useProvidersMock.mockReturnValue({
+      data: [...PROVIDERS, suppressedButConfigured],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
+    const drawer = await screen.findByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByLabelText("providers.show_suppressed"));
+
+    // The Re-enable branch keys on `suppressed`, not on auth status, so it
+    // must still fire for an entry `detect_auth` has promoted.
+    fireEvent.click(within(drawer).getByText("Vertex AI"));
+    expect(enableProviderMutateAsync).toHaveBeenCalledWith("vertex-ai");
+  });
+
+  // Suppressing the only provider used to leave the page saying "No providers
+  // configured yet", which reads as config loss to whoever just removed one.
+  it("says providers are hidden, not absent, when suppression empties the page", () => {
+    useProvidersMock.mockReturnValue({
+      data: [{ ...SUPPRESSED, auth_status: "not_required", id: "ollama", display_name: "Ollama" }],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    expect(screen.getByText("providers.empty_all_suppressed_title")).toBeInTheDocument();
+    expect(screen.queryByText("providers.empty_title")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "providers.empty_all_suppressed_cta" })).toBeInTheDocument();
+  });
+
+  it("excludes suppressed providers from the configured count", () => {
+    useProvidersMock.mockReturnValue({
+      // 2 configured + 1 suppressed-but-configured + 1 unconfigured = 4 total.
+      data: [...PROVIDERS, { ...SUPPRESSED, auth_status: "configured" }],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    // The pill interpolates across text nodes, so match on the element's own
+    // normalised text rather than a string literal.
+    expect(
+      screen.getByText((_, el) =>
+        el?.textContent?.replace(/\s+/g, " ").trim() === "2 / 4 providers.configured"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps suppressed providers out of the Add picker until asked for", async () => {
+    useProvidersMock.mockReturnValue({
+      data: [...PROVIDERS, SUPPRESSED],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
+    const drawer = await screen.findByTestId("drawer-slot");
+
+    // Unconfigured-but-not-suppressed still shows; the suppressed one does not.
+    expect(within(drawer).getByText("Groq")).toBeInTheDocument();
+    expect(within(drawer).queryByText("Vertex AI")).not.toBeInTheDocument();
+
+    // The way back: one checkbox, no config file editing.
+    fireEvent.click(within(drawer).getByLabelText("providers.show_suppressed"));
+    expect(within(drawer).getByText("Vertex AI")).toBeInTheDocument();
+  });
+
+  // The toggle is the only route back to a suppressed provider, so it has to
+  // appear whenever one exists — and the empty state must not simultaneously
+  // claim there is nothing left to add.
+  it("explains an Add picker emptied by suppression rather than calling it complete", async () => {
+    useProvidersMock.mockReturnValue({
+      // Every unconfigured provider is suppressed: Groq dropped, Vertex hidden.
+      data: [PROVIDERS[0], PROVIDERS[1], SUPPRESSED],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
+    const drawer = await screen.findByTestId("drawer-slot");
+
+    expect(within(drawer).getByText("providers.all_suppressed")).toBeInTheDocument();
+    expect(within(drawer).queryByText("providers.all_configured")).not.toBeInTheDocument();
+    expect(within(drawer).getByLabelText("providers.show_suppressed")).toBeInTheDocument();
+  });
+
+  // The count drives the toggle's label, so it is scoped by the same search
+  // term as the list it promises to reveal.
+  it("does not offer to reveal suppressed providers the search already excludes", async () => {
+    useProvidersMock.mockReturnValue({
+      data: [...PROVIDERS, SUPPRESSED],
+      isLoading: false,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /providers\.add/ }));
+    const drawer = await screen.findByTestId("drawer-slot");
+
+    expect(within(drawer).getByLabelText("providers.show_suppressed")).toBeInTheDocument();
+    fireEvent.change(within(drawer).getByPlaceholderText("common.search"), {
+      target: { value: "groq" },
+    });
+    expect(within(drawer).queryByLabelText("providers.show_suppressed")).not.toBeInTheDocument();
+    expect(within(drawer).getByText("Groq")).toBeInTheDocument();
   });
 
   // ── EveryAPI connect action ───────────────────────────────────────────
@@ -723,12 +953,13 @@ describe("ProvidersPage", () => {
     seedDiscoveredModel();
     const drawer = await openConfigureDrawer(LITELLM);
 
-    const field = within(drawer).getByLabelText("providers.context_window");
-    // Seeded from the value currently in force, so the operator edits the real
-    // number rather than an empty box.
-    expect(field).toHaveValue(131072);
+    // The shared `ModelParamField`: a rung set, seeded from the value in force
+    // so the selected rung is the real number rather than an empty box.
+    const ladder = within(drawer).getByRole("group", { name: "providers.context_window" });
+    expect(within(ladder).getByRole("button", { name: "128K" }))
+      .toHaveAttribute("aria-pressed", "true");
 
-    fireEvent.change(field, { target: { value: "16384" } });
+    fireEvent.click(within(ladder).getByRole("button", { name: "32K" }));
     fireEvent.click(
       within(drawer).getByRole("button", {
         name: /providers\.context_window/,
@@ -737,7 +968,7 @@ describe("ProvidersPage", () => {
 
     expect(updateOverridesMutateAsync).toHaveBeenCalledWith({
       modelKey: "litellm:sensor-model-generic-high",
-      overrides: { context_window: 16384 },
+      overrides: { context_window: 32768 },
     });
   });
 
@@ -753,8 +984,14 @@ describe("ProvidersPage", () => {
     });
     const drawer = await openConfigureDrawer(LITELLM);
 
-    const field = within(drawer).getByLabelText("providers.context_window");
-    expect(field).toHaveValue(16384);
+    // 16384 is not a context-window rung — the ladder starts 8K, 32K, 128K —
+    // so an override of that size lives in the custom field, seeded with it.
+    const ladder = within(drawer).getByRole("group", { name: "providers.context_window" });
+    expect(within(ladder).getByRole("button", { name: "model_param.custom" }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(
+      within(drawer).getByLabelText("providers.context_window — model_param.custom"),
+    ).toHaveValue(16384);
     // Untouched field → nothing to save.
     expect(
       within(drawer).getByRole("button", { name: /providers\.context_window/ }),
@@ -773,9 +1010,12 @@ describe("ProvidersPage", () => {
     });
     const drawer = await openConfigureDrawer(LITELLM);
 
-    fireEvent.change(
-      within(drawer).getByLabelText("providers.context_window"),
-      { target: { value: "" } },
+    // Inherit is the rung that means "no override here" — the same thing the
+    // cleared box used to mean.
+    fireEvent.click(
+      within(
+        within(drawer).getByRole("group", { name: "providers.context_window" }),
+      ).getByRole("button", { name: "model_param.inherit" }),
     );
     fireEvent.click(
       within(drawer).getByRole("button", {
@@ -800,7 +1040,9 @@ describe("ProvidersPage", () => {
       within(drawer).getByText("providers.context_window_unknown"),
     ).toBeInTheDocument();
     expect(
-      within(drawer).getByLabelText("providers.context_window"),
-    ).toHaveValue(null);
+      within(
+        within(drawer).getByRole("group", { name: "providers.context_window" }),
+      ).getByRole("button", { name: "model_param.inherit" }),
+    ).toHaveAttribute("aria-pressed", "true");
   });
 });

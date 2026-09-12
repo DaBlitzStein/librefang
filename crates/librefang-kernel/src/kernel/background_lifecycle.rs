@@ -866,6 +866,65 @@ impl LibreFangKernel {
             info!("In-memory GC sweep scheduled every 5 minutes");
         }
 
+        // Docker sandbox container reaper.
+        //
+        // `[docker] scope` lets a sandbox container outlive the tool call that created it, so
+        // something has to end that life: this loop applies `idle_timeout_secs` and
+        // `max_age_secs` to the pooled containers, and destroys all of them when the daemon
+        // shuts down. Without it, `scope = "agent"` / `"shared"` would accumulate containers
+        // for as long as the daemon runs. Only spawned when the sandbox is enabled — with
+        // `docker.enabled = false` no container is ever pooled and the loop has nothing to do.
+        if cfg.docker.enabled {
+            let kernel = Arc::clone(self);
+            let mut shutdown_rx = self.agents.supervisor.subscribe();
+            spawn_logged("docker_pool_reaper", async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                interval.tick().await; // Skip first immediate tick
+                let pool = librefang_runtime::docker_sandbox::global_pool();
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            // Re-read the bounds every tick rather than capturing them once, so
+                            // the loop uses whatever the live ArcSwap config holds. That is not
+                            // the same as hot-reloading them: `[docker]` is classified
+                            // restart-required (`config_reload.rs`, and the table in
+                            // `docs/operations/config-reload.md`), and `should_store_config`
+                            // declines the swap when a reload produced no hot action and no noop
+                            // change — so a `[docker]`-only `POST /api/config/reload` leaves the
+                            // boot-time table in place and still needs a daemon restart.
+                            //
+                            // `config_snapshot()` rather than `config_ref()`: the latter hands
+                            // back an `arc_swap::Guard`, which is `!Send`, and a guard alive
+                            // across the `cleanup` await would make this whole task future
+                            // `!Send` and reject it from `spawn_logged`.
+                            let cfg = kernel.config_snapshot();
+                            pool.cleanup(cfg.docker.idle_timeout_secs, cfg.docker.max_age_secs)
+                                .await;
+                        }
+                        _ = shutdown_rx.changed() => {
+                            // Copy the flag out before awaiting: the `watch::Ref` guard is not
+                            // `Send`, and holding it across `drain()` would make the whole task
+                            // future non-`Send`.
+                            let shutting_down = *shutdown_rx.borrow();
+                            if shutting_down {
+                                // Race the tick against the shutdown watch so the drain runs at
+                                // stop time instead of up to 60s later, by which point the
+                                // process is gone and the containers are stranded.
+                                pool.drain().await;
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            info!(
+                idle_timeout_secs = cfg.docker.idle_timeout_secs,
+                max_age_secs = cfg.docker.max_age_secs,
+                scope = ?cfg.docker.scope,
+                "Docker sandbox container reaper scheduled every 60 seconds"
+            );
+        }
+
         // Connect to configured + extension MCP servers
         let has_mcp = self
             .mcp
@@ -1137,27 +1196,11 @@ impl LibreFangKernel {
                             );
                             kernel.events.event_bus.publish(event).await;
 
-                            // Fan out to operator notification channels
-                            // (notification.alert_channels and matching
-                            // notification.agent_rules) so the same delivery
-                            // path that handles tool_failure / task_failed
-                            // also surfaces unresponsive-agent alerts. Routing
-                            // and event-type matching live in
-                            // push_notification; the event_type to use in
-                            // agent_rules.events is "health_check_failed".
-                            let msg = format!(
-                                "Agent \"{}\" is unresponsive (inactive for {}s)",
-                                status.name, status.inactive_secs,
-                            );
-                            // health_check_failed is agent-level, not
-                            // session-scoped — pass None so the alert
-                            // doesn't get a misleading [session=…] suffix.
                             kernel
-                                .push_notification(
-                                    &status.agent_id.to_string(),
-                                    "health_check_failed",
-                                    &msg,
-                                    None,
+                                .dispatch_heartbeat_alert(
+                                    status.agent_id,
+                                    &status.name,
+                                    status.inactive_secs,
                                 )
                                 .await;
                         }
@@ -1174,6 +1217,81 @@ impl LibreFangKernel {
         });
 
         info!("Heartbeat monitor started (interval: {}s)", interval_secs);
+    }
+
+    /// Deliver the "agent is unresponsive" alert for one `BecameUnresponsive` transition.
+    ///
+    /// Split out of the monitor loop so the whole delivery decision — the message text, the per-agent `autonomous.heartbeat_channel` shorthand, and the `[notification]` layers behind it — is exercisable from tests without waiting on a heartbeat tick.
+    ///
+    /// Delivery is the same fan-out that handles `tool_failure` / `task_failed`, under the event type `"health_check_failed"`; that is the string to list in `[[notification.agent_rules]] events`.
+    pub(in crate::kernel) async fn dispatch_heartbeat_alert(
+        &self,
+        agent_id: AgentId,
+        agent_name: &str,
+        inactive_secs: i64,
+    ) {
+        let msg = format!("Agent \"{agent_name}\" is unresponsive (inactive for {inactive_secs}s)");
+        let agent_target = self.heartbeat_alert_target(agent_id, agent_name);
+        // health_check_failed is agent-level, not session-scoped — pass None
+        // so the alert doesn't get a misleading [session=…] suffix.
+        self.push_notification_routed(
+            &agent_id.to_string(),
+            "health_check_failed",
+            &msg,
+            None,
+            agent_target.as_ref(),
+        )
+        .await;
+    }
+
+    /// Resolve this agent's `autonomous.heartbeat_channel` into a notification target, or `None` when the manifest names none.
+    ///
+    /// A value that cannot become a target — no channel part, or a bare channel for which the `owner` user has no `channel_bindings` entry — is reported once per unresponsive transition and then treated as absent, so a mistyped knob degrades to the `[notification]` routing instead of swallowing the alert.
+    /// The `WARN` is not separately rate-limited because the caller only runs on the edge into unresponsive, never on every tick.
+    pub(in crate::kernel) fn heartbeat_alert_target(
+        &self,
+        agent_id: AgentId,
+        agent_name: &str,
+    ) -> Option<librefang_types::approval::NotificationTarget> {
+        use crate::heartbeat::{resolve_heartbeat_channel, HeartbeatChannelResolution};
+
+        let entry = self.agents.registry.get_arc(agent_id)?;
+        let spec = entry
+            .manifest
+            .autonomous
+            .as_ref()?
+            .heartbeat_channel
+            .as_deref()?;
+
+        // The bare-channel form borrows the owner's recipient for that channel — the same binding `notify_owner_bg` delivers to, and the only recipient the daemon knows for a channel type.
+        let cfg = self.config.load_full();
+        let owner_bindings = cfg
+            .users
+            .iter()
+            .find(|u| u.role == "owner")
+            .map(|u| u.channel_bindings.clone())
+            .unwrap_or_default();
+
+        match resolve_heartbeat_channel(Some(spec), &owner_bindings) {
+            HeartbeatChannelResolution::Target(target) => Some(target),
+            HeartbeatChannelResolution::Unset => None,
+            HeartbeatChannelResolution::MalformedSpec { spec } => {
+                warn!(
+                    agent = %agent_name,
+                    heartbeat_channel = %spec,
+                    "autonomous.heartbeat_channel names no channel — falling back to [notification] routing for this alert"
+                );
+                None
+            }
+            HeartbeatChannelResolution::NoRecipient { channel } => {
+                warn!(
+                    agent = %agent_name,
+                    channel = %channel,
+                    "autonomous.heartbeat_channel names a channel with no recipient, and no [[users]] entry with role = \"owner\" binds that channel — write it as \"<channel>:<recipient>\" or add the owner binding; falling back to [notification] routing for this alert"
+                );
+                None
+            }
+        }
     }
 
     /// Start the background loop / register triggers for a single agent.

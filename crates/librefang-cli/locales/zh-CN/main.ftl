@@ -221,6 +221,7 @@ audit-failed = 审计追踪完整性检查失败。
 
 # --- Health ---
 health-ok = 守护进程运行正常
+health-degraded = 守护进程可访问，但报告有子系统异常
 health-not-running = 守护进程未运行。
 
 # --- Channel setup ---
@@ -1146,6 +1147,9 @@ tui-agents-title-templates = 模板
 tui-agents-title-custom-name = 自定义 — 名称
 tui-agents-title-custom-desc = 自定义 — 描述
 tui-agents-title-custom-prompt = 自定义 — 系统提示词
+tui-agents-detail-tokens = 令牌占用（$ 刷新）
+tui-agents-detail-tokens-injected = 已注入
+tui-agents-token-usage-failed = 无法加载令牌占用
 tui-agents-title-custom-tools = 自定义 — 工具
 tui-agents-title-custom-skills = 自定义 — Skill
 tui-agents-title-custom-mcp = 自定义 — MCP 服务
@@ -1180,7 +1184,7 @@ tui-agents-opt-create-new = 创建新 Agent
 
 tui-agents-hints-filter =   [输入] 过滤  [Enter] 应用  [Esc] 取消搜索
 tui-agents-hints-list =   [↑↓] 导航  [Enter] 详情  [/] 搜索  [Esc] 返回
-tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [p] 模型参数  [c] 聊天  [k] 停止  [Esc] 返回
+tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [p] 模型参数  [$] 令牌  [c] 聊天  [k] 停止  [Esc] 返回
 tui-agents-title-model-params = 模型参数
 tui-agents-prompt-model-params = 该代理自己的设置优先于模型设置。`inherit` 表示使用模型的设置。
 tui-agents-hints-model-params =   [←→] 修改  [i] 继承  [e] 自定义值  [Enter] 保存  [Esc] 取消
@@ -2550,3 +2554,32 @@ tui-memory-config-requires-daemon = 记忆设置来自守护进程 API —— TU
 tui-memory-config-fetch-failed = 无法读取记忆设置：{ $error }
 tui-goals-run-requires-daemon = 运行状态来自守护进程 API —— TUI 以进程内方式接入时不可用。
 tui-goals-run-fetch-failed = 无法读取 { $id } 的运行状态：{ $error }
+
+# config_editor.rs —— 通用配置分区编辑器 (#8165)
+tui-settings-tab-config = 6 配置
+tui-settings-hints-config =   [↑↓] 导航  [Enter] 打开分区  [r] 刷新
+tui-settings-hints-config-fields =   [↑↓] 导航  [Enter] 编辑 / 切换  [Esc] 返回  [r] 刷新
+tui-settings-config-loading = 正在加载配置…
+tui-settings-config-empty = 没有可用的配置分区。守护进程必须正在运行。
+tui-settings-config-select-section = 在左侧选择一个分区并按 [Enter] 查看其设置。
+tui-settings-config-header-section = 分区
+tui-settings-config-header-setting = 设置项
+tui-settings-config-header-value = 值
+tui-settings-config-unset = 未设置
+tui-settings-config-on = 开
+tui-settings-config-off = 关
+tui-settings-config-readonly = 只读
+tui-settings-config-readonly-msg = { $path } 在此处为只读 —— 请直接编辑 ~/.librefang/config.toml。
+tui-settings-config-complex = { $path } 保存的是列表或表 —— 请直接编辑 ~/.librefang/config.toml。
+tui-settings-config-invalid = 这不是 { $path } 的有效值。
+tui-settings-config-redacted = { $path } 以脱敏形式显示 — 请完整输入新值；此处不接受空值。
+tui-settings-config-prompt = 设置 { $path }（留空则清除）：
+tui-mod-config-value-saved = 已保存 { $path }
+tui-mod-config-value-saved-restart = 已保存 { $path } — 需重启守护进程后生效
+tui-mod-config-value-saved-reload-failed = 已将 { $path } 保存到 config.toml，但重新加载失败：{ $error }
+tui-event-config-schema-failed = 无法加载配置架构
+tui-event-config-schema-unreadable = 守护进程已响应，但无法读取配置模式：{ $error }
+tui-event-config-failed = 无法加载当前配置
+tui-event-config-unreadable = 守护进程已响应，但无法读取当前配置：{ $error }
+tui-event-config-set-failed = 无法保存 { $path }
+tui-event-config-need-daemon = 编辑配置需要正在运行的守护进程
