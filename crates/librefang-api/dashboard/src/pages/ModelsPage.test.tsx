@@ -499,27 +499,32 @@ describe("ModelsPage", () => {
     renderPage();
     fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
 
-    const temperatureRange = () =>
-      screen
-        .getAllByLabelText("models.temperature")
-        .find(
-          (element): element is HTMLInputElement =>
-            element instanceof HTMLInputElement && element.type === "range",
-        )!;
-    await waitFor(() => expect(temperatureRange().value).toBe("0.2"));
+    // Temperature is a rung ladder here, same as in the agent editor, so the
+    // selected value is the pressed rung rather than a range input's `value`.
+    const temperatureField = () =>
+      screen.getByText("model_param.temperature").closest("div") as HTMLElement;
+    const expectRung = async (rung: string) =>
+      waitFor(() =>
+        expect(within(temperatureField()).getByRole("button", { name: rung })).toHaveAttribute(
+          "aria-pressed",
+          "true",
+        ),
+      );
+
+    await expectRung("0.2");
 
     overrides = { temperature: 0.5 };
     fireEvent.change(screen.getByPlaceholderText("models.search_placeholder"), {
       target: { value: "g" },
     });
-    await waitFor(() => expect(temperatureRange().value).toBe("0.5"));
+    await expectRung("0.5");
 
-    fireEvent.change(temperatureRange(), { target: { value: "0.9" } });
+    fireEvent.click(within(temperatureField()).getByRole("button", { name: "1.5" }));
     overrides = { temperature: 0.7 };
     fireEvent.change(screen.getByPlaceholderText("models.search_placeholder"), {
       target: { value: "gp" },
     });
-    await waitFor(() => expect(temperatureRange().value).toBe("0.9"));
+    await expectRung("1.5");
   });
 
   it("does not apply settings-save effects after the drawer unmounts", async () => {

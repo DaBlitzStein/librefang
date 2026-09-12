@@ -21,6 +21,15 @@ interface StepLadderInputProps {
   customLabel: string;
   /** Placeholder for the custom field. */
   customPlaceholder?: string;
+  /**
+   * Bounds and granularity for the custom field, matching what the parameter
+   * accepts. These were hardcoded to `min="1"`, which is right for a token
+   * count and wrong for every sampling parameter — a temperature of 0 and a
+   * penalty of -2 are both legitimate, and the browser marked them invalid.
+   */
+  min?: number;
+  max?: number;
+  step?: number;
   /** Optional advisory shown under the control, e.g. an over-limit warning. */
   warning?: string;
 }
@@ -46,6 +55,9 @@ export function StepLadderInput({
   customLabel,
   customPlaceholder,
   warning,
+  min,
+  max,
+  step,
 }: StepLadderInputProps) {
   const id = useId();
   const rungs = ladderUpTo(ladder, cap);
@@ -126,7 +138,9 @@ export function StepLadderInput({
       {isCustom ? (
         <input
           type="number"
-          min="1"
+          min={min}
+          max={max}
+          step={step}
           value={value}
           aria-label={`${label} — ${customLabel}`}
           aria-invalid={warning ? true : undefined}

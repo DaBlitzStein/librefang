@@ -269,32 +269,52 @@ describe("AgentManifestForm — compact controls", () => {
 
 describe("AgentManifestForm — inference parameters", () => {
   /** The four knobs an agent could not reach before (#7781). */
-  it("lets the agent set every sampling preference, not just temperature and max_tokens", async () => {
+  it("lets the agent set every sampling preference on the shared ladder", async () => {
     const user = userEvent.setup();
     render(<Harness />);
 
     for (const label of [
-      "agents.form.temperature",
-      "agents.form.top_p",
-      "agents.form.frequency_penalty",
-      "agents.form.presence_penalty",
+      "model_param.temperature",
+      "model_param.top_p",
+      "model_param.frequency_penalty",
+      "model_param.presence_penalty",
     ]) {
-      expect(screen.getByRole("spinbutton", { name: label })).toBeInTheDocument();
+      expect(screen.getByText(label)).toBeInTheDocument();
     }
 
-    const topP = screen.getByRole("spinbutton", { name: "agents.form.top_p" });
-    await user.type(topP, "0.85");
-    expect(topP).toHaveValue(0.85);
+    // The control is shared; the rungs are not. A sampling parameter's ladder
+    // carries its own values, so a token count appearing here would mean the
+    // shared object had been handed the wrong ladder.
+    const tempField = screen.getByText("model_param.temperature").closest("div") as HTMLElement;
+    for (const rung of ["0", "0.2", "0.5", "0.7", "1", "1.5", "2"]) {
+      expect(within(tempField).getByRole("button", { name: rung })).toBeInTheDocument();
+    }
+    expect(within(tempField).queryByRole("button", { name: "8K" })).not.toBeInTheDocument();
+
+    const topPField = screen.getByText("model_param.top_p").closest("div") as HTMLElement;
+    await user.click(within(topPField).getByRole("button", { name: "0.9" }));
+    expect(
+      within(topPField).getByRole("button", { name: "0.9", pressed: true }),
+    ).toBeInTheDocument();
   });
 
   it("starts every knob on inherit rather than on a number nobody chose", () => {
     render(<Harness />);
-    expect(screen.getByRole("spinbutton", { name: "agents.form.temperature" })).toHaveValue(null);
-    // The ladder's inherit rung is pressed, which is the same state made visible.
-    const inheritRungs = screen.getAllByRole("button", { name: "model_param.inherit" });
-    expect(inheritRungs.length).toBeGreaterThan(0);
-    for (const rung of inheritRungs) {
-      expect(rung).toHaveAttribute("aria-pressed", "true");
+    // Every parameter the form sets, token counts and sampling alike, lands on
+    // the inherit rung — the agent states no opinion until someone gives it one.
+    for (const param of [
+      "context_window",
+      "max_tokens",
+      "temperature",
+      "top_p",
+      "frequency_penalty",
+      "presence_penalty",
+    ]) {
+      const field = screen.getByText(`model_param.${param}`).closest("div") as HTMLElement;
+      expect(within(field).getByRole("button", { name: "model_param.inherit" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
     }
   });
 
@@ -334,10 +354,13 @@ describe("AgentManifestForm — inference parameters", () => {
     const user = userEvent.setup();
     render(<Harness />);
 
-    const customButtons = screen.getAllByRole("button", { name: "model_param.custom" });
-    await user.click(customButtons[0]);
+    // Scoped to the response-length field: the form now renders seven ladders,
+    // so an unscoped "first custom button" is whichever one the layout happens
+    // to put first.
+    const lengthField = screen.getByText("model_param.max_tokens").closest("div") as HTMLElement;
+    await user.click(within(lengthField).getByRole("button", { name: "model_param.custom" }));
 
-    const field = screen.getByRole("spinbutton", {
+    const field = within(lengthField).getByRole("spinbutton", {
       name: "model_param.max_tokens — model_param.custom",
     });
     await user.clear(field);

@@ -17,7 +17,6 @@ import {
   mediaEndpointDraftFrom,
   mediaEndpointHasVoiceAndFormat,
 } from "../lib/mediaModelEndpoints";
-import { SliderInput } from "../components/ui/SliderInput";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
@@ -32,7 +31,11 @@ import {
   Brain, Tag, Settings, Mic, Volume2, Image as ImageIcon, Video, Server,
 } from "lucide-react";
 import { modelKey } from "../lib/hiddenModels";
-import { ModelParamField } from "../components/ui/ModelParamField";
+import {
+  ModelParamField,
+  isValidParamValue,
+  type ModelParamName,
+} from "../components/ui/ModelParamField";
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -1377,16 +1380,34 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
   // and an "is there an override at all" flag. Empty is the inherit rung, which
   // is the same thing the flag used to say.
   //
-  // The positive-integer guard is load-bearing, and is the floor the slider
-  // used to enforce by clamping. `PUT /api/models/overrides/{id}` persists what
-  // it is given, `InferenceParams` does not filter `max_tokens` the way it
-  // filters `context_window` and `max_output_tokens`, and the OpenAI driver
-  // puts it on the wire verbatim — so a `0` typed here reaches the provider as
+  // The range guard is load-bearing, and is the floor the slider used to
+  // enforce by clamping. `PUT /api/models/overrides/{id}` persists what it is
+  // given, `InferenceParams` does not filter `max_tokens` the way it filters
+  // `context_window` and `max_output_tokens`, and the OpenAI driver puts it on
+  // the wire verbatim — so a `0` typed here reaches the provider as
   // `"max_tokens": 0` for every agent on that model.
+  // What counts as in-range is `isValidParamValue`'s answer rather than this
+  // drawer's, so the agent editor and this one cannot disagree about whether a
+  // temperature of 3 is storable.
   const setLadderField = useCallback(
     (
-      field: "contextWindow" | "maxOutputTokens" | "maxTokens",
-      enabledField: "contextWindowEnabled" | "maxOutputTokensEnabled" | "maxTokensEnabled",
+      param: ModelParamName,
+      field:
+        | "contextWindow"
+        | "maxOutputTokens"
+        | "maxTokens"
+        | "temperature"
+        | "topP"
+        | "freqPenalty"
+        | "presPenalty",
+      enabledField:
+        | "contextWindowEnabled"
+        | "maxOutputTokensEnabled"
+        | "maxTokensEnabled"
+        | "tempEnabled"
+        | "topPEnabled"
+        | "freqEnabled"
+        | "presEnabled",
       next: string,
     ) => {
       const trimmed = next.trim();
@@ -1394,13 +1415,12 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
         dispatch({ type: "SET_FIELD", field: enabledField, value: false });
         return;
       }
-      const parsed = Number(trimmed);
-      // A half-typed value ("12" on its way to "128000") is kept; a
-      // non-positive or fractional one is refused outright rather than stored
-      // and saved. `min="1"` on the input does not do this — HTML checks it on
-      // form submit, which this drawer never performs.
-      if (!Number.isInteger(parsed) || parsed <= 0) return;
-      dispatch({ type: "SET_FIELD", field, value: parsed });
+      // A half-typed value ("12" on its way to "128000") is kept; an
+      // out-of-range one is refused outright rather than stored and saved.
+      // `min`/`max` on the input do not do this — HTML checks them on form
+      // submit, which this drawer never performs.
+      if (!isValidParamValue(param, trimmed)) return;
+      dispatch({ type: "SET_FIELD", field, value: Number(trimmed) });
       dispatch({ type: "SET_FIELD", field: enabledField, value: true });
     },
     [],
@@ -1583,52 +1603,60 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
           <ModelParamField
             param="context_window"
             value={state.contextWindowEnabled ? String(state.contextWindow) : ""}
-            onChange={(next) => setLadderField("contextWindow", "contextWindowEnabled", next)}
+            onChange={(next) =>
+              setLadderField("context_window", "contextWindow", "contextWindowEnabled", next)
+            }
             hint={catalogHint(model.context_window)}
           />
 
           <ModelParamField
             param="max_output_tokens"
             value={state.maxOutputTokensEnabled ? String(state.maxOutputTokens) : ""}
-            onChange={(next) => setLadderField("maxOutputTokens", "maxOutputTokensEnabled", next)}
+            onChange={(next) =>
+              setLadderField("max_output_tokens", "maxOutputTokens", "maxOutputTokensEnabled", next)
+            }
             hint={catalogHint(model.max_output_tokens)}
           />
 
-          <SliderInput
-            label={t("models.temperature")}
-            value={state.temperature} onChange={(v) => dispatch({ type: "SET_FIELD", field: "temperature", value: v })}
-            min={0} max={2} step={0.01}
-            enabled={state.tempEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "tempEnabled", value: v })}
+          {/*
+            Sampling parameters on the same rungs the agent editor offers. They
+            were 0.01-step sliders with a separate on/off switch, so the same
+            temperature was a slider here and a bare number box there, and
+            "inherit" was a toggle in one and an empty field in the other.
+          */}
+          <ModelParamField
+            param="temperature"
+            value={state.tempEnabled ? String(state.temperature) : ""}
+            onChange={(next) => setLadderField("temperature", "temperature", "tempEnabled", next)}
           />
 
-          <SliderInput
-            label={t("models.top_p")}
-            value={state.topP} onChange={(v) => dispatch({ type: "SET_FIELD", field: "topP", value: v })}
-            min={0} max={1} step={0.01}
-            enabled={state.topPEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "topPEnabled", value: v })}
+          <ModelParamField
+            param="top_p"
+            value={state.topPEnabled ? String(state.topP) : ""}
+            onChange={(next) => setLadderField("top_p", "topP", "topPEnabled", next)}
           />
 
           <ModelParamField
             param="max_tokens"
             value={state.maxTokensEnabled ? String(state.maxTokens) : ""}
-            onChange={(next) => setLadderField("maxTokens", "maxTokensEnabled", next)}
+            onChange={(next) => setLadderField("max_tokens", "maxTokens", "maxTokensEnabled", next)}
             hint={catalogHint(model.max_output_tokens)}
           />
 
-          <SliderInput
-            label={t("models.frequency_penalty")}
-            value={state.freqPenalty} onChange={(v) => dispatch({ type: "SET_FIELD", field: "freqPenalty", value: v })}
-            min={-2} max={2} step={0.01}
-            enabled={state.freqEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "freqEnabled", value: v })}
-            ticks={[-2, 0, 2]}
+          <ModelParamField
+            param="frequency_penalty"
+            value={state.freqEnabled ? String(state.freqPenalty) : ""}
+            onChange={(next) =>
+              setLadderField("frequency_penalty", "freqPenalty", "freqEnabled", next)
+            }
           />
 
-          <SliderInput
-            label={t("models.presence_penalty")}
-            value={state.presPenalty} onChange={(v) => dispatch({ type: "SET_FIELD", field: "presPenalty", value: v })}
-            min={-2} max={2} step={0.01}
-            enabled={state.presEnabled} onToggle={(v) => dispatch({ type: "SET_FIELD", field: "presEnabled", value: v })}
-            ticks={[-2, 0, 2]}
+          <ModelParamField
+            param="presence_penalty"
+            value={state.presEnabled ? String(state.presPenalty) : ""}
+            onChange={(next) =>
+              setLadderField("presence_penalty", "presPenalty", "presEnabled", next)
+            }
           />
 
           {/* Reasoning Effort */}
