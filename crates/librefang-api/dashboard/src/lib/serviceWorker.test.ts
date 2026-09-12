@@ -28,9 +28,11 @@ class MemoryCache {
 function loadWorker(fetchMock: typeof fetch, cache = new MemoryCache()) {
   const handlers = new Map<string, WorkerHandler>();
   const skipWaiting = vi.fn();
+  const claim = vi.fn(async () => undefined);
   const worker = {
     addEventListener: (type: string, handler: WorkerHandler) => handlers.set(type, handler),
     skipWaiting,
+    clients: { claim },
   };
   const caches = {
     open: vi.fn(async () => cache),
@@ -46,7 +48,7 @@ function loadWorker(fetchMock: typeof fetch, cache = new MemoryCache()) {
     URL,
     console,
   });
-  return { cache, caches, handlers, skipWaiting };
+  return { cache, caches, handlers, skipWaiting, claim };
 }
 
 describe("dashboard service worker", () => {
@@ -99,16 +101,37 @@ describe("dashboard service worker", () => {
     expect(cache.entries.has(request)).toBe(true);
   });
 
-  it("settles a failed precache and waits for explicit activation", async () => {
-    const fetchMock = vi.fn(async () => { throw new Error("offline"); }) as unknown as typeof fetch;
-    const { handlers, skipWaiting } = loadWorker(fetchMock);
-    let installPromise: Promise<unknown> | undefined;
-    handlers.get("install")?.({
-      waitUntil: (promise: Promise<unknown>) => { installPromise = promise; },
+  it("never serves a navigation from cache", async () => {
+    // The shell names the hashed bundle of the build it came from, so replaying it after a redeploy points the page at chunks the server no longer has.
+    const fetchMock = vi.fn(async () => new Response("fresh")) as unknown as typeof fetch;
+    const { handlers } = loadWorker(fetchMock);
+    const respondWith = vi.fn();
+    handlers.get("fetch")?.({
+      request: { url: "https://example.test/dashboard/agents", method: "GET", mode: "navigate" },
+      respondWith,
+      waitUntil: vi.fn(),
     });
-    await expect(installPromise).resolves.toBeUndefined();
-    expect(skipWaiting).not.toHaveBeenCalled();
-    handlers.get("message")?.({ data: { type: "SKIP_WAITING" } });
+    expect(respondWith).not.toHaveBeenCalled();
+  });
+
+  it("takes over on install instead of waiting for every tab to close", async () => {
+    // The predecessor never yielded: nothing in the dashboard ever sent the `SKIP_WAITING` message that was its only activation path.
+    const fetchMock = vi.fn(async () => new Response("x")) as unknown as typeof fetch;
+    const { handlers, skipWaiting } = loadWorker(fetchMock);
+    handlers.get("install")?.({ waitUntil: vi.fn() });
     expect(skipWaiting).toHaveBeenCalledOnce();
+  });
+
+  it("drops earlier cache generations and claims the open tabs", async () => {
+    const fetchMock = vi.fn(async () => new Response("x")) as unknown as typeof fetch;
+    const { handlers, caches, claim } = loadWorker(fetchMock);
+    let activatePromise: Promise<unknown> | undefined;
+    handlers.get("activate")?.({
+      waitUntil: (promise: Promise<unknown>) => { activatePromise = promise; },
+    });
+    await activatePromise;
+    expect(caches.delete).toHaveBeenCalledWith("librefang-v0");
+    expect(caches.delete).toHaveBeenCalledWith("librefang-v1");
+    expect(claim).toHaveBeenCalledOnce();
   });
 });
