@@ -1,5 +1,5 @@
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { fadeInScale, pageTransition } from "./lib/motion";
@@ -54,7 +54,7 @@ import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalett
 import { PushDrawer } from "./components/ui/PushDrawer";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
 import { useKeyboardShortcuts } from "./lib/useKeyboardShortcuts";
-import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getDashboardUsername, getStatus, getVersionInfo, isPasskeySupported, loginWithPasskey, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
+import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getStatus, getVersionInfo, getWhoami, isPasskeySupported, loginWithPasskey, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { EveryApiPartnerLink } from "./components/EveryApiPartnerLink";
@@ -407,10 +407,13 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     let cancelled = false;
-    getDashboardUsername().then((u) => {
+    // Not `/api/auth/dashboard-check`: it is unauthenticated and hard-codes an
+    // empty username, so it prefilled both fields blank no matter who was
+    // logged in. `/api/authz/whoami` resolves the calling credential's name.
+    getWhoami().then((w) => {
       if (cancelled) return;
-      setCurrentUsername(u);
-      setNewUsername(u);
+      setCurrentUsername(w.name);
+      setNewUsername(w.name);
     });
     return () => {
       cancelled = true;
@@ -921,6 +924,11 @@ function DashboardApp() {
   const { isOpen: isPaletteOpen, setIsOpen: setPaletteOpen } = useCommandPalette();
   const [authNeeded, setAuthNeeded] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
+  // Bumped by every successful login so the bootstrap effect below re-runs.
+  // Its authed half (`fetchAuthedBootstrap`) is skipped on the mount that
+  // renders the login dialog, and without a re-run the username and the
+  // terminal policy would keep their pre-login values for the whole session.
+  const [authEpoch, setAuthEpoch] = useState(0);
   const [authMode, setAuthMode] = useState<AuthMode>("none");
   const [appVersion, setAppVersion] = useState("");
   const [hostname, setHostname] = useState("");
@@ -932,6 +940,54 @@ function DashboardApp() {
   const setTerminalEnabled = useUIStore((s) => s.setTerminalEnabled);
 
   useKeyboardShortcuts({ onShowHelp: () => setShowShortcuts(true) });
+
+  // Re-armed on setup, not just cleared on teardown: `main.tsx` renders under
+  // `<React.StrictMode>`, which mounts → unmounts → remounts once in
+  // development. The ref survives that simulated remount, so a cleanup-only
+  // guard would stay `false` for the whole session and every continuation
+  // below would return early — the placeholder avatar and hostname this
+  // guard exists to prevent, back again under `vite dev`.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // Endpoints that require auth. Hoisted out of the mount effect below so the
+  // authEpoch effect can call it too without re-running the auth probe that
+  // effect owns — see the comment on `authEpoch`.
+  const fetchAuthedBootstrap = useCallback(() => {
+    getStatus()
+      .then((s) => {
+        if (!mountedRef.current) return;
+        setTerminalEnabled(s.terminal_enabled !== false);
+        // `/api/status` is a dashboard-read route, so it requires auth
+        // whenever any is configured — which every deployment that shows a
+        // login dialog is — and it returns the real machine hostname.
+        // `/api/version` is public unconditionally and deliberately never does.
+        setHostname(s.hostname ?? "");
+      })
+      .catch(() => {
+        // If status fetch fails, assume terminal is available (fail-open).
+        // The WebSocket connection itself will enforce actual policy.
+        if (mountedRef.current) setTerminalEnabled(true);
+      });
+
+    // `/api/auth/dashboard-check` deliberately never echoes the configured
+    // dashboard username to an unauthenticated caller, so it cannot answer
+    // "who am I" even from here. `/api/authz/whoami` is authenticated and
+    // resolves the calling credential's own name.
+    getWhoami()
+      .then((w) => {
+        if (!mountedRef.current) return;
+        setUsername(w.name);
+      })
+      .catch(() => {
+        /* unauth or no-auth mode — fine, avatar shows the icon. */
+      });
+  }, [setTerminalEnabled]);
 
   // Wire up global 401 handler so any failed request re-shows login
   useEffect(() => {
@@ -957,32 +1013,6 @@ function DashboardApp() {
         setAuthChecked(true);
       });
     });
-
-    // Endpoints that require auth: defer until after `verifyStoredAuth()`
-    // resolves, so we don't 401-spam the daemon log while the auth probe
-    // is still in flight. `/api/version{,s}` and `/api/health/detail` are
-    // public and can fire eagerly.
-    const fetchAuthedBootstrap = () => {
-      getStatus()
-        .then((s) => {
-          if (cancelled) return;
-          setTerminalEnabled(s.terminal_enabled !== false);
-        })
-        .catch(() => {
-          // If status fetch fails, assume terminal is available (fail-open).
-          // The WebSocket connection itself will enforce actual policy.
-          if (!cancelled) setTerminalEnabled(true);
-        });
-
-      getDashboardUsername()
-        .then((u) => {
-          if (cancelled) return;
-          setUsername(u);
-        })
-        .catch(() => {
-          /* unauth or no-auth mode — fine, avatar shows the icon. */
-        });
-    };
 
     const checkAuth = async () => {
       const mode = await checkDashboardAuthMode();
@@ -1012,15 +1042,26 @@ function DashboardApp() {
 
     void checkAuth();
     getVersionInfo().then((v) => {
+      if (cancelled) return;
       setAppVersion(v.version ?? "");
-      setHostname(v.hostname ?? "");
     }).catch(() => { /* Version info is non-essential; silently ignore failure. */ });
 
     return () => {
       cancelled = true;
       setOnUnauthorized(null);
     };
-  }, [setTerminalEnabled]);
+  }, [setTerminalEnabled, fetchAuthedBootstrap]);
+
+  // Bumped by every successful login (see its declaration above). Re-runs
+  // only the authed half of bootstrap, never the auth probe in the mount
+  // effect above: re-running `checkAuth()` here would re-await
+  // `verifyStoredAuth()`, and a transient failure from that immediate
+  // re-probe could bounce a user who just logged in successfully straight
+  // back to the login dialog.
+  useEffect(() => {
+    if (authEpoch === 0) return; // initial mount is handled by checkAuth() above
+    fetchAuthedBootstrap();
+  }, [authEpoch, fetchAuthedBootstrap]);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -1164,6 +1205,7 @@ function DashboardApp() {
           mode={authMode}
           onAuthenticated={() => {
             setAuthNeeded(false);
+            setAuthEpoch((epoch) => epoch + 1);
             void navigate({ to: "/overview", replace: true });
           }}
         />
