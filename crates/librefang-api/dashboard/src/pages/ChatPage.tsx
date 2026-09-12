@@ -1,4 +1,4 @@
-import { formatCost } from "../lib/format";
+import { formatBytes, formatCost } from "../lib/format";
 import { safeStorageGet, safeStorageSet } from "../lib/safeStorage";
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
@@ -1630,10 +1630,10 @@ function AttachmentChip({ attachment, onRemove }: { attachment: PendingAttachmen
   );
 }
 
-// Server-side cap (`KernelConfig.max_upload_size_bytes`, default 10MB).
-// Mirrored client-side so we can reject locally before pushing bytes over
-// the wire — the backend still enforces the real limit.
-const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+// Fallback for the server's `max_upload_size_bytes`, used only until `GET /api/config` resolves.
+// The real value is read from the config query (#8181): hardcoding the mirror meant an operator who raised the cap to 100 MB still had the browser refuse at 10 MB, so the setting did nothing — the same failure the server-side layer ordering had, one floor up.
+// Matches `default_max_upload_size_bytes()` in `librefang-types`; the backend still enforces the real limit.
+const DEFAULT_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 // Types the agent loop currently consumes via
 // `routes/agents.rs::resolve_attachments()`:
 //   - image/* — passed inline as base64 image blocks
@@ -1859,6 +1859,19 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   const [isDropping, setIsDropping] = useState(false);
   const dragDepthRef = useRef(0);
   const uploadMutation = useUploadAgentFile();
+  // Same query key as the page-level `useFullConfig`, so this shares one cache entry and one refetch rather than issuing a second request.
+  const configQuery = useFullConfig();
+  const serverUploadCap = (configQuery.data as Record<string, unknown> | undefined)?.max_upload_size_bytes;
+  // While `configQuery` is still in flight, `serverUploadCap` is undefined — falling back to
+  // `DEFAULT_MAX_ATTACHMENT_BYTES` there would enforce the 10 MB mirror as if it were the real
+  // cap for the first few hundred ms of every page load, refusing files a raised
+  // `max_upload_size_bytes` allows. The server enforces the real limit regardless, so it's safe
+  // to not refuse locally until the cap is actually known.
+  const maxAttachmentBytes = typeof serverUploadCap === "number"
+    ? serverUploadCap
+    : configQuery.isSuccess
+      ? DEFAULT_MAX_ATTACHMENT_BYTES
+      : Number.POSITIVE_INFINITY;
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
   const setDeepThinking = useUIStore((s) => s.setDeepThinking);
@@ -1956,7 +1969,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
     if (!agentId || files.length === 0) return;
     for (const file of files) {
       const localId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const tooLarge = file.size > MAX_ATTACHMENT_BYTES;
+      const tooLarge = file.size > maxAttachmentBytes;
       const isImage = isImageMime(file.type);
       // Local preview only makes sense for images; PDFs render as a file chip.
       const previewUrl = isImage ? URL.createObjectURL(file) : undefined;
@@ -1983,7 +1996,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
           contentType: file.type || "application/octet-stream",
           previewUrl,
           status: "error",
-          errorMessage: t("chat.attachment_too_large", { defaultValue: "File too large (max 10MB)" }),
+          errorMessage: t("chat.attachment_too_large", { max: formatBytes(maxAttachmentBytes), defaultValue: "File too large (max {{max}})" }),
         }]);
         continue;
       }
@@ -2013,7 +2026,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
         },
       });
     }
-  }, [agentId, uploadMutation, t]);
+  }, [agentId, maxAttachmentBytes, uploadMutation, t]);
 
   // Revoke any object URLs we created when the component unmounts so we
   // don't leak memory in a long-lived chat session. We mirror `attachments`

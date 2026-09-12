@@ -812,6 +812,10 @@ pub fn build_reload_plan_with_caps(
             "max_upload_size_bytes",
         );
         restart_if_changed(
+            old.max_concurrent_uploads != new.max_concurrent_uploads,
+            "max_concurrent_uploads",
+        );
+        restart_if_changed(
             old.max_concurrent_bg_llm != new.max_concurrent_bg_llm,
             "max_concurrent_bg_llm",
         );
@@ -1113,6 +1117,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "reload",
         "max_request_body_bytes",
         "max_upload_size_bytes",
+        "max_concurrent_uploads",
         "max_concurrent_bg_llm",
         "auto_dream",
         "rl_export",

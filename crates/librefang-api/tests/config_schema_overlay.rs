@@ -273,6 +273,11 @@ fn every_kernel_config_struct_field_is_exposed_via_overlay() {
         "max_concurrent_bg_llm",
         "max_agent_call_depth",
         "max_request_body_bytes",
+        // Upload concurrency cap (#8181), added to the `general` root_level
+        // entries beside the two size caps above it — a flat scalar, so it is
+        // guarded by `every_root_level_field_exists_on_kernel_config` rather
+        // than by a section descriptor of its own.
+        "max_concurrent_uploads",
         "workflow_stale_timeout_minutes",
         "workflow_default_total_timeout_secs",
         "local_probe_interval_secs",

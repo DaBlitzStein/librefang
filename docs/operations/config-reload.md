@@ -91,6 +91,7 @@ classified differently — the row note spells out which is which.
 | `allowed_mount_roots` | R | Host directories under which workspace mounts may resolve. |
 | `max_request_body_bytes` | R | Global request-body size cap (router safety net). |
 | `max_upload_size_bytes` | R | Maximum upload size in bytes. |
+| `max_concurrent_uploads` | R | Max in-flight `/upload` requests (sizes a `Semaphore` built once at router construction). |
 | `rate_limit` | R | API and WebSocket rate-limiting config. |
 
 ### Auth / RBAC / dashboard
