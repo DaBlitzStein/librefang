@@ -1531,7 +1531,10 @@ impl PublicRoute {
 /// new entries to each slice.
 pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
     // Static assets / shell
-    PublicRoute::exact_any("/"),
+    //
+    // `/` is deliberately absent (#8261).
+    // It serves the same `index.html` as the `/dashboard/*` tree, so an entry here made the shell reachable without a session however the gate was configured — whether a browser met the login screen depended on the URL it arrived by rather than on the session it held.
+    // It is now conditionally public through `is_shell_path`, like every other entry to the shell.
     PublicRoute::exact_any("/favicon.ico"),
     PublicRoute::exact_any("/logo.png"),
     // Auth flow entry points (method-free so POST also works)
@@ -1906,14 +1909,16 @@ pub async fn auth(
     let is_mcp_oauth_callback =
         is_get && path.starts_with("/api/mcp/servers/") && path.ends_with("/auth/callback");
 
-    // Path has been trimmed of trailing slashes above, so `/dashboard/` is
-    // normalized to `/dashboard`. Match the bare root as well as any
-    // descendant so the login gate (and cookie session lookup below) don't
-    // silently miss the root navigation.
-    let is_dashboard_path = path == "/dashboard" || path.starts_with("/dashboard/");
+    // Every path that serves the SPA shell: the bare root (`GET /`, handled by `webchat::webchat_page`) and the `/dashboard` tree (`webchat::react_asset`, which falls back to that same `index.html` for SPA routes).
+    // Path has been trimmed of trailing slashes above, so `/dashboard/` is normalized to `/dashboard`.
+    // Match the bare root as well as any descendant so the login gate (and the cookie session lookup below) don't silently miss the root navigation.
+    //
+    // `/` joined this set in #8261, having been unconditionally public before.
+    // Leaving it out did not merely skip the gate: it also skipped the cookie lookup below, so a session established from `/` could never have been recognised there afterwards.
+    let is_shell_path = path == "/" || path == "/dashboard" || path.starts_with("/dashboard/");
 
     // Compute `auth_configured` early so we can decide whether the SPA
-    // shell at `/dashboard/*` stays publicly reachable. When *any* form of
+    // shell at `/` and `/dashboard/*` stays publicly reachable. When *any* form of
     // auth is configured, shell access goes behind the session cookie and
     // an unauthenticated browser gets a minimal inline login page
     // (see the 401 handler below). When no auth is configured the shell
@@ -1931,7 +1936,7 @@ pub async fn auth(
     // Dashboard assets (JS/CSS/font chunks) and locale bundles are in
     // PUBLIC_ROUTES_GET_ONLY; the dashboard shell is conditionally public
     // based on dashboard_auth_enabled (handled below).
-    let dashboard_shell_public = !auth_state.dashboard_auth_enabled && is_dashboard_path;
+    let dashboard_shell_public = !auth_state.dashboard_auth_enabled && is_shell_path;
 
     // Walk PUBLIC_ROUTES_GET_ONLY: public on GET only regardless of auth config.
     // MCP OAuth callbacks are handled separately by is_mcp_oauth_callback above
@@ -2072,11 +2077,11 @@ pub async fn auth(
         });
 
     // Cookie-based session token — only accepted for SPA shell navigation
-    // (`/dashboard/*`). API endpoints still require a Bearer/header token so
+    // (`/` and `/dashboard/*`). API endpoints still require a Bearer/header token so
     // a cross-site request that auto-forwards the cookie cannot trigger a
     // write. Pair with `SameSite=Lax` on the Set-Cookie (issued by
     // `dashboard_login`) for the usual CSRF posture.
-    let cookie_session_token = if is_dashboard_path {
+    let cookie_session_token = if is_shell_path {
         request
             .headers()
             .get("cookie")
@@ -2304,7 +2309,7 @@ pub async fn auth(
     // minimal self-contained login page instead of a JSON error, so the SPA
     // bundle (and whatever it imports) never reaches an unauthenticated
     // caller.
-    if is_get && is_dashboard_path && auth_state.dashboard_auth_enabled {
+    if is_get && is_shell_path && auth_state.dashboard_auth_enabled {
         return Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header("content-type", "text/html; charset=utf-8")

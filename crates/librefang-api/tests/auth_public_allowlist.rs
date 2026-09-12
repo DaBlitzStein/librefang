@@ -248,7 +248,11 @@ const fn re(path: &'static str, expect: Expect) -> RouteEntry {
 /// Paths with dynamic segments use a representative concrete value.
 const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     // Always-public (in PUBLIC_ROUTES_ALWAYS or PUBLIC_ROUTES_GET_ONLY)
-    re("/", Expect::AlwaysPublic),
+    //
+    // `/` has no row here.
+    // It serves the SPA shell, which is conditionally public: reachable when no dashboard password is configured, answered with the login page when one is (#8261).
+    // None of the three classifications above can express that, and it is already how the rest of the shell is treated — no `/dashboard/<spa-route>` path appears in this table either.
+    // Both halves are pinned in `tests/dashboard_shell_gate_test.rs`.
     re("/favicon.ico", Expect::AlwaysPublic),
     re("/logo.png", Expect::AlwaysPublic),
     re("/.well-known/agent.json", Expect::AlwaysPublic),
