@@ -9,6 +9,7 @@ drift apart silently.
 """
 
 import io
+import json
 import os
 import time
 import urllib.error
@@ -1261,3 +1262,176 @@ async def test_stream_buffer_cap_drops_the_stream(monkeypatch):
     assert "big" in a._streams
     await a.on_command(tg.protocol.StreamDelta("big", "\u4e2d" * 8))
     assert "big" not in a._streams, "cap did not accumulate across deltas"
+
+
+def _stderr_records(captured):
+    return [
+        json.loads(line)
+        for line in captured.err.splitlines()
+        if line.startswith("{")
+    ]
+
+
+def test_refused_send_is_reported_on_stderr(monkeypatch, capsys):
+    """A definitive refusal by Telegram must leave a trace.
+
+    The daemon's `send` frame is fire-and-forget — it returns as soon as the
+    JSON line is written to our stdin, and the protocol carries no response
+    frame — and `on_command` discards whatever the send helpers return. So
+    without this line a `403 bot was blocked by the user` produces no journal
+    entry, no counter and no stderr, and is indistinguishable from a turn that
+    never happened. That is not hypothetical: it turned a ten-minute channel
+    diagnosis into an afternoon, because every observable on the host said the
+    reply had been sent.
+    """
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, method, payload: {
+            "ok": False,
+            "_http": 403,
+            "error_code": 403,
+            "description": "Forbidden: bot was blocked by the user",
+        },
+    )
+    a = _adapter()
+
+    a._send_text("c1", "el secreto de la respuesta")
+
+    captured = capsys.readouterr()
+    errors = [r for r in _stderr_records(captured) if r.get("level") == "error"]
+    assert errors, "a refused sendMessage must be reported on stderr"
+    fields = errors[0]["fields"]
+    assert fields["error_code"] == 403
+    assert fields["method"] == "sendMessage"
+    assert "blocked by the user" in fields["description"]
+    # The verdict, never the payload: the reply text and the token stay out.
+    assert "el secreto de la respuesta" not in captured.err
+    assert "T:tok" not in captured.err
+
+
+def test_successful_send_reports_nothing(monkeypatch, capsys):
+    """The happy path must stay silent — an error line per delivered reply
+    would train operators to ignore the one that matters."""
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, method, payload: {"ok": True, "result": {"message_id": 1}},
+    )
+    a = _adapter()
+
+    a._send_text("c1", "hola")
+
+    captured = capsys.readouterr()
+    assert not [r for r in _stderr_records(captured) if r.get("level") == "error"]
+
+
+@pytest.mark.asyncio
+async def test_refused_send_in_the_streaming_path_is_reported(monkeypatch, capsys):
+    """The streaming path has its own sends, and they were silent.
+
+    For an agent with streaming on, `_sync_stream_messages` is the ordinary
+    path, not the exceptional one: `_send_text` is reached only by
+    `_stream_end`, and only while no message has been created yet. A user who
+    blocks the bot mid-stream produced a 403 on `sendRichMessage`, a second
+    403 on the chunk send, `message_id is None`, `break` — and not one line
+    anywhere.
+    """
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, method, payload: {
+            "ok": False,
+            "_http": 403,
+            "error_code": 403,
+            "description": "Forbidden: bot was blocked by the user",
+        },
+    )
+    a = _adapter()
+
+    await a.on_command(tg.protocol.StreamStart("c1", "s1"))
+    await a.on_command(tg.protocol.StreamDelta("s1", "la respuesta en streaming"))
+
+    captured = capsys.readouterr()
+    errors = [r for r in _stderr_records(captured) if r.get("level") == "error"]
+    assert errors, "a refused send in the streaming path must be reported"
+    assert errors[0]["fields"]["error_code"] == 403
+    assert errors[0]["fields"]["method"] == "sendMessage"
+    assert "la respuesta en streaming" not in captured.err
+
+
+@pytest.mark.asyncio
+async def test_refused_edit_in_the_streaming_path_is_reported(monkeypatch, capsys):
+    """A refused edit freezes a half-written answer on screen.
+
+    The first delta creates the message; a later one edits it. If the edit is
+    refused the reader is left looking at a truncated reply forever, which is
+    the same symptom as no reply at all and was equally silent.
+    """
+    # First call creates the message; everything after it is refused.
+    seen = {"n": 0}
+
+    def fake(self, method, payload):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return {"ok": True, "result": {"message_id": 7}}
+        return {
+            "ok": False,
+            "_http": 403,
+            "error_code": 403,
+            "description": "Forbidden: bot was blocked by the user",
+        }
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_call", fake)
+    monkeypatch.setattr(tg, "STREAM_EDIT_INTERVAL", 0)
+    a = _adapter()
+
+    await a.on_command(tg.protocol.StreamStart("c1", "s2"))
+    await a.on_command(tg.protocol.StreamDelta("s2", "primera parte"))
+    await a.on_command(tg.protocol.StreamDelta("s2", " y la segunda"))
+
+    captured = capsys.readouterr()
+    errors = [r for r in _stderr_records(captured) if r.get("level") == "error"]
+    assert errors, "a refused edit in the streaming path must be reported"
+    assert errors[0]["fields"]["error_code"] == 403
+    assert errors[0]["fields"]["method"] == "editMessageText"
+
+
+def test_negotiated_fallbacks_that_deliver_report_nothing(monkeypatch, capsys):
+    """Both deliberate silences on the chunk path, guarded.
+
+    `_send_formatted_chunk` is where the reporting lives, and it sits after
+    *two* negotiations that each produce a non-`ok` response on the way to a
+    delivered message:
+
+      * `sendRichMessage` refused by a pre-10.1 Bot API server, which routes
+        the reply to the legacy HTML pipeline;
+      * the HTML chunk refused with `400 can't parse entities`, which is
+        re-sent as plain text and lands.
+
+    Neither is a failure, and neither may log. This test fails if the guard is
+    ever moved onto the intermediate `_call_retrying` response instead of the
+    final one — a one-line change that would make every message containing a
+    stray `<` report an error for a send that succeeded.
+    """
+    def fake(self, method, payload):
+        if method == "sendRichMessage":
+            return {
+                "ok": False, "_http": 400, "error_code": 400,
+                "description": "Bad Request: method not found",
+            }
+        if "parse_mode" in payload:
+            return {
+                "ok": False, "_http": 400, "error_code": 400,
+                "description": "Bad Request: can't parse entities in message text",
+            }
+        return {"ok": True, "result": {"message_id": 11}}
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_call", fake)
+    a = _adapter()
+
+    resp = a._send_text("c1", "a < b, y se entrega en plano")
+
+    captured = capsys.readouterr()
+    assert resp.get("ok") is True, "the plain retry must be the reported outcome"
+    assert not [r for r in _stderr_records(captured) if r.get("level") == "error"], (
+        "a negotiated fallback that delivers the message must stay silent: "
+        f"{captured.err}"
+    )

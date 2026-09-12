@@ -1049,6 +1049,34 @@ class TelegramAdapter(SidecarAdapter):
 
     # ---- outbound text (rich Markdown, HTML pipeline as fallback) ----
 
+    def _report_send_failure(self, method: str, chat_id, resp: dict) -> dict:
+        """Log a Telegram refusal of an outbound message, and return `resp`.
+
+        Nothing else does, on either side of the wire. The daemon's ``send``
+        frame is fire-and-forget — ``SidecarChannelAdapter::send`` returns as
+        soon as the JSON line is written to our stdin, and the protocol has no
+        response frame — and ``on_command`` discards whatever the send helpers
+        return. So a ``403 bot was blocked by the user`` or a ``400 chat not
+        found`` produces no journal line, no counter, and no stderr: it is
+        indistinguishable from a turn that never happened. The daemon does
+        surface every sidecar stderr line, which makes an error here the only
+        trace such a failure can leave.
+
+        Logs the API verdict only. Never the token, never the message body —
+        the chat id is already in the daemon's own outbound log line.
+        """
+        if not resp or resp.get("ok") is True:
+            return resp
+        log.error(
+            "telegram send failed; the reply did not reach the chat",
+            method=method,
+            chat_id=str(chat_id),
+            http=resp.get("_http"),
+            error_code=resp.get("error_code"),
+            description=str(resp.get("description", ""))[:200],
+        )
+        return resp
+
     def _send_text(self, chat_id, text: str, thread_id=None) -> dict:
         """Send outbound text.
 
@@ -1070,8 +1098,12 @@ class TelegramAdapter(SidecarAdapter):
             if resp.get("ok") is True:
                 return resp
             if not _is_api_rejection(resp):
-                # Outcome unknown — do not re-send the same answer.
-                return resp
+                # Outcome unknown — do not re-send the same answer. Report it:
+                # unknown is not success, and the reply may never have landed.
+                return self._report_send_failure("sendRichMessage", chat_id, resp)
+        # Each chunk reports itself inside `_send_formatted_chunk`, so a
+        # refusal on chunk three is not hidden behind the chunk-one response
+        # returned here.
         responses = self._send_text_chunks(chat_id, text, thread_id)
         return responses[0] if responses else {}
 
@@ -1132,7 +1164,13 @@ class TelegramAdapter(SidecarAdapter):
             if thread_id:
                 plain["message_thread_id"] = thread_id
             resp = self._call("sendMessage", plain)
-        return resp
+        # Reported here rather than in `_send_text`, because this is the one
+        # function both outbound paths funnel through: `_send_text_chunks` for
+        # an ordinary reply, and `_sync_stream_messages` for a streaming one.
+        # For an agent with streaming on, the streaming path is the ordinary
+        # one — `_send_text` is reached only from `_stream_end`, and only
+        # while no message has been created yet.
+        return self._report_send_failure("sendMessage", chat_id, resp)
 
     def _edit_formatted_chunk(
         self, chat_id, message_id, sanitized: str, plain_fallback: str,
@@ -1144,12 +1182,17 @@ class TelegramAdapter(SidecarAdapter):
             "parse_mode": PARSE_MODE_HTML,
         })
         desc = str(resp.get("description", ""))
-        if resp.get("_http") and "message is not modified" not in desc:
-            if resp.get("_http") == 400 and "can't parse entities" in desc:
-                self._call("editMessageText", {
-                    "chat_id": chat_id, "message_id": message_id,
-                    "text": plain_fallback,
-                })
+        # Telegram's way of saying the text is already what we are setting.
+        if "message is not modified" in desc:
+            return
+        if resp.get("_http") == 400 and "can't parse entities" in desc:
+            resp = self._call("editMessageText", {
+                "chat_id": chat_id, "message_id": message_id,
+                "text": plain_fallback,
+            })
+        # A refused edit leaves a half-written answer frozen on screen, which
+        # reads to the user exactly like no answer at all.
+        self._report_send_failure("editMessageText", chat_id, resp)
 
     def _send_media_request(self, endpoint: str, chat_id, body: dict,
                             thread_id=None) -> dict:
@@ -1157,7 +1200,9 @@ class TelegramAdapter(SidecarAdapter):
         body["chat_id"] = chat_id
         if thread_id:
             body["message_thread_id"] = thread_id
-        return self._call_retrying(endpoint, body)
+        return self._report_send_failure(
+            endpoint, chat_id, self._call_retrying(endpoint, body),
+        )
 
     def _send_media_upload(self, endpoint: str, field: str, chat_id,
                            data: bytes, filename: str, mime: str,
@@ -1180,7 +1225,7 @@ class TelegramAdapter(SidecarAdapter):
             time.sleep(delay)
             resp = _multipart(url, fields, field, filename, mime, data,
                               SEND_TIMEOUT_SECS)
-        return resp
+        return self._report_send_failure(endpoint, chat_id, resp)
 
     def _fetch_bytes(self, url: str):
         req = urllib.request.Request(url, method="GET")
@@ -1366,7 +1411,9 @@ class TelegramAdapter(SidecarAdapter):
         }
         if thread_id:
             body["message_thread_id"] = thread_id
-        return self._call("sendMessage", body)
+        return self._report_send_failure(
+            "sendMessage", chat_id, self._call("sendMessage", body),
+        )
 
     def _edit_interactive(self, chat_id, message_id, text, buttons):
         kb = self._inline_keyboard(buttons)
