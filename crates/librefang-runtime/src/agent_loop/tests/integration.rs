@@ -2212,6 +2212,117 @@ fn test_recover_text_tool_calls_multiple() {
     assert_eq!(calls[1].name, "read_file");
 }
 
+// #8235: models served behind OpenAI-compatible proxies (Hermes/Llama-3
+// tool-call format) emit the parameters as <parameter=NAME>value</parameter>
+// pairs instead of a JSON object. Verbatim shape from a production host:
+// the command value spans multiple lines and one parameter is numeric.
+#[test]
+fn test_recover_parameter_style_tool_call() {
+    let tools = vec![ToolDefinition {
+        name: "shell_exec".into(),
+        description: "Run a shell command".into(),
+        // #8236: the schema is what tells `coerce_scalar` `timeout_seconds`
+        // is really numeric — an empty schema now means "stay a string" (see
+        // test_recover_parameter_style_respects_string_schema_type below for
+        // the case that motivated the change).
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "timeout_seconds": {"type": "integer"}
+            }
+        }),
+    }];
+    let text = concat!(
+        "<function=shell_exec>\n",
+        "<parameter=command>\n",
+        "export PATH=\"/home/u/.nvm/versions/node/v22/bin:$PATH\"\n",
+        "mercadona product 3024 --json\n",
+        "</parameter>\n",
+        "<parameter=timeout_seconds>\n",
+        "180\n",
+        "</parameter>\n",
+        "</function>"
+    );
+    let calls = recover_text_tool_calls(text, &tools);
+    assert_eq!(calls.len(), 1, "a parameter-style call must be recovered");
+    assert_eq!(calls[0].name, "shell_exec");
+    assert_eq!(
+        calls[0].input["command"],
+        concat!(
+            "export PATH=\"/home/u/.nvm/versions/node/v22/bin:$PATH\"\n",
+            "mercadona product 3024 --json"
+        ),
+        "a multi-line parameter value must survive intact"
+    );
+    assert_eq!(
+        calls[0].input["timeout_seconds"],
+        serde_json::json!(180),
+        "a numeric parameter must arrive as a number, not a string"
+    );
+}
+
+#[test]
+fn test_recover_parameter_style_variant2() {
+    // Variant 2 shape (<function>NAME…</function>) with a parameter body and
+    // no JSON object. Before #8235 the search for '{' failed and the call
+    // was dropped.
+    let tools = vec![ToolDefinition {
+        name: "shell_exec".into(),
+        description: "Run a shell command".into(),
+        input_schema: serde_json::json!({}),
+    }];
+    let text = "<function>shell_exec<parameter=command>ls -la</parameter></function>";
+    let calls = recover_text_tool_calls(text, &tools);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].input["command"], "ls -la");
+}
+
+#[test]
+fn test_parameter_style_unknown_tool_is_still_rejected() {
+    let tools = vec![ToolDefinition {
+        name: "shell_exec".into(),
+        description: "Run a shell command".into(),
+        input_schema: serde_json::json!({}),
+    }];
+    let text = "<function=hack_system><parameter=command>rm -rf /</parameter></function>";
+    let calls = recover_text_tool_calls(text, &tools);
+    assert!(
+        calls.is_empty(),
+        "the parameter fallback must not bypass the name check"
+    );
+}
+
+#[test]
+fn test_pure_tool_call_markup_is_replaced_with_honest_reply() {
+    // A model that answered with nothing but an unparseable tool call would
+    // otherwise deliver the raw syntax to the channel (#8235).
+    let text = "<function=shell_exec>\n<parameter=command>ls</parameter>\n<parameter=timeout_seconds>5</parameter>\n</function>";
+    let out = replace_unrecoverable_tool_call_reply(text);
+    assert!(
+        !out.contains("<function=") && !out.contains("<parameter="),
+        "raw tool-call syntax must never reach the user, got: {out:?}"
+    );
+    assert!(
+        !out.trim().is_empty(),
+        "the replacement must say something honest"
+    );
+}
+
+#[test]
+fn test_markup_mixed_with_prose_is_delivered_unchanged() {
+    let text =
+        "I could not run that. <function=shell_exec><parameter=command>ls</parameter></function>";
+    let out = replace_unrecoverable_tool_call_reply(text);
+    assert_eq!(out, text, "a reply that starts with prose passes through");
+}
+
+#[test]
+fn test_normal_text_untouched_by_reply_guard() {
+    let text = "Here are the prices I found: piña 1,20 €.";
+    assert_eq!(replace_unrecoverable_tool_call_reply(text), text);
+}
+
 #[test]
 fn test_recover_text_tool_calls_no_pattern() {
     let tools = vec![ToolDefinition {
@@ -2229,6 +2340,456 @@ fn test_recover_text_tool_calls_empty_tools() {
     let text = r#"<function=web_search>{"query":"hello"}</function>"#;
     let calls = recover_text_tool_calls(text, &[]);
     assert!(calls.is_empty(), "No tools = no recovery");
+}
+
+// --- #8236 review fixes ------------------------------------------------
+
+#[test]
+fn test_unrecoverable_reply_guard_actually_substitutes_at_call_site() {
+    // Regression for the #8236 review finding on text_recovery.rs:668: the
+    // replacement branch used to return `Cow::Borrowed`, the same variant as
+    // the pass-through branch, so the `match` mirrored below (the one both
+    // mod.rs and run_streaming.rs actually run) always kept the caller's
+    // original `text` local and the raw markup reached the channel — even
+    // though this exact case already passed the pre-existing test above,
+    // because that test only inspects the *returned value*, never the
+    // discriminated variant.
+    let text = "<function=shell_exec>\n<parameter=command>ls</parameter>\n</function>";
+    let delivered = match replace_unrecoverable_tool_call_reply(text) {
+        std::borrow::Cow::Borrowed(_) => text.to_string(),
+        std::borrow::Cow::Owned(replacement) => replacement,
+    };
+    assert!(
+        !delivered.contains("<function="),
+        "the call-site match must receive the substituted text, got: {delivered:?}"
+    );
+}
+
+#[test]
+fn test_strip_tool_call_spans_preserves_trailing_prose_after_last_span() {
+    // Regression for text_recovery.rs:700: once the last recognized span is
+    // consumed, `strip_tool_call_spans` used to drop everything after it
+    // instead of keeping it as prose — so a reply that opens with a tool
+    // call and closes with a real answer got judged "100% unparseable" and
+    // had the user's actual answer replaced by the apology sentence.
+    let text = "<function=shell_exec><parameter=command>ls</parameter></function>\nLos precios son: piña 1,20 €.";
+    let out = replace_unrecoverable_tool_call_reply(text);
+    assert_eq!(
+        out, text,
+        "trailing prose after the last markup span must survive, not be swallowed"
+    );
+}
+
+#[test]
+fn test_tool_call_tag_uses_correct_closer() {
+    // Regression for text_recovery.rs:683: `strip_tool_call_spans` paired
+    // `<tool_call>` with a markdown fence ("```") instead of `</tool_call>`,
+    // so the real closer was never found. Two well-formed <tool_call> spans
+    // around genuine middle prose isolate the bug from the trailing-prose
+    // fix above: with the wrong closer, the very first span already reads
+    // as "unterminated" and drops everything — including the second span
+    // and the prose between them — before the loop ever gets a chance to
+    // treat the end of the text as an "opener not found" case.
+    let text = concat!(
+        "<tool_call>{\"name\":\"a\",\"arguments\":{}}</tool_call>",
+        "middle prose",
+        "<tool_call>{\"name\":\"b\",\"arguments\":{}}</tool_call>",
+    );
+    let out = replace_unrecoverable_tool_call_reply(text);
+    assert_eq!(
+        out, text,
+        "the middle prose between two properly closed <tool_call> spans must survive"
+    );
+}
+
+#[test]
+fn test_recover_parameter_style_respects_string_schema_type() {
+    // Regression for text_recovery.rs:755: `coerce_scalar` used to guess the
+    // JSON type from the value alone, so a `chat_id` that merely looks
+    // numeric was coerced to an integer — which `serde` then rejects on the
+    // tool's actual `String` field ("invalid type: integer, expected a
+    // string"), and which silently loses leading zeros or numeric precision
+    // for other string-typed IDs. The schema is now consulted first.
+    let tools = vec![ToolDefinition {
+        name: "telegram_send".into(),
+        description: "Send a Telegram message".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "chat_id": {"type": "string"},
+                "text": {"type": "string"}
+            }
+        }),
+    }];
+    let text = "<function=telegram_send><parameter=chat_id>-1001234567890</parameter><parameter=text>hi</parameter></function>";
+    let calls = recover_text_tool_calls(text, &tools);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].input["chat_id"],
+        serde_json::json!("-1001234567890"),
+        "a string-typed schema property must not be coerced to a number"
+    );
+}
+
+#[test]
+fn test_parameter_value_keeps_deliberate_blank_lines_and_indentation() {
+    // Regression for text_recovery.rs:735: the parameter value was
+    // `.trim()`ed, which the doc-comment above `parse_parameter_style_body`
+    // already called "verbatim" — but `.trim()` strips ALL surrounding
+    // whitespace, not just the single newline the markup convention puts
+    // right after `>` and right before `</parameter>`. A content-bearing
+    // parameter (e.g. `content` for a file-writing tool) loses a deliberate
+    // trailing blank line or leading indentation on its first line.
+    let tools = vec![ToolDefinition {
+        name: "write_file".into(),
+        description: "Write a file".into(),
+        input_schema: serde_json::json!({}),
+    }];
+    let text = concat!(
+        "<function=write_file>\n",
+        "<parameter=content>\n",
+        "  indented first line\n",
+        "\n",
+        "</parameter>\n",
+        "</function>"
+    );
+    let calls = recover_text_tool_calls(text, &tools);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].input["content"], "  indented first line\n",
+        "leading indentation and the deliberate trailing blank line must survive — \
+         only the single markup newline on each end is stripped"
+    );
+}
+
+#[tokio::test]
+async fn test_max_tokens_pure_markup_overflow_replaced_with_honest_reply() {
+    // Regression for mod.rs:1450's second gap: a token cap can cut a
+    // tool-call markup span off mid-call, leaving it permanently
+    // unterminated — the honest-reply guard used to run only on the EndTurn
+    // path, so this pure-text MaxTokens overflow delivered the raw
+    // `<function=...>` syntax to the channel verbatim.
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let agent_id = librefang_types::agent::AgentId::new();
+    let mut session = librefang_memory::session::Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id,
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
+        text: "<function=shell_exec><parameter=command>ls -la /very/long/path/that/got/cut/off",
+        stop_reason: StopReason::MaxTokens,
+    });
+
+    let result = run_agent_loop(
+        &manifest,
+        "Run something",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None, // checkpoint_manager
+        None, // process_registry
+        None,
+        None,
+        None,
+        None,
+        None,
+        &LoopOptions::default(),
+    )
+    .await
+    .expect("Loop should complete without error");
+
+    assert!(
+        !result.response.contains("<function="),
+        "raw tool-call markup must never reach the channel, got: {:?}",
+        result.response
+    );
+}
+
+#[tokio::test]
+async fn test_streaming_pure_markup_reply_never_appears_on_the_wire() {
+    // Regression for the run_streaming.rs:1011 review finding: the honest-
+    // reply guard rewrites the *final* text used for history/delivery, but
+    // by the time it runs, `stream_with_retry`'s forwarding task has already
+    // relayed every `TextDelta` live — a markup-only reply showed the raw
+    // `<function=...>` syntax to any client rendering deltas as they
+    // arrived, and the guard's substitution never reached the wire at all.
+    // `stream_with_retry` now withholds a delta while it might still resolve
+    // to pure markup, and `run_streaming.rs` sends the corrected text as a
+    // single catch-up delta once the stream ends without ever resolving.
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
+        text: "<function=shell_exec><parameter=command>ls</parameter></function>",
+        stop_reason: StopReason::EndTurn,
+    });
+    let (tx, mut rx) = mpsc::channel(64);
+
+    let result = run_streaming_for_test(
+        &manifest,
+        "Run something",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        tx,
+        &LoopOptions::default(),
+    )
+    .await
+    .expect("Streaming loop should complete without error");
+
+    let mut delta_texts = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let StreamEvent::TextDelta { text } = event {
+            delta_texts.push(text);
+        }
+    }
+    let all_deltas = delta_texts.join("");
+    assert!(
+        !all_deltas.contains("<function="),
+        "raw tool-call markup must never reach the wire, got deltas: {delta_texts:?}"
+    );
+    assert!(
+        !result.response.contains("<function="),
+        "the final response must also be the honest reply, got: {:?}",
+        result.response
+    );
+}
+
+#[tokio::test]
+async fn test_streaming_markup_with_trailing_prose_reaches_the_wire_unchanged() {
+    // The counterpart to the test above: once real content follows the
+    // markup, the withholding buffer must flush it — this is not a case the
+    // honest-reply guard replaces (see test_markup_mixed_with_prose_is_delivered_unchanged),
+    // so it must still be visible to a streaming client, not silently
+    // swallowed by the new buffer.
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let full_text =
+        "<function=shell_exec><parameter=command>ls</parameter></function>\nHere is your answer.";
+    let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
+        text: full_text,
+        stop_reason: StopReason::EndTurn,
+    });
+    let (tx, mut rx) = mpsc::channel(64);
+
+    let result = run_streaming_for_test(
+        &manifest,
+        "Run something",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        tx,
+        &LoopOptions::default(),
+    )
+    .await
+    .expect("Streaming loop should complete without error");
+
+    let mut delta_texts = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let StreamEvent::TextDelta { text } = event {
+            delta_texts.push(text);
+        }
+    }
+    let all_deltas = delta_texts.join("");
+    assert_eq!(
+        all_deltas, full_text,
+        "markup resolved by real trailing content must still reach the wire, unchanged"
+    );
+    assert_eq!(result.response, full_text);
+}
+
+/// A streaming driver that emits the given chunks as separate `TextDelta`s
+/// before reporting `stop_reason` — the shape a real provider streams in,
+/// and the only way to exercise a withholding decision that is made *after*
+/// earlier deltas already went out.
+struct ChunkedDeltasDriver {
+    chunks: &'static [&'static str],
+    stop_reason: StopReason,
+}
+
+#[async_trait]
+impl LlmDriver for ChunkedDeltasDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Ok(CompletionResponse {
+            content: vec![ContentBlock::Text {
+                text: self.chunks.concat(),
+                provider_metadata: None,
+            }],
+            stop_reason: self.stop_reason,
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+            actual_provider: None,
+            actual_model: None,
+        })
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<CompletionResponse, LlmError> {
+        for chunk in self.chunks {
+            tx.send(StreamEvent::TextDelta {
+                text: (*chunk).to_string(),
+            })
+            .await
+            .map_err(|_| LlmError::Http("stream receiver dropped".to_string()))?;
+        }
+        let response = CompletionResponse {
+            content: vec![ContentBlock::Text {
+                text: self.chunks.concat(),
+                provider_metadata: None,
+            }],
+            stop_reason: self.stop_reason,
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+            actual_provider: None,
+            actual_model: None,
+        };
+        tx.send(StreamEvent::ContentComplete {
+            stop_reason: response.stop_reason,
+            usage: response.usage,
+        })
+        .await
+        .map_err(|_| LlmError::Http("stream receiver dropped".to_string()))?;
+        Ok(response)
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_prose_then_markup_is_not_delivered_twice() {
+    // Regression (#8236 review G1): the withholding buffer was re-evaluated on
+    // every delta instead of being anchored to the first one, so a reply whose
+    // *later* delta happened to start with a known opener opened a buffer even
+    // though earlier prose had already gone out on the wire. The stream then
+    // ended with `withheld_markup = Some(..)`, and the catch-up send in
+    // `run_streaming.rs` re-sent the *whole* text — delivering the opening
+    // prose to the client a second time. The honest-reply guard cannot rescue
+    // it either: the full text starts with prose, so it is not a pure-markup
+    // reply and is returned borrowed, unchanged.
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let chunks: &[&str] = &[
+        "Hello there.\n",
+        "<function=nonexistent_tool><parameter=a>1</parameter></function>",
+    ];
+    let full_text = chunks.concat();
+    let driver: Arc<dyn LlmDriver> = Arc::new(ChunkedDeltasDriver {
+        chunks,
+        stop_reason: StopReason::EndTurn,
+    });
+    let (tx, mut rx) = mpsc::channel(64);
+
+    let result = run_streaming_for_test(
+        &manifest,
+        "Say hello",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        tx,
+        &LoopOptions::default(),
+    )
+    .await
+    .expect("Streaming loop should complete without error");
+
+    let mut delta_texts = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let StreamEvent::TextDelta { text } = event {
+            delta_texts.push(text);
+        }
+    }
+    let all_deltas = delta_texts.join("");
+    assert_eq!(
+        all_deltas, full_text,
+        "every byte of the reply must reach the wire exactly once, got deltas: {delta_texts:?}"
+    );
+    assert_eq!(
+        result.response, full_text,
+        "the final response is unchanged — a reply that opens with real prose is not \
+         a pure-markup reply the honest-reply guard replaces"
+    );
+}
+
+#[tokio::test]
+async fn test_streaming_max_tokens_pure_markup_overflow_replaced_with_honest_reply() {
+    // Regression (#8236 review M3): the token-cap counterpart of
+    // `test_max_tokens_pure_markup_overflow_replaced_with_honest_reply`. The
+    // honest-reply guard was added to the non-streaming `MaxTokens` arm only,
+    // so a truncated `<function=...>` still reached the channel verbatim on
+    // the streaming path — the one the dashboard and every channel bridge
+    // take. The withheld first delta also has to be released here: without a
+    // catch-up send this turn delivers no delta at all.
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
+        text: "<function=shell_exec><parameter=command>ls -la /very/long/path/that/got/cut/off",
+        stop_reason: StopReason::MaxTokens,
+    });
+    let (tx, mut rx) = mpsc::channel(64);
+
+    let result = run_streaming_for_test(
+        &manifest,
+        "Run something",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        tx,
+        &LoopOptions::default(),
+    )
+    .await
+    .expect("Streaming loop should complete without error");
+
+    let mut delta_texts = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let StreamEvent::TextDelta { text } = event {
+            delta_texts.push(text);
+        }
+    }
+    let all_deltas = delta_texts.join("");
+    assert!(
+        !result.response.contains("<function="),
+        "raw tool-call markup must never reach the channel, got: {:?}",
+        result.response
+    );
+    assert!(
+        !all_deltas.contains("<function="),
+        "raw tool-call markup must never reach the wire, got deltas: {delta_texts:?}"
+    );
+    assert_eq!(
+        all_deltas, result.response,
+        "the corrected text must be delivered as the one delta of this turn, not swallowed"
+    );
 }
 
 // --- Parallel tool-dispatch integration (#3129 PR-4) -------------------
