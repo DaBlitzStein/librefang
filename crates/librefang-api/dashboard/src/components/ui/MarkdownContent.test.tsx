@@ -204,6 +204,26 @@ describe("MermaidDiagram — fitting the chat column", () => {
     expect(box.className).toContain("[&>svg]:!w-auto");
   });
 
+  it("follows a diagram link instead of opening the modal", async () => {
+    const user = userEvent.setup();
+    // What mermaid emits for a `click X "url" _blank` directive.
+    renderDiagram.mockResolvedValue({
+      svg: '<svg data-testid="svg-body"><a href="https://example.com/x" target="_blank">node</a></svg>',
+    });
+    render(<MarkdownContent diagrams>{"```mermaid\n" + DIAGRAM + "\n```"}</MarkdownContent>);
+    await waitFor(() => expect(screen.getByTestId("mermaid-diagram")).toBeInTheDocument());
+
+    const link = screen.getByTestId("mermaid-diagram").querySelector("a")!;
+    await user.click(link);
+
+    // Clicking a link should not also enlarge the diagram behind it.
+    expect(screen.queryByTestId("mermaid-diagram-zoomed")).not.toBeInTheDocument();
+
+    // The enlarge control still works from the same diagram.
+    await user.click(screen.getByRole("button", { name: "Enlarge diagram" }));
+    expect(await screen.findByTestId("mermaid-diagram-zoomed")).toBeInTheDocument();
+  });
+
   it("opens the diagram full size on demand, and not before", async () => {
     const user = userEvent.setup();
     render(<MarkdownContent diagrams>{"```mermaid\n" + DIAGRAM + "\n```"}</MarkdownContent>);

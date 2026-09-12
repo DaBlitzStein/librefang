@@ -148,7 +148,14 @@ export const MermaidDiagram = memo(function MermaidDiagram({ source }: MermaidDi
           <Maximize2 className="h-3 w-3" />
         </button>
         <div
-          onClick={() => setZoomed(true)}
+          // A `click X "url"` directive makes a node an anchor, and a click on
+          // one would otherwise both follow the link and open the modal. The
+          // link wins: it is the more specific intent, and the enlarge control
+          // is a keystroke away.
+          onClick={(event) => {
+            if ((event.target as HTMLElement).closest("a")) return;
+            setZoomed(true);
+          }}
           className="min-w-0 overflow-x-auto rounded-lg bg-main p-2 cursor-zoom-in [&>svg]:!max-w-full [&>svg]:!max-h-64 [&>svg]:!w-auto [&>svg]:!h-auto"
           data-testid="mermaid-diagram"
         // Mermaid returns an SVG string; there is no React tree to hand back.
