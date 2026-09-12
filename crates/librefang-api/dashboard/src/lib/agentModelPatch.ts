@@ -14,12 +14,41 @@
 // an emptied field is a deliberate "hand this back to the model's setting" that reaches the
 // backend as `null` instead of being silently indistinguishable from no edit at all.
 
+/**
+ * The numeric fields, with the range `PATCH /api/agents/{id}/config` accepts
+ * for each.
+ *
+ * One table rather than five copies of the same three lines, and it is the
+ * single place the client's idea of a valid range lives. The bounds mirror the
+ * doc comments on `AgentConfigPatch` in `routes/agents/config.rs`: sending a
+ * value outside them is a 400, so catching it here is the difference between a
+ * disabled Save and a failed request.
+ */
+const NUMERIC_FIELDS = {
+  max_tokens: { min: 1, max: Number.POSITIVE_INFINITY, integer: true },
+  temperature: { min: 0, max: 2, integer: false },
+  top_p: { min: 0, max: 1, integer: false },
+  frequency_penalty: { min: -2, max: 2, integer: false },
+  presence_penalty: { min: -2, max: 2, integer: false },
+  context_window: { min: 1, max: Number.POSITIVE_INFINITY, integer: true },
+  max_output_tokens: { min: 1, max: Number.POSITIVE_INFINITY, integer: true },
+} as const;
+
+export type ModelNumericField = keyof typeof NUMERIC_FIELDS;
+
+export const MODEL_NUMERIC_FIELDS = Object.keys(NUMERIC_FIELDS) as ModelNumericField[];
+
 export interface PersistedModel {
   provider?: string;
   model?: string;
   /** `null` / absent means the agent inherits rather than pinning a number. */
   max_tokens?: number | null;
   temperature?: number | null;
+  top_p?: number | null;
+  frequency_penalty?: number | null;
+  presence_penalty?: number | null;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
 }
 
 export interface ModelDraft {
@@ -28,6 +57,11 @@ export interface ModelDraft {
   /** `""` is the inherit state, not zero. */
   max_tokens: string;
   temperature: string;
+  top_p: string;
+  frequency_penalty: string;
+  presence_penalty: string;
+  context_window: string;
+  max_output_tokens: string;
 }
 
 export interface ModelConfigPatch {
@@ -36,6 +70,34 @@ export interface ModelConfigPatch {
   /** `null` clears the agent's own value. */
   max_tokens?: number | null;
   temperature?: number | null;
+  top_p?: number | null;
+  frequency_penalty?: number | null;
+  presence_penalty?: number | null;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+}
+
+/** Every numeric field in its inherit state — the shape a fresh draft starts in. */
+export function emptyModelNumerics(): Pick<ModelDraft, ModelNumericField> {
+  return Object.fromEntries(MODEL_NUMERIC_FIELDS.map((f) => [f, ""])) as Pick<
+    ModelDraft,
+    ModelNumericField
+  >;
+}
+
+/**
+ * Seed the numeric half of a draft from what the daemon returned.
+ *
+ * A `null` on the wire becomes `""`, not the compiled default: an untouched
+ * field has to look untouched, or opening the drawer and saving would pin every
+ * inherited value as a deliberate choice (#5917).
+ */
+export function seedModelNumerics(
+  persisted: PersistedModel | undefined,
+): Pick<ModelDraft, ModelNumericField> {
+  return Object.fromEntries(
+    MODEL_NUMERIC_FIELDS.map((f) => [f, persisted?.[f] == null ? "" : String(persisted[f])]),
+  ) as Pick<ModelDraft, ModelNumericField>;
 }
 
 export interface BuildModelConfigPatchResult {
@@ -73,9 +135,19 @@ export function buildModelConfigPatch(
   const trimmedModel = draft.model.trim();
   if (!trimmedProvider || !trimmedModel) return { patch: null };
 
-  const maxTokens = parseTriState(draft.max_tokens, (s) => parseInt(s, 10), (n) => n > 0);
-  const temperature = parseTriState(draft.temperature, parseFloat, (n) => n >= 0 && n <= 2);
-  if (maxTokens === undefined || temperature === undefined) return { patch: null };
+  const parsed = {} as Record<ModelNumericField, number | null>;
+  for (const field of MODEL_NUMERIC_FIELDS) {
+    const { min, max, integer } = NUMERIC_FIELDS[field];
+    const value = parseTriState(
+      draft[field],
+      integer ? (s) => parseInt(s, 10) : parseFloat,
+      (n) => n >= min && n <= max,
+    );
+    // One invalid field invalidates the whole draft: a partial PATCH would
+    // save some of what the operator typed and silently drop the rest.
+    if (value === undefined) return { patch: null };
+    parsed[field] = value;
+  }
 
   const patch: ModelConfigPatch = {};
 
@@ -92,13 +164,17 @@ export function buildModelConfigPatch(
     patch.model = trimmedModel;
   }
 
-  // `?? null` rather than `|| null`: a persisted explicit `0` is a real value,
-  // not an absent one.
-  if (maxTokens !== (persisted?.max_tokens ?? null) && (!providerChanged || maxTokens !== null)) {
-    patch.max_tokens = maxTokens;
-  }
-  if (temperature !== (persisted?.temperature ?? null) && (!providerChanged || temperature !== null)) {
-    patch.temperature = temperature;
+  for (const field of MODEL_NUMERIC_FIELDS) {
+    const next = parsed[field];
+    // `?? null` rather than `|| null`: a persisted explicit `0` is a real
+    // value, not an absent one.
+    const current = persisted?.[field] ?? null;
+    if (next === current) continue;
+    // Switching provider already resets these server-side, so a `null` here
+    // would be an edit the operator did not make — it is the new provider's
+    // inherit state arriving as if it were a deliberate clear.
+    if (providerChanged && next === null) continue;
+    patch[field] = next;
   }
 
   return { patch };
