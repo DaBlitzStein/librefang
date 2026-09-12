@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MarkdownContent, urlTransform } from "./MarkdownContent";
 
 // Mermaid needs real SVG layout, which jsdom does not provide, so the library
@@ -168,5 +169,50 @@ describe("MarkdownContent mermaid blocks", () => {
 
     render(<MarkdownContent diagrams>{"```Mermaid\n" + DIAGRAM + "\n```"}</MarkdownContent>);
     await waitFor(() => expect(screen.getByTestId("mermaid-diagram")).toBeInTheDocument());
+  });
+});
+
+describe("MermaidDiagram — fitting the chat column", () => {
+  const DIAGRAM = "graph TD;\n  A-->B;";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Mermaid writes its own width onto the <svg>, which is the thing that has
+    // to lose to the container's cap.
+    renderDiagram.mockResolvedValue({
+      svg: '<svg data-testid="svg-body" style="max-width: 1840px;" width="100%"></svg>',
+    });
+  });
+
+  it("caps the diagram at the container width with a rule that beats mermaid's inline style", async () => {
+    render(<MarkdownContent diagrams>{"```mermaid\n" + DIAGRAM + "\n```"}</MarkdownContent>);
+    await waitFor(() => expect(screen.getByTestId("mermaid-diagram")).toBeInTheDocument());
+
+    const box = screen.getByTestId("mermaid-diagram");
+    // An inline `style="max-width: 1840px"` outranks a plain class, so the cap
+    // has to carry the important modifier or a wide diagram walks out of the
+    // chat column with nothing to scroll.
+    expect(box.className).toContain("[&>svg]:!max-w-full");
+    // And the container is what scrolls when the diagram still cannot shrink.
+    expect(box.className).toContain("overflow-x-auto");
+    expect(box.className).toContain("min-w-0");
+  });
+
+  it("opens the diagram full size on demand, and not before", async () => {
+    const user = userEvent.setup();
+    render(<MarkdownContent diagrams>{"```mermaid\n" + DIAGRAM + "\n```"}</MarkdownContent>);
+    await waitFor(() => expect(screen.getByTestId("mermaid-diagram")).toBeInTheDocument());
+
+    expect(screen.queryByTestId("mermaid-diagram-zoomed")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Enlarge diagram" }));
+
+    const zoomed = await screen.findByTestId("mermaid-diagram-zoomed");
+    // Uncapped, unlike the inline copy: this view exists to show the diagram
+    // at its natural size, and its own container is what scrolls.
+    expect(zoomed.className).not.toContain("max-w-full");
+    expect(zoomed.className).toContain("overflow-auto");
+    // Same markup, ids untouched — mermaid's <style> block selects on the root
+    // id, so renaming it would strip the enlarged copy of its styling.
+    expect(zoomed.querySelector('[data-testid="svg-body"]')).not.toBeNull();
   });
 });
