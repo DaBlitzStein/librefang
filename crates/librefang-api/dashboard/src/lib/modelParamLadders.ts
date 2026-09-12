@@ -29,7 +29,39 @@ export const MAX_OUTPUT_TOKENS_LADDER = [
   1_024, 4_096, 8_192, 16_384, 32_768, 65_536, 131_072,
 ] as const;
 
-/** Render a token count the way operators read them: `128K`, `1M`, or the raw number. */
+/**
+ * Temperature presets, smallest first.
+ *
+ * Sampling parameters get rungs for the same reason token counts do: the useful settings are a
+ * handful of named behaviours — deterministic, focused, default, loose — and a 0.01-step slider
+ * across them asks the operator to distinguish 0.68 from 0.71, which no model does.
+ * `0` is a rung rather than the inherit state: "always take the likeliest token" is a decision, and
+ * conflating it with "no opinion" is what a placeholder-empty number box did.
+ */
+export const TEMPERATURE_LADDER = [0, 0.2, 0.5, 0.7, 1, 1.5, 2] as const;
+
+/**
+ * Nucleus-sampling presets, smallest first.
+ *
+ * Stops at 1 because `top_p` is a probability mass, not a score — 1 already means "consider every
+ * token", and the ladder must not offer a value the endpoint will reject.
+ */
+export const TOP_P_LADDER = [0.1, 0.5, 0.8, 0.9, 0.95, 1] as const;
+
+/**
+ * Frequency- and presence-penalty presets, smallest first.
+ *
+ * Symmetric around `0` because the sign is meaningful: negatives encourage repetition, which is a
+ * real setting and not an error to be clamped away.
+ */
+export const PENALTY_LADDER = [-2, -1, -0.5, 0, 0.5, 1, 2] as const;
+
+/**
+ * Render a rung the way operators read it: `128K`, `1M`, `0.7`, or the raw number.
+ *
+ * Shared by the token ladders and the sampling ladders. The `K`/`M` shortening only fires on exact
+ * multiples of 1024, so a temperature or a penalty falls through to its plain decimal form.
+ */
 export function formatTokens(value: number): string {
   if (value >= 1024 * 1024 && value % (1024 * 1024) === 0) return `${value / (1024 * 1024)}M`;
   if (value >= 1024 && value % 1024 === 0) return `${value / 1024}K`;

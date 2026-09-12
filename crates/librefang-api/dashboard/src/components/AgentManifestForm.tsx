@@ -4,12 +4,8 @@ import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
 import { generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
-import { StepLadderInput } from "./ui/StepLadderInput";
-import {
-  CONTEXT_WINDOW_LADDER,
-  MAX_OUTPUT_TOKENS_LADDER,
-  formatTokens,
-} from "../lib/modelParamLadders";
+import { ModelParamField } from "./ui/ModelParamField";
+import { formatTokens } from "../lib/modelParamLadders";
 
 /**
  * Catalog entry for the skill/tool finder (#5049). Both fields are
@@ -284,81 +280,40 @@ export function AgentManifestForm({
           at different temperatures.
         */}
         <p className="text-[11px] text-text-dim">{t("agents.form.preferences_hint")}</p>
+        {/*
+          The same rung ladder the token fields use. These were four bare
+          number boxes with a `step` attribute, so setting a temperature meant
+          knowing that 0.7 is the usual default and 2 is the ceiling — the
+          control stated neither, while the model settings drawer rendered the
+          identical parameter as a slider. One parameter, one control.
+        */}
         <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.form.temperature")}>
-            <input
-              type="number"
-              step="0.05"
-              min="0"
-              max="2"
-              value={value.model.temperature}
-              onChange={(e) => updateModel({ temperature: e.target.value })}
-              // `Field` wraps in a <div> rather than a <label> (#5246), so the
-              // visible label is not associated with the control. Without this
-              // the input has no accessible name.
-              aria-label={t("agents.form.temperature")}
-              placeholder={t("agents.form.inherit_default")}
-              className={inputClass}
-            />
-          </Field>
-          <Field label={t("agents.form.top_p")}>
-            <input
-              type="number"
-              step="0.05"
-              min="0"
-              max="1"
-              value={value.model.top_p}
-              onChange={(e) => updateModel({ top_p: e.target.value })}
-              // `Field` wraps in a <div> rather than a <label> (#5246), so the
-              // visible label is not associated with the control. Without this
-              // the input has no accessible name.
-              aria-label={t("agents.form.top_p")}
-              placeholder={t("agents.form.inherit_default")}
-              className={inputClass}
-            />
-          </Field>
-          <Field label={t("agents.form.frequency_penalty")}>
-            <input
-              type="number"
-              step="0.1"
-              min="-2"
-              max="2"
-              value={value.model.frequency_penalty}
-              onChange={(e) => updateModel({ frequency_penalty: e.target.value })}
-              // `Field` wraps in a <div> rather than a <label> (#5246), so the
-              // visible label is not associated with the control. Without this
-              // the input has no accessible name.
-              aria-label={t("agents.form.frequency_penalty")}
-              placeholder={t("agents.form.inherit_default")}
-              className={inputClass}
-            />
-          </Field>
-          <Field label={t("agents.form.presence_penalty")}>
-            <input
-              type="number"
-              step="0.1"
-              min="-2"
-              max="2"
-              value={value.model.presence_penalty}
-              onChange={(e) => updateModel({ presence_penalty: e.target.value })}
-              // `Field` wraps in a <div> rather than a <label> (#5246), so the
-              // visible label is not associated with the control. Without this
-              // the input has no accessible name.
-              aria-label={t("agents.form.presence_penalty")}
-              placeholder={t("agents.form.inherit_default")}
-              className={inputClass}
-            />
-          </Field>
+          <ModelParamField
+            param="temperature"
+            value={value.model.temperature}
+            onChange={(next) => updateModel({ temperature: next })}
+          />
+          <ModelParamField
+            param="top_p"
+            value={value.model.top_p}
+            onChange={(next) => updateModel({ top_p: next })}
+          />
+          <ModelParamField
+            param="frequency_penalty"
+            value={value.model.frequency_penalty}
+            onChange={(next) => updateModel({ frequency_penalty: next })}
+          />
+          <ModelParamField
+            param="presence_penalty"
+            value={value.model.presence_penalty}
+            onChange={(next) => updateModel({ presence_penalty: next })}
+          />
         </div>
-        <StepLadderInput
-          label={t("agents.form.max_tokens")}
+        <ModelParamField
+          param="max_tokens"
           value={value.model.max_tokens}
           onChange={(next) => updateModel({ max_tokens: next })}
-          ladder={MAX_OUTPUT_TOKENS_LADDER}
           cap={selectedModelLimits.maxOutputTokens}
-          inheritLabel={t("agents.form.inherit_default")}
-          customLabel={t("agents.form.custom")}
-          customPlaceholder={t("agents.form.max_tokens_placeholder")}
           warning={maxTokensWarning}
         />
         {/*
@@ -367,24 +322,16 @@ export function AgentManifestForm({
           operator sees the conflict instead of a number they never chose.
         */}
         <p className="text-[11px] text-text-dim">{t("agents.form.limits_hint")}</p>
-        <StepLadderInput
-          label={t("agents.form.context_window")}
+        <ModelParamField
+          param="context_window"
           value={value.model.context_window}
           onChange={(next) => updateModel({ context_window: next })}
-          ladder={CONTEXT_WINDOW_LADDER}
-          inheritLabel={t("agents.form.inherit_default")}
-          customLabel={t("agents.form.custom")}
-          customPlaceholder={t("agents.form.context_window_placeholder")}
           warning={contextWindowWarning}
         />
-        <StepLadderInput
-          label={t("agents.form.max_output_tokens")}
+        <ModelParamField
+          param="max_output_tokens"
           value={value.model.max_output_tokens}
           onChange={(next) => updateModel({ max_output_tokens: next })}
-          ladder={MAX_OUTPUT_TOKENS_LADDER}
-          inheritLabel={t("agents.form.inherit_default")}
-          customLabel={t("agents.form.custom")}
-          customPlaceholder={t("agents.form.max_output_tokens_placeholder")}
         />
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.api_key_env")} hint={t("agents.form.api_key_env_hint")}>
