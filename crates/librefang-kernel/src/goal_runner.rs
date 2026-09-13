@@ -1790,7 +1790,7 @@ async fn run_loop<F, Fut, L, E, Efut>(
         // breaking this inner loop early is enough.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(tick_secs);
         while tokio::time::Instant::now() < deadline
-            && !stop.load(Ordering::SeqCst)
+            && !stop.is_raised()
             && !pause.load(Ordering::SeqCst)
         {
             let wake = (tokio::time::Instant::now() + PAUSE_POLL_INTERVAL).min(deadline);
@@ -2235,8 +2235,10 @@ mod tests {
             true,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -3152,7 +3154,7 @@ mod tests {
             no_evaluator,
             true,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
@@ -3758,8 +3760,10 @@ mod tests {
             true,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -3810,8 +3814,10 @@ mod tests {
             true,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -3847,8 +3853,10 @@ mod tests {
             true,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -3891,8 +3899,10 @@ mod tests {
             false,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -3931,8 +3941,10 @@ mod tests {
             true,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx.clone(),
             None,
+            Vec::new(),
         )
         .await;
         let first_key = learnings_key_for(&state);
@@ -3955,8 +3967,10 @@ mod tests {
             true,
             state2.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
         let second_key = learnings_key_for(&state2);
@@ -4010,8 +4024,10 @@ mod tests {
             false,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -4064,8 +4080,10 @@ mod tests {
             true,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -4150,8 +4168,10 @@ mod tests {
             true,
             state.clone(),
             stop,
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -4217,8 +4237,10 @@ mod tests {
             false,
             state.clone(),
             stop,
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -4284,8 +4306,10 @@ mod tests {
             true,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -4355,8 +4379,10 @@ mod tests {
             true,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -4429,8 +4455,10 @@ mod tests {
             true,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -4499,8 +4527,10 @@ mod tests {
             true,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -4573,8 +4603,10 @@ mod tests {
             true,
             state.clone(),
             Arc::new(StopFlag::default()),
+            Arc::new(AtomicBool::new(false)),
             rx,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -4743,7 +4775,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
@@ -4811,7 +4843,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             pause,
             rx,
             None,
@@ -4862,7 +4894,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             pause,
             rx,
             None,
@@ -5516,7 +5548,7 @@ mod tests {
             no_evaluator,
             false,
             state.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(StopFlag::default()),
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
