@@ -4975,16 +4975,16 @@ mod tests {
         // carries the learnings, so polling `state()` alone can race ahead
         // of the write this test is actually waiting on.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if load_pause_checkpoint(&substrate, goal_id).is_some() {
-                break;
+        let checkpoint = loop {
+            if let Some(cp) = load_pause_checkpoint(&substrate, goal_id) {
+                break cp;
             }
             assert!(
                 std::time::Instant::now() < deadline,
                 "pause checkpoint never landed"
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        };
 
         // Resume and let the run finish, capturing a second lesson.
         let send_second = |_a: AgentId, _p: String| async move {
@@ -5022,11 +5022,23 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
+        // Lessons are keyed to the RUN, not the goal (#7785 review), so the
+        // per-goal key this used to read never existed. Both halves of the
+        // cycle still land under one key, because a resume continues the run
+        // it checkpointed and keeps its original `started_at` rather than
+        // stamping a new one. The checkpoint is where that identity can be
+        // read without racing: the registry entry `runner.state()` would serve
+        // it from self-cleans the moment `run_loop` returns, which the poll
+        // above has already waited for.
+        let learnings_key = format!(
+            "{LEARNINGS_KEY_PREFIX}{goal_id}_{}",
+            checkpoint
+                .started_at
+                .expect("a pause checkpoint carries the run's started_at")
+                .timestamp_millis()
+        );
         let stored = substrate
-            .structured_get(
-                goals_storage_agent_id(),
-                &format!("{LEARNINGS_KEY_PREFIX}{goal_id}"),
-            )
+            .structured_get(goals_storage_agent_id(), &learnings_key)
             .unwrap()
             .expect("learnings must be persisted");
         let learnings: Vec<String> = stored["learnings"]
