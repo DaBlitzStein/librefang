@@ -511,6 +511,30 @@ function PromotionPreviewModal({ name, onClose }: { name: string; onClose: () =>
   );
 }
 
+/**
+ * Render one side of a registry-diff row as text.
+ *
+ * Six of the twelve fields the diff compares are string lists, so the array
+ * case is the common one here, not an edge case: rendering `tools` as
+ * `["read_file","write_file"]` spends most of a 200px truncating cell on
+ * quotes and brackets, where `read_file, write_file` fits.
+ *
+ * An absent `provider` or `model` arrives as JSON `null`, which stringifies to
+ * the literal word `null` and reads as a value the operator set rather than
+ * one that is not there — an em dash, matching the empty-list case, says
+ * "nothing" in the one way the table already uses.
+ *
+ * Anything else falls back to JSON rather than `String(value)`, which would
+ * flatten a structured value to `[object Object]` and hide the difference the
+ * row exists to show.
+ */
+function formatDiffValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "—";
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
+}
+
 export function RestoreDiffModal({
   name,
   onClose,
@@ -584,10 +608,10 @@ export function RestoreDiffModal({
                   <tr key={d.field} className="border-b border-border-subtle last:border-0">
                     <td className="px-3 py-1.5 font-mono text-text-main">{d.field}</td>
                     <td className="max-w-[200px] truncate px-3 py-1.5 text-error/80">
-                      {typeof d.local === "string" ? d.local : JSON.stringify(d.local)}
+                      {formatDiffValue(d.local)}
                     </td>
                     <td className="max-w-[200px] truncate px-3 py-1.5 text-green-500/80">
-                      {typeof d.registry === "string" ? d.registry : JSON.stringify(d.registry)}
+                      {formatDiffValue(d.registry)}
                     </td>
                   </tr>
                 ))}

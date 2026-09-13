@@ -68,3 +68,59 @@ describe("RestoreDiffModal error branch (#8042)", () => {
     expect(screen.getByText(/local manifest is unparseable/)).toBeInTheDocument();
   });
 });
+
+describe("RestoreDiffModal value rendering (#8054)", () => {
+  // Six of the twelve fields the backend diffs are `Vec<String>`, so the array
+  // case is the common one in this table rather than an edge case, and the
+  // cells it renders into are `max-w-[200px] truncate`.
+  it("renders a list field as a readable list, not as JSON", () => {
+    useAgentTypeRegistryDiffMock.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: {
+        name: "t",
+        identical: false,
+        unlisted_diffs: 0,
+        diffs: [{ field: "tools", local: ["read_file"], registry: ["read_file", "write_file"] }],
+        local_toml: "",
+        registry_toml: "",
+      },
+    });
+    useRestoreAgentTypeMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
+
+    render(<RestoreDiffModal name="t" onClose={() => {}} />);
+
+    expect(screen.getByText("read_file, write_file")).toBeInTheDocument();
+    expect(screen.queryByText('["read_file","write_file"]')).not.toBeInTheDocument();
+  });
+
+  // An unset `provider`/`model` arrives as JSON null. Rendering the literal
+  // word `null` reads as a value the operator chose rather than one that is
+  // absent, and the table already spells "nothing" as an em dash for the
+  // empty-list case.
+  it("renders an absent value as an em dash rather than the word null", () => {
+    useAgentTypeRegistryDiffMock.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: {
+        name: "t",
+        identical: false,
+        unlisted_diffs: 0,
+        diffs: [
+          { field: "provider", local: null, registry: "anthropic" },
+          { field: "skills", local: [], registry: ["triage"] },
+        ],
+        local_toml: "",
+        registry_toml: "",
+      },
+    });
+    useRestoreAgentTypeMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
+
+    render(<RestoreDiffModal name="t" onClose={() => {}} />);
+
+    expect(screen.queryByText("null")).not.toBeInTheDocument();
+    expect(screen.getAllByText("—")).toHaveLength(2);
+  });
+});

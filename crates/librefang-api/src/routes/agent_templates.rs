@@ -760,10 +760,7 @@ pub async fn delete_agent_type(
 /// (or legacy `agents/{name}/agent.toml`).
 /// Returns `Ok(None)` when the type is not in the registry.
 async fn read_registry_agent_type(name: &str) -> std::io::Result<Option<String>> {
-    let Some(home) = agent_types_dir().parent().map(|p| p.to_path_buf()) else {
-        return Ok(None);
-    };
-    let registry_cache = home.join("registry");
+    let registry_cache = librefang_types::agent_type_store::registry_cache_dir();
 
     // Resolve the two candidate directory names directly rather than through
     // `resolve_agent_types_dir`. That resolver's "log once ever" missing-checkout
