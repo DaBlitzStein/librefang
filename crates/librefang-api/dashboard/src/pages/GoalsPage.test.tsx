@@ -857,6 +857,22 @@ describe("GoalRunPhaseBadge", () => {
     expect(badge.querySelectorAll("svg")).toHaveLength(1);
     expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(0);
   });
+
+  // The phase this PR adds, asserted on the same axes as the unknown one above:
+  // without this nothing pins `paused` to a deliberate appearance, and it would
+  // silently fall back through `default` again if the arm were dropped in a merge.
+  // `warning` and not `error`: a paused run is an operator's own decision, not a
+  // fault, and it shares that reading with `stopped`.
+  it("renders the paused phase as a known one, under warning and led by its icon", () => {
+    const { container } = render(<GoalRunPhaseBadge phase="paused" />);
+    const badge = container.querySelector("span.inline-flex")!;
+
+    expect(badge.className).toContain("bg-warning/10");
+    expect(badge.className).toContain("text-warning");
+    // Known phase: an icon and no dot, the same exclusivity `running` is held to.
+    expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(0);
+    expect(badge.querySelectorAll("svg")).toHaveLength(1);
+  });
 });
 
 // The duplicate-badge regression the standalone suite above cannot reach: it
