@@ -536,7 +536,8 @@
       "memory_scope_unrestricted": "Bez ograniczeń (klucz pominięty) — agent może swobodnie korzystać z pamięci.",
       "memory_scope_restrict": "Zamiast tego zadeklaruj pusto (odmów wszystkim).",
       "memory_scope_denied": "Odmowa wszystkim — zadeklarowano pusto; dostęp do pamięci nie jest przyznany.",
-      "memory_scope_unrestrict": "Usuń deklarację (bez ograniczeń)."
+      "memory_scope_unrestrict": "Usuń deklarację (bez ograniczeń).",
+      "sampling_provider_hint": "Tylko dostawcy zgodni z OpenAI oraz Ollama"
     },
     "delete_confirm": "Czy na pewno chcesz usunąć agenta \"{{name}}\"?",
     "prompts": "Prompty",

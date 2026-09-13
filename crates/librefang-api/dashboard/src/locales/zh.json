@@ -536,7 +536,8 @@
       "memory_scope_unrestricted": "不受限（省略该键）— 代理可自由使用其记忆。",
       "memory_scope_restrict": "改为声明为空（全部拒绝）。",
       "memory_scope_denied": "全部拒绝 — 已声明为空；不授予任何记忆访问。",
-      "memory_scope_unrestrict": "移除声明（不受限）。"
+      "memory_scope_unrestrict": "移除声明（不受限）。",
+      "sampling_provider_hint": "仅适用于兼容 OpenAI 的提供商和 Ollama"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",

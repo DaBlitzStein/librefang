@@ -536,7 +536,8 @@
       "memory_scope_unrestricted": "무제한(키 생략) — 에이전트가 자유롭게 메모리를 사용합니다.",
       "memory_scope_restrict": "대신 빈 값으로 선언(전체 거부).",
       "memory_scope_denied": "전체 거부 — 빈 값으로 선언됨; 메모리 접근이 허용되지 않습니다.",
-      "memory_scope_unrestrict": "선언 제거(무제한)."
+      "memory_scope_unrestrict": "선언 제거(무제한).",
+      "sampling_provider_hint": "OpenAI 호환 제공자와 Ollama에서만 적용됩니다"
     },
     "delete_confirm": "\"{{name}}\" 에이전트를 삭제하시겠습니까?",
     "prompts": "프롬프트",

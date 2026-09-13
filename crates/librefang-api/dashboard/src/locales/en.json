@@ -536,7 +536,8 @@
       "memory_scope_unrestricted": "Unrestricted (key omitted) — the agent may use its memory freely.",
       "memory_scope_restrict": "Declare empty instead (deny all).",
       "memory_scope_denied": "Deny all — declared empty; no memory access is granted.",
-      "memory_scope_unrestrict": "Remove the declaration (unrestricted)."
+      "memory_scope_unrestrict": "Remove the declaration (unrestricted).",
+      "sampling_provider_hint": "OpenAI-compatible providers and Ollama only"
     },
     "delete_confirm": "Are you sure you want to delete agent \"{{name}}\"?",
     "prompts": "Prompts",

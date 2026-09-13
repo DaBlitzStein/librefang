@@ -367,20 +367,30 @@ export function AgentManifestForm({
             value={value.model.temperature}
             onChange={(next) => updateModel({ temperature: next })}
           />
+          {/*
+            Only these three carry the provider caveat, not `temperature`:
+            every driver honours a temperature, while nucleus sampling and the
+            two penalties reach the wire on the OpenAI-shaped drivers and
+            Ollama and are dropped elsewhere. Without the line, setting one on
+            a provider that ignores it looks like it took effect.
+          */}
           <ModelParamField
             param="top_p"
             value={value.model.top_p}
             onChange={(next) => updateModel({ top_p: next })}
+            hint={t("agents.form.sampling_provider_hint")}
           />
           <ModelParamField
             param="frequency_penalty"
             value={value.model.frequency_penalty}
             onChange={(next) => updateModel({ frequency_penalty: next })}
+            hint={t("agents.form.sampling_provider_hint")}
           />
           <ModelParamField
             param="presence_penalty"
             value={value.model.presence_penalty}
             onChange={(next) => updateModel({ presence_penalty: next })}
+            hint={t("agents.form.sampling_provider_hint")}
           />
         </div>
         <ModelParamField
