@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 61;
+const SCHEMA_VERSION: u32 = 62;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -307,6 +307,21 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Another open PR also wants 61; whichever merges first keeps it and the
     // rest renumber to 62, 63, … on rebase.
     run_step!(61, migrate_v61);
+
+    // v62 (#7752): add `sessions.parent_session_id` so a sub-agent run
+    // records which session spawned it. The parent can enumerate its
+    // children, and deleting the parent cascades. NULL on every ordinary
+    // session, which is almost all of them.
+    //
+    // 61 is the next free number above main's 60, and it must stay
+    // contiguous rather than skipping ahead to leave room for other open
+    // PRs: `run_step!` gates on `current_version < N` read once at boot, so
+    // a database that reaches N via a binary with a gap below it will never
+    // run the skipped migrations — the backfill at the end of
+    // `run_migrations` writes their audit rows anyway, so the skew is
+    // silent and permanent. Other open PRs also want 61; whichever merges
+    // first keeps it and the rest renumber to 62, 63, … on rebase.
+    run_step!(62, migrate_v62);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1480,6 +1495,32 @@ fn migrate_v61(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (61, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v62 (#7752): session parentage — `sessions.parent_session_id`.
+///
+/// Idempotent in both halves: `try_column_exists` guards the `ALTER TABLE`
+/// (SQLite has no `ADD COLUMN IF NOT EXISTS`) and the index is
+/// `CREATE INDEX IF NOT EXISTS`, so re-running against a database that
+/// already has the column is a no-op rather than
+/// "duplicate column name: parent_session_id".
+fn migrate_v62(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "sessions", "parent_session_id")? {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id) WHERE parent_session_id IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (62, datetime('now'), 'Add sessions.parent_session_id for sub-agent run lineage (#7752)')",
         [],
     )?;
     Ok(())
@@ -4161,6 +4202,39 @@ mod tests {
         assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 
+    /// v61 is a no-op against a database that already has the column.
+    ///
+    /// SQLite has no `ADD COLUMN IF NOT EXISTS`, so the `try_column_exists`
+    /// guard is the only thing standing between a re-run and
+    /// "duplicate column name: parent_session_id" on boot. That re-run is not
+    /// hypothetical: another open PR wants this same slot, so this
+    /// migration will be renumbered at least once before it merges, and a
+    /// renumbered migration is one that runs against databases which may
+    /// already carry its DDL.
+    #[test]
+    fn test_migrate_v61_is_a_noop_when_the_column_already_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(try_column_exists(&conn, "sessions", "parent_session_id").unwrap());
+
+        // Second run, directly and then through the ladder.
+        migrate_v61(&conn).expect("re-running v61 on an existing column must not error");
+        run_migrations(&conn).expect("a second full run must not error");
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(try_column_exists(&conn, "sessions", "parent_session_id").unwrap());
+
+        // The audit row is recorded exactly once — `INSERT OR IGNORE` rather
+        // than a second row claiming the same version was applied twice.
+        let audit_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE version = 61",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_rows, 1, "v61 must record exactly one migrations row");
+    }
+
     #[test]
     fn test_migrate_v10_partial_apply_does_not_panic() {
         // #3452 — simulate a DB that crashed mid-v10 with the agent_id columns
@@ -4637,6 +4711,15 @@ mod tests {
                 scheduled_at TEXT,
                 created_at TEXT NOT NULL,
                 completed_at TEXT
+            );
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                messages BLOB NOT NULL,
+                context_window_tokens INTEGER DEFAULT 0,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             CREATE TABLE migrations (
                 version INTEGER PRIMARY KEY,
