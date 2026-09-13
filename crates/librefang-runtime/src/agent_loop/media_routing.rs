@@ -330,11 +330,11 @@ pub(super) async fn describe_images_for_text_only_model(
     // needlessly described. Only consulted when there is an image to gate —
     // otherwise the catalog lookup is pure overhead on every text turn.
     let model_supports_vision = !has_images
-        || kernel.map_or(true, |k| {
-            // Tres respuestas, no dos: solo `Unsupported` —una fuente que SABE que el
-            // modelo no acepta imágenes— justifica describirlas. `Unknown` cubre tanto
-            // el modelo ausente del catálogo como el que solo tiene el valor inferido
-            // de su nombre, y las dos llevan la misma cantidad de información.
+        || kernel.is_none_or(|k| {
+            // Three answers, not two: only `Unsupported` — a source that *knows* the
+            // model refuses images — justifies describing them away. `Unknown` covers
+            // both the model absent from the catalog and the one carrying only the
+            // value inferred from its name, and those two say equally little.
             !matches!(
                 k.vision_support_for(&api_model),
                 librefang_types::model_catalog::VisionSupport::Unsupported
