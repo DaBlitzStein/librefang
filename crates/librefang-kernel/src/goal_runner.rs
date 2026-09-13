@@ -4990,6 +4990,18 @@ mod tests {
         while turns.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        // #7785/#8230 reconciliation: the learnings key is scoped to the RUN
+        // (`{LEARNINGS_KEY_PREFIX}{goal_id}_{run_ident}`, `run_ident` being
+        // `started_at.timestamp_millis()`), not just the goal — see the
+        // comment at the write site. A resume reuses the checkpointed
+        // `started_at` rather than minting a new one, so capturing it here,
+        // before the pause, gives the same identity the resumed run's own
+        // persistence will use.
+        let run_ident = runner
+            .state(goal_id)
+            .expect("run must be live before it is paused")
+            .started_at
+            .timestamp_millis();
         assert!(runner.pause(goal_id), "pause must signal the live run");
 
         // Wait for the durable checkpoint itself, not just `state()`'s
@@ -5048,7 +5060,7 @@ mod tests {
         let stored = substrate
             .structured_get(
                 goals_storage_agent_id(),
-                &format!("{LEARNINGS_KEY_PREFIX}{goal_id}"),
+                &format!("{LEARNINGS_KEY_PREFIX}{goal_id}_{run_ident}"),
             )
             .unwrap()
             .expect("learnings must be persisted");
