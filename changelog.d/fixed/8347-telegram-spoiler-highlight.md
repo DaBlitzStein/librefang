@@ -1,0 +1,4 @@
+`||spoiler||` and `==highlight==` render again in Telegram messages.
+Both are Telegram's own Rich Markdown syntax and both worked until #8049 moved outbound text to `InputRichMessage.blocks` — their syntax contains no `<`, so the sanitiser never touched them and Telegram parsed them itself, while the block converter emitted neither type and passed them through as literal characters.
+They are now found by scanning each assembled inline run, which also makes them nest the way Telegram nests them: `**bold ||spoiler||**` is a spoiler inside the bold, byte-identical to the parse Telegram returns for the same source.
+The scan cannot reach code — an inline span is already a separate node by the time a run is assembled, and a fenced block never passes through the scanning path — so `||` in a code sample stays two pipes (#8347) (@nevgenov)

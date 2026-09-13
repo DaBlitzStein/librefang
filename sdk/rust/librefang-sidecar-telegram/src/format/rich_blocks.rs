@@ -19,10 +19,21 @@
 //! # Scope
 //!
 //! What an agent actually writes: paragraphs, headings, lists, tables, code, emphasis,
-//! links, block quotes, dividers. Media blocks, collages, maps and `<details>` are out of
+//! links, block quotes, dividers, spoilers and highlights. Media blocks, collages, maps and `<details>` are out of
 //! scope (#8015) and degrade to their text. Footnotes and math are not parsed at all —
 //! their `pulldown-cmark` options are off — so `[^1]` is an ordinary shortcut reference and
 //! `$x$` is ordinary text; neither is "degraded", both are simply never recognised.
+//!
+//! One divergence from Telegram is known and left alone: a *single* tilde, `~x~`, becomes
+//! strikethrough here and is literal text to Telegram. `pulldown-cmark` reads one tilde as
+//! strikethrough whenever `ENABLE_STRIKETHROUGH` is on and `ENABLE_SUBSCRIPT` is not, and
+//! offers no way to require the doubled form. Cosmetic — emphasis the author did not ask
+//! for — and recorded here so it is not rediscovered as a bug (#8347).
+//!
+//! Subscript and superscript are deliberately *not* enabled although the parser offers them
+//! and Telegram accepts the types: Telegram's own Markdown leaves `~x~` and `^x^` as plain
+//! text, so emitting them would invent formatting from syntax the author's target parser
+//! ignores.
 //!
 //! "Degrade to their text" is the property to hold on to, and it is the one that broke:
 //! block-level HTML was routed through `push_inline`, which does nothing when no inline run
@@ -111,6 +122,10 @@ pub enum Styled {
     Code { text: Box<RichText> },
     #[serde(rename = "url")]
     Url { text: Box<RichText>, url: String },
+    #[serde(rename = "spoiler")]
+    Spoiler { text: Box<RichText> },
+    #[serde(rename = "marked")]
+    Marked { text: Box<RichText> },
 }
 
 impl RichText {
@@ -143,6 +158,114 @@ impl RichText {
             _ => RichText::Seq(merged),
         }
     }
+}
+
+/// Telegram's own Rich Markdown understands `||spoiler||` and `==highlight==`; CommonMark
+/// does not, so `pulldown-cmark` hands them through as ordinary characters and they were
+/// lost when this path replaced the Markdown one. Both shapes worked before, because the
+/// sanitiser had no reason to touch `|` or `=`.
+///
+/// The scan runs over an assembled inline run rather than over raw source, which is what
+/// makes it cheap and safe here:
+///
+/// * a delimiter pair may span several nodes, so `||text **bold** more||` wraps the styled
+///   children too rather than only matching inside one literal string;
+/// * inline code is already a separate `Styled::Code` node by this point, and a fenced
+///   block never reaches this function at all, so neither can be scanned into a spoiler;
+/// * a mistake here costs the wrong emphasis, never an interactive element — the reason a
+///   hand-written inline scan is acceptable on this path and was not on the Markdown one.
+fn wrap_delimited(
+    parts: Vec<RichText>,
+    delim: &str,
+    wrap: fn(Box<RichText>) -> Styled,
+) -> Vec<RichText> {
+    let Some((open_at, open_cut)) = find_delim(&parts, delim, 0, 0) else {
+        return parts;
+    };
+    // The closing delimiter must start after the opening one ends, or `||||` would match
+    // itself and wrap nothing.
+    let Some((close_at, close_cut)) = find_delim(&parts, delim, open_at, open_cut + delim.len())
+    else {
+        return parts;
+    };
+
+    let mut out = Vec::with_capacity(parts.len());
+    let mut inner = Vec::new();
+    let mut tail = Vec::new();
+    for (i, part) in parts.into_iter().enumerate() {
+        match i {
+            _ if i < open_at => out.push(part),
+            _ if i > close_at => tail.push(part),
+            _ => {
+                let RichText::Plain(s) = &part else {
+                    if i == open_at {
+                        out.push(part);
+                    } else {
+                        inner.push(part);
+                    }
+                    continue;
+                };
+                if i == open_at && i == close_at {
+                    out.push(RichText::Plain(s[..open_cut].to_string()));
+                    inner.push(RichText::Plain(
+                        s[open_cut + delim.len()..close_cut].to_string(),
+                    ));
+                    out.push(RichText::Styled(wrap(Box::new(RichText::from_parts(
+                        std::mem::take(&mut inner),
+                    )))));
+                    tail.push(RichText::Plain(s[close_cut + delim.len()..].to_string()));
+                } else if i == open_at {
+                    out.push(RichText::Plain(s[..open_cut].to_string()));
+                    inner.push(RichText::Plain(s[open_cut + delim.len()..].to_string()));
+                } else if i == close_at {
+                    inner.push(RichText::Plain(s[..close_cut].to_string()));
+                    out.push(RichText::Styled(wrap(Box::new(RichText::from_parts(
+                        std::mem::take(&mut inner),
+                    )))));
+                    tail.push(RichText::Plain(s[close_cut + delim.len()..].to_string()));
+                } else {
+                    inner.push(part);
+                }
+            }
+        }
+    }
+    // Whatever followed the closing delimiter is untouched, and may itself contain another
+    // pair — `||a|| and ||b||` needs the second one too.
+    out.extend(wrap_delimited(tail, delim, wrap));
+    out.retain(|p| !matches!(p, RichText::Plain(s) if s.is_empty()));
+    out
+}
+
+/// Apply every delimiter scan to one assembled run.
+///
+/// Called for a whole block's text *and* for the children of each styled span, because
+/// Telegram nests these: it reads `**bold ||spoiler||**` as a spoiler inside the bold, and
+/// scanning only the outer run left the pipes as literal characters there. Verified by
+/// sending both forms to a live bot and diffing the parse it echoes back.
+fn scan_delimiters(parts: Vec<RichText>) -> Vec<RichText> {
+    let parts = wrap_delimited(parts, "||", |text| Styled::Spoiler { text });
+    wrap_delimited(parts, "==", |text| Styled::Marked { text })
+}
+
+/// Byte offset of `delim` at or after `(from_part, from_byte)`, searching `Plain` nodes only.
+fn find_delim(
+    parts: &[RichText],
+    delim: &str,
+    from_part: usize,
+    from_byte: usize,
+) -> Option<(usize, usize)> {
+    for (i, part) in parts.iter().enumerate().skip(from_part) {
+        let RichText::Plain(s) = part else { continue };
+        let start = if i == from_part {
+            from_byte.min(s.len())
+        } else {
+            0
+        };
+        if let Some(rel) = s[start..].find(delim) {
+            return Some((i, start + rel));
+        }
+    }
+    None
 }
 
 /// Convert an agent's Markdown into rich blocks.
@@ -267,7 +390,15 @@ impl Builder {
         self.inlines.push(Vec::new());
     }
 
+    /// Close the open inline run, applying the delimiter scans.
     fn take_inline(&mut self) -> RichText {
+        RichText::from_parts(scan_delimiters(self.inlines.pop().unwrap_or_default()))
+    }
+
+    /// Close the run without scanning. A fenced block's content is literal — `||` inside a
+    /// code sample is two pipes, not a spoiler — and it is the one caller that reaches here
+    /// with text the author did not intend as markup.
+    fn take_inline_literal(&mut self) -> RichText {
         RichText::from_parts(self.inlines.pop().unwrap_or_default())
     }
 
@@ -420,7 +551,7 @@ impl Builder {
                 });
             }
             TagEnd::CodeBlock => {
-                let text = self.take_inline();
+                let text = self.take_inline_literal();
                 let language = self.code_language.take().flatten();
                 self.push_block(Block::Pre {
                     text: trim_trailing_newline(text),
@@ -541,7 +672,7 @@ impl Builder {
             return;
         };
         let start = start.min(run.len());
-        let inner = RichText::from_parts(run.split_off(start));
+        let inner = RichText::from_parts(scan_delimiters(run.split_off(start)));
         let text = Box::new(inner);
         run.push(RichText::Styled(match kind {
             StyleKind::Bold => Styled::Bold { text },
@@ -622,7 +753,9 @@ fn rich_text_len(text: &RichText) -> usize {
             | Styled::Italic { text }
             | Styled::Strikethrough { text }
             | Styled::Code { text }
-            | Styled::Url { text, .. } => text,
+            | Styled::Url { text, .. }
+            | Styled::Spoiler { text }
+            | Styled::Marked { text } => text,
         }),
     }
 }
@@ -1037,6 +1170,86 @@ mod tests {
             serde_json::json!([{"type": "list", "items": [
                 {"blocks": []},
                 {"blocks": [{"type": "paragraph", "text": {"type": "bold", "text": "bold"}}]},
+            ]}])
+        );
+    }
+
+    /// Both worked before this path replaced the Markdown one: their syntax contains no
+    /// `<`, so the sanitiser passed them through and Telegram parsed them itself. Losing
+    /// them was a regression, not a scope decision.
+    #[test]
+    fn spoilers_and_highlights_are_restored() {
+        assert_eq!(
+            json("Секрет: ||скрыто||, важно: ==ярко=="),
+            serde_json::json!([{"type": "paragraph", "text": [
+                "Секрет: ", {"type": "spoiler", "text": "скрыто"},
+                ", важно: ", {"type": "marked", "text": "ярко"},
+            ]}])
+        );
+    }
+
+    /// A pair may span several inline nodes, so the wrapper has to take the styled children
+    /// between the delimiters rather than only matching inside one literal string.
+    #[test]
+    fn a_pair_wraps_styled_children_between_its_delimiters() {
+        assert_eq!(
+            json("||a **b** c||"),
+            serde_json::json!([{"type": "paragraph", "text":
+                {"type": "spoiler", "text": ["a ", {"type": "bold", "text": "b"}, " c"]}}])
+        );
+    }
+
+    /// Telegram nests these — `**bold ||spoiler||**` is a spoiler *inside* the bold, not
+    /// pipes inside it. Scanning only the outer run left them literal there. Checked by
+    /// sending both forms to a live bot and diffing the parse it echoes back in the
+    /// response; this expectation is byte-identical to Telegram's own.
+    #[test]
+    fn a_pair_inside_a_styled_span_nests_as_telegram_nests_it() {
+        assert_eq!(
+            json("**жирный ||секрет||**"),
+            serde_json::json!([{"type": "paragraph", "text": {"type": "bold", "text": [
+                "жирный ", {"type": "spoiler", "text": "секрет"},
+            ]}}])
+        );
+    }
+
+    /// The scan must not reach code. An inline span is already a separate `Code` node by
+    /// the time a run is assembled, and a fence never passes through the scanning path at
+    /// all — `take_inline_literal` exists for exactly that caller.
+    #[test]
+    fn code_is_never_scanned_for_delimiters() {
+        assert_eq!(
+            json("`||не спойлер||`"),
+            serde_json::json!([{"type": "paragraph", "text":
+                {"type": "code", "text": "||не спойлер||"}}])
+        );
+        assert_eq!(
+            json("```\n||и тут нет||\n```"),
+            serde_json::json!([{"type": "pre", "text": "||и тут нет||"}])
+        );
+    }
+
+    /// An unpaired delimiter is ordinary text — `a || b` as "or" must not become a spoiler
+    /// that swallows the rest of the paragraph.
+    #[test]
+    fn unpaired_delimiters_stay_literal() {
+        for source in ["||незакрытый", "a || b", "просто == равно", "||", "=="]
+        {
+            assert_eq!(
+                json(source),
+                serde_json::json!([{"type": "paragraph", "text": source}]),
+                "{source:?} должен остаться текстом"
+            );
+        }
+    }
+
+    #[test]
+    fn several_pairs_in_one_run_all_wrap() {
+        assert_eq!(
+            json("||раз|| и ||два||"),
+            serde_json::json!([{"type": "paragraph", "text": [
+                {"type": "spoiler", "text": "раз"}, " и ",
+                {"type": "spoiler", "text": "два"},
             ]}])
         );
     }
