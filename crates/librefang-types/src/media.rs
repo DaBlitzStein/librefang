@@ -450,6 +450,60 @@ pub fn on_disk_name(file_id: &str, content_type: &str, filename: &str) -> String
     }
 }
 
+// ---------------------------------------------------------------------------
+// Agent avatars (#8339)
+// ---------------------------------------------------------------------------
+
+/// File extensions an avatar can be stored under, one per accepted image format.
+///
+/// The stored extension is always chosen from this table by sniffing the bytes, never taken from the request — see `routes::agents::avatar` in `librefang-api`.
+/// It exists so an operator listing `~/.librefang/avatars/` sees files their own tools recognise, and so a reader can find the file without a second index to fall out of step with the directory.
+/// The MIME served back is re-derived from the bytes at read time, so a renamed file cannot change what the daemon claims a file is.
+pub const AVATAR_EXTENSIONS: [&str; 4] = ["png", "jpg", "gif", "webp"];
+
+/// The reference a stored [`crate::agent::AgentIdentity::avatar_url`] is allowed to hold.
+///
+/// This is the *only* legal value besides none at all, and it is deliberately a route on this daemon rather than a URL.
+/// `avatar_url` used to accept any string beginning `http://`, `https://` or `data:`.
+/// A remote URL turns rendering an agent list into an outbound request the operator never asked for, made from the dashboard's own origin; a `data:` URI carries its payload inline, so it stored unbounded arbitrary text inside the agent manifest.
+/// Neither is needed once the daemon can hold the image itself.
+#[must_use]
+pub fn agent_avatar_url(agent_id: &str) -> String {
+    format!("/api/agents/{agent_id}/avatar")
+}
+
+/// Where an avatar for `agent_id` is stored, for one extension.
+///
+/// `agent_id` is a UUID rendered by `AgentId::to_string`, so the joined name is entirely server-derived: no part of it comes from the request.
+/// That is what makes the shared [`filename_guard`](https://github.com/librefang/librefang/blob/main/crates/librefang-api/src/validation/filename_guard.rs) unnecessary here rather than merely satisfied — there is no client-supplied name to check.
+#[must_use]
+pub fn avatar_path(avatars_dir: &std::path::Path, agent_id: &str, ext: &str) -> std::path::PathBuf {
+    avatars_dir.join(format!("{agent_id}.{ext}"))
+}
+
+/// The stored avatar for `agent_id`, or `None` when there is none.
+///
+/// Probes the four candidate names rather than reading the directory: it is four `stat` calls against a known set, needs no index, and cannot be confused by anything else that ends up in the directory.
+#[must_use]
+pub fn find_avatar(avatars_dir: &std::path::Path, agent_id: &str) -> Option<std::path::PathBuf> {
+    AVATAR_EXTENSIONS
+        .iter()
+        .map(|ext| avatar_path(avatars_dir, agent_id, ext))
+        .find(|path| path.is_file())
+}
+
+/// Remove every stored avatar for `agent_id`. Returns how many files were removed.
+///
+/// All four candidates are attempted, not just the first: an upload that changed format writes the new extension and removes the old one, and a crash between those two steps would otherwise leave a file that [`find_avatar`] could return for the rest of the agent's life.
+/// A missing file is not an error — this is called on deletion paths where "already gone" is the desired end state.
+pub fn remove_avatars(avatars_dir: &std::path::Path, agent_id: &str) -> usize {
+    AVATAR_EXTENSIONS
+        .iter()
+        .map(|ext| avatar_path(avatars_dir, agent_id, ext))
+        .filter(|path| std::fs::remove_file(path).is_ok())
+        .count()
+}
+
 impl MediaAttachment {
     /// Validate the attachment against security constraints.
     pub fn validate(&self) -> Result<(), String> {
