@@ -14,31 +14,28 @@
 // an emptied field is a deliberate "hand this back to the model's setting" that reaches the
 // backend as `null` instead of being silently indistinguishable from no edit at all.
 
+import {
+  isValidParamValue,
+  MODEL_PARAM_NAMES,
+  type ModelParamName,
+} from "../components/ui/ModelParamField";
+
 /**
- * The numeric fields, with the range `PATCH /api/agents/{id}/config` accepts
- * for each.
+ * The numeric half of the draft is exactly the shared parameter set, not a second list of its own.
  *
- * One table rather than five copies of the same three lines, and it is the
- * single place the client's idea of a valid range lives. The bounds mirror what
- * `patch_agent_config` validates on `PatchAgentConfigRequest`
- * (`routes/agents/config.rs`): a range table covers the four float fields, and
- * the three integer ones are rejected only at zero. Sending a value outside
- * them is a 400, so catching it here is the difference between a disabled Save
- * and a failed request.
+ * What a field may hold lives in `MODEL_PARAM_RANGES` next to the control that renders it, and
+ * `isValidParamValue` is the one function that answers it — the same answer the create form and the
+ * model settings already get. A table here would be a second opinion about the same seven fields,
+ * free to drift from the `min`/`max`/`step` the operator's own input box enforces.
+ *
+ * The shared bounds are what `patch_agent_config` validates on `PatchAgentConfigRequest`
+ * (`routes/agents/config.rs`): a range table covers the four float fields, and the three integer
+ * ones are rejected only at zero. Sending a value outside them is a 400, so catching it here is the
+ * difference between a disabled Save and a failed request.
  */
-const NUMERIC_FIELDS = {
-  max_tokens: { min: 1, max: Number.POSITIVE_INFINITY, integer: true },
-  temperature: { min: 0, max: 2, integer: false },
-  top_p: { min: 0, max: 1, integer: false },
-  frequency_penalty: { min: -2, max: 2, integer: false },
-  presence_penalty: { min: -2, max: 2, integer: false },
-  context_window: { min: 1, max: Number.POSITIVE_INFINITY, integer: true },
-  max_output_tokens: { min: 1, max: Number.POSITIVE_INFINITY, integer: true },
-} as const;
+export type ModelNumericField = ModelParamName;
 
-export type ModelNumericField = keyof typeof NUMERIC_FIELDS;
-
-export const MODEL_NUMERIC_FIELDS = Object.keys(NUMERIC_FIELDS) as ModelNumericField[];
+export const MODEL_NUMERIC_FIELDS = MODEL_PARAM_NAMES;
 
 export interface PersistedModel {
   provider?: string;
@@ -114,16 +111,15 @@ export interface BuildModelConfigPatchResult {
  * `undefined` when the text is not a number this field accepts — which the
  * caller treats as an invalid draft.
  */
-function parseTriState(
-  raw: string,
-  parse: (s: string) => number,
-  valid: (n: number) => boolean,
-): number | null | undefined {
+function parseTriState(param: ModelNumericField, raw: string): number | null | undefined {
   const trimmed = raw.trim();
   if (trimmed === "") return null;
-  if (Number.isNaN(Number(trimmed))) return undefined;
-  const parsed = parse(trimmed);
-  return Number.isNaN(parsed) || !valid(parsed) ? undefined : parsed;
+  // `isValidParamValue` covers finiteness, the range, and whole-numberness for the token counts, so
+  // `Number` is the only parse needed and cannot come back NaN after it. The previous `parseInt`
+  // read a prefix rather than the value: `1e5` became 1 and `4096.7` became 4096, both stored
+  // silently, and both accepted here while the shared validator rejected them.
+  if (!isValidParamValue(param, trimmed)) return undefined;
+  return Number(trimmed);
 }
 
 // Build the PATCH payload from the draft, including a field only when the user
@@ -139,12 +135,7 @@ export function buildModelConfigPatch(
 
   const parsed = {} as Record<ModelNumericField, number | null>;
   for (const field of MODEL_NUMERIC_FIELDS) {
-    const { min, max, integer } = NUMERIC_FIELDS[field];
-    const value = parseTriState(
-      draft[field],
-      integer ? (s) => parseInt(s, 10) : parseFloat,
-      (n) => n >= min && n <= max,
-    );
+    const value = parseTriState(field, draft[field]);
     // One invalid field invalidates the whole draft: a partial PATCH would
     // save some of what the operator typed and silently drop the rest.
     if (value === undefined) return { patch: null };
@@ -172,10 +163,15 @@ export function buildModelConfigPatch(
     // value, not an absent one.
     const current = persisted?.[field] ?? null;
     if (next === current) continue;
-    // Switching provider already resets these server-side, so a `null` here
-    // would be an edit the operator did not make — it is the new provider's
-    // inherit state arriving as if it were a deliberate clear.
-    if (providerChanged && next === null) continue;
+    // A `null` here goes out even when the provider changed in the same edit.
+    // This used to be skipped on the theory that switching provider resets
+    // these server-side; it does not. `set_agent_model`
+    // (`librefang-kernel/src/kernel/agent_state.rs`) clears `api_key_env` and
+    // `base_url` and nothing else, and `patch_agent_config` writes model and
+    // provider before the sampling fields, so a `null` alongside a provider
+    // change lands rather than being overwritten. Skipping it could only ever
+    // drop a clear the operator made by hand: an untouched pinned field seeds
+    // to its own value and leaves by the equality check above.
     patch[field] = next;
   }
 
