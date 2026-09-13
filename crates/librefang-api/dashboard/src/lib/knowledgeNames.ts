@@ -10,6 +10,16 @@
 // invalid. Only the classes that are dangerous or that no filesystem stores
 // faithfully are refused.
 //
+// One server check is deliberately NOT mirrored: `is_safe_name` also asks the
+// platform's own path parser for exactly one `Component::Normal`, which catches
+// the Windows drive-relative form `C:evil.md` (whose `Prefix::Disk` makes
+// `Path::join` replace the base rather than extend it). That check is
+// platform-dependent by design — on Unix `:` is an ordinary filename character
+// and `C:evil.md` is one normal component — and the browser cannot know which
+// OS the daemon runs on. Implementing the Windows reading here would refuse
+// names a Linux daemon stores happily, which is the client-stricter-than-server
+// bug this whole file exists to avoid. So it is left to the server, which knows.
+//
 // What this file deliberately does NOT do is scan for prompt injection. Every
 // name in a base is replayed into agent context — `file_list` returns the
 // filenames and the base name reaches the system prompt as `- **@name** → …` —
@@ -137,7 +147,18 @@ function isSafeName(name: string, maxChars: number): boolean {
     const code = point.codePointAt(0) ?? 0;
     // Rust's `char::is_control()` is exactly the Cc category.
     const isControl = code <= 0x1f || (code >= 0x7f && code <= 0x9f);
-    if (isControl || point === "/" || point === "\\" || INVISIBLE_FORMAT_CHARS.has(point)) {
+    // The tag block, checked as a range rather than through the invisible
+    // table, which stops at U+FE0F. U+E0020–U+E007F mirror printable ASCII one
+    // for one, render as nothing, and are read by a model as the ASCII they
+    // mirror — the smuggling channel a name-based injection would actually use.
+    const isTag = code >= 0xe0000 && code <= 0xe007f;
+    if (
+      isControl ||
+      isTag ||
+      point === "/" ||
+      point === "\\" ||
+      INVISIBLE_FORMAT_CHARS.has(point)
+    ) {
       return false;
     }
   }
