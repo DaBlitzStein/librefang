@@ -4263,6 +4263,7 @@
   },
   "agentTypes": {
     "confirm_delete": "Usunąć typ agenta '{{name}}'? Agenci już z niego utworzeni pozostaną nienaruszeni.",
+    "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "Nowy typ agenta",
     "created": "Utworzono typ agenta",
     "delete": "Usuń",

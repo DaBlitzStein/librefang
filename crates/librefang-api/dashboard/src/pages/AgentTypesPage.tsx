@@ -2,7 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
 import { Edit2, ExternalLink, History, LayoutTemplate, Lock, Play, Plus, RotateCcw, Share2, ShieldCheck, Trash2 } from "lucide-react";
-import type { AgentTemplate, AgentTypeSpec, SpawnEphemeralResult } from "../api";
+import type {
+  AgentTemplate,
+  AgentTypeSpec,
+  SpawnEphemeralResult,
+  TemplateVersionEntry,
+} from "../api";
 import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
@@ -509,6 +514,15 @@ function PromotionPreviewModal({ name, onClose }: { name: string; onClose: () =>
   );
 }
 
+/**
+ * The stored timestamp is naive UTC. The row label and the restore confirmation
+ * must read it identically, or the dialog would name a version the operator
+ * cannot find in the list above it.
+ */
+function versionTimestamp(v: TemplateVersionEntry): string {
+  return new Date(v.timestamp + "Z").toLocaleString();
+}
+
 function TemplateHistoryModal({
   name,
   onClose,
@@ -521,6 +535,24 @@ function TemplateHistoryModal({
   const history = useAgentTypeHistory(name, { enabled: true });
   const restore = useRestoreTemplateVersion();
   const [expanded, setExpanded] = useState<number | null>(null);
+  // Restoring overwrites the template's agent.toml on disk, and the snapshot the
+  // server takes afterwards records the restored content, not the content it
+  // replaced — so the click that starts it gets the same confirmation step as
+  // Delete and Promote on this page (#8334).
+  const [pendingRestore, setPendingRestore] = useState<TemplateVersionEntry | null>(null);
+
+  async function confirmRestore() {
+    if (!pendingRestore) return;
+    try {
+      await restore.mutateAsync({ name, versionId: pendingRestore.id });
+      addToast(t("agentTypes.restored", { defaultValue: "Version restored" }), "success");
+      onClose();
+    } catch (err) {
+      addToast(toastErr(err, t("agentTypes.restore_failed", { defaultValue: "Restore failed" })), "error");
+    } finally {
+      setPendingRestore(null);
+    }
+  }
 
   return (
     <Modal
@@ -552,7 +584,7 @@ function TemplateHistoryModal({
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">
                   <span className="text-[12px] font-medium text-text-main">
-                    {new Date(v.timestamp + "Z").toLocaleString()}
+                    {versionTimestamp(v)}
                   </span>
                   <Badge variant="default" className="ml-2">{v.change_source}</Badge>
                 </div>
@@ -566,15 +598,7 @@ function TemplateHistoryModal({
                   </button>
                   <button
                     type="button"
-                    onClick={async () => {
-                      try {
-                        await restore.mutateAsync({ name, versionId: v.id });
-                        addToast(t("agentTypes.restored", { defaultValue: "Version restored" }), "success");
-                        onClose();
-                      } catch (err) {
-                        addToast(toastErr(err, t("agentTypes.restore_failed", { defaultValue: "Restore failed" })), "error");
-                      }
-                    }}
+                    onClick={() => setPendingRestore(v)}
                     disabled={restore.isPending}
                     className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-text-dim hover:bg-brand/10 hover:text-brand"
                     title={t("agentTypes.restore", { defaultValue: "Restore this version" })}
@@ -593,6 +617,19 @@ function TemplateHistoryModal({
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={pendingRestore !== null}
+        onClose={() => setPendingRestore(null)}
+        onConfirm={() => void confirmRestore()}
+        title={t("agentTypes.restore", { defaultValue: "Restore this version" })}
+        message={t("agentTypes.confirm_restore", {
+          name,
+          timestamp: pendingRestore ? versionTimestamp(pendingRestore) : "",
+          source: pendingRestore?.change_source ?? "",
+        })}
+        tone="destructive"
+      />
     </Modal>
   );
 }

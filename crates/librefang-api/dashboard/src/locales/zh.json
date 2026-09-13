@@ -4248,6 +4248,7 @@
   },
   "agentTypes": {
     "confirm_delete": "删除智能体类型 '{{name}}'？已据此创建的智能体不受影响。",
+    "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "新建智能体类型",
     "created": "已创建智能体类型",
     "delete": "删除",

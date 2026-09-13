@@ -4247,6 +4247,7 @@
   },
   "agentTypes": {
     "confirm_delete": "에이전트 타입 '{{name}}'을(를) 삭제할까요? 이미 스폰된 에이전트에는 영향이 없습니다.",
+    "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "새 에이전트 타입",
     "created": "에이전트 타입을 만들었습니다",
     "delete": "삭제",

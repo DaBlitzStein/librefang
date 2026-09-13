@@ -4249,6 +4249,7 @@
   },
   "agentTypes": {
     "confirm_delete": "Delete the agent type '{{name}}'? Agents already spawned from it are not affected.",
+    "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "New agent type",
     "created": "Agent type created",
     "delete": "Delete",
