@@ -1686,6 +1686,56 @@
         }
       }
     },
+    "/api/agents/{id}/manifest-history": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/manifest-history — how this agent's config changed over time.",
+        "description": "Returns an array of manifest snapshots, newest first.\nEach entry carries the full TOML so the dashboard can render a diff between\nconsecutive versions. This endpoint is read-only: there is no restore.",
+        "operationId": "list_agent_manifest_history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max entries to return (default 30, max 200)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manifest version history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id or limit"
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/mcp_servers": {
       "get": {
         "tags": [
@@ -8846,7 +8896,7 @@
           "media"
         ],
         "summary": "List available media providers with their capabilities and config status.",
-        "description": "`configured` reports whether the provider's credentials are present, and\n`capabilities` is the set of `MediaCapability` values it advertises — the\nsame values the `[capabilities]` config block routes by.",
+        "description": "The list is derived from the live catalog on every request rather than from\nthe snapshot `kernel::boot` hands `MediaDriverCache`. Nothing re-runs\n`load_providers_from_registry` after boot, so a provider added by a catalog\nupdate was invisible here until a restart — which is the same class of drift\nthis route was changed to fix — and one removed lingered with an empty\ncapability list.\n\n`configured` reports whether the provider's credentials are present, and\n`capabilities` is the set of `MediaCapability` values it advertises — the\nsame values the `[capabilities]` config block routes by.",
         "operationId": "list_media_providers",
         "responses": {
           "200": {
