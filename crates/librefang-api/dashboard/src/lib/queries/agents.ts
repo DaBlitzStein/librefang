@@ -3,7 +3,6 @@ import {
   listAgents,
   getAgentDetail,
   getAgentManifest,
-  getAgentChannels,
   getAgentStats,
   listAgentEvents,
   listAgentSessions,
@@ -153,7 +152,7 @@ export const agentQueries = {
     }),
   // Per-agent channel allowlist (#7742) — backs the Configure drawer's
   // Channels section.
-  channels: (agentId: string) =>
+  agentChannels: (agentId: string) =>
     queryOptions({
       queryKey: agentKeys.channels(agentId),
       queryFn: () => getAgentChannels(agentId),
@@ -228,10 +227,6 @@ export function useAgentMcpServers(agentId: string, options: QueryOverrides = {}
 
 export function useAgentManifest(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.manifest(agentId), options));
-}
-
-export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(agentQueries.channels(agentId), options));
 }
 
 export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
