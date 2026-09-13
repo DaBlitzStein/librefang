@@ -2664,9 +2664,24 @@ async fn test_patch_identity_and_patch_config_agree_on_partial_updates() {
     let from_config = stored_identity(&h.state, via_config);
 
     assert_eq!(from_identity.emoji, from_config.emoji, "emoji diverged");
+    // `avatar_url` is the one field whose correct value is *not* the same for
+    // two agents: since #8339 it may only be the avatar route of the agent it
+    // belongs to. Comparing the two across agents would now demand they be
+    // wrong. Each is checked against its own agent instead, which still fails
+    // if either route drops or rewrites the field it was told to preserve.
     assert_eq!(
-        from_identity.avatar_url, from_config.avatar_url,
-        "avatar_url diverged"
+        from_identity.avatar_url,
+        Some(librefang_types::media::agent_avatar_url(
+            &via_identity.to_string()
+        )),
+        "PATCH /identity dropped avatar_url from an unrelated partial update"
+    );
+    assert_eq!(
+        from_config.avatar_url,
+        Some(librefang_types::media::agent_avatar_url(
+            &via_config.to_string()
+        )),
+        "PATCH /config dropped avatar_url from an unrelated partial update"
     );
     assert_eq!(from_identity.color, from_config.color, "color diverged");
     assert_eq!(
