@@ -18,6 +18,7 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
+import { useAgents } from "../lib/queries/agents";
 import { useTaskQueue } from "../lib/queries/runtime";
 import { useAgents } from "../lib/queries/agents";
 import {
@@ -191,6 +192,18 @@ function TaskCard({ task, isDragTarget, onDragStart, agentsById }: TaskCardProps
             {t("tasks.by")} {task.created_by}
           </span>
         )}
+        {!!task.priority && (
+          <span className="text-[10px] text-text-dim/50 shrink-0">
+            {t("tasks.priority_badge", { priority: task.priority })}
+          </span>
+        )}
+        {task.timeout_secs != null && (
+          <span className="text-[10px] text-text-dim/50 shrink-0">
+            {task.timeout_secs === 0
+              ? t("tasks.timeout_badge_never")
+              : t("tasks.timeout_badge", { secs: task.timeout_secs })}
+          </span>
+        )}
         <span className="ml-auto flex items-center gap-1 text-[10px] text-text-dim/50 shrink-0">
           <Clock className="w-2.5 h-2.5" />
           {relativeTime(task.created_at)}
@@ -360,6 +373,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [assignee, setAssignee] = useState("");
+  const [priority, setPriority] = useState("");
+  const [timeoutSecs, setTimeoutSecs] = useState("");
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -368,6 +383,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
       title: title.trim(),
       description: description.trim(),
       ...(assignee ? { assigned_to: assignee } : {}),
+      ...(priority.trim() ? { priority: Number(priority) } : {}),
+      ...(timeoutSecs.trim() ? { timeout_secs: Number(timeoutSecs) } : {}),
     });
   }
 
@@ -379,6 +396,8 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
       setTitle("");
       setDescription("");
       setAssignee("");
+      setPriority("");
+      setTimeoutSecs("");
     }
   }, [isOpen]);
 
@@ -495,6 +514,14 @@ export function TasksPage() {
 
   // Fetch all tasks (no status filter — we split client-side)
   const taskListQuery = useTaskQueue();
+  // The registry — the new-task assignee picker is built from this, not from
+  // historical tasks: the kernel validates the assignee against the registry
+  // now, so a picker offering a deleted agent's name (or a typo on an empty
+  // board) produces a 400 the moment the operator picks it.
+  // `includeHands: true` because the kernel accepts hand agents as assignees
+  // too; the default-excluding list here would otherwise offer strictly less
+  // than what a claim can actually target.
+  const agentsQuery = useAgents({ includeHands: true });
 
   const allTasks: TaskQueueItem[] = taskListQuery.data?.tasks ?? [];
   const validTasks = allTasks.filter(
