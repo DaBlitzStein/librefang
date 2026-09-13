@@ -4347,6 +4347,13 @@
     "field_description_placeholder": "描述要分配给智能体的任务...",
     "field_assignee": "分配给（可选）",
     "field_assignee_placeholder": "智能体名称或 ID",
+    "field_priority": "优先级（可选）",
+    "field_priority_placeholder": "数值越高越先执行，默认 0",
+    "field_timeout": "认领超时，秒（可选）",
+    "field_timeout_placeholder": "覆盖全局认领 TTL，0 表示永不回收",
+    "priority_badge": "P{{priority}}",
+    "timeout_badge": "TTL {{secs}}秒",
+    "timeout_badge_never": "TTL：永不回收",
     "submit": "创建任务",
     "cancel": "取消",
     "empty": "暂无任务",
@@ -4368,6 +4375,10 @@
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}秒",
     "timeout_badge_never": "TTL：永不回收"
+    "status_failed": "失败",
+    "assignee_none": "未分配 — 任何智能体都可认领",
+    "no_agents_hint": "尚未注册任何智能体。请先创建智能体再分配任务。",
+    "field_description_hint": "智能体会逐字读取此内容。请写明目标、约束以及完成标准。"
   },
   "prompts": {
     "title": "提示词",

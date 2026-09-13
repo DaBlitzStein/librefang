@@ -135,7 +135,6 @@ function setQueryDefaults() {
   useTaskQueueMock.mockReturnValue(makeQuery({ tasks: SAMPLE_TASKS, total: SAMPLE_TASKS.length }));
   useTaskQueueStatusMock.mockReturnValue(makeQuery(SAMPLE_STATUS));
   useAgentsMock.mockReturnValue(makeQuery(SAMPLE_AGENTS));
-  useAgentsMock.mockReturnValue(makeQuery([]));
 }
 
 function setMutationDefaults() {
@@ -431,43 +430,70 @@ describe("TasksPage", () => {
       expect(payload).not.toHaveProperty("timeout_secs");
     });
 
-    it("keeps a typed assignee once the agent registry loads instead of losing it to a widget swap", async () => {
+    // Was: "keeps a typed assignee once the agent registry loads instead of
+    // losing it to a widget swap". The widget swap it guarded against is gone —
+    // the field is now always a <select>, so there is no second control for a
+    // value to be stranded under, and while the registry is still loading the
+    // picker is disabled rather than accepting a value it is about to orphan.
+    //
+    // The guarantee still matters and is asserted here against the surviving
+    // widget: a chosen assignee survives the registry changing underneath it.
+    // Keying by agent id rather than by name is what makes that true across a
+    // rename, which is the case a name-valued control could not have survived
+    // at all — it would have been left pointing at a string that no longer
+    // exists.
+    it("keeps the selected agent id when the registry changes under it, including across a rename", async () => {
       const mutate = vi.fn();
       useCreateTaskMock.mockReturnValue(makeMutation({ mutate }));
 
-      // Registry still loading: no suggestions yet.
+      // Pick the assignee picker out of the two selects on the page by the
+      // option only it carries, so the query survives a change of selection.
+      const assigneeSelect = () =>
+        screen
+          .getAllByRole("combobox")
+          .find((el) =>
+            Array.from(el.querySelectorAll("option")).some(
+              (o) => o.textContent === "tasks.assignee_none",
+            ),
+          ) as HTMLSelectElement;
+
+      // Registry still loading: nothing to offer, so the field is disabled
+      // rather than accepting a value it cannot yet validate.
       useAgentsMock.mockReturnValue(makeQuery(undefined, { isLoading: true, isSuccess: false }));
       const { rerenderSameTree } = renderPage();
       fireEvent.click(screen.getByRole("button", { name: /tasks.new_task/i }));
 
       fireEvent.change(screen.getByPlaceholderText("tasks.field_title_placeholder"), {
-        target: { value: "For a hand agent" },
+        target: { value: "For agent alpha" },
       });
       fireEvent.change(screen.getByPlaceholderText("tasks.field_description_placeholder"), {
-        target: { value: "Not in the registry list yet" },
+        target: { value: "Chosen once the registry arrived" },
       });
-      const assigneeInput = screen.getByPlaceholderText("tasks.field_assignee_placeholder");
-      fireEvent.change(assigneeInput, { target: { value: "hand-agent-x" } });
+      expect(assigneeSelect()).toBeDisabled();
 
-      // Registry finishes loading with a list that does not contain
-      // "hand-agent-x" (e.g. it is a hand agent, or owned by someone else).
+      // Registry arrives; choose alpha by id.
+      useAgentsMock.mockReturnValue(makeQuery(SAMPLE_AGENTS));
+      rerenderSameTree();
+      fireEvent.change(assigneeSelect(), { target: { value: ALPHA_ID } });
+      expect(assigneeSelect()).toHaveValue(ALPHA_ID);
+
+      // Registry updates again and alpha has been renamed. The selection is an
+      // id, so it is still the same agent and still selected.
       useAgentsMock.mockReturnValue(
         makeQuery([
-          { id: "a1", name: "agent-alpha" },
-          { id: "a2", name: "agent-beta" },
+          { id: ALPHA_ID, name: "agent-alpha-renamed" },
+          ...SAMPLE_AGENTS.slice(1),
         ]),
       );
       rerenderSameTree();
 
-      // The typed value must still be there, and still submittable, rather
-      // than silently cleared or orphaned by a control that swapped under it.
-      expect(screen.getByPlaceholderText("tasks.field_assignee_placeholder")).toHaveValue("hand-agent-x");
+      expect(assigneeSelect()).toHaveValue(ALPHA_ID);
 
       fireEvent.click(screen.getByRole("button", { name: "tasks.submit" }));
 
       await waitFor(() => {
         expect(mutate).toHaveBeenCalledWith(
-          expect.objectContaining({ assigned_to: "hand-agent-x" }),
+          expect.objectContaining({ assigned_to: ALPHA_ID }),
         );
       });
     });

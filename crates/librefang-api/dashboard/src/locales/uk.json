@@ -4360,6 +4360,13 @@
     "field_description_placeholder": "Опишіть таску для агента...",
     "field_assignee": "Виконавець (необов'язково)",
     "field_assignee_placeholder": "Ім'я або ID агента",
+    "field_priority": "Пріоритет (необов'язково)",
+    "field_priority_placeholder": "Вищий виконується першим, за замовчуванням 0",
+    "field_timeout": "Тайм-аут захоплення в секундах (необов'язково)",
+    "field_timeout_placeholder": "Перевизначає глобальний TTL захоплення, 0 = ніколи не повертати",
+    "priority_badge": "P{{priority}}",
+    "timeout_badge": "TTL {{secs}}с",
+    "timeout_badge_never": "TTL: ніколи не повертається",
     "submit": "Створити таску",
     "cancel": "Скасувати",
     "empty": "Немає тасок",
@@ -4381,6 +4388,10 @@
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}с",
     "timeout_badge_never": "TTL: ніколи не повертається"
+    "status_failed": "Провалено",
+    "assignee_none": "Без виконавця — будь-який агент може взяти",
+    "no_agents_hint": "Жодного агента ще не зареєстровано. Створіть агента, перш ніж призначати таски.",
+    "field_description_hint": "Агент читає це дослівно. Вкажіть мету, обмеження та критерій завершення."
   },
   "prompts": {
     "title": "Промпти",

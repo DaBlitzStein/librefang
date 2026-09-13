@@ -462,6 +462,34 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
           )}
         </div>
 
+        <div className="flex gap-3">
+          <div className="flex-1">
+            <label className="block text-xs font-semibold text-text-dim mb-1.5">
+              {t("tasks.field_priority")}
+            </label>
+            <input
+              type="number"
+              value={priority}
+              onChange={(e) => setPriority(e.target.value)}
+              placeholder={t("tasks.field_priority_placeholder")}
+              className={INPUT_CLASS}
+            />
+          </div>
+          <div className="flex-1">
+            <label className="block text-xs font-semibold text-text-dim mb-1.5">
+              {t("tasks.field_timeout")}
+            </label>
+            <input
+              type="number"
+              min={0}
+              value={timeoutSecs}
+              onChange={(e) => setTimeoutSecs(e.target.value)}
+              placeholder={t("tasks.field_timeout_placeholder")}
+              className={INPUT_CLASS}
+            />
+          </div>
+        </div>
+
         {createMutation.isError && (
           <p className="text-xs text-error">
             {createMutation.error instanceof Error
@@ -513,20 +541,23 @@ export function TasksPage() {
 
   // Fetch all tasks (no status filter — we split client-side)
   const taskListQuery = useTaskQueue();
-  // The registry — the new-task assignee picker is built from this, not from
-  // historical tasks: the kernel validates the assignee against the registry
-  // now, so a picker offering a deleted agent's name (or a typo on an empty
-  // board) produces a 400 the moment the operator picks it.
-  // `includeHands: true` because the kernel accepts hand agents as assignees
-  // too; the default-excluding list here would otherwise offer strictly less
-  // than what a claim can actually target.
-  const agentsQuery = useAgents({ includeHands: true });
-
   const allTasks: TaskQueueItem[] = taskListQuery.data?.tasks ?? [];
   const validTasks = allTasks.filter(
     (task): task is TaskQueueItem & { id: string } => typeof task.id === "string" && task.id.length > 0,
   );
 
+  // The agent registry is the source of truth for who can hold a task. The
+  // previous list was derived from the `assigned_to` of tasks that already
+  // existed, which meant a new agent was unreachable until someone had already
+  // assigned it something, a deleted agent lingered forever, and an empty
+  // board offered no picker at all.
+  //
+  // `includeHands: true` because the kernel accepts hand agents as assignees
+  // too, and this list is now a `<select>` rather than a suggestion list — an
+  // agent it omits is not merely unsuggested, it is unreachable. The
+  // default-excluding call would offer strictly less than what a claim can
+  // actually target.
+  const agentsQuery = useAgents({ includeHands: true });
   const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
   const agentsById = useMemo(
     () => new Map(agents.map((a) => [a.id, a])),
