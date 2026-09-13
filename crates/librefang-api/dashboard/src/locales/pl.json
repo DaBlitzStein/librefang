@@ -4290,6 +4290,10 @@
     "no_agents_hint": "Nie zarejestrowano jeszcze żadnych agentów. Utwórz agenta przed przypisywaniem zadań.",
     "field_description_hint": "Agent czyta to dosłownie. Podaj cel, ograniczenia i kryteria ukończenia.",
     "field_assignee_placeholder": "Nazwa lub ID agenta"
+    "status_failed": "Nieudane",
+    "assignee_none": "Nieprzypisane — dowolny agent może pobrać",
+    "no_agents_hint": "Nie zarejestrowano jeszcze żadnych agentów. Utwórz agenta przed przypisywaniem zadań.",
+    "field_description_hint": "Agent czyta to dosłownie. Podaj cel, ograniczenia i kryteria ukończenia."
   },
   "prompts": {
     "title": "Prompty",

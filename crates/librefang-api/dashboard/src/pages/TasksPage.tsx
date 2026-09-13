@@ -381,7 +381,7 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
     createMutation.mutate({
       title: title.trim(),
       description: description.trim(),
-      ...(assignee.trim() ? { assigned_to: assignee.trim() } : {}),
+      ...(assignee ? { assigned_to: assignee } : {}),
       ...(priority.trim() ? { priority: Number(priority) } : {}),
       ...(timeoutSecs.trim() ? { timeout_secs: Number(timeoutSecs) } : {}),
     });
@@ -554,8 +554,10 @@ export function TasksPage() {
   // board offered no picker at all.
   //
   // `includeHands: true` because the kernel accepts hand agents as assignees
-  // too; the default-excluding list here would otherwise offer strictly less
-  // than what a claim can actually target.
+  // too, and this list is now a `<select>` rather than a suggestion list — an
+  // agent it omits is not merely unsuggested, it is unreachable. The
+  // default-excluding call would offer strictly less than what a claim can
+  // actually target.
   const agentsQuery = useAgents({ includeHands: true });
   const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
   const agentsById = useMemo(
