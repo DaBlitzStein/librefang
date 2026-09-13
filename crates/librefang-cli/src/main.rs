@@ -35,6 +35,12 @@ pub(crate) mod templates;
 #[cfg(test)]
 pub(crate) mod test_env_lock;
 pub(crate) mod tui;
+
+/// Shared env-mutation test helper: save/restore around a closure, taken by
+/// `doctor.rs` and `commands/skill.rs`, which race otherwise. The lock itself
+/// is `test_env_lock`'s, so all env-var tests in this binary hold one mutex.
+#[cfg(test)]
+pub(crate) mod test_env;
 pub(crate) mod ui;
 
 use clap::Parser;
