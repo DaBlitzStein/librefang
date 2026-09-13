@@ -834,14 +834,14 @@ mod tests {
     //! behaviour and *can* be locked down here.
 
     use super::*;
+    use crate::test_env_lock::env_lock;
     use ratatui::layout::Rect;
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    /// Tests in this file mutate process-global env vars (`LIBREFANG_HOME`,
-    /// `HOME`). Cargo runs tests within a single binary in parallel, so we
-    /// serialize anything that touches those vars through one mutex.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Tests in this file mutate process-global env vars (`LIBREFANG_HOME`,
+    // `HOME`). `LIBREFANG_HOME` is also mutated by `templates.rs`'s tests,
+    // so both files serialize through the crate-wide `env_lock` rather than
+    // a module-private mutex (#8239).
 
     // ── strip_ansi ──────────────────────────────────────────────────────────
 
@@ -1037,7 +1037,7 @@ mod tests {
 
     #[test]
     fn is_first_run_true_when_config_missing() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = env_lock();
         let tmp = TempDir::new().expect("tempdir");
         let prev = std::env::var_os("LIBREFANG_HOME");
 
@@ -1062,7 +1062,7 @@ mod tests {
 
     #[test]
     fn is_first_run_false_once_config_exists() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = env_lock();
         let tmp = TempDir::new().expect("tempdir");
         std::fs::write(tmp.path().join("config.toml"), "# fake config\n").unwrap();
         let prev = std::env::var_os("LIBREFANG_HOME");

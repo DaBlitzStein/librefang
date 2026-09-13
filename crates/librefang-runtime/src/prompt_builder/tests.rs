@@ -1475,3 +1475,143 @@ fn current_time_message_absent_when_unset() {
     let ctx = basic_ctx();
     assert_eq!(build_current_time_message(&ctx), None);
 }
+
+// ── channel_send guidance per channel kind (#7995) ──────────────────────────
+// `webui` has no messaging adapter at all — media only reaches the user by
+// being embedded in the reply text, so `channel_send` there would silently
+// fail. `cron` and `autonomous` are different: they have no *default*
+// channel or recipient, but `channel_send` still works there when the agent
+// names a real channel and recipient explicitly, so it must stay offered
+// rather than suppressed (that regressed a working capability — see the
+// #7995 review).
+
+#[test]
+fn webui_is_matched_the_same_way_the_system_channel_predicate_matches() {
+    // The webui arm used to compare exactly while the arm three lines below it trimmed and
+    // lowercased, so a `"WebUI"` fell past the first and into the second — telling a live
+    // browser session "This turn has no default channel or recipient" (#7995 review).
+    let granted = vec!["channel_send".to_string()];
+    for spelling in ["webui", "WebUI", " webui ", "WEBUI"] {
+        let section = build_channel_section(spelling, None, None, false, false, &granted);
+        assert!(
+            section.contains("Do NOT use `channel_send`"),
+            "{spelling:?} must take the webui arm, got: {section}"
+        );
+        assert!(
+            !section.contains("no default channel or recipient"),
+            "{spelling:?} must not be described as a background turn, got: {section}"
+        );
+    }
+}
+
+#[test]
+fn webui_suppresses_the_channel_send_recipient_instruction() {
+    let granted = vec!["channel_send".to_string()];
+    let section = build_channel_section(
+        "webui",
+        Some("Paco"),
+        Some("127.0.0.1"),
+        false,
+        false,
+        &granted,
+    );
+    assert!(
+        section.contains("Do NOT use `channel_send`"),
+        "webui should tell the agent not to use channel_send, got: {section}"
+    );
+    assert!(
+        !section.contains("recipient=\"127.0.0.1\""),
+        "webui must not hand the agent a recipient for a non-existent adapter, got: {section}"
+    );
+}
+
+#[test]
+fn cron_and_autonomous_keep_channel_send_but_require_an_explicit_target() {
+    let granted = vec!["channel_send".to_string()];
+    for channel in ["cron", "autonomous"] {
+        let section = build_channel_section(
+            channel,
+            Some("Paco"),
+            Some("127.0.0.1"),
+            false,
+            false,
+            &granted,
+        );
+        assert!(
+            !section.contains("Do NOT use `channel_send`"),
+            "{channel} must not be told to avoid channel_send — it has no adapter of its \
+             own, but a real one named explicitly still works, got: {section}"
+        );
+        assert!(
+            section.contains("channel_send"),
+            "{channel} must still offer channel_send, got: {section}"
+        );
+        assert!(
+            !section.contains("recipient=\"127.0.0.1\""),
+            "{channel} must not hand the agent a recipient for the sentinel channel itself, \
+             got: {section}"
+        );
+    }
+}
+
+/// Nothing attaches agent-generated media to an assistant message — the
+/// only path that reaches the user is the agent embedding the returned
+/// URL in the reply. The webui instruction must say that, and name the URL
+/// contract it is talking about (`/api/uploads/<id>`, minted by
+/// `routes/media.rs`), not claim media is attached automatically
+/// (#7995 review).
+#[test]
+fn webui_states_the_true_media_delivery_mechanism() {
+    let granted = vec!["channel_send".to_string()];
+    let section = build_channel_section("webui", None, None, false, false, &granted);
+    assert!(
+        section.contains("/api/uploads"),
+        "webui must point the agent at the actual URL contract, got: {section}"
+    );
+    assert!(
+        !section.contains("shown to the user automatically"),
+        "webui must not claim media is attached automatically, got: {section}"
+    );
+}
+
+/// The instruction cron and autonomous receive must be the same one #8149
+/// writes from its own pre-image — the two commits rewrite this exact block
+/// and previously disagreed about whether `channel_send` may be used at all.
+#[test]
+fn background_run_guidance_matches_the_wording_shared_with_8149() {
+    let granted = vec!["channel_send".to_string()];
+    for channel in ["cron", "autonomous"] {
+        let section = build_channel_section(channel, Some("Paco"), None, false, false, &granted);
+        assert!(
+            section.contains("This is a background run: no chat is attached to it"),
+            "{channel}: the background-run wording must stay byte-identical across #7995 \
+             and #8149, got: {section}"
+        );
+        assert!(
+            !section.contains("image_url"),
+            "{channel}: a background turn has no default target for the media hint, got: \
+             {section}"
+        );
+    }
+}
+
+#[test]
+fn real_channels_keep_the_channel_send_recipient_instruction() {
+    let granted = vec!["channel_send".to_string()];
+    let section = build_channel_section(
+        "telegram",
+        Some("Paco"),
+        Some("12345"),
+        false,
+        false,
+        &granted,
+    );
+    assert!(
+        section.contains("recipient=\"12345\""),
+        "telegram should still name the recipient, got: {section}"
+    );
+    assert!(
+        !section.contains("Do NOT use `channel_send`"),
+        "telegram must not be told to avoid channel_send, got: {section}"
+    );
+}

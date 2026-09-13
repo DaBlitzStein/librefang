@@ -1499,7 +1499,7 @@ pub async fn reset_session(
         .reset_session(agent_id, ResetScope::Agent)
         .await
     {
-        Ok(()) => (
+        Ok(_) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": "Session reset"})),
         ),
@@ -1559,7 +1559,7 @@ pub async fn reboot_session(
         .reboot_session(agent_id, ResetScope::Agent)
         .await
     {
-        Ok(()) => (
+        Ok(_) => (
             StatusCode::OK,
             Json(
                 serde_json::json!({"status": "ok", "message": "Session rebooted. Context cleared."}),

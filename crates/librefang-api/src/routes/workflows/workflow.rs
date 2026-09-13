@@ -578,7 +578,12 @@ fn workflow_running_response(run_id: WorkflowRunId) -> (StatusCode, Json<serde_j
     )
 }
 
-async fn workflow_completed_response(
+/// Render the terminal response for a `?wait=true` run whose executor returned `Ok`.
+///
+/// `execute_run` returns `Ok(output)` both for a run that finished and for a run that suspended itself at a human-in-the-loop gate, so the run's own state — not the `Ok` — decides which status this reports.
+/// A gate nobody has answered yet must not come back as `200 {"status":"completed"}` carrying the pre-gate artifact: the caller would take the artifact as the workflow's result and never look for the pending review.
+/// A paused run is reported the same way an unfinished one is, `202` plus a pointer to poll, with the pause reason and the partial output attached.
+async fn workflow_wait_response(
     state: &Arc<AppState>,
     run_id: WorkflowRunId,
     output: String,
@@ -605,6 +610,24 @@ async fn workflow_completed_response(
         })
         .unwrap_or_default();
 
+    let paused_reason = run.as_ref().and_then(|run| match &run.state {
+        WorkflowRunState::Paused { reason, .. } => Some(reason.clone()),
+        _ => None,
+    });
+    if let Some(reason) = paused_reason {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "run_id": run_id.to_string(),
+                "output": output,
+                "status": "paused",
+                "reason": reason,
+                "step_results": step_results,
+                "message": "workflow is paused awaiting a human response; inspect it at GET /api/workflows/runs/{run_id}/operator",
+            })),
+        );
+    }
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -622,10 +645,11 @@ async fn workflow_completed_response(
 /// in the background and a 202 is returned immediately with `{"run_id":"..."}`.
 /// The caller can poll `GET /api/workflows/runs/{run_id}` to track progress.
 ///
-/// With `?wait=true` the request blocks until completion (original behavior,
-/// kept for backward compat). With `?wait=true&timeout_ms=N` the block is
-/// capped at N milliseconds; if the run hasn't finished, 202 is returned
-/// and the run continues in the background.
+/// With `?wait=true` the request blocks until the executor returns (original behavior, kept for backward compat).
+/// With `?wait=true&timeout_ms=N` the block is capped at N milliseconds; if the run hasn't finished, 202 is returned and the run continues in the background.
+///
+/// "The executor returned" is not the same as "the workflow finished": a run that reaches a `mode = "approval"` / `mode = "operator"` step suspends there, and a suspended run answers `202 {"status":"paused"}` with the pause reason rather than `200 {"status":"completed"}`.
+/// Its `output` is the artifact put in front of the reviewer, not the workflow's result.
 #[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), request_body(content = crate::types::JsonObject, description = "Workflow input variables (free-form key/value object)"), responses((status = 200, description = "Workflow run completed (wait=true)"), (status = 202, description = "Workflow run started asynchronously")))]
 pub async fn run_workflow(
     State(state): State<Arc<AppState>>,
@@ -646,7 +670,7 @@ pub async fn run_workflow(
         // Preserve the original fully synchronous kernel runner, including
         // its global execution timeout and nested-agent depth accounting.
         match state.kernel.run_workflow_typed(workflow_id, input).await {
-            Ok((run_id, output)) => workflow_completed_response(&state, run_id, output).await,
+            Ok((run_id, output)) => workflow_wait_response(&state, run_id, output).await,
             Err(e) => {
                 tracing::warn!("Workflow run failed for {id}: {e}");
                 (
@@ -677,7 +701,7 @@ pub async fn run_workflow(
             match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), &mut run_task)
                 .await
             {
-                Ok(Ok(Ok(output))) => workflow_completed_response(&state, run_id, output).await,
+                Ok(Ok(Ok(output))) => workflow_wait_response(&state, run_id, output).await,
                 Ok(Ok(Err(e))) => {
                     tracing::warn!("Workflow run failed for {id}: {e}");
                     (
@@ -794,6 +818,8 @@ pub async fn get_workflow_run(
                 "workflow_name": run.workflow_name,
                 "input": run.input,
                 "state": serde_json::to_value(&run.state).unwrap_or_default(),
+                "current_step_index": run.live_step_index(),
+                "total_steps": run.total_steps,
                 "output": run.output,
                 "error": run.error,
                 "started_at": run.started_at.to_rfc3339(),
@@ -813,6 +839,7 @@ pub async fn get_workflow_run(
                     "output_tokens": s.output_tokens,
                     "duration_ms": s.duration_ms,
                     "error": s.error,
+                    "variables": s.variables,
                 })).collect::<Vec<_>>(),
             })),
         ),
@@ -1490,7 +1517,12 @@ pub async fn list_pending_operator_workflow_runs(
 }
 
 /// GET /api/workflows/:id/runs — List runs for the workflow named in the path.
-#[utoipa::path(get, path = "/api/workflows/{id}/runs", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "List workflow runs", body = Vec<serde_json::Value>), (status = 400, description = "Invalid workflow ID")))]
+///
+/// `steps_completed` and `total_steps` are deliberately not a fraction, and a client that renders them as one will be wrong in both directions.
+/// `steps_completed` counts *executions* — the entries in `step_results` — while `total_steps` counts the steps the workflow *defines*.
+/// A `StepMode::Loop` step pushes one result per iteration, so a one-step workflow looping five times reports `steps_completed: 5, total_steps: 1`; a `StepMode::Conditional` step that is skipped pushes none, so a fully completed four-step workflow can report `steps_completed: 2, total_steps: 4`.
+/// The field `total_steps` actually bounds is `current_step_index`, which is an index into the workflow's step list; that pair is the one safe to render as "step 2 of 4".
+#[utoipa::path(get, path = "/api/workflows/{id}/runs", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "List workflow runs; `steps_completed` counts step executions (a loop step contributes one per iteration) while `total_steps` counts defined steps — the two are not a fraction", body = Vec<serde_json::Value>), (status = 400, description = "Invalid workflow ID")))]
 pub async fn list_workflow_runs(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1515,6 +1547,8 @@ pub async fn list_workflow_runs(
                 "workflow_name": r.workflow_name,
                 "state": serde_json::to_value(&r.state).unwrap_or_default(),
                 "steps_completed": r.step_results.len(),
+                "current_step_index": r.live_step_index(),
+                "total_steps": r.total_steps,
                 "input": r.input,
                 "error": r.error,
                 "started_at": r.started_at.to_rfc3339(),

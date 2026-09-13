@@ -566,6 +566,202 @@ async fn force_compact_bypasses_threshold() {
     );
 }
 
+/// A second `/new` with a configured `reset_prompt`, and no user activity
+/// in between, must report 0 messages cleared — not the system message the
+/// *first* `/new` injected into the fresh session (#7701 review round 2).
+///
+/// `inject_reset_prompt` seeds the recreated session with `Message::system`
+/// entries; the cleared count must exclude those, or every second `/new` in
+/// a row acks a true no-op as if it wiped real history.
+#[tokio::test(flavor = "multi_thread")]
+async fn second_new_with_reset_prompt_reports_zero_cleared() {
+    let (kernel, _tmp) = MockKernelBuilder::new()
+        .with_config(|c| {
+            c.default_model.provider = "ollama".to_string();
+            c.default_model.model = "test".to_string();
+            c.default_model.api_key_env = "OLLAMA_API_KEY".to_string();
+            c.session.reset_prompt = Some("Fresh start.".to_string());
+        })
+        .build();
+
+    let agent_id = spawn_test_agent(&kernel, "reset-prompt-agent");
+    let telegram_sid = SessionId::for_channel(agent_id, "telegram:reset-prompt-chat");
+    save_session_with_jsonl(&kernel, agent_id, telegram_sid, 3);
+
+    // First /new: real history (6 messages) is cleared, and the fresh
+    // session is seeded with the configured reset_prompt as a system
+    // message.
+    let first = kernel
+        .reset_session(agent_id, ResetScope::Session(telegram_sid))
+        .await
+        .expect("first reset_session succeeds");
+    assert_eq!(first, 6, "first /new must report the real turn history");
+
+    let seeded = kernel
+        .memory_substrate()
+        .get_session(telegram_sid)
+        .unwrap()
+        .expect("session recreated at the same sid");
+    assert_eq!(
+        seeded.messages.len(),
+        1,
+        "fresh session must hold exactly the injected reset_prompt"
+    );
+
+    // Second /new, no user activity in between: must report 0, not the
+    // injected system message from the first reset.
+    let second = kernel
+        .reset_session(agent_id, ResetScope::Session(telegram_sid))
+        .await
+        .expect("second reset_session succeeds");
+    assert_eq!(
+        second, 0,
+        "a true no-op /new must not ack as if it cleared the previous \
+         reset's injected system message"
+    );
+}
+
+/// Poll for the detached summary write to land. `save_session_summary`
+/// spawns the aux-LLM digest via `handle.spawn` rather than awaiting it
+/// inline (see `session_summary_runtime_lifetime_test.rs`), so a bare
+/// check right after `reset_session` returns can race the write. A bounded
+/// wait is the honest check for the positive case; the negative case (no
+/// write at all) needs no wait, because a skipped `save_session_summary`
+/// call never spawns anything to race against.
+fn wait_for_summary(
+    kernel: &librefang_kernel::LibreFangKernel,
+    agent_id: librefang_types::agent::AgentId,
+    sid: SessionId,
+    timeout: std::time::Duration,
+) -> bool {
+    let key = format!("session_{}", sid.0);
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if matches!(
+            kernel.memory_substrate().structured_get(agent_id, &key),
+            Ok(Some(_))
+        ) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
+/// A second agent-wide reset with a configured `reset_prompt` and an
+/// `AfterReset` injection, no user activity in between, must report 0
+/// cleared (the same injected-system-message bug `reset_one_session` had,
+/// found and fixed in the sibling `reset_all_sessions`) AND must not save a
+/// second summary of the system messages the first reset injected — the
+/// `>= 2` gate that guards `save_session_summary` has to use the same
+/// non-system count as `cleared`, or a true no-op still hands the aux LLM
+/// the reset prompt as if it were conversation (#7701 review round 3).
+#[tokio::test(flavor = "multi_thread")]
+async fn second_agent_wide_reset_with_reset_prompt_reports_zero_cleared_and_skips_summary() {
+    let (kernel, _tmp) = MockKernelBuilder::new()
+        .with_config(|c| {
+            c.default_model.provider = "ollama".to_string();
+            c.default_model.model = "test".to_string();
+            c.default_model.api_key_env = "OLLAMA_API_KEY".to_string();
+            c.session.reset_prompt = Some("Fresh start.".to_string());
+            c.session
+                .context_injection
+                .push(librefang_types::config::ContextInjection {
+                    name: "after-reset-note".to_string(),
+                    content: "Reminder: stay on task.".to_string(),
+                    position: librefang_types::config::InjectionPosition::AfterReset,
+                    condition: None,
+                });
+        })
+        .build();
+
+    let agent_id = spawn_test_agent(&kernel, "agent-wide-reset-prompt-agent");
+    // `spawn_agent` computes the registry's `session_id` pointer from
+    // `get_agent_session_ids` BEFORE the backing session it then injects
+    // into is created, so on a brand-new agent the two disagree: an orphan
+    // session already holds the injected system messages, and the
+    // registry points at an id with no row yet. A throwaway warm-up reset
+    // is unrelated to what this test pins — it just collapses both back to
+    // one real session so `original_sid` below is trustworthy.
+    kernel
+        .reset_session(agent_id, ResetScope::Agent)
+        .await
+        .expect("warm-up reset succeeds");
+    let original_sid = kernel.agent_registry().get(agent_id).unwrap().session_id;
+    save_session_with_jsonl(&kernel, agent_id, original_sid, 3);
+
+    // First agent-wide reset: real history (6 messages) is cleared, saved
+    // as a summary keyed on the ORIGINAL sid, and the fresh session is
+    // seeded with 2 system messages (reset_prompt + the AfterReset
+    // injection).
+    let first = kernel
+        .reset_session(agent_id, ResetScope::Agent)
+        .await
+        .expect("first reset_session(Agent) succeeds");
+    assert_eq!(
+        first, 6,
+        "first agent-wide reset must report the real turn history"
+    );
+    assert!(
+        wait_for_summary(
+            &kernel,
+            agent_id,
+            original_sid,
+            std::time::Duration::from_secs(10)
+        ),
+        "real history must still be summarised — this proves the harness \
+         can save a summary at all, so the negative check below is not \
+         vacuous"
+    );
+
+    let post_reset_sids = kernel
+        .memory_substrate()
+        .get_agent_session_ids(agent_id)
+        .unwrap();
+    assert_eq!(
+        post_reset_sids.len(),
+        1,
+        "agent-wide reset leaves exactly one fresh session"
+    );
+    let fresh_sid = post_reset_sids[0];
+    let seeded = kernel
+        .memory_substrate()
+        .get_session(fresh_sid)
+        .unwrap()
+        .expect("fresh session exists");
+    assert_eq!(
+        seeded.messages.len(),
+        2,
+        "fresh session must hold both injected system messages"
+    );
+
+    // Second agent-wide reset, no user activity in between: must report 0,
+    // not the 2 injected system messages from the first reset.
+    let second = kernel
+        .reset_session(agent_id, ResetScope::Agent)
+        .await
+        .expect("second reset_session(Agent) succeeds");
+    assert_eq!(
+        second, 0,
+        "a true no-op agent-wide reset must not ack as if it cleared the \
+         previous reset's injected system messages"
+    );
+
+    // No race to wait out here: with the fix, `non_system_count >= 2` is
+    // false for the all-system fresh session, so `save_session_summary` is
+    // never called for `fresh_sid` — nothing is spawned to land late.
+    assert!(
+        matches!(
+            kernel
+                .memory_substrate()
+                .structured_get(agent_id, &format!("session_{}", fresh_sid.0)),
+            Ok(None)
+        ),
+        "a no-op agent-wide reset must not summarise the injected reset \
+         prompt and context injection as if they were conversation"
+    );
+}
+
 /// `force = false` on the auto-compaction path still no-ops when the session
 /// is below the message threshold. Regression guard for the gate change.
 #[tokio::test(flavor = "multi_thread")]

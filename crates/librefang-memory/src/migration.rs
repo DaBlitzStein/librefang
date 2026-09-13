@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 55;
+const SCHEMA_VERSION: u32 = 60;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -281,6 +281,17 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // prior configuration from the dashboard.
     run_step!(55, migrate_v55);
 
+    // v56: persist workflow_runs.total_steps so a run recovered after a
+    // daemon restart reports real progress instead of "step X of 0".
+    run_step!(56, migrate_v56);
+
+    // v57: narrow the `memories_fts_au` trigger to the columns it mirrors.
+    // As created by v50 it fired on every UPDATE of `memories`, including the per-fragment access bump every recall performs and the bulk confidence decay each consolidation sweep runs — rebuilding FTS rows whose content was byte-identical before and after.
+    run_step!(57, migrate_v57);
+    run_step!(58, migrate_v58);
+    run_step!(59, migrate_v59);
+    run_step!(60, migrate_v60);
+
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
     // applied DDL without recording its audit row — operator tooling
@@ -363,6 +374,23 @@ fn try_column_exists(
         }
     }
     Ok(false)
+}
+
+/// Whether `table` exists at all.
+///
+/// [`try_column_exists`] cannot answer this: `PRAGMA table_info` on a missing
+/// table yields zero rows, so an absent table and an absent column are
+/// indistinguishable through it — and a migration that reads `false` as "add
+/// the column" then fails the `ALTER` outright. A migration whose target table
+/// was created below the schema version a database is stamped at (so its
+/// `CREATE TABLE` step never ran) needs this distinction.
+fn try_table_exists(conn: &Connection, table: &str) -> Result<bool, rusqlite::Error> {
+    let found: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |row| row.get(0),
+    )?;
+    Ok(found > 0)
 }
 
 #[cfg(test)]
@@ -1232,6 +1260,178 @@ fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (55, datetime('now'), 'Template (agent-type) version history table')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 56: persist `workflow_runs.total_steps`.
+///
+/// The workflow_runs table (v37) never stored the run's step count, so
+/// `row_to_workflow_run` hardcoded `total_steps: 0` on reload — a run
+/// recovered after a daemon restart reported "step X of 0" in the API and
+/// dashboard. Store the actual value so progress survives a restart.
+/// `try_column_exists` keeps the ADD COLUMN idempotent.
+fn migrate_v56(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // A database stamped at or above v37 without ever running v37's DDL has no
+    // `workflow_runs` table to alter. It has no runs to lose progress on either,
+    // so skipping is correct — and unlike v49, which has the same shape, this
+    // migration sits above the version such databases are stamped at, so it is
+    // the first one that would actually hit the missing table.
+    if try_table_exists(conn, "workflow_runs")?
+        && !try_column_exists(conn, "workflow_runs", "total_steps")?
+    {
+        conn.execute(
+            "ALTER TABLE workflow_runs ADD COLUMN total_steps INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (56, datetime('now'), 'Persist workflow_runs.total_steps so run progress survives restart')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v57: only re-index `memories_fts` when an indexed column actually changed.
+///
+/// [`migrate_v50`] created `memories_fts_au` as a bare `AFTER UPDATE ON memories`, with no column list and no `WHEN` guard, so it fired for every UPDATE the crate performs — including ones that cannot change either indexed column.
+/// Two of those are hot.
+/// `SemanticStore::bump_recall_access_counts` issues one `UPDATE memories SET access_count = access_count + 1, accessed_at = ?` per returned fragment at the end of every recall, and `ConsolidationEngine::consolidate` opens each sweep with a single bulk `UPDATE memories SET confidence = MAX(0.1, confidence * ?)` over every stale row.
+/// Each affected row paid a full FTS delete plus re-insert that produced a byte-identical index.
+///
+/// The cost is worse than one wasted delete/insert pair per row.
+/// `memory_id` is declared `UNINDEXED` and an fts5 virtual table carries no secondary index, so `DELETE FROM memories_fts WHERE memory_id = old.id` cannot seek — SQLite plans it as a full scan of the FTS content.
+/// That makes any multi-row UPDATE on `memories` quadratic in store size, and because the decay sweep is a single statement holding SQLite's one write slot, a large store can hold that slot past the 5 s `busy_timeout` and make concurrent memory and session writes fail with `database is locked`.
+///
+/// The `WHEN` clause names both mirrored columns rather than relying on `AFTER UPDATE OF content`: `agent_id` is mirrored into the index too, and an `OF` list alone would still fire for a write that sets a listed column to the value it already held.
+/// `IS NOT` rather than `<>` keeps the comparison correct if either column ever becomes nullable.
+///
+/// `CREATE TRIGGER IF NOT EXISTS` cannot express this — the v50 trigger already occupies the name — so the old one is dropped first.
+/// No rebuild is needed: the index rows this stops rewriting were being rewritten to the value they already had.
+fn migrate_v57(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        DROP TRIGGER IF EXISTS memories_fts_au;
+
+        CREATE TRIGGER memories_fts_au AFTER UPDATE ON memories
+        WHEN new.content IS NOT old.content OR new.agent_id IS NOT old.agent_id
+        BEGIN
+            DELETE FROM memories_fts WHERE memory_id = old.id;
+            INSERT INTO memories_fts (memory_id, agent_id, content)
+            VALUES (new.id, new.agent_id, new.content);
+        END;
+        ",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (57, datetime('now'), 'Guard memories_fts_au with a WHEN clause so the recall access bump and the decay sweep stop rebuilding identical memories_fts rows')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 58: agent manifest version history.
+///
+/// Forward-compatibility step. This table was created by pre-release builds
+/// that numbered it v58 while assembling several unmerged branches, so a
+/// database those builds touched already has it and is stamped at or above 58.
+/// A binary without this step refuses to open such a database at all —
+/// `run_migrations` rejects any `user_version` above `SCHEMA_VERSION`, which is
+/// the correct rule and the reason the step has to exist here rather than be
+/// skipped. `IF NOT EXISTS` makes it a no-op on those databases and a plain
+/// create everywhere else.
+///
+/// The DDL is copied verbatim from the build that ran in production so the
+/// table shape cannot differ between a database that was migrated and one
+/// created fresh. When the feature lands properly its own migration will take
+/// a number above this one and, being `IF NOT EXISTS`, will find the table
+/// already there.
+fn migrate_v58(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS manifest_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id        TEXT NOT NULL,
+            agent_name      TEXT NOT NULL DEFAULT '',
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            manifest_toml   TEXT NOT NULL,
+            change_source   TEXT NOT NULL DEFAULT 'unknown',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_manifest_versions_agent_id
+            ON manifest_versions(agent_id, timestamp DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (58, datetime('now'), 'Agent manifest version history table')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 59: `workflow_runs.total_steps`, again.
+///
+/// [`migrate_v56`] already adds this column, and this step adds nothing new to
+/// a database that reached 56 through this binary. It exists because the same
+/// change was numbered 59 by the pre-release builds described on
+/// [`migrate_v58`], so databases they touched are stamped at 59 with the column
+/// present, and a binary whose `SCHEMA_VERSION` stops at 57 will not open them.
+///
+/// Guarded the same way v56 is, so it is a no-op wherever the column already
+/// exists — which, after v56, is everywhere.
+fn migrate_v59(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if try_table_exists(conn, "workflow_runs")?
+        && !try_column_exists(conn, "workflow_runs", "total_steps")?
+    {
+        conn.execute(
+            "ALTER TABLE workflow_runs ADD COLUMN total_steps INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (59, datetime('now'), 'Persist workflow_runs.total_steps so run progress survives restart')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 60: make `manifest_versions` present wherever the cascade expects it.
+///
+/// [`migrate_v58`] creates the table, but only for a database climbing *through*
+/// 58. Pre-release builds numbered several different tables 58 — one machine's
+/// v58 audit row reads `Create template_versions table`, another's reads
+/// `Agent manifest version history table` — so a database can sit at 58 or 59
+/// with the number recorded and this table absent.
+///
+/// That matters because `manifest_versions` is in `AGENT_SCOPED_TABLES`, and
+/// the cascade issues its `DELETE` unconditionally: on such a database,
+/// removing an agent would fail with "no such table". An error deleting an
+/// agent is worse than the retention leak the cascade entry closes, so rather
+/// than teach the cascade to tolerate a missing table — which would blunt
+/// `agent_cascade_purges_every_agent_keyed_table` for every other entry — this
+/// step makes the invariant true: at 60, the table exists.
+///
+/// Idempotent, and on the machines that already have it the only observable
+/// change is the version stamp and an audit row.
+fn migrate_v60(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS manifest_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id        TEXT NOT NULL,
+            agent_name      TEXT NOT NULL DEFAULT '',
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            manifest_toml   TEXT NOT NULL,
+            change_source   TEXT NOT NULL DEFAULT 'unknown',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_manifest_versions_agent_id
+            ON manifest_versions(agent_id, timestamp DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (60, datetime('now'), 'Ensure manifest_versions exists on databases a pre-release build stamped past 58 without it')",
         [],
     )?;
     Ok(())
@@ -3286,6 +3486,65 @@ mod tests {
         assert_eq!(id, "old");
     }
 
+    /// v56: the FTS sync trigger must ignore UPDATEs that cannot change an indexed column, and must still fire for the ones that can.
+    ///
+    /// `total_changes()` counts rows written by trigger programs as well as by the statement itself, and an fts5 write touches several shadow-table rows, so the access bump below reports a delta of 1 when the trigger stays asleep and well over 1 when it runs.
+    /// That is the whole regression: every recall ends in one `UPDATE memories SET access_count = access_count + 1` per returned fragment, and each consolidation sweep issues one bulk confidence UPDATE across every stale row.
+    #[test]
+    fn test_migrate_v56_access_bump_leaves_the_fts_index_alone() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted) \
+             VALUES ('m1', 'agent-1', 'the release train leaves on Thursday', 'conversation', 'agent_memory', 1.0, '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 0, 0)",
+            [],
+        )
+        .unwrap();
+
+        // The recall access bump, verbatim from `SemanticStore::bump_recall_access_counts`.
+        let before = conn.total_changes();
+        conn.execute(
+            "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = 'm1'",
+            ["2026-07-20T00:00:00+00:00"],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.total_changes() - before,
+            1,
+            "an access bump changes neither content nor agent_id, so it must write exactly the one `memories` row and nothing in `memories_fts`"
+        );
+
+        // A genuine content edit must still re-index, or the guard would have traded write amplification for a silently stale index.
+        let before_edit = conn.total_changes();
+        conn.execute(
+            "UPDATE memories SET content = 'the postgres primary lives in Frankfurt' WHERE id = 'm1'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.total_changes() - before_edit > 1,
+            "a content edit must still fire the trigger"
+        );
+
+        let fresh: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?1",
+                ["\"postgres\""],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fresh, 1, "the new content must be searchable");
+        let stale: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?1",
+                ["\"thursday\""],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 0, "the replaced content must be gone from the index");
+    }
+
     #[test]
     fn test_migrate_v22_adds_user_id_and_channel_columns() {
         // RBAC M1: pre-existing audit_entries rows must keep working after
@@ -4135,6 +4394,117 @@ mod tests {
             n, 1,
             "idx_agents_parent_id is what makes deriving `children` a lookup instead of a scan"
         );
+    }
+
+    /// The case this pair of migrations exists for, reproduced.
+    ///
+    /// A pre-release build stamped a production database at 59 and left
+    /// `workflow_runs.total_steps` already present. Before these steps existed
+    /// the daemon refused to open it outright — `run_migrations` rejects any
+    /// `user_version` above `SCHEMA_VERSION`, and the operator's only signal was
+    /// "Downgrade is not supported" on a boot loop.
+    #[test]
+    fn a_database_a_pre_release_build_stamped_at_59_still_opens() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Stand where the pre-release build left it: the column is there and
+        // the stamp is ahead of anything this binary wrote itself.
+        assert!(try_column_exists(&conn, "workflow_runs", "total_steps").unwrap());
+        // Pragma and audit ladder agree at 59, which is the real state on the
+        // machine that failed: its `MAX(version)` and `user_version` were both
+        // 59. Rewinding only the pragma manufactures the inconsistency
+        // `InconsistentLadder` already refuses, which is a different test.
+        conn.execute("DELETE FROM migrations WHERE version > 59", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 59i64).unwrap();
+
+        run_migrations(&conn).expect("a database stamped at 59 must still open");
+        // And is carried the rest of the way rather than left where it was.
+        assert_eq!(get_schema_version(&conn).unwrap(), 60);
+    }
+
+    /// The other half: a database that stopped at 57 climbs to 59 without
+    /// tripping over a column v56 already added.
+    #[test]
+    fn the_forward_compat_steps_are_no_ops_when_their_changes_are_already_present() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // A database that genuinely stopped at 57: the pragma and the audit
+        // ladder agree. Rewinding only the pragma manufactures the
+        // inconsistency `InconsistentLadder` exists to refuse, which is a
+        // different test and one the guard already covers.
+        conn.execute("DELETE FROM migrations WHERE version > 57", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 57i64).unwrap();
+
+        run_migrations(&conn)
+            .expect("re-running the forward-compat steps over their own result must not fail");
+        assert_eq!(get_schema_version(&conn).unwrap(), 60);
+
+        // Exactly one of each, not a duplicate from the second pass.
+        for (kind, name) in [
+            ("table", "manifest_versions"),
+            ("index", "idx_manifest_versions_agent_id"),
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type=?1 AND name=?2",
+                    rusqlite::params![kind, name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{kind} {name} must exist exactly once");
+        }
+    }
+
+    /// The hazard v60 exists for.
+    ///
+    /// Pre-release builds numbered different tables 58 — one machine's audit
+    /// row for 58 reads `Create template_versions table`, another's reads the
+    /// manifest one — so a database can be stamped at 59 with
+    /// `manifest_versions` absent. That table is in the agent cascade, whose
+    /// `DELETE` is unconditional, so removing an agent there would fail with
+    /// "no such table".
+    #[test]
+    fn a_database_stamped_past_58_without_manifest_versions_gets_it() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Stand where such a machine stands: stamped past 58, table gone.
+        conn.execute_batch("DROP TABLE manifest_versions").unwrap();
+        conn.execute("DELETE FROM migrations WHERE version > 59", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 59i64).unwrap();
+        assert!(!try_table_exists(&conn, "manifest_versions").unwrap());
+
+        run_migrations(&conn).expect("must migrate rather than refuse");
+
+        assert!(
+            try_table_exists(&conn, "manifest_versions").unwrap(),
+            "the cascade issues an unconditional DELETE against this table, so it has to be here"
+        );
+        assert_eq!(get_schema_version(&conn).unwrap(), 60);
+    }
+
+    #[test]
+    fn the_forward_compat_steps_record_their_audit_rows_under_their_own_versions() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        for v in [58i64, 59i64, 60i64] {
+            let description: String = conn
+                .query_row(
+                    "SELECT description FROM migrations WHERE version = ?1",
+                    rusqlite::params![v],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| {
+                    panic!("v{v} must have recorded an audit row under version {v}")
+                });
+            assert!(
+                !description.trim().is_empty(),
+                "v{v} audit row must say what it did"
+            );
+        }
     }
 
     #[test]

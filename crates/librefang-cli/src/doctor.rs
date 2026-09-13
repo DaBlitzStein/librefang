@@ -886,7 +886,11 @@ mod tests {
     }
 
     /// Run a closure with `LIBREFANG_VAULT_KEY` temporarily set to `value`.
-    /// Holds [`env_lock`] for the entire body so concurrent vault-key tests (and any other env-var test in this binary) don't race.
+    /// Holds [`env_lock`] for the entire body so concurrent vault-key tests in
+    /// this module don't race. `LIBREFANG_VAULT_KEY` isn't touched by any
+    /// other module's tests, so this module-private lock (unlike
+    /// `templates.rs`/`launcher.rs`'s shared `crate::test_env_lock`, which
+    /// both mutate `LIBREFANG_HOME`) doesn't need to be crate-wide.
     /// The original value is restored before the lock is released.
     fn with_vault_key<F: FnOnce() -> AuditResult>(value: Option<&str>, f: F) -> AuditResult {
         // poison is fine — a panicking sibling test shouldn't make the rest

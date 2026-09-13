@@ -18,6 +18,9 @@ pub struct UsageSnapshot {
     pub output_tokens: u64,
     pub tool_calls: u64,
     pub llm_calls: u64,
+    /// Bytes the agent's metered network tools read over the rolling hour — the same sum `max_network_bytes_per_hour` is enforced against.
+    /// Deliberately not a counter on the tumbling window the token and tool-call figures use: an operator whose agent is suddenly refused a `web_fetch` has to be shown the spend that refused it, and a tumbling counter reads near zero for up to an hour after a window flip while the rolling gate is still refusing.
+    pub network_bytes: u64,
 }
 
 /// Tracks resource usage for an agent with a rolling hourly window.
@@ -40,6 +43,11 @@ pub struct UsageTracker {
     /// Sliding window of (timestamp, token_count) for burst limiting.
     /// Prevents burning the entire hourly quota in a single minute.
     pub token_timestamps: VecDeque<(Instant, u64)>,
+    /// Sliding window of (timestamp, byte_count) for the `max_network_bytes_per_hour` quota.
+    ///
+    /// A deque rather than a counter on the tumbling hourly window because the quota is documented as a *rolling* hour: with a tumbling window an agent that spends its whole cap in the last second of one window may spend it again in the first second of the next, which is not a cap of N bytes per hour by any reading an operator would recognise.
+    /// It is also the only network figure kept, so [`UsageSnapshot::network_bytes`] reports the number the gate actually refuses on rather than a second one that drifts from it.
+    pub network_byte_timestamps: VecDeque<(Instant, u64)>,
 }
 
 /// One minute as a Duration constant.
@@ -47,18 +55,29 @@ const ONE_MINUTE: Duration = Duration::from_secs(60);
 /// One hour as a Duration constant.
 const ONE_HOUR: Duration = Duration::from_secs(3600);
 
-/// `Instant::now() - d`, but panic-proof.
+/// The oldest `Instant` a `d`-wide rolling window still covers, or `None` when the platform's monotonic clock is not yet `d` old.
 ///
-/// `Instant - Duration` panics when the result would predate the platform's
-/// monotonic origin (on Linux that origin is process boot). During the first
-/// minute of a cold-started daemon, `Instant::now() - ONE_MINUTE` underflows
-/// and panics inside the scheduler hot path. `checked_sub` returns `None`
-/// instead; we fall back to `now` (an empty look-back window — no timestamp is
-/// older than "now", so eviction simply keeps everything this tick, which is
-/// correct because nothing can yet be a full minute old).
-fn instant_now_minus(d: Duration) -> Instant {
-    let now = Instant::now();
-    now.checked_sub(d).unwrap_or(now)
+/// `Instant - Duration` panics when the result would predate the monotonic origin (process start on Linux, boot on Windows and macOS).
+/// A cold-started daemon hits that within its first minute for `ONE_MINUTE`, and a host booted under an hour ago hits it for `ONE_HOUR` on every call the scheduler makes.
+///
+/// `None` means "nothing recorded so far can possibly have aged out", so every caller skips eviction entirely.
+/// The previous fallback returned `now`, which reads as an empty look-back window and is the opposite of correct: every timestamp already in a deque is strictly older than `now`, so the eviction loops drained the whole window on each call and the rolling counters read zero.
+/// On a host with sub-hour uptime that silently disabled `max_network_bytes_per_hour` (and, in the first minute of daemon life, the tool-call and token burst gates) — the quota never accumulated a spend to refuse on.
+fn window_cutoff(d: Duration) -> Option<Instant> {
+    Instant::now().checked_sub(d)
+}
+
+/// Drop every entry at the front of `deque` that predates `cutoff`.
+///
+/// `cutoff` is a [`window_cutoff`] answer, so `None` means the window is wider than the monotonic clock and nothing can have aged out of it yet — evict nothing.
+/// The deques are push-ordered, so the stale entries are always a prefix.
+fn evict_before<T>(deque: &mut VecDeque<T>, cutoff: Option<Instant>, at: impl Fn(&T) -> Instant) {
+    let Some(cutoff) = cutoff else {
+        return;
+    };
+    while deque.front().is_some_and(|entry| at(entry) < cutoff) {
+        deque.pop_front();
+    }
 }
 
 impl Default for UsageTracker {
@@ -72,6 +91,7 @@ impl Default for UsageTracker {
             window_start: Instant::now(),
             tool_call_timestamps: VecDeque::new(),
             token_timestamps: VecDeque::new(),
+            network_byte_timestamps: VecDeque::new(),
         }
     }
 }
@@ -88,33 +108,57 @@ impl UsageTracker {
             self.window_start = Instant::now();
             self.tool_call_timestamps.clear();
             self.token_timestamps.clear();
+            // `network_byte_timestamps` is deliberately NOT cleared here.
+            // It backs a rolling hour and evicts on its own cutoff; wiping it when the tumbling window flips would hand an agent that just spent its whole cap a fresh one seconds later.
         }
     }
 
     /// Evict tool-call timestamps older than 1 minute and return how many remain.
     fn tool_calls_in_last_minute(&mut self) -> u32 {
-        let cutoff = instant_now_minus(ONE_MINUTE);
-        while self
-            .tool_call_timestamps
-            .front()
-            .is_some_and(|t| *t < cutoff)
-        {
-            self.tool_call_timestamps.pop_front();
-        }
+        evict_before(
+            &mut self.tool_call_timestamps,
+            window_cutoff(ONE_MINUTE),
+            |t| *t,
+        );
         self.tool_call_timestamps.len() as u32
     }
 
     /// Return total tokens consumed in the last minute (burst window).
     fn tokens_in_last_minute(&mut self) -> u64 {
-        let cutoff = instant_now_minus(ONE_MINUTE);
-        while self
-            .token_timestamps
-            .front()
-            .is_some_and(|(t, _)| *t < cutoff)
-        {
-            self.token_timestamps.pop_front();
-        }
+        evict_before(
+            &mut self.token_timestamps,
+            window_cutoff(ONE_MINUTE),
+            |(t, _)| *t,
+        );
         self.token_timestamps.iter().map(|(_, n)| n).sum()
+    }
+
+    /// Evict network-byte entries older than an hour and return what remains — the rolling-hour total the quota is compared against.
+    fn network_bytes_in_last_hour(&mut self) -> u64 {
+        evict_before(
+            &mut self.network_byte_timestamps,
+            window_cutoff(ONE_HOUR),
+            |(t, _)| *t,
+        );
+        self.network_byte_timestamps.iter().map(|(_, n)| n).sum()
+    }
+
+    /// The `max_network_bytes_per_hour` gate, shared by [`AgentScheduler::check_quota`] and [`AgentScheduler::check_network_quota`].
+    ///
+    /// `0` means unlimited, the same convention `max_tool_calls_per_minute` uses, and the same one the dashboard's `0 = unlimited` placeholder promises.
+    /// The comparison is `>=` for the same reason the tool-call gate uses it: the counters are post-charge, so an agent that has already transferred exactly its cap has spent it.
+    fn network_quota_gate(&mut self, quota: &ResourceQuota) -> LibreFangResult<()> {
+        if quota.max_network_bytes_per_hour == 0 {
+            return Ok(());
+        }
+        let recent = self.network_bytes_in_last_hour();
+        if recent >= quota.max_network_bytes_per_hour {
+            return Err(LibreFangError::QuotaExceeded(format!(
+                "Network byte limit exceeded: {} / {} bytes per hour",
+                recent, quota.max_network_bytes_per_hour
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -350,19 +394,55 @@ impl AgentScheduler {
             // configured (the prune-then-len read at quota time
             // sees the same result); pure memory-leak plug for
             // agents that don't.
-            let cutoff = instant_now_minus(ONE_MINUTE);
-            while tracker
-                .tool_call_timestamps
-                .front()
-                .is_some_and(|t| *t < cutoff)
-            {
-                tracker.tool_call_timestamps.pop_front();
-            }
+            evict_before(
+                &mut tracker.tool_call_timestamps,
+                window_cutoff(ONE_MINUTE),
+                |t| *t,
+            );
             for _ in 0..count {
                 tracker.tool_call_timestamps.push_back(now);
             }
             tracker.tool_calls += u64::from(count);
         }
+    }
+
+    /// Record bytes an agent pulled in over the network.
+    ///
+    /// Called once per metered transfer by the runtime's tool dispatcher, which measures what the agent's outbound tools actually read off the wire during the call.
+    /// This is a post-charge counter: the transfer being reported has already happened, and what it buys is the refusal of the *next* one — the same shape `record_tool_calls` has.
+    pub fn record_network_bytes(&self, agent_id: AgentId, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
+            tracker.reset_if_expired();
+            // Evict on push for the same reason `record_tool_calls` does: the read side runs only for an agent that has a cap configured, so an uncapped agent would otherwise accrete one entry per transfer with no upper bound until the daemon restarts.
+            evict_before(
+                &mut tracker.network_byte_timestamps,
+                window_cutoff(ONE_HOUR),
+                |(t, _)| *t,
+            );
+            tracker
+                .network_byte_timestamps
+                .push_back((Instant::now(), bytes));
+        }
+    }
+
+    /// Whether the agent may start another metered network transfer.
+    ///
+    /// Split out from [`Self::check_quota`] because the two are asked at different moments: `check_quota` is a per-turn question, while egress is per-tool-call, and a turn that starts under the cap can blow through it in one iteration of `web_fetch` calls.
+    /// Returns `Ok(())` for an agent with no registered quota and for a cap of `0` (unlimited).
+    pub fn check_network_quota(&self, agent_id: AgentId) -> LibreFangResult<()> {
+        let quota = match self.quotas.get(&agent_id) {
+            Some(q) => q.clone(),
+            None => return Ok(()), // No quota = no limit
+        };
+        let mut tracker = match self.usage.get_mut(&agent_id) {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+        tracker.reset_if_expired();
+        tracker.network_quota_gate(&quota)
     }
 
     /// Check if an agent has exceeded its quota.
@@ -411,6 +491,9 @@ impl AgentScheduler {
                 )));
             }
         }
+
+        // --- Network byte limit (rolling hour) ---
+        tracker.network_quota_gate(&quota)?;
 
         Ok(())
     }
@@ -558,6 +641,8 @@ impl AgentScheduler {
             tracker.window_start = Instant::now();
             tracker.tool_call_timestamps.clear();
             tracker.token_timestamps.clear();
+            // Unlike the window rollover in `reset_if_expired`, an explicit reset is an operator/session-level "start over", so the rolling-hour deque goes with it.
+            tracker.network_byte_timestamps.clear();
         }
     }
 
@@ -577,13 +662,20 @@ impl AgentScheduler {
     }
 
     /// Get usage stats for an agent.
+    ///
+    /// Takes the map entry mutably because `network_bytes` is read out of the rolling-hour deque, which evicts expired entries as it sums.
+    /// Reporting a separate tumbling counter instead would be cheaper and wrong: it reads near zero for up to an hour after a window flip while `check_network_quota` is still refusing on the rolling sum, so the gauge an operator consults would disagree with the gate that stopped their agent.
     pub fn get_usage(&self, agent_id: AgentId) -> Option<UsageSnapshot> {
-        self.usage.get(&agent_id).map(|t| UsageSnapshot {
-            total_tokens: t.total_tokens,
-            input_tokens: t.input_tokens,
-            output_tokens: t.output_tokens,
-            tool_calls: t.tool_calls,
-            llm_calls: t.llm_calls,
+        self.usage.get_mut(&agent_id).map(|mut t| {
+            let network_bytes = t.network_bytes_in_last_hour();
+            UsageSnapshot {
+                total_tokens: t.total_tokens,
+                input_tokens: t.input_tokens,
+                output_tokens: t.output_tokens,
+                tool_calls: t.tool_calls,
+                llm_calls: t.llm_calls,
+                network_bytes,
+            }
         })
     }
 }
@@ -656,6 +748,158 @@ mod tests {
         // 1 more — hits the limit (5 >= 5)
         scheduler.record_tool_calls(id, 1);
         assert!(scheduler.check_quota(id).is_err());
+    }
+
+    /// Build a quota whose only live limit is the hourly network byte cap.
+    fn network_only_quota(max_network_bytes_per_hour: u64) -> ResourceQuota {
+        ResourceQuota {
+            max_llm_tokens_per_hour: Some(0), // unlimited tokens
+            max_tool_calls_per_minute: 0,     // unlimited tool calls
+            max_network_bytes_per_hour,
+            ..Default::default()
+        }
+    }
+
+    /// `max_network_bytes_per_hour` refuses further egress once the rolling hour
+    /// reaches the cap. Before this existed the field had no reader anywhere in
+    /// the workspace, so an agent configured with a 1 KiB cap transferred without
+    /// bound and both assertions below passed as `Ok`.
+    #[test]
+    fn network_byte_quota_refuses_egress_once_the_cap_is_spent() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, network_only_quota(1024));
+
+        // 512 of 1024 bytes — still under.
+        scheduler.record_network_bytes(id, 512);
+        assert!(
+            scheduler.check_network_quota(id).is_ok(),
+            "512 bytes must pass a 1024-byte hourly cap"
+        );
+
+        // 1024 of 1024 — the cap is spent (`>=`, matching the tool-call gate).
+        scheduler.record_network_bytes(id, 512);
+        let err = scheduler
+            .check_network_quota(id)
+            .expect_err("1024 of 1024 bytes must exhaust the hourly cap");
+        assert!(
+            err.to_string().contains("1024 / 1024 bytes per hour"),
+            "the refusal must name both the spend and the cap: {err}"
+        );
+
+        // The per-turn `check_quota` sees the same exhausted cap.
+        assert!(
+            scheduler.check_quota(id).is_err(),
+            "check_quota must fail on the same exhausted network cap"
+        );
+    }
+
+    /// `0` is the documented "unlimited" value — the same convention
+    /// `max_tool_calls_per_minute` uses and the one the dashboard's
+    /// `0 = unlimited` placeholder promises operators.
+    #[test]
+    fn network_byte_quota_of_zero_is_unlimited() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, network_only_quota(0));
+
+        scheduler.record_network_bytes(id, 512 * 1024 * 1024);
+        assert!(
+            scheduler.check_network_quota(id).is_ok(),
+            "a cap of 0 must never refuse, however many bytes were transferred"
+        );
+        assert!(scheduler.check_quota(id).is_ok());
+    }
+
+    /// Transferred bytes surface on the usage snapshot the budget / system API
+    /// routes read, so an operator can see the spend the cap is charged against
+    /// rather than only its refusals.
+    #[test]
+    fn network_bytes_surface_on_the_usage_snapshot() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, network_only_quota(0));
+
+        assert_eq!(scheduler.get_usage(id).unwrap().network_bytes, 0);
+        scheduler.record_network_bytes(id, 4096);
+        scheduler.record_network_bytes(id, 96);
+        assert_eq!(scheduler.get_usage(id).unwrap().network_bytes, 4192);
+
+        // A zero-byte report is a no-op rather than an entry in the window.
+        scheduler.record_network_bytes(id, 0);
+        assert_eq!(scheduler.get_usage(id).unwrap().network_bytes, 4192);
+    }
+
+    /// The reported spend must be the spend the gate refuses on, including
+    /// after the tumbling hourly window flips. The snapshot used to read a
+    /// separate counter that `reset_if_expired` zeroed on the flip while the
+    /// rolling deque — the thing `check_network_quota` actually sums — kept
+    /// the bytes, so for up to an hour `/api/metrics` and `/api/budget`
+    /// reported ~0 for an agent whose every `web_fetch` was being refused.
+    #[test]
+    fn a_window_flip_does_not_hide_the_spend_the_gate_refuses_on() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, network_only_quota(1024));
+        scheduler.record_network_bytes(id, 2048);
+
+        // Age the tumbling window past its hour so the next touch rolls it over.
+        // Skipped on a host whose uptime is under an hour, where no stale
+        // `Instant` can be materialized — the same guard
+        // `record_tool_calls_long_horizon_stays_bounded_without_quota` uses.
+        let Some(stale) = Instant::now().checked_sub(ONE_HOUR + Duration::from_secs(1)) else {
+            return;
+        };
+        {
+            let mut tracker = scheduler.usage.get_mut(&id).unwrap();
+            tracker.window_start = stale;
+            tracker.tool_calls = 7;
+        }
+
+        assert!(
+            scheduler.check_network_quota(id).is_err(),
+            "the rolling hour still holds 2048 bytes against a 1024-byte cap"
+        );
+        let snap = scheduler.get_usage(id).unwrap();
+        assert_eq!(
+            snap.tool_calls, 0,
+            "the tumbling window did flip, so the per-window tool-call count is back to zero"
+        );
+        assert_eq!(
+            snap.network_bytes, 2048,
+            "the reported byte spend must be the one the refusal was computed from"
+        );
+    }
+
+    /// An explicit usage reset (session reset / operator action) clears the
+    /// rolling network window too — otherwise a reset agent would still be
+    /// refused by spend it can no longer see in its own snapshot.
+    #[test]
+    fn reset_usage_clears_the_network_byte_window() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, network_only_quota(1024));
+
+        scheduler.record_network_bytes(id, 2048);
+        assert!(scheduler.check_network_quota(id).is_err());
+
+        scheduler.reset_usage(id);
+        assert_eq!(scheduler.get_usage(id).unwrap().network_bytes, 0);
+        assert!(
+            scheduler.check_network_quota(id).is_ok(),
+            "reset_usage must clear the rolling window the cap is charged against"
+        );
+    }
+
+    /// An agent the scheduler has never seen has no quota to enforce — the same
+    /// "no quota = no limit" fallthrough every other gate in `check_quota` uses.
+    #[test]
+    fn network_byte_quota_is_silent_for_an_unregistered_agent() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.record_network_bytes(id, 1_000_000);
+        assert!(scheduler.check_network_quota(id).is_ok());
+        assert!(scheduler.get_usage(id).is_none());
     }
 
     #[test]
@@ -1232,33 +1476,56 @@ mod tests {
     // -- #5136: Instant - Duration underflow guard --------------------------
 
     #[test]
-    fn instant_now_minus_does_not_panic_on_huge_duration() {
-        // `Instant::now() - Duration::from_secs(u64::MAX)` underflows the
-        // platform monotonic origin and panics. The helper must return a
-        // valid Instant (the `now` fallback) instead — this is the cold-start
-        // path that previously panicked within the first minute of daemon
-        // life. A normal small subtraction must still produce an earlier
-        // Instant.
-        let now = Instant::now();
-        // Huge duration → fallback to ~now (never panics).
-        let fallback = instant_now_minus(Duration::from_secs(u64::MAX));
+    fn window_cutoff_does_not_panic_on_huge_duration() {
+        // `Instant::now() - Duration::from_secs(u64::MAX)` underflows the platform monotonic origin and panics.
+        // The helper must answer `None` instead — this is the cold-start path that previously panicked within the first minute of daemon life.
+        // A look-back well inside process lifetime must still produce a genuine earlier Instant.
         assert!(
-            fallback >= now,
-            "fallback instant must not predate the call site"
+            window_cutoff(Duration::from_secs(u64::MAX)).is_none(),
+            "a look-back longer than the monotonic clock has no cutoff"
         );
-        // Small duration well within process lifetime → genuine subtraction.
         std::thread::sleep(Duration::from_millis(5));
-        let earlier = instant_now_minus(Duration::from_millis(1));
+        let earlier = window_cutoff(Duration::from_millis(1)).expect("1 ms is within process life");
         assert!(
             earlier < Instant::now(),
             "small look-back must yield an earlier instant"
         );
     }
 
+    /// The underflow fallback used to be `Instant::now()`, which is not an empty look-back window but a *total* one: every timestamp already recorded is strictly older than `now`, so each eviction loop drained its whole deque and the rolling counters read zero.
+    /// On a host booted less than an hour ago — a fresh CI runner, a container, a rebooted box — that silently switched `max_network_bytes_per_hour` off: the spend never accumulated, so the gate never had anything to refuse on.
+    ///
+    /// Reverting `window_cutoff` to the `unwrap_or(now)` form fails this with `0`.
+    #[test]
+    fn a_window_wider_than_uptime_evicts_nothing() {
+        let mut t = UsageTracker::default();
+        t.network_byte_timestamps.push_back((Instant::now(), 4096));
+        t.token_timestamps.push_back((Instant::now(), 128));
+        t.tool_call_timestamps.push_back(Instant::now());
+
+        // `None` is what `window_cutoff` answers for a window wider than the monotonic clock — `ONE_HOUR` on a freshly-booted host, `ONE_MINUTE` in a daemon's first minute.
+        // Driving `evict_before` with it directly is what makes this deterministic; asserting through `network_bytes_in_last_hour()` would only reproduce the bug on a machine that happens to have booted within the hour.
+        assert!(window_cutoff(Duration::from_secs(u64::MAX)).is_none());
+        evict_before(&mut t.network_byte_timestamps, None, |(i, _)| *i);
+        evict_before(&mut t.token_timestamps, None, |(i, _)| *i);
+        evict_before(&mut t.tool_call_timestamps, None, |i| *i);
+
+        assert_eq!(
+            t.network_byte_timestamps
+                .iter()
+                .map(|(_, n)| n)
+                .sum::<u64>(),
+            4096,
+            "a spend recorded moments ago must survive a window wider than uptime"
+        );
+        assert_eq!(t.token_timestamps.iter().map(|(_, n)| n).sum::<u64>(), 128);
+        assert_eq!(t.tool_call_timestamps.len(), 1);
+    }
+
     #[test]
     fn tool_call_and_token_eviction_survive_huge_window() {
         // Exercises the two call sites: with no timestamps recorded yet the
-        // eviction helpers must run their `instant_now_minus(ONE_MINUTE)`
+        // eviction helpers must run their `window_cutoff(ONE_MINUTE)`
         // cutoff without panicking even if invoked on a freshly-started
         // process (the helper is the guard, this asserts wiring).
         let mut t = UsageTracker::default();
@@ -1285,14 +1552,8 @@ mod tests {
         scheduler.usage.insert(agent_id, UsageTracker::default());
         // Seed: 200 timestamps from 2 hours ago.
         //
-        // `instant_now_minus` uses `checked_sub` internally and returns
-        // `Instant::now()` when the requested look-back exceeds system uptime
-        // (e.g. freshly-provisioned Windows CI runners). In that case
-        // the "stale" timestamps equal `now`, which is inside the eviction
-        // window, so the eviction assertion below would falsely fail (#5726).
-        // Skip the eviction sub-test when we can't materialize a truly stale
-        // instant; the bounded-deque invariant is covered by the sibling test
-        // `record_tool_calls_long_horizon_stays_bounded_without_quota`.
+        // `Instant::now() - 2h` has no answer on a host whose monotonic clock is younger than that (a freshly-provisioned CI runner, a container, a rebooted box), so the seeding itself is what cannot be done there — not the eviction, which now correctly keeps everything when its own window is wider than uptime.
+        // Skip the eviction sub-test when we can't materialize a truly stale instant; the bounded-deque invariant is covered by the sibling test `record_tool_calls_long_horizon_stays_bounded_without_quota`.
         let two_hours = ONE_MINUTE * 120;
         let stale = match Instant::now().checked_sub(two_hours) {
             Some(t) => t,

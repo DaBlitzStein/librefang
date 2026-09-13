@@ -1,5 +1,5 @@
-const CACHE_NAME = "librefang-v1";
-const PRECACHE = ["/dashboard/"];
+// Bumping this name is what evicts a poisoned cache from a browser already carrying one: `activate` deletes every cache whose name differs.
+const CACHE_NAME = "librefang-v2";
 const MAX_CACHE_ENTRIES = 200;
 
 async function trimCache(cache) {
@@ -9,38 +9,18 @@ async function trimCache(cache) {
   await Promise.all(keys.slice(0, excess).map((request) => cache.delete(request)));
 }
 
-async function precache() {
-  try {
-    const cache = await caches.open(CACHE_NAME);
-    await Promise.allSettled(
-      PRECACHE.map(async (url) => {
-        const response = await fetch(url, { cache: "reload" });
-        if (response.ok) await cache.put(url, response);
-      }),
-    );
-  } catch (error) {
-    console.warn("Service worker precache failed", error);
-  }
-}
-
-self.addEventListener("install", (e) => {
-  e.waitUntil(precache());
-});
-
-// Let an explicit update prompt activate a waiting worker. Do not take over
-// open tabs automatically while they may still reference the prior build.
-self.addEventListener("message", (e) => {
-  if (e.data?.type === "SKIP_WAITING") self.skipWaiting();
+// The worker this replaces never called `skipWaiting()`, and the only thing that could activate a waiting replacement was a `SKIP_WAITING` message no dashboard code has ever sent.
+// A new worker therefore sat waiting until every tab in scope closed, which is not something an operator who keeps the dashboard open ever does.
+self.addEventListener("install", () => {
+  self.skipWaiting();
 });
 
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches.keys().then(async (names) => {
-      await Promise.all(
-        names
-          .filter((n) => n !== CACHE_NAME)
-          .map((n) => caches.delete(n)),
-      );
+      await Promise.all(names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n)));
+      // Claim the open tabs so their next asset fetch goes through this worker rather than the predecessor that was serving the stale bundle.
+      await self.clients.claim();
       const cache = await caches.open(CACHE_NAME);
       await trimCache(cache);
     }),
@@ -58,6 +38,12 @@ self.addEventListener("fetch", (e) => {
 
   // Only cache GET requests (Cache API does not support POST)
   if (e.request.method !== "GET") return;
+
+  // Navigations: network only, never cached.
+  // The HTML shell names the hashed asset bundle of the build it came from, so a shell replayed from cache after a redeploy asks for chunks the server no longer has.
+  // Serving it stale-while-revalidate still hands the stale copy to the navigation that triggered the revalidation, which is the one that matters.
+  // Hashed assets stay cacheable because their URL changes with their content.
+  if (e.request.mode === "navigate") return;
 
   // Static assets: stale-while-revalidate
   e.respondWith(

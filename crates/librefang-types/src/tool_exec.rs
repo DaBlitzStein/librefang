@@ -55,6 +55,19 @@ impl BackendKind {
             BackendKind::Daytona => "daytona",
         }
     }
+
+    /// Whether selecting this kind actually changes where a tool call runs.
+    ///
+    /// Only `Local` does today: the resolver in this module picks a kind, but nothing downstream reads that choice, so every tool still executes as a subprocess on the daemon host (#8221).
+    /// Callers use this to warn an operator whose configuration is being silently ignored — the boot warning in `librefang-kernel`'s `boot.rs` for the global kind, and the per-agent one in `spawn.rs`.
+    ///
+    /// Written as an exhaustive match rather than a comparison against `Local` so that adding a variant, or wiring an existing one into dispatch, forces this answer to be revisited instead of inheriting a default.
+    pub fn is_wired_into_dispatch(self) -> bool {
+        match self {
+            BackendKind::Local => true,
+            BackendKind::Docker | BackendKind::Ssh | BackendKind::Daytona => false,
+        }
+    }
 }
 
 impl FromStr for BackendKind {
@@ -141,11 +154,14 @@ impl ToolExecConfig {
     /// Validate that the active backend kind has the matching sub-table
     /// populated. Called from kernel boot so misconfigurations fail
     /// loudly at startup instead of silently downgrading at the first
-    /// tool call.
+    /// tool call, and from `validate_config_for_reload` so a write that
+    /// would produce one is refused at the point it is made rather than
+    /// at the next restart (#8175).
     ///
-    /// Currently only enforces presence of the sub-table; detailed
-    /// per-field checks (host non-empty, api_url scheme, etc.) live in
-    /// the per-backend constructor where the error context is richest.
+    /// Enforces presence of the sub-table, the fields that sub-table
+    /// cannot work without, and the zero timeout below; the remaining
+    /// per-field checks (api_url scheme, credential reachability) live
+    /// in the per-backend constructor where the error context is richest.
     pub fn validate(&self) -> Result<(), String> {
         // `0` builds a `Duration::from_secs(0)`, which makes every local exec
         // return `ExecError::Timeout("after 0s")` — a daemon that boots clean
@@ -608,5 +624,24 @@ mod tests {
         ToolExecConfig::default()
             .validate_override(BackendKind::Local)
             .expect("local always ok");
+    }
+
+    /// Pins the set of backends that actually route tool calls (#8221).
+    ///
+    /// The two operator-facing warnings — at boot for `[tool_exec] kind`, at spawn for a manifest's `tool_exec_backend` — fire on exactly the complement of this set, so an entry silently flipping to `true` would take the warning away from a backend that still does nothing.
+    /// Whoever wires a backend into dispatch updates this test in the same change.
+    #[test]
+    fn only_the_local_backend_is_wired_into_dispatch_8221() {
+        assert!(
+            BackendKind::Local.is_wired_into_dispatch(),
+            "local is the backend every tool call has always used"
+        );
+        for kind in [BackendKind::Docker, BackendKind::Ssh, BackendKind::Daytona] {
+            assert!(
+                !kind.is_wired_into_dispatch(),
+                "{} is selectable but never reaches tool dispatch; if that changed, drop it from this list and from the warnings in boot.rs / spawn.rs",
+                kind.as_str()
+            );
+        }
     }
 }

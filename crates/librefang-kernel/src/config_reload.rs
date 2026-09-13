@@ -1,6 +1,6 @@
 //! Config hot-reload — diffs two `KernelConfig` instances and produces a `ReloadPlan`.
 //!
-//! **Hot-reload safe**: channels, skills, usage footer, web config, approval policy, cron settings, webhook triggers, extensions, tool policy, api_key, dashboard credentials, stable_prefix_mode, proxy, provider_api_keys, sanitize, default model, language, mode, log_level (when a [`crate::log_reload::LogLevelReloader`] is installed by the binary).
+//! **Hot-reload safe**: channels, skills, usage footer, web config, approval policy, cron settings, webhook triggers, trigger cooldown / per-event budget, extensions, tool policy, api_key, dashboard credentials, stable_prefix_mode, proxy, provider_api_keys, sanitize, default model, language, mode, log_level (when a [`crate::log_reload::LogLevelReloader`] is installed by the binary).
 //!
 //! **Restart required**: api_listen, network, memory, home_dir, data_dir, vault, browser.
 
@@ -69,6 +69,12 @@ pub enum HotAction {
     /// previous policy is still being enforced. Supersedes the M6
     /// `ReloadUsers` action that only rebuilt the channel-binding index.
     ReloadAuth,
+    /// `[triggers] cooldown_secs` / `max_per_event` changed — push both into the running [`crate::triggers::TriggerEngine`].
+    ///
+    /// The engine copies these two values into its own fields when it is built at boot and is owned by the workflow subsystem rather than held behind the config `ArcSwap`, so it cannot be replaced by a reload.
+    /// Without this action the swap left triggers firing on the boot-time cooldown and the boot-time per-event budget while the reload response reported the edit as already effective.
+    /// The section's other two fields (`max_depth`, `max_workflow_secs`) genuinely are read from the live config per event and per workflow run, so they stay a bare swap.
+    UpdateTriggersConfig,
     /// `[queue.concurrency]` changed — resize the global lane semaphores
     /// so a smaller `trigger_lane` actually rate-limits new work (#3628).
     /// Per-agent caps are NOT touched — see
@@ -116,6 +122,12 @@ pub struct ReloadPlan {
     pub hot_actions: Vec<HotAction>,
     /// Fields that changed but are no-ops (informational only).
     pub noop_changes: Vec<String>,
+    /// Whether [`crate::LibreFangKernel::reload_config`] actually swapped the freshly-read config into the live `ArcSwap` — and therefore whether the `hot_actions` above were applied at all.
+    ///
+    /// [`build_reload_plan`] leaves this `false`: the diff alone cannot know, because the answer also depends on the `[reload] mode` that was in force when the reload started.
+    /// `reload_config` sets it at the one place that performs the swap, so every caller reads the kernel's own decision instead of re-deriving it from [`should_store_config`] against a `mode` it re-read at a different instant.
+    /// Callers that publish state derived from the live config — the HTTP auth tables, the reload response's `hot_actions_applied` — must gate on this: under `mode = "off"` / `"restart"` the plan is a preview of what a restart would do, not a record of what happened.
+    pub config_stored: bool,
 }
 
 impl ReloadPlan {
@@ -278,6 +290,8 @@ pub fn build_reload_plan_with_caps(
         restart_reasons: Vec::new(),
         hot_actions: Vec::new(),
         noop_changes: Vec::new(),
+        // Set by `reload_config` if and when it performs the swap; a plan that was only diffed has applied nothing.
+        config_stored: false,
     };
 
     // ----- Restart-required fields -----
@@ -558,6 +572,43 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::UpdateQueueConcurrency);
     }
 
+    // `queue` minus `concurrency`, which #3628 classified alone.
+    // `max_depth_per_agent` / `max_depth_global` / `task_ttl_secs` are reported straight off the live config by `GET /api/queue/status` and `GET /api/config`, so the swap itself is the whole of applying them; `task_queue_retention_days` is captured once by the retention sweep at boot (`kernel/background_lifecycle.rs`) and genuinely needs a restart.
+    // Classifying neither left a queue-only edit matching no branch at all, so the plan carried no change, `should_store_config` discarded the whole reloaded config and `POST /api/config/reload` answered "no changes detected" — the same defect the `registry` split further down fixes.
+    if old.queue.task_queue_retention_days != new.queue.task_queue_retention_days {
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "queue.task_queue_retention_days changed (the task-queue retention sweep captures it at boot; restart required)"
+                .to_string(),
+        );
+    }
+    if old.queue.max_depth_per_agent != new.queue.max_depth_per_agent
+        || old.queue.max_depth_global != new.queue.max_depth_global
+        || old.queue.task_ttl_secs != new.queue.task_ttl_secs
+    {
+        plan.noop_changes.push(
+            "queue depth / TTL limits changed (effective on next request via config swap)"
+                .to_string(),
+        );
+    }
+
+    // `[triggers]` was classified as a whole-section live read, which is true of only half of it.
+    // `max_depth` and `max_workflow_secs` are read from `self.config.load_full()` per event and per workflow run (`kernel/triggers_and_workflow.rs`), so for those the swap is the whole of applying them.
+    // `cooldown_secs` and `max_per_event` were copied into `TriggerEngine`'s own fields at boot and never re-read, so the reload reported "effective on next message/request" while triggers went on firing at the boot-time cooldown and per-event budget until the daemon restarted.
+    if old.triggers.cooldown_secs != new.triggers.cooldown_secs
+        || old.triggers.max_per_event != new.triggers.max_per_event
+    {
+        plan.hot_actions.push(HotAction::UpdateTriggersConfig);
+    }
+    if old.triggers.max_depth != new.triggers.max_depth
+        || old.triggers.max_workflow_secs != new.triggers.max_workflow_secs
+    {
+        plan.noop_changes.push(
+            "triggers depth / workflow timeout changed (effective on next event via config swap)"
+                .to_string(),
+        );
+    }
+
     // #4797 — `[budget]` is held in `MeteringSubsystem.budget_config` (an
     // ArcSwap snapshot built at boot from `KernelConfig.budget`), separate
     // from `self.config`. A bare config swap leaves the metering snapshot
@@ -765,6 +816,24 @@ pub fn build_reload_plan_with_caps(
         );
         restart_if_changed(field_changed(&old.heartbeat, &new.heartbeat), "heartbeat");
         restart_if_changed(field_changed(&old.plugins, &new.plugins), "plugins");
+        // `tts` minus `enabled` / `output_format`: everything else in the section
+        // reaches the tool through `TtsEngine`, which `boot.rs` builds once from
+        // `config.tts.clone()` with no rebuild path — the same shape as
+        // `MediaEngine` and `BrowserManager` above, and classifying it NOOP made
+        // `POST /api/config/reload` answer "effective on next message" for a
+        // change that does nothing until the daemon restarts.
+        // The two exceptions are read per turn from the config snapshot:
+        // `enabled` at the call sites that decide whether to lend the engine,
+        // `output_format` through `LoopOptions.tts_config` (#8272). They stay in
+        // the NOOP block below — which is also what lets `should_store_config`
+        // accept the swap at all.
+        let tts_except_live_keys_changed = {
+            let mut old_rest = old.tts.clone();
+            old_rest.enabled = new.tts.enabled;
+            old_rest.output_format = new.tts.output_format.clone();
+            field_changed(&old_rest, &new.tts)
+        };
+        restart_if_changed(tts_except_live_keys_changed, "tts");
         // `registry` minus `auto_sync`: the mirror / host / TTL are read once when the checkout is set up, but `auto_sync` is re-read from the config snapshot on every tick of the 24 h catalog task, so it belongs in the NOOP block below.
         // Classifying the whole section as restart-required made the documented "flip it off and the next automatic refresh stops" impossible: `should_store_config` swaps the config only when there is a hot action or a noop change, so a registry-only reload was recorded as restart-required and then discarded, leaving the task reading the old value until the daemon actually restarted.
         let registry_except_auto_sync_changed = {
@@ -810,6 +879,10 @@ pub fn build_reload_plan_with_caps(
         restart_if_changed(
             old.max_upload_size_bytes != new.max_upload_size_bytes,
             "max_upload_size_bytes",
+        );
+        restart_if_changed(
+            old.max_concurrent_uploads != new.max_concurrent_uploads,
+            "max_concurrent_uploads",
         );
         restart_if_changed(
             old.max_concurrent_bg_llm != new.max_concurrent_bg_llm,
@@ -904,12 +977,17 @@ pub fn build_reload_plan_with_caps(
             "tool_timeouts",
         );
         noop_if_changed(field_changed(&old.thinking, &new.thinking), "thinking");
-        noop_if_changed(field_changed(&old.triggers, &new.triggers), "triggers");
         noop_if_changed(
             field_changed(&old.notification, &new.notification),
             "notification",
         );
-        noop_if_changed(field_changed(&old.tts, &new.tts), "tts");
+        // Only the two keys the runtime re-reads per turn; the rest of `[tts]` is
+        // restart-required above because it is captured in `TtsEngine` at boot.
+        noop_if_changed(old.tts.enabled != new.tts.enabled, "tts.enabled");
+        noop_if_changed(
+            old.tts.output_format != new.tts.output_format,
+            "tts.output_format",
+        );
         // The hands marketplace install handler reads `hands.registry_allowed_hosts`
         // live from `config_snapshot()` on every request, so a swap is effective
         // on the next install with no explicit reapply action.
@@ -1005,162 +1083,163 @@ pub const KERNEL_CONFIG_FIELD_ALIASES: &[&str] = &[
     "approval_policy", // alias for approval
 ];
 
-/// The exhaustive set of `KernelConfig` field names that
-/// [`build_reload_plan`] inspects and classifies (RequiresRestart /
-/// HotReload / Ignore).
+/// Every `KernelConfig` field name [`build_reload_plan`] inspects, mapped to the class it is documented under.
 ///
-/// This is a literal mirror of every field touched in
-/// `build_reload_plan_with_caps`. The
-/// `every_config_field_is_reload_classified` test asserts that this set is a
-/// superset of every real `KernelConfig` field, so a newly-added field that
-/// is not also wired into `build_reload_plan` fails the build instead of
-/// silently no-op-ing on `POST /api/config/reload`.
+/// `R` — restart required. `H` — hot-reloaded through a `HotAction`. `N` — no-op, the config swap is the whole of applying it.
+/// A `/`-joined value is a section that splits across classes by sub-field, as `queue` (`H/N/R`) and `external_auth` (`H/N`) do; the doc row's Meaning column says which sub-field falls where.
+/// `H*` is a class conditional on runtime state, which only `log_level` has.
 ///
-/// **When you add a field to `KernelConfig`:** add a branch to
-/// `build_reload_plan_with_caps` AND its name here. The test will remind you
-/// if you forget.
-pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
+/// This is a literal mirror of every field touched in `build_reload_plan_with_caps`.
+/// The `every_config_field_is_reload_classified` test asserts that its keys are a superset of every real `KernelConfig` field, so a newly-added field that is not also wired into `build_reload_plan` fails the build instead of silently no-op-ing on `POST /api/config/reload`.
+///
+/// The class letter lives here rather than only in the doc table because a table no code reads can be wrong in the one direction that harms an operator: a field documented `N` that actually needs a restart makes `POST /api/config/reload` answer success and do nothing (#8305, and #8059 before it).
+/// With the letter mirrored, the two must agree — an edit to either side that forgets the other fails `doc_reload_table_matches_classified_reload_fields`.
+///
+/// **When you add a field to `KernelConfig`:** add a branch to `build_reload_plan_with_caps`, its name and class here, AND a row to `docs/operations/config-reload.md`.
+/// The tests will remind you if you forget any of the three.
+pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'static str> {
     [
         // -- hand-tuned branches at the top of build_reload_plan --
-        "api_listen",
-        "api_key",
-        "api_key_hash",
-        "dashboard_user",
-        "dashboard_pass",
-        "dashboard_pass_hash",
-        "passkey_enabled",
-        "passkey_rp_id",
-        "passkey_rp_origin",
-        "network_enabled",
-        "network",
-        "memory",
-        "memory_wiki",
-        "proxy",
-        "default_model",
-        "home_dir",
-        "data_dir",
-        "stable_prefix_mode",
-        "vault",
-        "channels",
-        "sidecar_channels",
-        "skills",
-        "usage_footer",
-        "web",
-        "browser",
-        "approval",
-        "max_cron_jobs",
-        "webhook_triggers",
-        "extensions",
-        "mcp_servers",
-        "mcp_runtime_store",
-        "taint_rules",
-        "a2a",
-        "fallback_providers",
-        "credential_pools",
-        "provider_urls",
-        "provider_regions",
-        "tool_policy",
-        "users",
-        "groups",
-        "default_owner",
-        "proactive_memory",
-        "queue",
-        "usage",
-        "budget",
-        "sanitize",
-        "provider_api_keys",
-        "log_level",
-        "language",
-        "mode",
+        ("api_listen", "R"),
+        ("api_key", "N"),
+        ("api_key_hash", "N"),
+        ("dashboard_user", "H"),
+        ("dashboard_pass", "H"),
+        ("dashboard_pass_hash", "H"),
+        ("passkey_enabled", "R"),
+        ("passkey_rp_id", "R"),
+        ("passkey_rp_origin", "R"),
+        ("network_enabled", "R"),
+        ("network", "R"),
+        ("memory", "R"),
+        ("memory_wiki", "R"),
+        ("proxy", "H"),
+        ("default_model", "H"),
+        ("home_dir", "R"),
+        ("data_dir", "R"),
+        ("stable_prefix_mode", "N"),
+        ("vault", "R"),
+        ("channels", "H"),
+        ("sidecar_channels", "H"),
+        ("skills", "H"),
+        ("usage_footer", "H"),
+        ("web", "H"),
+        ("browser", "R"),
+        ("approval", "H"),
+        ("max_cron_jobs", "H"),
+        ("webhook_triggers", "H"),
+        ("extensions", "H"),
+        ("mcp_servers", "H"),
+        ("mcp_runtime_store", "N"),
+        ("taint_rules", "H"),
+        ("a2a", "H"),
+        ("fallback_providers", "H"),
+        ("credential_pools", "H"),
+        ("provider_urls", "H"),
+        ("provider_regions", "H"),
+        ("tool_policy", "H"),
+        ("users", "H"),
+        ("groups", "N"),
+        ("default_owner", "N"),
+        ("proactive_memory", "H"),
+        ("queue", "H/N/R"),
+        ("usage", "N"),
+        ("budget", "H"),
+        ("sanitize", "N"),
+        ("provider_api_keys", "H"),
+        ("log_level", "H*"),
+        ("language", "N"),
+        ("mode", "N"),
         // hot-reloadable: ReloadExternalAuth on IdP-identity change, noop
         // (live-read) otherwise — see the hand-tuned branch above.
-        "external_auth",
+        ("external_auth", "H/N"),
         // -- backfilled RESTART branches --
-        "config_version",
-        "cors_origin",
-        "trusted_hosts",
-        "trusted_proxies",
-        "trust_forwarded_for",
-        "allowed_mount_roots",
-        "require_auth_for_reads",
-        "external_auth_proxy",
-        "channel_role_mapping",
-        "include",
-        "exec_policy",
-        "bindings",
-        "tool_exec",
-        "auth_profiles",
-        "vertex_ai",
-        "azure_openai",
-        "oauth",
-        "provider_request_timeout_secs",
-        "provider_max_retries",
-        "provider_proxy_urls",
-        "local_probe_interval_secs",
-        "health_check",
-        "heartbeat",
-        "plugins",
-        "registry",
-        "rate_limit",
-        "strict_config",
-        "parallel_tools",
-        "workflow_stale_timeout_minutes",
-        "workflow_default_total_timeout_secs",
-        "background",
-        "log_dir",
-        "workspaces_dir",
-        "llm",
-        "reload",
-        "max_request_body_bytes",
-        "max_upload_size_bytes",
-        "max_concurrent_bg_llm",
-        "auto_dream",
-        "rl_export",
-        "audit",
-        "telemetry",
-        "context_engine",
-        "session",
-        "task_board",
-        "broadcast",
-        "auto_reply",
-        "canvas",
-        "update_channel",
-        "inbox",
-        "prompt_intelligence",
-        "docker",
-        "trusted_manifest_signers",
-        "terminal",
+        ("config_version", "R"),
+        ("cors_origin", "R"),
+        ("trusted_hosts", "R"),
+        ("trusted_proxies", "R"),
+        ("trust_forwarded_for", "R"),
+        ("allowed_mount_roots", "R"),
+        ("require_auth_for_reads", "R"),
+        ("external_auth_proxy", "R"),
+        ("channel_role_mapping", "R"),
+        ("include", "R"),
+        ("exec_policy", "R"),
+        ("bindings", "R"),
+        ("tool_exec", "R"),
+        ("auth_profiles", "R"),
+        ("vertex_ai", "R"),
+        ("azure_openai", "R"),
+        ("oauth", "R"),
+        ("provider_request_timeout_secs", "R"),
+        ("provider_max_retries", "R"),
+        ("provider_proxy_urls", "R"),
+        ("local_probe_interval_secs", "R"),
+        ("health_check", "R"),
+        ("heartbeat", "R"),
+        ("plugins", "R"),
+        ("registry", "R/N"),
+        ("rate_limit", "R"),
+        ("strict_config", "R"),
+        ("parallel_tools", "R"),
+        ("workflow_stale_timeout_minutes", "R"),
+        ("workflow_default_total_timeout_secs", "R"),
+        ("background", "R"),
+        ("log_dir", "R"),
+        ("workspaces_dir", "R"),
+        ("llm", "N"),
+        ("reload", "R"),
+        ("max_request_body_bytes", "R"),
+        ("max_upload_size_bytes", "R"),
+        ("max_concurrent_uploads", "R"),
+        ("max_concurrent_bg_llm", "R"),
+        ("auto_dream", "R"),
+        ("rl_export", "R"),
+        ("audit", "R"),
+        ("telemetry", "R"),
+        ("context_engine", "R"),
+        ("session", "R"),
+        ("task_board", "N"),
+        ("broadcast", "R"),
+        ("auto_reply", "R"),
+        ("canvas", "R"),
+        ("update_channel", "R"),
+        ("inbox", "R"),
+        ("prompt_intelligence", "R"),
+        ("docker", "R"),
+        ("trusted_manifest_signers", "R"),
+        ("terminal", "R"),
         // -- backfilled NOOP branches --
-        "agent_max_iterations",
-        "max_history_messages",
-        "memory_fact_budget_percent",
-        "max_agent_call_depth",
-        "tool_timeout_secs",
-        "tool_timeouts",
-        "thinking",
-        "triggers",
-        "notification",
-        "tts",
-        "media",
-        "hands",
-        "links",
-        "privacy",
-        "pairing",
-        "gateway_compression",
-        "tool_results",
-        "tool_invoke",
-        "default_routing",
-        "prompt_caching",
-        "prompt_cache",
-        "compaction",
-        "providers",
-        "qwen_code_path",
-        "cron_session_max_tokens",
-        "cron_session_max_messages",
-        "cron_session_warn_fraction",
-        "cron_session_warn_total_tokens",
-        "cron_session_compaction_mode",
-        "cron_session_compaction_keep_recent",
+        ("agent_max_iterations", "N"),
+        ("max_history_messages", "N"),
+        ("memory_fact_budget_percent", "N"),
+        ("max_agent_call_depth", "N"),
+        ("tool_timeout_secs", "N"),
+        ("tool_timeouts", "N"),
+        ("thinking", "N"),
+        ("triggers", "H/N"),
+        ("notification", "N"),
+        ("tts", "N"),
+        ("media", "R"),
+        ("hands", "N"),
+        ("links", "N"),
+        ("privacy", "N"),
+        ("pairing", "N"),
+        ("gateway_compression", "N"),
+        ("tool_results", "N"),
+        ("tool_invoke", "N"),
+        ("default_routing", "N"),
+        ("prompt_caching", "N"),
+        ("prompt_cache", "N"),
+        ("compaction", "N"),
+        ("providers", "N"),
+        ("qwen_code_path", "N"),
+        ("cron_session_max_tokens", "N"),
+        ("cron_session_max_messages", "N"),
+        ("cron_session_warn_fraction", "N"),
+        ("cron_session_warn_total_tokens", "N"),
+        ("cron_session_compaction_mode", "N"),
+        ("cron_session_compaction_keep_recent", "N"),
     ]
     .into_iter()
     .collect()
@@ -1188,6 +1267,22 @@ pub fn validate_config_for_reload(config: &KernelConfig) -> Result<(), Vec<Strin
     // Validate approval policy
     if let Err(e) = config.approval.validate() {
         errors.push(format!("approval policy: {e}"));
+    }
+
+    // The same check kernel boot runs, which is exactly why it belongs here: a
+    // config the API accepts has to be one the daemon can still start on.
+    // `[tool_exec]` is restart-classified, so validating only at boot meant
+    // `default_timeout_secs = 0` was answered 200 OK and written to
+    // `config.toml`, and the failure surfaced at the next start as
+    // `Invalid [tool_exec] config` — decoupled from the save that caused it, and
+    // unrecoverable over the API, since the API is what no longer comes up.
+    // Hand-editing `config.toml` on the host was the only way back.
+    // Validated in this function rather than in the route handler because it is
+    // the one place every config write already funnels through: the config
+    // editor, `POST /api/config/reload`, and the budget and user/group writers
+    // are covered without each growing its own copy of the check (#8175).
+    if let Err(e) = config.tool_exec.validate() {
+        errors.push(format!("tool_exec: {e}"));
     }
 
     // Network config: if network is enabled, shared_secret must be set
@@ -1391,6 +1486,100 @@ mod tests {
             .restart_reasons
             .iter()
             .any(|r| r.contains("memory config")));
+    }
+
+    /// The two `[tts]` keys the runtime re-reads per turn must reach a running
+    /// daemon, and the plan must be storable — `should_store_config` swaps the
+    /// config only when there is a hot action or a noop change, so classifying
+    /// the whole section restart-required would throw the new value away and
+    /// `[tts] output_format` would keep resolving to the boot-time value (#8272).
+    #[test]
+    fn tts_live_keys_are_read_per_turn_and_reach_the_config_store() {
+        for (label, mutate) in [
+            (
+                "tts.enabled",
+                Box::new(|c: &mut KernelConfig| c.tts.enabled = !c.tts.enabled)
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "tts.output_format",
+                Box::new(|c: &mut KernelConfig| c.tts.output_format = Some("ogg_opus".to_string()))
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+        ] {
+            let a = default_cfg();
+            let mut b = default_cfg();
+            mutate(&mut b);
+            let plan = build_reload_plan(&a, &b);
+
+            assert!(
+                !plan.restart_required,
+                "{label} is read per turn; restart_reasons: {:?}",
+                plan.restart_reasons
+            );
+            assert!(
+                plan.noop_changes.iter().any(|r| r.contains(label)),
+                "{label} must be recorded as a live-read change: {:?}",
+                plan.noop_changes
+            );
+            for mode in [ReloadMode::Hot, ReloadMode::Hybrid] {
+                assert!(
+                    should_store_config(mode, &plan),
+                    "{label}: the reloaded config must be stored in {mode:?} mode, \
+                     or the next turn keeps reading the old value"
+                );
+            }
+        }
+    }
+
+    /// Everything else in `[tts]` reaches the tool through `TtsEngine`, which is
+    /// built once at boot from `config.tts.clone()` with no rebuild path. A bare
+    /// config swap does nothing for these, so the reload report must say so
+    /// rather than claim "effective on next message" — the same honesty fix
+    /// `browser` got when its hot action turned out to be a no-op.
+    #[test]
+    fn tts_fields_other_than_the_live_keys_still_require_restart() {
+        for (label, mutate) in [
+            (
+                "provider",
+                Box::new(|c: &mut KernelConfig| c.tts.provider = Some("elevenlabs".to_string()))
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "timeout_secs",
+                Box::new(|c: &mut KernelConfig| c.tts.timeout_secs = 99)
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "elevenlabs.output_format",
+                Box::new(|c: &mut KernelConfig| {
+                    c.tts.elevenlabs.output_format = "mp3_44100_128".to_string()
+                }) as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "custom.base_url",
+                Box::new(|c: &mut KernelConfig| {
+                    c.tts.custom.base_url = "http://example.invalid/v1/audio/speech".to_string()
+                }) as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+        ] {
+            let a = default_cfg();
+            let mut b = default_cfg();
+            mutate(&mut b);
+            let plan = build_reload_plan(&a, &b);
+
+            assert!(
+                plan.restart_required,
+                "[tts] {label} is captured in TtsEngine at boot and must be \
+                 reported restart-required; noop_changes: {:?}",
+                plan.noop_changes
+            );
+            assert!(
+                plan.restart_reasons.iter().any(|r| r.contains("tts")),
+                "[tts] {label} must name `tts` as the reason: {:?}",
+                plan.restart_reasons
+            );
+        }
     }
 
     /// Flipping `[registry] auto_sync` must reach the running catalog task.
@@ -1653,6 +1842,101 @@ mod tests {
                 .contains(&HotAction::UpdateQueueConcurrency),
             "expected UpdateQueueConcurrency in {:?}",
             plan.hot_actions,
+        );
+    }
+
+    /// A `[queue]` edit that touched anything but `concurrency` matched no branch at all, so the plan carried no change, `should_store_config` discarded the reloaded config and the reload answered "no changes detected".
+    #[test]
+    fn queue_fields_other_than_concurrency_reach_the_config_store() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.queue.task_ttl_secs = a.queue.task_ttl_secs + 3600;
+        let plan = build_reload_plan(&a, &b);
+
+        assert!(
+            !plan.restart_required,
+            "depth / TTL limits are reported off the live config; restart_reasons: {:?}",
+            plan.restart_reasons
+        );
+        assert!(
+            plan.noop_changes.iter().any(|r| r.contains("queue")),
+            "a depth / TTL edit must be recorded as a live-read change: {:?}",
+            plan.noop_changes
+        );
+        for mode in [ReloadMode::Hot, ReloadMode::Hybrid] {
+            assert!(
+                should_store_config(mode, &plan),
+                "the reloaded config must be stored in {mode:?} mode, or the queue edit is thrown away"
+            );
+        }
+    }
+
+    /// `task_queue_retention_days` is captured by the retention sweep at boot, so the operator has to be told a restart is needed rather than told nothing at all.
+    #[test]
+    fn queue_retention_days_requires_restart() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.queue.task_queue_retention_days = a.queue.task_queue_retention_days + 30;
+        let plan = build_reload_plan(&a, &b);
+
+        assert!(plan.restart_required);
+        assert!(
+            plan.restart_reasons
+                .iter()
+                .any(|r| r.contains("queue.task_queue_retention_days")),
+            "the reason must name the field: {:?}",
+            plan.restart_reasons
+        );
+    }
+
+    /// `[triggers] cooldown_secs` / `max_per_event` are copied into `TriggerEngine`'s own fields at boot, so classifying the whole section as a live read told the operator the edit was already effective while triggers kept firing on the boot-time values.
+    #[test]
+    fn trigger_cooldown_and_per_event_budget_emit_update_triggers_action() {
+        for label in ["cooldown_secs", "max_per_event"] {
+            let a = default_cfg();
+            let mut b = default_cfg();
+            if label == "cooldown_secs" {
+                b.triggers.cooldown_secs = a.triggers.cooldown_secs + 295;
+            } else {
+                b.triggers.max_per_event = a.triggers.max_per_event + 40;
+            }
+            let plan = build_reload_plan(&a, &b);
+
+            assert!(
+                !plan.restart_required,
+                "`triggers.{label}` is hot-reloadable; restart_reasons: {:?}",
+                plan.restart_reasons
+            );
+            assert!(
+                plan.hot_actions.contains(&HotAction::UpdateTriggersConfig),
+                "`triggers.{label}` must push the new value into the running engine: {:?}",
+                plan.hot_actions
+            );
+        }
+    }
+
+    /// The two fields that genuinely are read live must stay a bare swap — no restart, no action — while still counting as a change so the new config is stored.
+    #[test]
+    fn trigger_depth_and_workflow_timeout_stay_a_live_read() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.triggers.max_depth = a.triggers.max_depth + 1;
+        let plan = build_reload_plan(&a, &b);
+
+        assert!(
+            !plan.restart_required,
+            "max_depth is read per event: {:?}",
+            plan.restart_reasons
+        );
+        assert!(
+            !plan.hot_actions.contains(&HotAction::UpdateTriggersConfig),
+            "max_depth needs no engine update: {:?}",
+            plan.hot_actions
+        );
+        assert!(
+            plan.noop_changes.iter().any(|r| r.contains("triggers")),
+            "the change must still be recorded so the config is stored: {:?}",
+            plan.noop_changes
         );
     }
 
@@ -2044,6 +2328,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(!plan.has_changes());
 
@@ -2053,6 +2338,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec!["language: en -> de".to_string()],
+            config_stored: false,
         };
         assert!(plan.has_changes());
 
@@ -2062,6 +2348,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::UpdateCronConfig],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(plan.has_changes());
 
@@ -2071,6 +2358,7 @@ mod tests {
             restart_reasons: vec!["api_listen changed".to_string()],
             hot_actions: vec![],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(plan.has_changes());
     }
@@ -2082,6 +2370,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(plan.is_hot_reloadable());
 
@@ -2090,6 +2379,7 @@ mod tests {
             restart_reasons: vec!["api_listen changed".to_string()],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(!plan.is_hot_reloadable());
     }
@@ -2139,6 +2429,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(!should_apply_hot(ReloadMode::Off, &plan));
     }
@@ -2150,6 +2441,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(!should_apply_hot(ReloadMode::Restart, &plan));
     }
@@ -2161,6 +2453,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(should_apply_hot(ReloadMode::Hybrid, &plan));
         assert!(should_apply_hot(ReloadMode::Hot, &plan));
@@ -2173,6 +2466,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(!should_apply_hot(ReloadMode::Hybrid, &plan));
     }
@@ -2190,6 +2484,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec!["max_history_messages".to_string()],
+            config_stored: false,
         };
         // `should_apply_hot` is false (no hot actions) — that was the bug:
         // gating the swap on it left read-live edits unapplied.
@@ -2208,6 +2503,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec!["max_history_messages".to_string()],
+            config_stored: false,
         };
         // Off / Restart must not apply runtime changes even with pending diffs.
         assert!(!should_store_config(ReloadMode::Off, &plan));
@@ -2221,6 +2517,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec![],
+            config_stored: false,
         };
         assert!(!should_store_config(ReloadMode::Hot, &plan));
         assert!(!should_store_config(ReloadMode::Hybrid, &plan));
@@ -2255,7 +2552,10 @@ mod tests {
             .filter(|f| !aliases.contains(f))
             .collect();
 
-        let covered = super::classified_reload_fields();
+        // Only the names matter here; the class each one carries is what
+        // `doc_reload_table_matches_classified_reload_fields` checks.
+        let covered: std::collections::BTreeSet<&str> =
+            super::classified_reload_fields().into_keys().collect();
 
         let missing: Vec<&str> = fields.difference(&covered).copied().collect();
         assert!(
@@ -2285,18 +2585,14 @@ mod tests {
         );
     }
 
-    /// The ops-facing reference table in `docs/operations/config-reload.md`
-    /// must list exactly the same set of fields that
-    /// [`super::classified_reload_fields`] classifies. The doc is
-    /// hand-transcribed from `build_reload_plan`, so without this guard a
-    /// classification change (or a newly-added field) could land in the code
-    /// while the doc silently rots — defeating the doc's stated purpose of
-    /// being the canonical "does this hot-reload?" answer.
+    /// The ops-facing reference table in `docs/operations/config-reload.md` must list exactly the same fields that [`super::classified_reload_fields`] classifies, **with the same class letter**.
+    /// The doc is hand-transcribed from `build_reload_plan`, so without this guard a classification change could land in the code while the doc silently rots — defeating the doc's stated purpose of being the canonical "does this hot-reload?" answer.
     ///
-    /// The doc lists each field as the first column of a markdown table row,
-    /// `| `field_name` | ... |`. We parse those backtick-wrapped leading
-    /// tokens and compare the set to `classified_reload_fields()` in both
-    /// directions.
+    /// Comparing the letter and not only the name is #8305. Until then this test read column 1 and ignored column 2, which left the asymmetry that matters: a field *missing* from the table failed the test, while a field *misdescribed* in it passed.
+    /// Misdescribed is the direction that harms an operator, because a row reading `N` for a restart-required field turns `POST /api/config/reload` into a call that reports success and changes nothing. #8059 is the prior instance of that class.
+    ///
+    /// Each field is the first column of a markdown table row, `| `field_name` | R | … |`.
+    /// The class is column 2 verbatim, so a section split across classes (`queue` is `H/N/R`) has to match on the whole string rather than on a set of letters — the ordering in the doc is the ordering here, which keeps the comparison total instead of letting `R/N` and `N/R` both pass.
     #[test]
     fn doc_reload_table_matches_classified_reload_fields() {
         // CARGO_MANIFEST_DIR = <repo>/crates/librefang-kernel
@@ -2306,8 +2602,9 @@ mod tests {
             panic!("failed to read {}: {e}", doc_path.display());
         });
 
-        // Collect the first-column backtick token of every table row.
-        let mut doc_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        // Collect `field -> class` from every table row.
+        let mut doc_fields: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
         for line in doc.lines() {
             let line = line.trim_start();
             let Some(rest) = line.strip_prefix("| `") else {
@@ -2317,21 +2614,41 @@ mod tests {
             // `[a-z0-9_]+`; anything else (legend rows, prose) won't match.
             let Some(end) = rest.find('`') else { continue };
             let token = &rest[..end];
-            if !token.is_empty()
-                && token
+            if token.is_empty()
+                || !token
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
             {
-                doc_fields.insert(token.to_string());
+                continue;
             }
+            // Column 2 is what follows the closing backtick, between the next
+            // two pipes. A row whose shape does not yield one is a parse
+            // failure rather than a row to skip: silently dropping it is how
+            // the letter went unchecked in the first place.
+            let after_name = &rest[end + 1..];
+            let Some(after_pipe) = after_name.strip_prefix(" | ") else {
+                panic!(
+                    "table row for `{token}` does not have the expected `| `field` | CLASS | …` shape: {line}"
+                );
+            };
+            let Some(class_end) = after_pipe.find('|') else {
+                panic!("table row for `{token}` has no class column: {line}");
+            };
+            doc_fields.insert(
+                token.to_string(),
+                after_pipe[..class_end].trim().to_string(),
+            );
         }
 
-        let covered: std::collections::BTreeSet<String> = super::classified_reload_fields()
+        let covered: std::collections::BTreeMap<String, String> = super::classified_reload_fields()
             .iter()
-            .map(|s| s.to_string())
+            .map(|(name, class)| (name.to_string(), class.to_string()))
             .collect();
 
-        let missing_from_doc: Vec<&String> = covered.difference(&doc_fields).collect();
+        let doc_names: std::collections::BTreeSet<&String> = doc_fields.keys().collect();
+        let covered_names: std::collections::BTreeSet<&String> = covered.keys().collect();
+
+        let missing_from_doc: Vec<&&String> = covered_names.difference(&doc_names).collect();
         assert!(
             missing_from_doc.is_empty(),
             "fields classified in build_reload_plan but absent from \
@@ -2339,11 +2656,52 @@ mod tests {
              Add a table row for each in the doc."
         );
 
-        let extra_in_doc: Vec<&String> = doc_fields.difference(&covered).collect();
+        let extra_in_doc: Vec<&&String> = doc_names.difference(&covered_names).collect();
         assert!(
             extra_in_doc.is_empty(),
             "docs/operations/config-reload.md lists field names that are not \
              classified in build_reload_plan (renamed/removed?): {extra_in_doc:?}"
+        );
+
+        // The half #8305 is about: the names agreeing says nothing about the
+        // letters agreeing, and the letter is the answer an operator came for.
+        let mismatched: Vec<String> = covered
+            .iter()
+            .filter_map(|(name, code_class)| {
+                let doc_class = doc_fields.get(name)?;
+                (doc_class != code_class)
+                    .then(|| format!("{name}: doc says `{doc_class}`, code says `{code_class}`"))
+            })
+            .collect();
+        assert!(
+            mismatched.is_empty(),
+            "class letter disagrees between docs/operations/config-reload.md and \
+             `classified_reload_fields()`:\n  {}\n\
+             Whichever is wrong, fix both — an operator reads the doc to decide \
+             whether an edit needs a restart.",
+            mismatched.join("\n  ")
+        );
+    }
+
+    /// The class recorded for a field must be one the legend defines, in the
+    /// spelling the legend uses.
+    ///
+    /// Without this, `classified_reload_fields()` and the doc could agree on a
+    /// typo — `HN` for `H/N`, or a lowercase `r` — and the comparison above
+    /// would pass over two copies of the same mistake.
+    #[test]
+    fn every_reload_class_is_a_known_spelling() {
+        const KNOWN: &[&str] = &["R", "H", "N", "H*", "H/N", "R/N", "H/N/R"];
+        let unknown: Vec<String> = super::classified_reload_fields()
+            .iter()
+            .filter(|(_, class)| !KNOWN.contains(class))
+            .map(|(name, class)| format!("{name}: `{class}`"))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "unrecognised reload class(es): {unknown:?}\n\
+             Known spellings are {KNOWN:?}. A new combination needs adding here \
+             and explaining in the doc's legend."
         );
     }
 }

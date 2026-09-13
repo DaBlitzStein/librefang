@@ -285,6 +285,37 @@ describe("RuntimePage", () => {
     expect(screen.getByText("gpt-4")).toBeInTheDocument();
   });
 
+  // The Resources tile and the Providers page header pill label the same
+  // number with the same word. They diverged once already, when only one of
+  // them learned that a suppressed provider is not configured.
+  it("counts configured providers the way the Providers page does", () => {
+    useDashboardSnapshotMock.mockReturnValue(
+      makeQuery({
+        status: { version: "2026.5.1", agent_count: 0, session_count: 0 },
+        providers: [
+          { id: "openai", auth_status: "validated_key" },
+          // Rejected key and offline local service are still configured.
+          { id: "deepseek", auth_status: "invalid_key" },
+          { id: "ollama", auth_status: "local_offline" },
+          // Removed by the operator — not configured anywhere.
+          { id: "vertex-ai", auth_status: "configured", suppressed: true },
+          // Never set up.
+          { id: "groq", auth_status: "missing" },
+        ],
+        channels: [],
+        skillCount: 0,
+        workflowCount: 0,
+        health: { status: "ok", checks: [] },
+      }),
+    );
+
+    renderPage();
+
+    const tile = screen.getByText("runtime.providers").closest("div");
+    expect(tile?.textContent).toContain("5");
+    expect(tile?.textContent).toContain("3 status.configured");
+  });
+
   it("renders audit entries with action and validity badge", () => {
     renderPage();
     expect(screen.getByText("agent.start")).toBeInTheDocument();

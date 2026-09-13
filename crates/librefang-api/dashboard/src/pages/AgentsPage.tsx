@@ -99,6 +99,7 @@ import {
   useSetAgentChannels,
 } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
+import { formatNumber } from "../lib/format";
 
 /**
  * Local view type that pairs the strict `AgentDetail` shape from `api.ts`
@@ -161,6 +162,17 @@ export function cloneResultNotice(result: CloneAgentResult): {
     partial: result.partial || warnings.length > 0,
     warnings: warnings.join(", ") || "unknown",
   };
+}
+
+/**
+ * Whether the token-footprint panel has data to show. A genuine zero (a
+ * tools-disabled agent with no system_prompt) is real data, not "missing" —
+ * only the absence of the field means the daemon has nothing to report.
+ */
+export function hasTokenFootprintData(
+  injectedFootprintTokens: number | null | undefined,
+): injectedFootprintTokens is number {
+  return injectedFootprintTokens != null;
 }
 
 /** Two-column row used inside the detail modal's value cards. */
@@ -1035,7 +1047,11 @@ export function AgentsPage() {
   }, [skillsQuery.data]);
 
   const configuredProviders = useMemo(
-    () => (providersQuery.data ?? []).filter(p => isProviderAvailable(p.auth_status)),
+    // Suppression excluded as well as availability: a provider the operator
+    // removed is absent from the Providers page, and offering it here would
+    // let an agent be bound to something with no card, no badge and no way to
+    // manage it.
+    () => (providersQuery.data ?? []).filter(p => p.suppressed !== true && isProviderAvailable(p.auth_status)),
     [providersQuery.data],
   );
 
@@ -3300,7 +3316,7 @@ export function AgentsPage() {
                           <span className="font-mono">
                             {detailAgent.model.max_tokens == null
                               ? t("agents.form.inherit_default")
-                              : detailAgent.model.max_tokens.toLocaleString()}
+                              : formatNumber(detailAgent.model.max_tokens)}
                           </span>
                         </DetailRow>
                         <DetailRow label={t("agents.temperature")}>
@@ -3526,7 +3542,7 @@ export function AgentsPage() {
                       </Badge>
                     </DetailRow>
                     <DetailRow label={t("agents.budget_tokens")}>
-                      <span className="font-mono">{detailAgent.thinking.budget_tokens?.toLocaleString() ?? 0}</span>
+                      <span className="font-mono">{formatNumber(detailAgent.thinking.budget_tokens)}</span>
                     </DetailRow>
                     <DetailRow label={t("agents.stream_thinking")}>
                       <Badge variant={detailAgent.thinking.stream_thinking ? "brand" : "default"}>
@@ -3643,6 +3659,37 @@ export function AgentsPage() {
                   </Button>
                 )}
               </div>
+
+              {hasTokenFootprintData(detailAgent.injected_footprint_tokens) && (
+                <div className="rounded-lg bg-main/30 p-3 space-y-1.5">
+                  <p className="text-[11px] font-bold text-text-dim">
+                    {t("agents.token_usage_title", { defaultValue: "Token footprint" })}
+                  </p>
+                  <div className="flex justify-between text-[11px] border-t border-border/40 pt-1.5">
+                    <span className="font-bold">
+                      {t("agents.token_injected_total", { defaultValue: "Injected per request" })}
+                    </span>
+                    <span className="font-mono font-bold">
+                      {formatNumber(detailAgent.injected_footprint_tokens)}
+                    </span>
+                  </div>
+                  {(agentEventsQuery.data ?? []).length > 0 && (
+                    <div className="border-t border-border/40 pt-1.5 space-y-1">
+                      <p className="text-[10px] text-text-dim">
+                        {t("agents.token_recent", { defaultValue: "Recent calls" })}
+                      </p>
+                      {(agentEventsQuery.data ?? []).slice(0, 5).map((call, i) => (
+                        <div key={`${call.timestamp}-${i}`} className="flex justify-between text-[10px]">
+                          <span className="text-text-dim truncate">{call.model}</span>
+                          <span className="font-mono">
+                            {call.input_tokens}/{call.output_tokens} · ${call.cost_usd.toFixed(4)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <Button
                 variant="secondary"

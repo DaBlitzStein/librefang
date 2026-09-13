@@ -250,13 +250,21 @@ fn next_tmp_name() -> String {
     format!(".config.toml.tmp.{}.{seq}", std::process::id())
 }
 
-/// Remove the `[[sidecar_channels]]` block identified by `name`; returns whether one was removed.
+/// Remove every `[[sidecar_channels]]` block identified by `name`; returns whether at least one was removed.
+///
+/// Drains every match rather than stopping at the first — a file with a
+/// duplicate `name` entry (a hand-edit, or a copy-pasted block) used to keep
+/// the second one alive after a "successful" removal, which the reload then
+/// re-merged and respawned. That is the single-file version of the same
+/// "reported `removed` while the channel comes back" bug the cross-file walk
+/// in `remove_sidecar_block_anywhere` exists to prevent.
 pub fn remove_sidecar_block(path: &Path, name: &str) -> Result<bool, String> {
     let original = read_existing_or_empty(path)?;
     let mut doc: DocumentMut = original
         .parse()
         .map_err(|e| format!("parse {path:?}: {e}"))?;
 
+    let mut removed_any = false;
     let now_empty;
     {
         let Some(aot_item) = doc.get_mut("sidecar_channels") else {
@@ -265,17 +273,24 @@ pub fn remove_sidecar_block(path: &Path, name: &str) -> Result<bool, String> {
         let aot = aot_item.as_array_of_tables_mut().ok_or_else(|| {
             "config.toml: `sidecar_channels` is not an array-of-tables".to_string()
         })?;
-        let idx = (0..aot.len()).find(|&i| {
-            aot.get(i)
+        let mut i = 0;
+        while i < aot.len() {
+            let matches = aot
+                .get(i)
                 .and_then(|t| t.get("name"))
                 .and_then(|v| v.as_str())
-                == Some(name)
-        });
-        let Some(idx) = idx else {
-            return Ok(false);
-        };
-        aot.remove(idx);
+                == Some(name);
+            if matches {
+                aot.remove(i);
+                removed_any = true;
+            } else {
+                i += 1;
+            }
+        }
         now_empty = aot.is_empty();
+    }
+    if !removed_any {
+        return Ok(false);
     }
     // Drop a now-empty array entirely rather than leaving a bare `sidecar_channels = []`.
     if now_empty {
@@ -307,6 +322,32 @@ mod tests {
             fs::read_dir(dir.path()).unwrap().count(),
             1,
             "successful writes must not leave staging files"
+        );
+    }
+
+    #[test]
+    fn remove_drains_every_duplicate_entry_in_one_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[[sidecar_channels]]\nname = \"email\"\n\
+             [[sidecar_channels]]\nname = \"telegram\"\n\
+             [[sidecar_channels]]\nname = \"email\"\n",
+        )
+        .unwrap();
+
+        let removed = remove_sidecar_block(&path, "email").unwrap();
+        assert!(removed);
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            !written.contains("\"email\""),
+            "both duplicate `email` entries must be gone: {written}"
+        );
+        assert!(
+            written.contains("\"telegram\""),
+            "the unrelated entry must survive: {written}"
         );
     }
 

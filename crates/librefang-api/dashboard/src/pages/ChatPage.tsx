@@ -1,4 +1,4 @@
-import { formatCost } from "../lib/format";
+import { formatBytes, formatCost, formatNumber } from "../lib/format";
 import { safeStorageGet, safeStorageSet } from "../lib/safeStorage";
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
@@ -126,6 +126,11 @@ function makeMessageId(prefix: string): string {
 const WS_MAX_RETRIES = 10;
 // Auth-failure close codes — do not reconnect on these
 const WS_AUTH_ERROR_CODES = new Set([4401, 4403]);
+// How long a liveness probe waits for the daemon to say anything at all.
+// Generous for a round trip on any link worth keeping, and far below the 180s
+// turn watchdog, so a socket found dead here is replaced long before that
+// watchdog would re-send the message over HTTP.
+const WS_PROBE_TIMEOUT_MS = 5_000;
 
 function useWebSocket(
   agentId: string | null,
@@ -152,8 +157,13 @@ function useWebSocket(
   }, []);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retriesRef = useRef(0);
-  // Callback fired when WS closes while a response is pending
-  const onDropRef = useRef<(() => void) | null>(null);
+  // Callback fired when the WS goes away while a response is pending.
+  // The `intentional` flag separates the two ways that happens, because they imply
+  // opposite recoveries: an unplanned close leaves delivery of the last frame in
+  // doubt, so the turn retries over HTTP, while a close we perform ourselves on an
+  // agent/session switch followed a healthy `send`, so the daemon already has the
+  // turn and retrying would run it twice.
+  const onDropRef = useRef<((intentional: boolean) => void) | null>(null);
   // Issue #3550: every in-flight slash-command listener registers its
   // AbortController here so ws.onclose can detach them all at once.
   // Without this the listeners stay attached on the dead WebSocket
@@ -173,6 +183,9 @@ function useWebSocket(
   // visibilitychange / online listeners below recover the socket
   // when the user comes back or the network reappears.
   const gaveUpRef = useRef(false);
+  // Armed while a liveness probe is outstanding, so a burst of visibilitychange
+  // events cannot stack probes on one socket.
+  const probeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Keep onAuthError in a ref to avoid triggering the effect when the caller
   // passes a fresh inline lambda on every render.
   const onAuthErrorRef = useRef(onAuthError);
@@ -230,7 +243,7 @@ function useWebSocket(
           setWsConnected(false);
           // Notify pending response handler
           if (onDropRef.current) {
-            onDropRef.current();
+            onDropRef.current(false);
             onDropRef.current = null;
           }
           // Issue #3550: detach any pending slash-command listeners.
@@ -294,13 +307,61 @@ function useWebSocket(
     // dead socket until they refresh the page (audit of #3930
     // 'silent giveup' finding).  Auth-error termination is left
     // alone — that genuinely needs a refresh to pick up new auth.
+    // Ask the daemon to prove the link is alive, because `readyState` cannot.
+    // `ws.rs` has answered {"type":"ping"} with {"type":"pong"} since the socket
+    // was written and nothing had ever called it; this is that caller, not a new
+    // protocol.
+    const probeLiveness = () => {
+      const socket = wsRef.current;
+      // CONNECTING / CLOSING / CLOSED already have their own paths; only a socket
+      // claiming OPEN can be lying.
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      // One probe per socket: visibilitychange and online can both fire on the
+      // same wake-up.
+      if (probeTimer.current) return;
+      // A turn in flight owns this window instead. `ws.rs` awaits the whole agent
+      // turn inside its main loop, so while one runs the daemon is not reading
+      // the socket and cannot answer a probe — timing out here would close a
+      // healthy chat mid-answer. `onDropRef` is non-null exactly while this
+      // socket is awaiting a response, and that turn's own 180s watchdog already
+      // covers it. Do not remove this guard without moving the daemon's turn off
+      // the socket's read loop first.
+      if (onDropRef.current) return;
+
+      const settle = () => {
+        if (probeTimer.current) clearTimeout(probeTimer.current);
+        probeTimer.current = null;
+        socket.removeEventListener("message", onAnyFrame);
+      };
+      // Any frame answers the probe, not just the pong — a stream delta is the
+      // same proof that the link carries traffic.
+      const onAnyFrame = () => settle();
+      socket.addEventListener("message", onAnyFrame);
+      probeTimer.current = setTimeout(() => {
+        settle();
+        // Hand off to the machinery that already exists: close() fires onclose,
+        // which runs the pending-turn recovery and the backoff reconnect.
+        socket.close();
+      }, WS_PROBE_TIMEOUT_MS);
+      socket.send(JSON.stringify({ type: "ping" }));
+    };
+
     const wakeUp = () => {
       if (authErrorRef.current) return;
-      if (!gaveUpRef.current) return;
-      gaveUpRef.current = false;
-      retriesRef.current = 0;
-      setAriaAnnouncement("Reconnecting…");
-      connect();
+      if (gaveUpRef.current) {
+        gaveUpRef.current = false;
+        retriesRef.current = 0;
+        setAriaAnnouncement("Reconnecting…");
+        connect();
+        return;
+      }
+      // Not having given up is not the same as being alive. A link that dies
+      // while the tab is hidden — suspend, wifi roam, a NAT drop — never fires
+      // `onclose`, so no retry is ever attempted, `gaveUpRef` stays false and
+      // this listener used to return here having done nothing. That silent case
+      // is the one it exists for; the retries-exhausted case above is the one
+      // where the browser already noticed (#3854, #3930, #4063).
+      probeLiveness();
     };
     const onVisibility = () => {
       if (document.visibilityState === "visible") wakeUp();
@@ -312,9 +373,21 @@ function useWebSocket(
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("online", wakeUp);
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (probeTimer.current) {
+        // An outstanding probe would otherwise fire against the socket this
+        // teardown is replacing and close the new one's predecessor by surprise.
+        clearTimeout(probeTimer.current);
+        probeTimer.current = null;
+      }
       retriesRef.current = 0;
       authErrorRef.current = false;
       gaveUpRef.current = false;
+      // Invoke before dropping. `ws.onclose` is nulled below so the handler that
+      // normally settles a pending turn will never run on this socket, and without
+      // this call the in-flight turn is abandoned outright: its loading flag stays
+      // raised, its bubble keeps spinning, and its 180s watchdog stays armed to
+      // re-send a message the daemon already accepted.
+      onDropRef.current?.(true);
       onDropRef.current = null;
       // Issue #3550: agent/session change tears down the socket. Any
       // command listener still pending would be orphaned, so abort
@@ -354,7 +427,10 @@ const cacheSet = setCachedChatMessages<ChatMessage>;
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(
+// Exported as a test seam: the turn lifecycle this hook owns (socket teardown, the
+// per-agent loading flag, the HTTP fallback watchdog) is not reachable from `ChatPage`
+// without standing up the whole page, and it is where the agent-switch hang lives.
+export function useChatMessages(
   agentId: string | null,
   agents: AgentItem[] = [],
   sessionVersion = 0,
@@ -1209,15 +1285,36 @@ function useChatMessages(
           }
         };
 
-        // Register fallback: if WS drops mid-stream, retry via HTTP
-        onDropRef.current = () => {
-          if (!turn.responded) {
-            ws.current?.removeEventListener("message", handleMessage);
-            if (activeTurnsRef.current[sendAgentId] === turn) {
-              delete activeTurnsRef.current[sendAgentId];
-            }
-            sendViaHttp();
+        // What to do when the socket goes away mid-turn.
+        //
+        // Unplanned drop: the `send` below may or may not have reached the daemon, so the
+        // turn is retried over HTTP — the recovery this ref has always provided.
+        //
+        // Intentional teardown (agent or session switch): the frame went out on a healthy
+        // socket, so the daemon has the turn and is still running it. Retrying would execute
+        // the same turn twice against one session's history, and stopping it would cancel
+        // work nobody asked to cancel — switching agents is not a cancel, and a long run
+        // should survive the user looking at something else. So the turn is detached: the
+        // watchdog is disarmed and the input released, the run is left alone, and its result
+        // reaches the user through session history on the next load.
+        // Re-attaching to the live stream is not available here — `ws.rs` writes terminal
+        // frames to the socket that sent the message and has no per-session fan-out, so a
+        // reconnected socket never sees them.
+        onDropRef.current = (intentional: boolean) => {
+          if (turn.responded) return;
+          if (intentional) {
+            cleanup();
+            updateAgentMessages(sendAgentId, prev => prev.map(m =>
+              m.id === botMsg.id ? { ...m, isStreaming: false } : m,
+            ));
+            finishTurnIfCurrent(sendAgentId, botMsg.id);
+            return;
           }
+          ws.current?.removeEventListener("message", handleMessage);
+          if (activeTurnsRef.current[sendAgentId] === turn) {
+            delete activeTurnsRef.current[sendAgentId];
+          }
+          sendViaHttp();
         };
 
         ws.current.addEventListener("message", handleMessage);
@@ -1595,10 +1692,10 @@ function AttachmentChip({ attachment, onRemove }: { attachment: PendingAttachmen
   );
 }
 
-// Server-side cap (`KernelConfig.max_upload_size_bytes`, default 10MB).
-// Mirrored client-side so we can reject locally before pushing bytes over
-// the wire — the backend still enforces the real limit.
-const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+// Fallback for the server's `max_upload_size_bytes`, used only until `GET /api/config` resolves.
+// The real value is read from the config query (#8181): hardcoding the mirror meant an operator who raised the cap to 100 MB still had the browser refuse at 10 MB, so the setting did nothing — the same failure the server-side layer ordering had, one floor up.
+// Matches `default_max_upload_size_bytes()` in `librefang-types`; the backend still enforces the real limit.
+const DEFAULT_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 // Types the agent loop currently consumes via
 // `routes/agents.rs::resolve_attachments()`:
 //   - image/* — passed inline as base64 image blocks
@@ -1824,6 +1921,19 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   const [isDropping, setIsDropping] = useState(false);
   const dragDepthRef = useRef(0);
   const uploadMutation = useUploadAgentFile();
+  // Same query key as the page-level `useFullConfig`, so this shares one cache entry and one refetch rather than issuing a second request.
+  const configQuery = useFullConfig();
+  const serverUploadCap = (configQuery.data as Record<string, unknown> | undefined)?.max_upload_size_bytes;
+  // While `configQuery` is still in flight, `serverUploadCap` is undefined — falling back to
+  // `DEFAULT_MAX_ATTACHMENT_BYTES` there would enforce the 10 MB mirror as if it were the real
+  // cap for the first few hundred ms of every page load, refusing files a raised
+  // `max_upload_size_bytes` allows. The server enforces the real limit regardless, so it's safe
+  // to not refuse locally until the cap is actually known.
+  const maxAttachmentBytes = typeof serverUploadCap === "number"
+    ? serverUploadCap
+    : configQuery.isSuccess
+      ? DEFAULT_MAX_ATTACHMENT_BYTES
+      : Number.POSITIVE_INFINITY;
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
   const setDeepThinking = useUIStore((s) => s.setDeepThinking);
@@ -1921,7 +2031,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
     if (!agentId || files.length === 0) return;
     for (const file of files) {
       const localId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const tooLarge = file.size > MAX_ATTACHMENT_BYTES;
+      const tooLarge = file.size > maxAttachmentBytes;
       const isImage = isImageMime(file.type);
       // Local preview only makes sense for images; PDFs render as a file chip.
       const previewUrl = isImage ? URL.createObjectURL(file) : undefined;
@@ -1948,7 +2058,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
           contentType: file.type || "application/octet-stream",
           previewUrl,
           status: "error",
-          errorMessage: t("chat.attachment_too_large", { defaultValue: "File too large (max 10MB)" }),
+          errorMessage: t("chat.attachment_too_large", { max: formatBytes(maxAttachmentBytes), defaultValue: "File too large (max {{max}})" }),
         }]);
         continue;
       }
@@ -1978,7 +2088,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
         },
       });
     }
-  }, [agentId, uploadMutation, t]);
+  }, [agentId, maxAttachmentBytes, uploadMutation, t]);
 
   // Revoke any object URLs we created when the component unmounts so we
   // don't leak memory in a long-lived chat session. We mirror `attachments`
@@ -2334,8 +2444,8 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
 
   const clampedPct = Math.max(0, Math.min(100, pct));
   const label = t("chat.context_usage", {
-    used: used.toLocaleString(),
-    max: max.toLocaleString(),
+    used: formatNumber(used),
+    max: formatNumber(max),
     pct: clampedPct.toFixed(1),
   });
   const ariaLabel = t("chat.context_usage_aria", { pct: clampedPct.toFixed(1) });
@@ -2347,7 +2457,7 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
   // the operator cannot explain. Refs #7774.
   const assumedLabel = assumed ? t("chat.context_usage_assumed") : "";
   const assumedDetail = assumed
-    ? t("chat.context_usage_assumed_detail", { max: max.toLocaleString() })
+    ? t("chat.context_usage_assumed_detail", { max: formatNumber(max) })
     : "";
 
   return (

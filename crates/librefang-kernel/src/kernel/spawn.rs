@@ -86,6 +86,19 @@ impl LibreFangKernel {
                     ),
                 )));
             }
+            // The check above only rejects an override the config cannot satisfy.
+            // A well-formed one is accepted and then ignored, because backend routing does not reach tool dispatch yet — the same gap the boot warning covers for the global `[tool_exec] kind` (#8221), reached through `agent.toml` instead.
+            //
+            // Warned per spawn rather than once at boot: a manifest can be added or edited long after startup, so a boot-time warning would never have been printed for it.
+            if !override_kind.is_wired_into_dispatch() {
+                warn!(
+                    agent = %name,
+                    configured_backend = override_kind.as_str(),
+                    "agent sets tool_exec_backend to a non-local backend, but its tool calls still execute on the \
+                     daemon host — backend routing is not wired into tool dispatch yet (#8221). This setting is \
+                     not a sandbox."
+                );
+            }
         }
 
         Ok(())
@@ -513,6 +526,7 @@ impl LibreFangKernel {
             }),
         );
         // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
+        let event_timestamp = event.timestamp;
         let (triggered, trigger_state_mutated) = self
             .workflows
             .triggers
@@ -523,6 +537,11 @@ impl LibreFangKernel {
             if let Err(e) = self.workflows.triggers.persist() {
                 warn!("Failed to persist trigger jobs after spawn event: {e}");
             }
+        }
+        // Evaluation already charged each match its `fire_count`, its cooldown stamp and a step towards `max_fires`, so dropping the matches here would spend a trigger's budget on a fire that delivered nothing.
+        // Dispatch through the same path the event bus uses so an `agent_spawned` trigger reaches its agent or starts its workflow under the same concurrency, ordering and timeout guarantees.
+        if !triggered.is_empty() {
+            self.dispatch_trigger_matches(&triggered, event_timestamp);
         }
 
         Ok(agent_id)

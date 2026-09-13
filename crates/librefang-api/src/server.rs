@@ -330,6 +330,9 @@ pub(crate) fn has_dashboard_credentials(snap: &ApiAuthSnapshot) -> bool {
 /// credential-change endpoint (which alters the derived session token that
 /// rides in the same list).
 ///
+/// All three reach it through [`refresh_auth_tables`], which republishes the per-user bearer table from the same snapshot, and new call sites should do the same: every one of them calls `reload_config` first, and a reload that refreshed the master key while leaving the bearer table alone is the exact shape of the revocation hole `refresh_auth_tables` exists to close.
+/// Call this one directly only where no config reload is involved at all, so the `[[users]]` half provably cannot have moved.
+///
 /// This is the *only* place the env / `vault:` indirection is re-run, which makes it the boundary for one operational fact worth stating plainly: rotating a `vault:NAME` master key with `librefang vault set` writes `vault.enc`, not `config.toml`, so nothing here notices until the operator calls `POST /api/config/reload`.
 /// That matches the posture the HTTP middleware has always had — `api_key_lock` was likewise resolved once and swapped on reload — and since #6613 the WS and terminal upgrade paths agree with it instead of re-resolving per connection.
 /// A reload suffices; a daemon restart is not needed.
@@ -346,6 +349,22 @@ pub(crate) async fn refresh_master_credential(
     // authenticates.
     *api_key_lock.write().await = tokens;
     master_key.set(master.plaintext, master.hash).await;
+}
+
+/// Re-derive the "dashboard username/password auth is configured" flag the middleware reads on every request.
+///
+/// Call at every site that calls [`refresh_master_credential`], and for the same reason: `dashboard_user` / `dashboard_pass` / `dashboard_pass_hash` are classified `HotAction::UpdateDashboardCredentials` with no restart flag, so the kernel treats the config swap as the whole of the reload.
+/// A boot-time snapshot on the middleware would make that classification false — it is an OR-term of the `auth_configured` test that closes the dashboard-reads allowlist, it decides whether the SPA shell at `/dashboard/*` stays publicly reachable, and it is one of the four terms of the fail-closed no-auth branch — so an operator whose remediation is "add dashboard credentials and reload" would keep all three open until the daemon restarted.
+///
+/// Kept as a separate function rather than folded into `refresh_master_credential` because the two touch unrelated credentials; they are called together, not derived from each other.
+pub(crate) fn refresh_dashboard_auth_flag(
+    snap: &ApiAuthSnapshot,
+    dashboard_auth_enabled: &std::sync::atomic::AtomicBool,
+) {
+    dashboard_auth_enabled.store(
+        has_dashboard_credentials(snap),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 pub(crate) fn configured_user_api_keys(snap: &ApiAuthSnapshot) -> Vec<middleware::ApiUserAuth> {
@@ -386,17 +405,69 @@ pub(crate) fn paired_device_user_keys(snap: &ApiAuthSnapshot) -> Vec<middleware:
         .collect()
 }
 
+/// The whole per-user bearer table: every `[[users]]` entry that carries an `api_key_hash`, plus every paired device.
+///
+/// `middleware::auth` verifies an `Authorization: Bearer` against this one list and consults nothing else — not `config.toml`, not the kernel config, not the pairing store — so the list *is* the answer to "which per-user credentials does this daemon accept", and any writer that publishes less than the union silently revokes the half it left out.
+/// One function so boot, the reload paths, and the `/api/users` write path cannot each spell the union differently, which is exactly how the two halves drifted apart: `POST /api/config/reload` never rebuilt the table at all (a deleted `[[users]]` block kept authenticating until restart), while a `/api/users` write rebuilt it from config alone (de-authenticating every paired device until restart).
+pub(crate) fn user_api_key_table(snap: &ApiAuthSnapshot) -> Vec<middleware::ApiUserAuth> {
+    let mut keys = configured_user_api_keys(snap);
+    keys.extend(paired_device_user_keys(snap));
+    keys
+}
+
+/// Push a fresh auth snapshot into *every* live auth handle the HTTP middleware reads: the master credential pair (see [`refresh_master_credential`]) and the per-user bearer table.
+///
+/// Call this — not `refresh_master_credential` alone — after a config reload.
+/// `users` is classified as a hot-reload field (`build_reload_plan`), and the WS and terminal upgrade paths honour it because they re-derive their table from `auth_snapshot()` per connection; the REST surface reads the shared table instead, which no reload path wrote. An operator who deleted a `[[users]]` block and called `POST /api/config/reload` therefore saw the revocation take effect on one surface and silently fail on the other, with the revoked bearer keeping its role on every `/api/*` request until the daemon restarted.
+///
+/// `config_stored` is `ReloadPlan::config_stored` — the kernel's own record of whether that reload swapped the freshly-read config into the live `ArcSwap`, set at the line that performs the swap. Pass it straight through; do not re-derive it from `should_store_config`, which needs a `[reload] mode` read at the same instant the kernel read it and cannot be obtained after the fact.
+/// The bearer table may only be rebuilt from a config generation that matches the file on disk. Under `mode = "off"` / `"restart"` the kernel deliberately does not swap the freshly-read config in, so `auth_snapshot()` still answers with the pre-reload `[[users]]` — and `persist_identity_sections` publishes revocations straight to the table without waiting for a reload, so a rebuild from a config the kernel refused to apply would put a rotated-away `api_key_hash` back into service. The master credential is refreshed either way, exactly as this path has since #6613.
+///
+/// The snapshot is taken *after* the bearer-table write guard is acquired, not before: `pairing_complete` holds that same guard across the kernel-store mutation that publishes a new device, so a snapshot read ahead of the lock can observe the store without the device and then overwrite the row pairing had already pushed. Taking it under the guard also means the master credential and the bearer table come from one reload generation.
+///
+/// A rebuild can now empty the table, which no reload path could do before, so the transition that removes a daemon's *last* credential is logged.
+/// An operator who deletes every key-bearing `[[users]]` block from a daemon with no `api_key`, no paired device and no dashboard password arrives at the same no-auth posture `check_bind_auth_safety` refuses to boot a non-loopback bind into: remote callers get 401 on everything, and loopback callers are served as `Owner` without presenting anything (`middleware.rs`, the `TrustedNoAuthCaller` branch), which `LIBREFANG_ALLOW_NO_AUTH` widens to every origin.
+/// The boot check runs before `build_router` and cannot see a reload, so the warning is the only signal — and it is gated on the table having been non-empty first, so a deployment that never configured auth is not nagged on every reload.
+pub(crate) async fn refresh_auth_tables<K>(
+    kernel: &K,
+    api_key_lock: &tokio::sync::RwLock<String>,
+    master_key: &middleware::MasterKeyState,
+    user_api_keys: &tokio::sync::RwLock<Vec<middleware::ApiUserAuth>>,
+    dashboard_auth_enabled: &std::sync::atomic::AtomicBool,
+    config_stored: bool,
+) where
+    K: ApiAuth + ?Sized,
+{
+    let mut dropped_last_credential = false;
+    let snap = if config_stored {
+        let mut guard = user_api_keys.write().await;
+        let snap = kernel.auth_snapshot();
+        dropped_last_credential = !guard.is_empty() && !any_auth_configured(&snap);
+        *guard = user_api_key_table(&snap);
+        snap
+    } else {
+        kernel.auth_snapshot()
+    };
+    if dropped_last_credential {
+        tracing::warn!(
+            "Config reload removed this daemon's last credential — no api_key / api_key_hash, no [[users]] entry carrying an api_key_hash, no paired device, no dashboard password. Remote callers now get 401 on everything; loopback callers are served as Owner without presenting anything, and LIBREFANG_ALLOW_NO_AUTH widens that to every origin. Restore a credential in config.toml and reload again."
+        );
+    }
+    refresh_master_credential(&snap, api_key_lock, master_key).await;
+    // The dashboard flag rides along rather than being refreshed beside each call site.
+    // It is the same snapshot, it is hot-reloadable for the same reason (`HotAction::UpdateDashboardCredentials` carries no restart flag), and the `dropped_last_credential` warning above already counts a dashboard password as one of the four credentials — so leaving it out here would make this function's name a lie at the one moment it matters.
+    refresh_dashboard_auth_flag(&snap, dashboard_auth_enabled);
+}
+
 /// Returns `true` when at least one form of authentication is configured for
 /// the daemon: a master credential (`api_key` literal / env / vault, or
 /// `api_key_hash`), any `[[users]]` entry with an `api_key_hash`, any paired
 /// device, or dashboard credentials. Used at boot (#3572) to decide whether a
-/// non-loopback bind is safe.
+/// non-loopback bind is safe, and by [`refresh_auth_tables`] to detect a reload that removed the last one.
 ///
-/// Reads the snapshot, unlike the per-request surfaces that read the live
-/// handles: this runs in `run_daemon` *before* `build_router`, so the handles do
-/// not exist yet, and resolving the vault once at boot is not a hot path.
-/// Keeping it on the snapshot is also what makes the boot refusal honest — it is
-/// answering "what did the operator configure", not "what is currently loaded".
+/// Reads the snapshot, unlike the per-request surfaces that read the live handles.
+/// The boot caller runs in `run_daemon` *before* `build_router`, so the handles do not exist yet, and resolving the vault once at boot is not a hot path; the reload caller has just rebuilt those handles from this very snapshot, so the snapshot and the live state agree by construction.
+/// Keeping it on the snapshot is also what makes both answers honest — it reports what the operator configured, not what some handle happens to hold.
 fn any_auth_configured(snap: &ApiAuthSnapshot) -> bool {
     let api_key_set = master_credential(snap).is_configured();
     let users_have_keys = snap.config_users.iter().any(|u| {
@@ -836,7 +907,10 @@ pub(crate) async fn dashboard_login(
             session.user_role = Some("owner".to_string());
             {
                 let mut sessions = state.active_sessions.write().await;
-                sessions.insert(session.token.clone(), session);
+                sessions.insert(
+                    crate::password_hash::hash_device_token(&session.token),
+                    session,
+                );
                 // Persist so sessions survive daemon restarts.
                 save_sessions(state.kernel.home_dir(), &sessions);
             }
@@ -895,7 +969,10 @@ pub(crate) async fn mint_dashboard_session(
     token.user_role = Some(role.to_string());
     {
         let mut sessions = state.active_sessions.write().await;
-        sessions.insert(token.token.clone(), token.clone());
+        sessions.insert(
+            crate::password_hash::hash_device_token(&token.token),
+            token.clone(),
+        );
         save_sessions(state.kernel.home_dir(), &sessions);
     }
     let cookie = format!(
@@ -1018,7 +1095,10 @@ pub(crate) async fn dashboard_logout(
         let mut sessions = state.active_sessions.write().await;
         let mut removed_any = false;
         for token in &tokens {
-            if sessions.remove(token).is_some() {
+            if sessions
+                .remove(&crate::password_hash::hash_device_token(token))
+                .is_some()
+            {
                 removed_any = true;
             }
         }
@@ -1296,17 +1376,30 @@ pub(crate) async fn change_password(
         Err(error) => return change_password_internal_error("join config write task", &error),
     }
 
-    // Trigger config reload so the kernel picks up the new credentials
-    if let Err(e) = state.kernel.reload_config().await {
-        tracing::warn!("Config reload after credential change failed: {e}");
-    }
+    // Trigger config reload so the kernel picks up the new credentials.
+    // The reload is best-effort — the credentials are already durable on disk, so a reload failure must not fail the request — but the plan it returns is not optional bookkeeping: it is the only record of whether the live config actually advanced, which decides whether the per-user bearer table may be rebuilt below.
+    let reload_plan = match state.kernel.reload_config().await {
+        Ok(plan) => Some(plan),
+        Err(e) => {
+            tracing::warn!("Config reload after credential change failed: {e}");
+            None
+        }
+    };
 
-    // Update the live auth handles so the derived static token reflects the
-    // new credentials immediately. The master key is untouched by a dashboard
-    // password change, but it rides in the same composite token list, so both
-    // handles are refreshed from one snapshot rather than only the list.
-    let snap = state.kernel.auth_snapshot();
-    refresh_master_credential(&snap, &state.api_key_lock, &state.master_key).await;
+    // Update the live auth handles so the derived static token reflects the new credentials immediately.
+    // The master key is untouched by a dashboard password change, but it rides in the same composite token list, so both handles are refreshed from one snapshot rather than only the list.
+    //
+    // The per-user bearer table goes with them even though this endpoint writes `[dashboard]` only, because the reload above is not scoped to what this endpoint wrote: in Hot / Hybrid mode it swaps in whatever `config.toml` currently says, including a `[[users]]` block an operator deleted by hand minutes ago.
+    // Leaving that to the 30 s config-file watcher does not work, and the gate is what breaks it — the watcher's own `reload_config` diffs the already-swapped live config against the same unchanged file, gets an empty plan, and skips the rebuild. A revoked bearer that a dashboard password change happened to load would then stay live until the daemon restarted.
+    refresh_auth_tables(
+        state.kernel.as_ref(),
+        &state.api_key_lock,
+        &state.master_key,
+        &state.user_api_keys,
+        &state.dashboard_auth_enabled,
+        reload_plan.is_some_and(|plan| plan.config_stored),
+    )
+    .await;
 
     // Invalidate all existing sessions to force re-login
     state.active_sessions.write().await.clear();
@@ -1341,22 +1434,23 @@ const SESSIONS_HASH_PREFIX: &str = "$sha256$";
 /// upgraded onto a multi-user host stops leaking bearer tokens immediately
 /// instead of waiting for the next session mutation.
 ///
-/// SECURITY (#5494): the on-disk map key is hashed by `save_sessions` so
+/// SECURITY (#5494): the on-disk map key is a `$sha256$` hash so
 /// `sessions.json` lifted out of a backup snapshot (Time Machine, restic,
 /// BorgBackup pipelines often do NOT honor source 0600 perms) does not
-/// yield a usable set of bearer tokens. Entries whose key carries the
-/// `$sha256$` prefix are dropped on load — there is no cleartext to re-key
-/// the in-memory auth map with, so they cannot authenticate any presented
-/// token. The daemon trades cross-restart session continuity for
-/// backup-snapshot replay resistance; operators get one re-login per
-/// restart, an attacker with a month-old `sessions.json` gets nothing.
+/// yield a usable set of bearer tokens.
 ///
-/// Entries whose key does NOT carry the `$sha256$` prefix are treated as
-/// legacy cleartext from a pre-#5494 daemon. They authenticate normally
-/// for one session lifetime and are rewritten in the new hashed form by
-/// the very next `save_sessions` call (every login, every logout, the
-/// periodic GC sweep), so the migration window is at most one mutation
-/// deep.
+/// That protection does not require discarding the entries. The in-memory
+/// map is keyed by the same hash, and every lookup hashes the token the
+/// caller presented before probing it, so a hashed entry authenticates its
+/// token without the daemon ever holding the cleartext. Restoring the map
+/// verbatim therefore costs nothing an attacker can use: the file still
+/// contains only hashes, and `SessionToken.token` is still cleared before
+/// it is written.
+///
+/// Entries whose key does NOT carry the prefix are legacy cleartext from a
+/// pre-#5494 daemon. They are hashed on load so both vintages share one
+/// keyspace, and the next `save_sessions` writes the file back in the
+/// hashed form.
 fn load_sessions(
     home_dir: &std::path::Path,
 ) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
@@ -1392,13 +1486,15 @@ fn load_sessions(
         serde_json::from_str(&content).unwrap_or_default();
     sessions
         .into_iter()
-        .filter(|(key, _)| {
-            // New-format hashed entries (post-#5494) cannot be reversed
-            // into the cleartext key the auth middleware looks up against
-            // — keeping them would just bloat the map with rows that
-            // match no presented token. Drop them; operator must
-            // re-authenticate after restart.
-            !key.starts_with(SESSIONS_HASH_PREFIX)
+        .map(|(key, st)| {
+            // Legacy pre-#5494 rows carry the cleartext token as the key.
+            // Hash them so the restored map is uniformly keyed the way
+            // every lookup probes it.
+            if key.starts_with(SESSIONS_HASH_PREFIX) {
+                (key, st)
+            } else {
+                (crate::password_hash::hash_device_token(&key), st)
+            }
         })
         .filter(|(_, st)| {
             !crate::password_hash::is_token_expired(
@@ -1425,13 +1521,22 @@ fn sessions_for_disk(
 ) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
     sessions
         .iter()
-        .map(|(token, st)| {
+        .map(|(key, st)| {
             let mut redacted = st.clone();
             // Wipe the inner copy of the token so a backup snapshot
             // doesn't hand the attacker the same secret via the value
             // payload that the key already hid.
             redacted.token.clear();
-            (crate::password_hash::hash_device_token(token), redacted)
+            // The in-memory map is already keyed by the digest, so this is
+            // normally a passthrough. Hashing anything that is not still
+            // keeps the guarantee at the disk boundary rather than resting
+            // it on every insert site getting the key right.
+            let key = if key.starts_with(SESSIONS_HASH_PREFIX) {
+                key.clone()
+            } else {
+                crate::password_hash::hash_device_token(key)
+            };
+            (key, redacted)
         })
         .collect()
 }
@@ -1441,14 +1546,14 @@ fn sessions_for_disk(
 /// SECURITY: The file is written with owner-only permissions (0600) so that
 /// bearer tokens stored in it cannot be read by other local users (#3589/#3725).
 ///
-/// SECURITY (#5494): each map key is hashed via `hash_device_token` (and
-/// the duplicate `SessionToken.token` field is cleared) before
-/// serialization, so `sessions.json` cannot be replayed even if leaked
-/// through a backup pipeline that did not honor the source 0600 perms
-/// (Time Machine, restic, BorgBackup snapshots). The in-memory
-/// `active_sessions` map keeps the cleartext token as the key, so live
-/// auth lookups in `middleware.rs` (`sessions.get(token_str)`) are
-/// unchanged.
+/// SECURITY (#5494): the map key is a `hash_device_token` digest and the
+/// duplicate `SessionToken.token` field is cleared before serialization, so
+/// `sessions.json` cannot be replayed even if leaked through a backup
+/// pipeline that did not honor the source 0600 perms (Time Machine, restic,
+/// BorgBackup snapshots). The in-memory `active_sessions` map is keyed by
+/// that same digest, so live auth lookups in `middleware.rs` hash the
+/// presented token before probing (`sessions.get(&hash_device_token(tok))`)
+/// and the cleartext never has to be stored anywhere.
 fn save_sessions(
     home_dir: &std::path::Path,
     sessions: &std::collections::HashMap<String, crate::password_hash::SessionToken>,
@@ -1602,16 +1707,16 @@ pub async fn build_router(
         kernel.home_dir().to_path_buf(),
     ));
     refresh_master_credential(&auth_snap, &api_key_lock, &master_key).await;
+    // Third live auth handle, shared with AppState and AuthState the same way the two above are.
+    // `dashboard_user` / `dashboard_pass` / `dashboard_pass_hash` hot-reload, so the middleware must not snapshot "is dashboard auth configured" at boot; see `refresh_dashboard_auth_flag`.
+    let dashboard_auth_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    refresh_dashboard_auth_flag(&auth_snap, &dashboard_auth_enabled);
     // Per-user API key snapshot is wrapped in a `RwLock` so the rotate-key
     // endpoint (`POST /api/users/{name}/rotate-key`) can swap entries live —
     // both AppState (mutator) and AuthState (reader) share the same Arc, so
     // the next request after rotation sees the new hash and the old plaintext
     // bearer token immediately fails authentication.
-    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new({
-        let mut keys = configured_user_api_keys(&auth_snap);
-        keys.extend(paired_device_user_keys(&auth_snap));
-        keys
-    }));
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(user_api_key_table(&auth_snap)));
 
     let auth_login_limiter = Arc::new(rate_limiter::AuthLoginLimiter::new());
 
@@ -1648,38 +1753,49 @@ pub async fn build_router(
             kernel.memory_substrate().pool(),
         ));
 
-    // Build the passkey ceremony engine only when opted in. A bad RP config
-    // is logged loudly and leaves the engine `None` (routes answer 503)
-    // rather than aborting daemon boot — password login must keep working.
+    // Build the passkey ceremony engine only when opted in.
+    // A bad RP config or a missing dashboard principal is logged loudly and leaves the engine `None` (routes answer 503) rather than aborting daemon boot — password login must keep working.
     let passkey_engine: Option<Arc<crate::passkey::PasskeyEngine>> = {
         let cfg = kernel.config_ref();
         if cfg.passkey_enabled {
+            // Trimmed to match `dashboard_login`, which compares the typed username against the trimmed `dashboard_user`: an untrimmed principal would file credentials under a name no password session can present, and the registration guard in `routes::passkey` would then refuse the only caller entitled to enroll.
             let principal = resolve_credential(
                 &cfg.dashboard_user,
                 "LIBREFANG_DASHBOARD_USER",
                 kernel.home_dir(),
             );
-            match crate::passkey::PasskeyEngine::new(
-                &cfg.passkey_rp_id,
-                &cfg.passkey_rp_origin,
-                &principal,
-            ) {
-                Ok(engine) => {
-                    tracing::info!(
-                        rp_id = %cfg.passkey_rp_id,
-                        rp_origin = %cfg.passkey_rp_origin,
-                        "passkey (WebAuthn) login enabled"
-                    );
-                    Some(Arc::new(engine))
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "passkey_enabled = true but the RP configuration is invalid; \
-                         passkey login is DISABLED. Fix passkey_rp_id / passkey_rp_origin \
-                         in config.toml. Password login is unaffected."
-                    );
-                    None
+            let principal = principal.trim().to_string();
+            if principal.is_empty() {
+                // A passkey authenticates *as* the dashboard principal, so without one there is no identity to mint a session for — `authentication_verify` would hand `mint_dashboard_session` an empty user name. Leave the engine `None` (routes answer 503) instead of accepting registrations for a login that can never complete.
+                tracing::error!(
+                    "passkey_enabled = true but no dashboard user is configured; passkey login is \
+                     DISABLED. Passkeys authenticate as the dashboard principal — set dashboard_user \
+                     (or LIBREFANG_DASHBOARD_USER) in config.toml. Password login is unaffected."
+                );
+                None
+            } else {
+                match crate::passkey::PasskeyEngine::new(
+                    &cfg.passkey_rp_id,
+                    &cfg.passkey_rp_origin,
+                    &principal,
+                ) {
+                    Ok(engine) => {
+                        tracing::info!(
+                            rp_id = %cfg.passkey_rp_id,
+                            rp_origin = %cfg.passkey_rp_origin,
+                            "passkey (WebAuthn) login enabled"
+                        );
+                        Some(Arc::new(engine))
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "passkey_enabled = true but the RP configuration is invalid; \
+                             passkey login is DISABLED. Fix passkey_rp_id / passkey_rp_origin \
+                             in config.toml. Password login is unaffected."
+                        );
+                        None
+                    }
                 }
             }
         } else {
@@ -1710,6 +1826,7 @@ pub async fn build_router(
         active_sessions: active_sessions.clone(),
         api_key_lock: api_key_lock.clone(),
         master_key: master_key.clone(),
+        dashboard_auth_enabled: dashboard_auth_enabled.clone(),
         user_api_keys: user_api_keys_lock.clone(),
         media_drivers: librefang_kernel::media::MediaDriverCache::new_with_urls(
             kernel.config_ref().provider_urls.clone(),
@@ -1773,12 +1890,15 @@ pub async fn build_router(
     // change_password / rotate-key can update them live without a daemon
     // restart.
     let user_api_keys_initial_len = state.user_api_keys.read().await.len();
-    // Atomic snapshot so dashboard_auth_enabled and api_key_set come from
-    // the same config generation (#3744 review #2).
+    // Atomic snapshot so the dashboard-credential flag and api_key_set come from the same config generation (#3744 review #2).
     let snap = state.kernel.auth_snapshot();
-    let dashboard_auth_enabled = has_dashboard_credentials(&snap);
+    // Re-derive onto the shared handle so the flag the middleware reads and the `any_auth` the boot logs below describe come from this one snapshot rather than the (older) one taken before `AppState`.
+    refresh_dashboard_auth_flag(&snap, &state.dashboard_auth_enabled);
+    let dashboard_auth_configured = state
+        .dashboard_auth_enabled
+        .load(std::sync::atomic::Ordering::Relaxed);
     let api_key_set = master_credential(&snap).is_configured();
-    let any_auth = api_key_set || user_api_keys_initial_len > 0 || dashboard_auth_enabled;
+    let any_auth = api_key_set || user_api_keys_initial_len > 0 || dashboard_auth_configured;
 
     // Resolve the effective value of `require_auth_for_reads`.
     // - Explicit `Some(true)`  → operators are forcing the allowlist
@@ -1794,11 +1914,18 @@ pub async fn build_router(
     //   agent IDs to the LAN.
     let configured_require_auth_for_reads = state.kernel.config_ref().require_auth_for_reads;
     let external_auth_proxy = state.kernel.config_ref().external_auth_proxy;
-    let require_auth_for_reads = derive_require_auth_for_reads(
+    // The effective posture *at boot*, used only by the operator-facing logs below.
+    let require_auth_for_reads_at_boot = derive_require_auth_for_reads(
         configured_require_auth_for_reads,
         any_auth,
         external_auth_proxy,
     );
+    // What the middleware carries is the same derivation with `any_auth` assumed true, because the middleware recomputes the "is any credential configured" half on every request and ANDs it in (`auth_configured` in `middleware::auth`).
+    // The credentials that half reads reach it without a restart: `refresh_master_credential` pushes `api_key` / `api_key_hash` into the live handles on `POST /api/config/reload` and on the config-file watcher tick, `refresh_dashboard_auth_flag` re-derives the dashboard-credential flag at the same sites, and `[[users]]` entries written through `/api/users*` replace `user_api_keys` in place.
+    // `require_auth_for_reads` and `external_auth_proxy` are the restart-required pair, which is why they — and only they — are snapshotted here.
+    // Folding the boot value of `any_auth` in would mean an operator who adds the first credential and reloads keeps a publicly readable dashboard-reads allowlist until the daemon restarts, with the reload plan reporting `restart_required: false` and nothing warning them.
+    let require_auth_for_reads =
+        derive_require_auth_for_reads(configured_require_auth_for_reads, true, external_auth_proxy);
     // Audit `require-auth-for-reads-false-leak`: surface the
     // bypass-refused case loudly so an operator who set
     // `require_auth_for_reads = false` without an external proxy
@@ -1815,7 +1942,7 @@ pub async fn build_router(
              Cloudflare Access, etc.) actually fronts the daemon."
         );
     }
-    if require_auth_for_reads && !any_auth {
+    if require_auth_for_reads_at_boot && !any_auth {
         tracing::warn!(
             "require_auth_for_reads = true but no authentication is configured \
              (api_key, user_api_keys, and dashboard credentials are all empty). \
@@ -1823,7 +1950,7 @@ pub async fn build_router(
              credentials to lock down read endpoints."
         );
     }
-    if require_auth_for_reads && configured_require_auth_for_reads.is_none() {
+    if require_auth_for_reads_at_boot && configured_require_auth_for_reads.is_none() {
         tracing::info!(
             "require_auth_for_reads auto-enabled because authentication is configured \
              (api_key / user_api_keys / dashboard credentials). Dashboard reads now \
@@ -1896,7 +2023,7 @@ pub async fn build_router(
         api_key_lock: api_key_lock.clone(),
         master_key: master_key.clone(),
         active_sessions: active_sessions.clone(),
-        dashboard_auth_enabled,
+        dashboard_auth_enabled: state.dashboard_auth_enabled.clone(),
         user_api_keys: state.user_api_keys.clone(),
         require_auth_for_reads,
         allow_no_auth,
@@ -1943,11 +2070,8 @@ pub async fn build_router(
     let v1_routes = api_v1_routes(webhook_body_limit);
 
     // Upload routes are defined separately so they can share the auth/rate-limit
-    // layers but bypass the *global* `RequestBodyLimitLayer` applied at
-    // `app.layer(...)` below — uploads have their own, larger, operator-
-    // configurable cap (`max_upload_size_bytes`, default 10 MB) which
-    // would otherwise be clamped by the global cap intended for JSON
-    // request bodies.
+    // layers but bypass the *global* `RequestBodyLimitLayer` — uploads have their own, larger, operator-configurable cap (`max_upload_size_bytes`, default 10 MB) which would otherwise be clamped by the global cap intended for JSON request bodies.
+    // The bypass is what the global limit is applied *to*: it wraps the route set built before this router is merged, never `app` as a whole (#8181).
     //
     // Pre-#audit, the upload sub-router was merged into `app` BEFORE the
     // global limit ran but had no limit of its own — `body: axum::body::Bytes`
@@ -1964,6 +2088,14 @@ pub async fn build_router(
     // place as defence-in-depth (and to surface a localised error
     // message instead of the framework-default 413).
     let upload_body_cap = kernel.config_ref().max_upload_size_bytes;
+    // `upload_file` buffers its whole body into RAM (`axum::body::Bytes`), so the per-request
+    // caps above don't bound total RSS on this route — only concurrency does. Sized once here
+    // (a restart, not a hot-reload knob: see `max_concurrent_uploads` in config_reload.rs) and
+    // shared by both aliases below so the two paths draw from the same pool rather than each
+    // getting their own `max_concurrent_uploads` allowance.
+    let upload_concurrency_permits = Arc::new(tokio::sync::Semaphore::new(
+        kernel.config_ref().max_concurrent_uploads,
+    ));
     let upload_routes = Router::new()
         .route(
             "/api/agents/{id}/upload",
@@ -1973,10 +2105,35 @@ pub async fn build_router(
             "/api/v1/agents/{id}/upload",
             axum::routing::post(routes::agents::upload_file),
         )
-        .layer(RequestBodyLimitLayer::new(upload_body_cap));
+        .layer(RequestBodyLimitLayer::new(upload_body_cap))
+        // The two limits are not the same limit and neither substitutes for the other.
+        // `RequestBodyLimitLayer` bounds the *stream*; `DefaultBodyLimit` bounds what the `Bytes` **extractor** will buffer, and its default is axum's own 2 MiB.
+        // Without this line the stream cap is irrelevant above 2 MiB: `upload_file` extracts `axum::body::Bytes`, so a 3 MiB attachment is refused by the extractor with a 413 even when the operator set `max_upload_size_bytes` to 10 MB or 100 MB — which is most of the PDFs the issue was reported about (#8185).
+        .layer(axum::extract::DefaultBodyLimit::max(upload_body_cap))
+        // Outermost on the upload path, so it answers before the limit layer cuts the stream: a body whose declared `Content-Length` is over the cap gets a JSON 413 naming the cap, and the daemon logs it.
+        // Without this the operator sees nothing at all and the client sees a dropped connection it cannot tell apart from an unreachable daemon (#8181).
+        .layer(axum::middleware::from_fn_with_state(
+            upload_body_cap,
+            middleware::reject_oversized_upload,
+        ))
+        // Outermost of all: acquires before any of the above run, so a saturated pool gets
+        // rejected without spending even the Content-Length parse, and holds the permit across
+        // the whole request/response round trip — including the `Bytes` extraction the layers
+        // above cannot bound concurrency on.
+        .layer(axum::middleware::from_fn_with_state(
+            upload_concurrency_permits,
+            middleware::limit_concurrent_uploads,
+        ));
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
+        // matchit's `{*path}` capture requires at least one character, so the
+        // catch-all below never matched the basepath root itself and both forms
+        // returned 404 — the URL an operator bookmarks, and the one an installed
+        // PWA launches into (`manifest.json` declares `start_url` as
+        // `/dashboard/#/overview`, whose path component is `/dashboard/`).
+        .route("/dashboard", axum::routing::get(webchat::webchat_page))
+        .route("/dashboard/", axum::routing::get(webchat::webchat_page))
         .route(
             "/dashboard/{*path}",
             axum::routing::get(webchat::react_asset),
@@ -2036,11 +2193,6 @@ pub async fn build_router(
             "/v1/models",
             axum::routing::get(crate::openai_compat::list_models),
         )
-        // Upload routes must be merged BEFORE the layer calls so that auth and
-        // rate-limit middleware apply to them.  They are intentionally excluded
-        // from RequestBodyLimitLayer (applied below) because the handler
-        // enforces its own configurable limit.
-        .merge(upload_routes)
         // JSON depth guard — buffers `application/json` bodies once,
         // checks nesting depth against MAX_JSON_BODY_DEPTH, rejects
         // adversarial `[[[[…]]]]` payloads before any handler sees them.
@@ -2052,6 +2204,16 @@ pub async fn build_router(
         // these), so it still wraps the guard and a depth rejection surfaces
         // in the request log with the right status. Audit: check-json-depth-unused.
         .layer(axum::middleware::from_fn(middleware::enforce_json_body_depth))
+        // The global JSON-body cap, applied HERE rather than to the finished `app`.
+        // `Router::layer` wraps every route registered so far and nothing registered later, so this covers every route above — including the depth guard on the line before it — and exempts `upload_routes`, merged on the next line with its own larger cap.
+        // Applying it to `app` after the merge — as this did until #8181 — wrapped the upload router too, and the smaller of two nested limits is the one that cuts: an operator's 100 MB `max_upload_size_bytes` could never take effect behind a 1 MB global cap.
+        // Staying OUTSIDE the depth guard is the other half of the ordering and is just as load-bearing: the guard buffers a JSON body whole under its own 8 MiB ceiling, so a cap placed inside it would let an authenticated caller stage 8 MiB before a 1 MB limit ever ran.
+        .layer(RequestBodyLimitLayer::new(
+            kernel.config_ref().max_request_body_bytes,
+        ))
+        // Upload routes must be merged BEFORE the layer calls below so that auth and rate-limit middleware apply to them.
+        // Merging after the depth guard also takes uploads out of it, which is what we want twice over: the upload handler writes bytes to disk and never hands them to serde_json, and the guard's 8 MiB ceiling was a third undeclared cap on `application/json` uploads (an allowed upload type — `EXTRA_ALLOWED_UPLOAD_TYPES`), overriding `max_upload_size_bytes` exactly the way the global limit did.
+        .merge(upload_routes)
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             middleware::auth,
@@ -2088,19 +2250,6 @@ pub async fn build_router(
                 .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO)),
         )
         .layer(cors);
-
-    // Apply the global request body size limit to the full app.  Upload routes
-    // were merged before the security layers above and therefore covered by
-    // auth/rate-limit, but they are NOT wrapped by this layer — Axum layers
-    // only apply to routes registered before the layer call, so routes merged
-    // after this point (channel_routes below) are also exempt.  The upload
-    // sub-router now carries its OWN `RequestBodyLimitLayer` sized to
-    // `max_upload_size_bytes` (added above), so the upload path remains
-    // wire-level capped — the global limit here is intentionally the
-    // smaller JSON-body cap and is not the upload safety net.
-    let app = app.layer(RequestBodyLimitLayer::new(
-        kernel.config_ref().max_request_body_bytes,
-    ));
 
     // NOTE: HTTP metrics are recorded inside `request_logging` middleware via
     // `librefang_telemetry::metrics::record_http_request()`.  A separate metrics
@@ -2362,18 +2511,28 @@ pub async fn run_daemon(
                     tracing::info!("Config file changed, reloading...");
                     match k.reload_config().await {
                         Ok(plan) => {
-                            if plan.has_changes() {
+                            if !plan.has_changes() {
+                                tracing::debug!("Config hot-reload: no actionable changes");
+                            } else if plan.config_stored {
                                 tracing::info!("Config hot-reload applied: {:?}", plan.hot_actions);
                             } else {
-                                tracing::debug!("Config hot-reload: no actionable changes");
+                                // `[reload] mode` withheld the swap, so the plan is a preview of what a restart would do and nothing ran. Logging it as "applied" is the same misleading-success shape the HTTP response avoids.
+                                tracing::info!(
+                                    "Config change read but withheld by [reload] mode; restart to apply — hot actions {:?}, read-live changes {:?}",
+                                    plan.hot_actions,
+                                    plan.noop_changes
+                                );
                             }
-                            // Same live-handle refresh the `POST /api/config/reload`
-                            // handler performs (#6613) — an operator editing
-                            // config.toml directly must not need a restart before an
-                            // edited `api_key` / `api_key_hash` reaches the HTTP
-                            // middleware.
-                            let snap = k.auth_snapshot();
-                            refresh_master_credential(&snap, &st.api_key_lock, &st.master_key).await;
+                            // Same live-handle refresh the `POST /api/config/reload` handler performs (#6613) — an operator editing config.toml directly must not need a restart before an edited `api_key` / `api_key_hash` reaches the HTTP middleware, and the same holds for an edited `[[users]]` block reaching the per-user bearer table.
+                            refresh_auth_tables(
+                                k.as_ref(),
+                                &st.api_key_lock,
+                                &st.master_key,
+                                &st.user_api_keys,
+                                &st.dashboard_auth_enabled,
+                                plan.config_stored,
+                            )
+                            .await;
                             // Restart channel bridge if channel config changed
                             if plan.hot_actions.contains(
                                 &HotAction::ReloadChannels,
@@ -3291,8 +3450,11 @@ mod observability_tests {
         };
 
         let mut sessions = std::collections::HashMap::new();
-        sessions.insert("live-token".to_string(), live);
-        sessions.insert("expired-token".to_string(), expired);
+        sessions.insert(crate::password_hash::hash_device_token("live-token"), live);
+        sessions.insert(
+            crate::password_hash::hash_device_token("expired-token"),
+            expired,
+        );
 
         // Per #5494, the on-disk form is keyed by the SHA-256 hash of
         // the cleartext token (and the inner token field is wiped), so
@@ -3428,7 +3590,10 @@ mod observability_tests {
     fn sessions_for_disk_redacts_token_field() {
         let cleartext = "f0e1d2c3b4a596878695a4b3c2d1e0f0e1d2c3b4a596878695a4b3c2d1e0f0e1";
         let mut sessions = std::collections::HashMap::new();
-        sessions.insert(cleartext.to_string(), make_session_5494(cleartext));
+        sessions.insert(
+            crate::password_hash::hash_device_token(cleartext),
+            make_session_5494(cleartext),
+        );
 
         let on_disk = sessions_for_disk(&sessions);
 
@@ -3450,11 +3615,14 @@ mod observability_tests {
     }
 
     /// End-to-end audit threat model: a daemon writes a session to
-    /// `sessions.json`, the file is later restored from a backup
-    /// snapshot (Time Machine, restic, BorgBackup), and the original
-    /// cleartext token must NOT authenticate against the re-loaded
-    /// map. Asserts both that the raw file holds no cleartext AND that
-    /// `load_sessions` does not produce a row keyed by it.
+    /// `sessions.json` and the file is later lifted out of a backup
+    /// snapshot (Time Machine, restic, BorgBackup). The file must yield
+    /// nothing an attacker can present — no cleartext anywhere, and a
+    /// key that is a one-way digest.
+    ///
+    /// Also pins the fail-safe at the disk boundary: this map is keyed by
+    /// cleartext, which the live map never is, and it must still be hashed
+    /// on the way out.
     #[test]
     fn save_then_load_does_not_resurrect_cleartext_token() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3473,15 +3641,25 @@ mod observability_tests {
             "sessions.json must not contain the cleartext bearer: {raw}"
         );
 
-        // `load_sessions` simulates both the boot path and what a
-        // forensic reader would derive from a backup. The middleware's
-        // auth lookup is `sessions.get(presented_token_cleartext)`, so
-        // absence of the cleartext key here means a presented
-        // `Bearer <cleartext>` returns None ⇒ 401.
+        // The threat is an attacker holding the FILE, and the file yields
+        // nothing to present: the key is a one-way digest and the inner
+        // token field is empty, so there is no bearer to replay. That is
+        // what the two assertions above establish.
+        //
+        // What the restored map *does* still authenticate is the original
+        // token, for whoever legitimately holds it — the browser that was
+        // issued it. Keying the map by the same digest the file uses means
+        // the daemon can honour that without ever storing the cleartext.
+        // Dropping these rows on load never denied an attacker anything;
+        // it only logged out every operator on every restart.
         let reloaded = load_sessions(home);
         assert!(
             !reloaded.contains_key(&cleartext),
-            "disk-recovered map must not authenticate the original cleartext token"
+            "the cleartext must never be a key anywhere, on disk or in memory"
+        );
+        assert!(
+            reloaded.contains_key(&crate::password_hash::hash_device_token(&cleartext)),
+            "a restored session must still authenticate the token its holder presents"
         );
     }
 
@@ -3504,8 +3682,12 @@ mod observability_tests {
 
         let reloaded = load_sessions(home);
         assert!(
-            reloaded.contains_key(&cleartext),
-            "legacy cleartext sessions.json entries must continue to auth across one upgrade cycle"
+            reloaded.contains_key(&crate::password_hash::hash_device_token(&cleartext)),
+            "legacy cleartext entries must be hashed on load so they keep authenticating"
+        );
+        assert!(
+            !reloaded.contains_key(&cleartext),
+            "the cleartext key must not survive the migration into memory"
         );
 
         // Next save_sessions migrates the file in place.
@@ -3518,6 +3700,118 @@ mod observability_tests {
         assert!(
             migrated_raw.contains(SESSIONS_HASH_PREFIX),
             "migrated file must carry the $sha256$ marker for the rewritten entry: {migrated_raw}"
+        );
+    }
+
+    /// A restored session must keep the identity it was issued with.
+    ///
+    /// `sessions_for_disk` clears `SessionToken.token` but deliberately keeps
+    /// `user_name` / `user_role`, and both carry `#[serde(default)]`. If they
+    /// were lost in the round trip the session would still authenticate but
+    /// arrive with no `AuthenticatedApiUser`, taking the trusted-anonymous
+    /// path meant for pre-attribution sessions — a silent privilege change
+    /// rather than a visible failure.
+    #[test]
+    fn restored_session_keeps_its_user_and_role() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        let cleartext = "b".repeat(64);
+        let mut session = make_session_5494(&cleartext);
+        session.user_name = Some("admin".to_string());
+        session.user_role = Some("owner".to_string());
+
+        let key = crate::password_hash::hash_device_token(&cleartext);
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(key.clone(), session);
+        save_sessions(home, &sessions);
+
+        let restored = load_sessions(home);
+        let restored = restored
+            .get(&key)
+            .expect("session must survive the save/load round trip");
+        assert_eq!(
+            restored.user_name.as_deref(),
+            Some("admin"),
+            "user_name must survive persistence"
+        );
+        assert_eq!(
+            restored.user_role.as_deref(),
+            Some("owner"),
+            "user_role must survive persistence, or the session silently downgrades"
+        );
+        assert!(
+            restored.token.is_empty(),
+            "the redacted token field stays empty; nothing reads it after lookup"
+        );
+    }
+
+    /// The other direction of the same question: a row that genuinely lacks
+    /// the attribution fields must load as `None`, not as some default that
+    /// grants more than it should.
+    ///
+    /// `None` routes an unattributed session to `anonymous_fallback_acl` in
+    /// the memory ACL — one readable namespace, no writes, no PII, no export,
+    /// no delete.
+    ///
+    /// That is only half the picture, and the half that misled a first reading
+    /// of this: the middleware's own RBAC gate is a *separate* check, and it
+    /// used to be skipped entirely for a row with no role rather than run at a
+    /// low one. `a_restored_session_without_attribution_still_faces_the_rbac_gate`
+    /// covers that side; this test only pins the deserialization contract.
+    #[test]
+    fn a_row_without_attribution_loads_as_none_not_as_a_privileged_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        // Written by hand with the two optional fields absent, which is what a
+        // pre-attribution daemon left behind.
+        let key = crate::password_hash::hash_device_token("d".repeat(64).as_str());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(
+            sessions_path(home),
+            format!(r#"{{"{key}":{{"token":"","created_at":{now}}}}}"#),
+        )
+        .unwrap();
+
+        let restored = load_sessions(home);
+        let restored = restored.get(&key).expect("row must load");
+        assert!(
+            restored.user_name.is_none() && restored.user_role.is_none(),
+            "absent attribution must stay absent, got {:?}/{:?}",
+            restored.user_name,
+            restored.user_role
+        );
+    }
+
+    /// An expired session must not come back to life across a restart.
+    #[test]
+    fn expired_sessions_are_not_restored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cleartext = "c".repeat(64);
+        let mut stale = make_session_5494(&cleartext);
+        stale.created_at = now.saturating_sub(crate::password_hash::DEFAULT_SESSION_TTL_SECS + 60);
+
+        let key = crate::password_hash::hash_device_token(&cleartext);
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(key.clone(), stale);
+        save_sessions(home, &sessions);
+
+        assert!(
+            !load_sessions(home).contains_key(&key),
+            "a session past DEFAULT_SESSION_TTL_SECS must not be restored"
         );
     }
 }
