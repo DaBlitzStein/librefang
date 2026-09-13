@@ -709,6 +709,7 @@ impl LibreFangKernel {
         let mut ephemeral_session = librefang_memory::session::Session {
             id: ephemeral_session_id,
             agent_id,
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: Some("ephemeral /btw".to_string()),
@@ -2467,6 +2468,7 @@ impl LibreFangKernel {
         let mut session = existing_session.unwrap_or_else(|| librefang_memory::session::Session {
             id: effective_session_id,
             agent_id,
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
