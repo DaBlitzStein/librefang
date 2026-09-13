@@ -58,6 +58,7 @@ class LibreFang:
         self.hands = _HandsResource(self)
         self.inbox = _InboxResource(self)
         self.mcp = _McpResource(self)
+        self.media = _MediaResource(self)
         self.memory = _MemoryResource(self)
         self.models = _ModelsResource(self)
         self.network = _NetworkResource(self)
@@ -74,32 +75,20 @@ class LibreFang:
         self.workflows = _WorkflowsResource(self)
 
 
-    def _request(
-        self,
-        method: str,
-        path: str,
-        body: Any = None,
-        query: Optional[Dict[str, Any]] = None,
-        raw_body: Optional[str] = None,
-        content_type: Optional[str] = None,
-    ) -> Any:
+    def _request(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None, content_type: Optional[str] = None) -> Any:
+        """Send a request. `content_type` sends `body` as raw bytes instead of JSON."""
         url = self.base_url + path
         if query:
             filtered = {k: v for k, v in query.items() if v is not None}
             if filtered:
                 url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
-        # `raw_body` bypasses JSON encoding entirely — for the few endpoints (raw-TOML
-        # saves, file upload) whose OpenAPI requestBody isn't `application/json`, the
-        # caller already has the exact string to send and `json.dumps`-ing it would
-        # produce a body the server's extractor can't parse.
-        if raw_body is not None:
-            data = raw_body.encode()
-            headers = dict(self._headers)
-            if content_type:
-                headers["Content-Type"] = content_type
+        headers = self._headers
+        if content_type is not None:
+            data = bytes(body) if body is not None else None
+            headers = dict(headers)
+            headers["Content-Type"] = content_type
         else:
             data = json.dumps(body).encode() if body is not None else None
-            headers = self._headers
         req = Request(url, data=data, headers=headers, method=method)
         try:
             with urlopen(req, timeout=self.timeout) as resp:
@@ -327,6 +316,12 @@ class _AgentsResource(_Resource):
     def set_model(self, id: str, **data):
         return self._c._request("PUT", f"/api/agents/{id}/model", data)
 
+    def get_agent_model_routing(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/model_routing")
+
+    def set_agent_model_routing(self, id: str, **data):
+        return self._c._request("PUT", f"/api/agents/{id}/model_routing", data)
+
     def push_message(self, id: str, **data):
         return self._c._request("POST", f"/api/agents/{id}/push", data)
 
@@ -402,8 +397,8 @@ class _AgentsResource(_Resource):
     def get_agent_traces(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/traces")
 
-    def upload_file(self, id: str, body: str):
-        return self._c._request("POST", f"/api/agents/{id}/upload", raw_body=body, content_type="application/octet-stream")
+    def upload_file(self, id: str, body: bytes, content_type: str = "application/octet-stream"):
+        return self._c._request("POST", f"/api/agents/{id}/upload", body, content_type=content_type)
 
     def serve_upload(self, file_id: str):
         return self._c._request("GET", f"/api/uploads/{file_id}")
@@ -782,6 +777,32 @@ class _McpResource(_Resource):
         return self._c._request("GET", "/api/mcp/taint-rules")
 
 
+# ── Media Resource ─────────────────────────────────────────────
+
+class _MediaResource(_Resource):
+
+    def generate_image(self, **data):
+        return self._c._request("POST", "/api/media/image", data)
+
+    def generate_music(self, **data):
+        return self._c._request("POST", "/api/media/music", data)
+
+    def list_media_providers(self):
+        return self._c._request("GET", "/api/media/providers")
+
+    def synthesize_speech(self, **data):
+        return self._c._request("POST", "/api/media/speech", data)
+
+    def transcribe_audio(self, body: bytes, content_type: str = "audio/webm"):
+        return self._c._request("POST", "/api/media/transcribe", body, content_type=content_type)
+
+    def submit_video(self, **data):
+        return self._c._request("POST", "/api/media/video", data)
+
+    def poll_video_task(self, task_id: str, provider: Any = None):
+        return self._c._request("GET", f"/api/media/video/{task_id}", None, query={"provider": provider})
+
+
 # ── Memory Resource ────────────────────────────────────────────
 
 class _MemoryResource(_Resource):
@@ -823,6 +844,9 @@ class _ModelsResource(_Resource):
 
     def list_credential_pools(self):
         return self._c._request("GET", "/api/credential-pools")
+
+    def list_model_router_profiles(self):
+        return self._c._request("GET", "/api/model-router/profiles")
 
     def list_all_models(self):
         return self._c._request("GET", "/api/models")
@@ -1357,11 +1381,11 @@ class _SystemResource(_Resource):
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")
 
-    def put_agent_template_toml(self, name: str, body: str):
-        return self._c._request("PUT", f"/api/templates/{name}/toml", raw_body=body, content_type="text/plain")
+    def put_agent_template_toml(self, name: str, body: bytes, content_type: str = "text/plain"):
+        return self._c._request("PUT", f"/api/templates/{name}/toml", body, content_type=content_type)
 
-    def post_agent_template_toml(self, name: str, body: str):
-        return self._c._request("POST", f"/api/templates/{name}/toml", raw_body=body, content_type="text/plain")
+    def post_agent_template_toml(self, name: str, body: bytes, content_type: str = "text/plain"):
+        return self._c._request("POST", f"/api/templates/{name}/toml", body, content_type=content_type)
 
     def version(self):
         return self._c._request("GET", "/api/version")

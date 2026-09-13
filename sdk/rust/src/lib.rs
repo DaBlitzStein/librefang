@@ -89,45 +89,31 @@ async fn do_req(
     } else {
         req
     };
-    let res = req.send().await?;
-    let status = res.status();
-    let text = res.text().await?;
-    if !status.is_success() {
-        return Err(Error::Api {
-            status: status.as_u16(),
-            body: text,
-        });
-    }
-    Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    send_and_parse(req).await
 }
 
-// Sends `body` as-is instead of JSON-encoding it — for the few endpoints
-// (raw-TOML saves, file upload) whose OpenAPI requestBody isn't
-// application/json, where the caller already has the exact string to send.
+/// Sends `body` verbatim under `content_type`, for endpoints that read the
+/// request body as bytes and reject `application/json`.
 async fn do_req_raw(
     client: &Client,
     base_url: &str,
     method: reqwest::Method,
     path_segments: &[&str],
-    body: String,
+    body: Vec<u8>,
     content_type: &str,
-    query: &[(&str, Option<&str>)],
 ) -> Result<Value> {
     let url = build_url(client, base_url, path_segments.iter().copied())?;
-    let req = client
-        .request(method, url)
-        .timeout(DEFAULT_REQUEST_TIMEOUT)
-        .header("Content-Type", content_type)
-        .body(body);
-    let filtered: Vec<(&str, &str)> = query
-        .iter()
-        .filter_map(|(k, v)| v.map(|vv| (*k, vv)))
-        .collect();
-    let req = if filtered.is_empty() {
-        req
-    } else {
-        req.query(&filtered)
-    };
+    send_and_parse(
+        client
+            .request(method, url)
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body),
+    )
+    .await
+}
+
+async fn send_and_parse(req: reqwest::RequestBuilder) -> Result<Value> {
     let res = req.send().await?;
     let status = res.status();
     let text = res.text().await?;
@@ -316,6 +302,7 @@ pub struct LibreFang {
     pub hands: Arc<HandsResource>,
     pub inbox: Arc<InboxResource>,
     pub mcp: Arc<McpResource>,
+    pub media: Arc<MediaResource>,
     pub memory: Arc<MemoryResource>,
     pub models: Arc<ModelsResource>,
     pub network: Arc<NetworkResource>,
@@ -363,6 +350,7 @@ impl LibreFang {
             hands: Arc::new(HandsResource::new(base_url.clone(), client.clone())),
             inbox: Arc::new(InboxResource::new(base_url.clone(), client.clone())),
             mcp: Arc::new(McpResource::new(base_url.clone(), client.clone())),
+            media: Arc::new(MediaResource::new(base_url.clone(), client.clone())),
             memory: Arc::new(MemoryResource::new(base_url.clone(), client.clone())),
             models: Arc::new(ModelsResource::new(base_url.clone(), client.clone())),
             network: Arc::new(NetworkResource::new(base_url.clone(), client.clone())),
@@ -943,6 +931,30 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn get_agent_model_routing(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "model_routing"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn set_agent_model_routing(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "agents", id, "model_routing"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn push_message(&self, id: &str, data: Value) -> Result<Value> {
         do_req(
             &self.client,
@@ -1262,15 +1274,20 @@ impl AgentsResource {
         .await
     }
 
-    pub async fn upload_file(&self, id: &str, body: String) -> Result<Value> {
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn upload_file(
+        &self,
+        id: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
         do_req_raw(
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
             &["api", "agents", id, "upload"],
             body,
-            "application/octet-stream",
-            &[],
+            content_type.unwrap_or("application/octet-stream"),
         )
         .await
     }
@@ -2759,6 +2776,109 @@ impl McpResource {
     }
 }
 
+// ── Media ──
+
+#[derive(Debug, Clone)]
+pub struct MediaResource {
+    base_url: String,
+    client: Client,
+}
+
+impl MediaResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn generate_image(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "image"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn generate_music(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "music"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_media_providers(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "media", "providers"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn synthesize_speech(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "speech"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    /// Sends a raw `audio/webm` body; `content_type` overrides that default.
+    pub async fn transcribe_audio(
+        &self,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "transcribe"],
+            body,
+            content_type.unwrap_or("audio/webm"),
+        )
+        .await
+    }
+
+    pub async fn submit_video(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "video"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn poll_video_task(&self, task_id: &str, provider: Option<&str>) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "media", "video", task_id],
+            None,
+            &[("provider", provider)],
+        )
+        .await
+    }
+}
+
 // ── Memory ──
 
 #[derive(Debug, Clone)]
@@ -2912,6 +3032,18 @@ impl ModelsResource {
             &self.base_url,
             reqwest::Method::GET,
             &["api", "credential-pools"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_model_router_profiles(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "model-router", "profiles"],
             None,
             &[],
         )
@@ -5114,28 +5246,38 @@ impl SystemResource {
         .await
     }
 
-    pub async fn put_agent_template_toml(&self, name: &str, body: String) -> Result<Value> {
+    /// Sends a raw `text/plain` body; `content_type` overrides that default.
+    pub async fn put_agent_template_toml(
+        &self,
+        name: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
         do_req_raw(
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
             &["api", "templates", name, "toml"],
             body,
-            "text/plain",
-            &[],
+            content_type.unwrap_or("text/plain"),
         )
         .await
     }
 
-    pub async fn post_agent_template_toml(&self, name: &str, body: String) -> Result<Value> {
+    /// Sends a raw `text/plain` body; `content_type` overrides that default.
+    pub async fn post_agent_template_toml(
+        &self,
+        name: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
         do_req_raw(
             &self.client,
             &self.base_url,
             reqwest::Method::POST,
             &["api", "templates", name, "toml"],
             body,
-            "text/plain",
-            &[],
+            content_type.unwrap_or("text/plain"),
         )
         .await
     }
