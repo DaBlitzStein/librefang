@@ -57,7 +57,8 @@ import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
 import { AgentManifestForm } from "../components/AgentManifestForm";
-import { ModelParamField } from "../components/ui/ModelParamField";
+import { AgentModelParamFields } from "../components/AgentModelParamFields";
+import { selectModelLimits } from "../lib/modelLimits";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
@@ -1024,6 +1025,13 @@ export function AgentsPage() {
   // Both facts are read off `buildModelConfigPatch`, the same strict builder Save itself calls: a null patch means the draft is invalid, an empty patch means nothing changed.
   // Sharing the builder also keeps trailing garbage ("4096abc") from enabling a button that then no-ops, because the parse that rejects it is the parse that would have built the request.
   const currentModel = detailAgent?.model;
+  // The declared capacities for the model being edited, so the drawer trims rungs the endpoint
+  // cannot honour and warns on an over-limit value — the same two things the create form does with
+  // the same helper, instead of the drawer silently offering both.
+  const drawerModelLimits = useMemo(
+    () => selectModelLimits(visibleModels, modelDraft.model, modelDraft.provider),
+    [visibleModels, modelDraft.model, modelDraft.provider],
+  );
   const modelPatchPreview = buildModelConfigPatch(modelDraft, currentModel).patch;
   const modelValid = modelPatchPreview !== null;
   const modelDirty = modelPatchPreview !== null && Object.keys(modelPatchPreview).length > 0;
@@ -2757,64 +2765,26 @@ export function AgentsPage() {
                           </datalist>
                         </DetailRow>
                         {/*
-                          The same `ModelParamField` the create form and the
-                          model settings drawer use, rather than a second set of
-                          hand-rolled number boxes. One parameter, one control:
-                          a bare `<input type="number">` stated neither the
-                          usual value nor the ceiling, so setting a temperature
-                          meant knowing that 0.7 is typical and 2 is the limit,
-                          while the identical parameter elsewhere in the app was
-                          a labelled ladder.
+                          The same step ladders the create form and the model
+                          settings use, rather than a second set of hand-rolled
+                          number boxes. One parameter, one control: a bare
+                          `<input type="number">` stated neither the usual value
+                          nor the ceiling, so setting a temperature meant knowing
+                          that 0.7 is typical and 2 is the limit, while the
+                          identical parameter elsewhere in the app was a labelled
+                          ladder.
 
                           Every field is tri-state, and `""` is the third state:
                           it means the agent has no opinion and the model's own
                           setting applies. That is why an untouched row must stay
                           empty (#5917).
                         */}
-                        <div className="space-y-3 py-1">
-                          <ModelParamField
-                            param="temperature"
-                            value={modelDraft.temperature}
-                            onChange={next => setModelDraft(d => ({ ...d, temperature: next }))}
-                          />
-                          <ModelParamField
-                            param="top_p"
-                            value={modelDraft.top_p}
-                            onChange={next => setModelDraft(d => ({ ...d, top_p: next }))}
-                          />
-                          <ModelParamField
-                            param="frequency_penalty"
-                            value={modelDraft.frequency_penalty}
-                            onChange={next => setModelDraft(d => ({ ...d, frequency_penalty: next }))}
-                          />
-                          <ModelParamField
-                            param="presence_penalty"
-                            value={modelDraft.presence_penalty}
-                            onChange={next => setModelDraft(d => ({ ...d, presence_penalty: next }))}
-                          />
-                          {/*
-                            Below the sampling rows and separated, because these
-                            are endpoint limits rather than preferences: what the
-                            model may read and emit, not how it should sound.
-                          */}
-                          <div className="pt-2 border-t border-border-subtle/40 space-y-3">
-                            <ModelParamField
-                              param="max_tokens"
-                              value={modelDraft.max_tokens}
-                              onChange={next => setModelDraft(d => ({ ...d, max_tokens: next }))}
-                            />
-                            <ModelParamField
-                              param="context_window"
-                              value={modelDraft.context_window}
-                              onChange={next => setModelDraft(d => ({ ...d, context_window: next }))}
-                            />
-                            <ModelParamField
-                              param="max_output_tokens"
-                              value={modelDraft.max_output_tokens}
-                              onChange={next => setModelDraft(d => ({ ...d, max_output_tokens: next }))}
-                            />
-                          </div>
-                        </div>
+                        <AgentModelParamFields
+                          draft={modelDraft}
+                          onChange={(field, next) => setModelDraft(d => ({ ...d, [field]: next }))}
+                          isHand={detailAgent.is_hand === true}
+                          limits={drawerModelLimits}
+                        />
                         <div className="flex justify-end gap-2 pt-1">
                           <button
                             onClick={cancelModelEdit}
@@ -2860,6 +2830,30 @@ export function AgentsPage() {
                               : detailAgent.model.temperature}
                           </span>
                         </DetailRow>
+                        {/*
+                          The rest of what the editor can set. Leaving them out
+                          made a saved value invisible the moment edit mode
+                          closed, so there was nowhere to notice that a write
+                          had not taken — which is how the hand-agent drop
+                          stayed hidden.
+                        */}
+                        {([
+                          ["model_param.top_p", detailAgent.model.top_p, false],
+                          ["model_param.frequency_penalty", detailAgent.model.frequency_penalty, false],
+                          ["model_param.presence_penalty", detailAgent.model.presence_penalty, false],
+                          ["model_param.context_window", detailAgent.model.context_window, true],
+                          ["model_param.max_output_tokens", detailAgent.model.max_output_tokens, true],
+                        ] as const).map(([key, value, isTokenCount]) => (
+                          <DetailRow key={key} label={t(key)}>
+                            <span className="font-mono">
+                              {value == null
+                                ? t("agents.form.inherit_default")
+                                : isTokenCount
+                                  ? formatNumber(value)
+                                  : value}
+                            </span>
+                          </DetailRow>
+                        ))}
                       </>
                     )}
                   </div>
