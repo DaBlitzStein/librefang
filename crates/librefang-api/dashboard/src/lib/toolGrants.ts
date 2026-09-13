@@ -88,6 +88,31 @@ export function isMcpServerGranted(
   return (mcpServers ?? []).some((s) => normalizeMcpName(s) === target);
 }
 
+/** What an MCP server's card in the Tools tab can do, and therefore what it may say.
+ *
+ * - `granted` / `grantable` — the grant is a per-server pin in `mcp_servers`, so the card toggles it.
+ * - `wildcard` — the grant comes from `mcp_servers = ["*"]`; revoking it means editing the wildcard, not this card.
+ * - `hard-disabled` — `tools_disabled` or `mcp_disabled` makes the kernel skip MCP entirely, so a staged grant would arm a save that changes nothing.
+ *
+ * The three branches that render these cards (the all-tools grid, and the assigned/available lists of the allowlist view) each derived this inline and disagreed, which is how a card ended up inert, clickable and labelled "click to assign" all at once (#7749 review).
+ */
+export type McpGroupCardState = "granted" | "grantable" | "wildcard" | "hard-disabled";
+
+export function mcpGroupCardState(args: {
+  granted: boolean;
+  mode: McpGrantMode;
+  hardDisabled: boolean;
+}): McpGroupCardState {
+  if (args.hardDisabled) return "hard-disabled";
+  if (args.mode === "all") return "wildcard";
+  return args.granted ? "granted" : "grantable";
+}
+
+/** Whether clicking the card stages a change. The two inert states must not arm a save. */
+export function isMcpGroupCardActionable(state: McpGroupCardState): boolean {
+  return state === "granted" || state === "grantable";
+}
+
 /**
  * Add or remove `server` from a staged `mcp_servers` grant list, comparing
  * names after `normalizeMcpName` so a draft that already carries

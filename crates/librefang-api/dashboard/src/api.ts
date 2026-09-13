@@ -1791,10 +1791,17 @@ export interface AgentChannelInstance {
   bound_to_this_agent: boolean;
 }
 
+/** Response shape for `GET /api/agents/{id}/channels`. */
 export interface AgentChannelsResponse {
+  /** Channel-type allowlist currently pinned on the agent. Empty means "all". */
   assigned: string[];
+  /** Every channel type configured on this instance (`[[sidecar_channels]]`),
+   *  regardless of whether it's assigned to this agent — the picker's option list. */
   available: string[];
+  /** Per-instance bindings for those types, so the editor can say which
+   *  specific bot delivers to this agent (#6131). */
   instances: AgentChannelInstance[];
+  /** 'all' when `assigned` is empty, 'allowlist' otherwise. */
   mode: "all" | "allowlist";
 }
 
