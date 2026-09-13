@@ -4262,15 +4262,12 @@
     "history_empty": "No version history yet",
     "history_empty_desc": "Version snapshots are recorded when a template is created or edited.",
     "history_title": "History: {{name}}",
-    "inherit_placeholder": "default",
     "managed_elsewhere": "在“智能体”中管理",
     "managed_elsewhere_hint": "该条目是运行中智能体自身的清单，请在“智能体”页面编辑。",
     "name": "名称",
     "name_hint": "仅支持字母、数字、连字符和下划线，创建后不可更改。",
     "name_placeholder": "customer-support",
     "new": "新建智能体类型",
-    "preserved_note": "保存只会重写以上字段。该类型 agent.toml 中的其他内容——触发器、压缩配置、MCP 允许列表、会话模式——都会原样保留。",
-    "promote": "提升",
     "promote_copied": "已复制脱敏后的 TOML",
     "promote_copy": "复制 TOML",
     "promote_copy_failed": "无法复制 TOML",
@@ -4303,12 +4300,7 @@
     "saved": "已保存智能体类型",
     "unknown_keys_dropped": "守护进程未能识别并已丢弃：{{keys}}",
     "subtitle": "可重复使用的智能体清单，可直接据此创建智能体。",
-    "system_prompt": "系统提示词",
-    "system_prompt_hint": "留空即保存为空，不会自动替换成任何默认文案。",
     "title": "智能体类型",
-    "tools": "工具",
-    "tools_hint": "从本守护进程提供的工具中选择，也可手动输入目录之外的标识符。",
-    "tools_search": "搜索工具…",
     "promote": "推广到注册表",
     "promote_preview": "提升预览",
     "confirm_promote": "将代理类型 '{{name}}' 推广到公共注册表？清单将被清理后作为 GitHub pull request 提交。",
@@ -4333,6 +4325,5 @@
     "temperature_placeholder": "0 到 2",
     "top_p": "Top-p",
     "top_p_placeholder": "0 到 1"
-    "title": "智能体类型"
   }
 }

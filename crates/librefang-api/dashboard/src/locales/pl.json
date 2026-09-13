@@ -4277,15 +4277,12 @@
     "history_empty": "No version history yet",
     "history_empty_desc": "Version snapshots are recorded when a template is created or edited.",
     "history_title": "History: {{name}}",
-    "inherit_placeholder": "default",
     "managed_elsewhere": "Zarządzane w Agentach",
     "managed_elsewhere_hint": "Ten wpis to manifest działającego agenta. Edytuj go na stronie Agenci.",
     "name": "Nazwa",
     "name_hint": "Tylko litery, cyfry, myślnik i podkreślenie. Nazwy nie da się później zmienić.",
     "name_placeholder": "customer-support",
     "new": "Nowy typ agenta",
-    "preserved_note": "Zapis nadpisuje wyłącznie powyższe pola. Reszta pliku agent.toml tego typu — wyzwalacze, kompaktowanie, listy MCP, tryb sesji — zostaje zachowana.",
-    "promote": "Promuj",
     "promote_copied": "Skopiowano oczyszczony plik TOML",
     "promote_copy": "Kopiuj TOML",
     "promote_copy_failed": "Nie udało się skopiować pliku TOML",
@@ -4318,12 +4315,7 @@
     "saved": "Zapisano typ agenta",
     "unknown_keys_dropped": "Demon nie rozpoznał i usunął: {{keys}}",
     "subtitle": "Manifesty agentów wielokrotnego użytku, z których można tworzyć agentów.",
-    "system_prompt": "Prompt systemowy",
-    "system_prompt_hint": "Pozostawiony pusty zostanie zapisany jako pusty — nic nie jest podstawiane automatycznie.",
     "title": "Typy agentów",
-    "tools": "Narzędzia",
-    "tools_hint": "Wybierane z narzędzi udostępnianych przez tego demona; nieznane identyfikatory można wpisać ręcznie.",
-    "tools_search": "Szukaj narzędzi…",
     "promote": "Opublikuj w rejestrze",
     "promote_preview": "Podgląd promocji",
     "confirm_promote": "Opublikować typ agenta '{{name}}' w publicznym rejestrze? Manifest zostanie oczyszczony i przesłany jako pull request na GitHubie.",
@@ -4348,6 +4340,5 @@
     "temperature_placeholder": "od 0 do 2",
     "top_p": "Top-p",
     "top_p_placeholder": "od 0 do 1"
-    "title": "Typy agentów"
   }
 }
