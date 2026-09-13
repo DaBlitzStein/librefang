@@ -292,6 +292,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(59, migrate_v59);
     run_step!(60, migrate_v60);
 
+    // v56: persist workflow_runs.total_steps so a run recovered after a
+    // daemon restart reports real progress instead of "step X of 0".
+    run_step!(56, migrate_v56);
+
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
     // applied DDL without recording its audit row — operator tooling

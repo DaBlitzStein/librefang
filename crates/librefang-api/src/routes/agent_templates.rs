@@ -196,7 +196,8 @@ impl TemplateSource {
 
 use librefang_types::agent_type_store::agent_type_path_in;
 use librefang_types::agent_type_store::{
-    agent_types_dir_in, workspace_agent_manifest_path_in, workspace_agents_dir_in,
+    agent_type_path, agent_types_dir, agent_types_dir_in, librefang_home, persist_agent_type,
+    workspace_agent_manifest_path, workspace_agent_manifest_path_in, workspace_agents_dir_in,
 };
 
 /// Fold "the file does not exist" into `Ok(None)`, leaving every other I/O
@@ -988,7 +989,7 @@ pub async fn get_registry_diff(
 
     // Read local version. Only an agent-type file is in scope — a live agent's own
     // manifest is refused with the same 409 `restore_from_registry` answers for it.
-    let local_content = match read_agent_type(&name).await {
+    let local_content = match read_agent_type_in(&librefang_home(), &name).await {
         Ok(Some((TemplateSource::WorkspaceAgent, _))) => {
             return ApiErrorResponse::conflict(managed_elsewhere)
                 .with_code("template_not_editable")
