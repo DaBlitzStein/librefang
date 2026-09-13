@@ -1,4 +1,4 @@
-import { formatRelativeTime, formatSqliteDateTime } from "../lib/datetime";
+import { formatRelativeTime } from "../lib/datetime";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
@@ -18,11 +18,14 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { Modal } from "../components/ui/Modal";
 import {
+  isMcpGroupCardActionable,
   isMcpServerGranted,
   isToolAllowed,
   isToolBlocked,
+  mcpGroupCardState,
   resolveMcpGrantMode,
   toggleMcpServerGrant,
+  type McpGroupCardState,
 } from "../lib/toolGrants";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
@@ -37,7 +40,7 @@ import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch, ChevronRight, Radio, Route, History } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch, ChevronRight, Radio, Route } from "lucide-react";
 import { buildModelConfigPatch, emptyModelNumerics, seedModelNumerics, type ModelDraft } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
@@ -80,12 +83,11 @@ import {
   useAgentMcpServers,
   useAgentManifest,
   useAgentChannels,
-  useAgentManifestHistory,
   usePromptVersions,
   useTools,
 } from "../lib/queries/agents";
 import {
-  useAgentTypeToml,
+  useAgentTemplateToml,
   useCloneAgent,
   useDeleteAgent,
   usePatchAgent,
@@ -349,9 +351,15 @@ export function SystemPromptSection({
 export function DescriptionSection({
   agentId,
   description,
+  onSaved,
 }: {
   agentId: string;
   description: string;
+  /// #7749 review: `description` comes from the parent's imperatively-held
+  /// detail state, so a success that only toasts leaves `current` at the old
+  /// text — the section stays dirty and the header shows the stale value.
+  /// The parent refreshes its detail state through this hook.
+  onSaved?: () => void;
 }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -370,11 +378,13 @@ export function DescriptionSection({
     patchAgent.mutate(
       { agentId, body: { description: draft } },
       {
-        onSuccess: () =>
+        onSuccess: () => {
           addToast(
             t("agents.detail.description_saved", { defaultValue: "Description saved" }),
             "success",
-          ),
+          );
+          onSaved?.();
+        },
         onError: (e: Error) =>
           addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
       },
@@ -475,7 +485,16 @@ export function ChannelsSection({ agentId }: { agentId: string }) {
       </p>
       {channelsQuery.isLoading ? (
         <p className="text-xs text-text-dim">{t("common.loading", { defaultValue: "Loading..." })}</p>
-      ) : available.length > 0 ? (
+      ) : /* `available` comes only from `config.sidecar_channels`
+             (`routes/agents/config.rs: get_agent_channels`) and never unions in
+             the agent's own `channels`, so an allowlist left over from a
+             since-removed sidecar channel has a non-empty `assigned` against an
+             empty `available`. Gating on `available` alone hid that allowlist
+             behind "No channels configured" while it actively restricted the
+             agent, with no way to clear it. `MultiSelectCmdk` renders its chips
+             from `value`, so an assigned-but-unavailable name still shows and
+             still survives a save (#7749 review). */
+        available.length > 0 || assigned.length > 0 ? (
         <MultiSelectCmdk
           options={available}
           value={current}
@@ -589,14 +608,7 @@ export function AgentsPage() {
   // the PUT — leaving the tab discards the draft (the "change your mind" path).
   const [skillsDraft, setSkillsDraft] = useState<string[] | null>(null);
   const [agentTab, setAgentTab] = useState<
-    | "conversation"
-    | "memory"
-    | "skills"
-    | "tools"
-    | "routing"
-    | "schedule"
-    | "logs"
-    | "history"
+    "conversation" | "memory" | "skills" | "tools" | "routing" | "schedule" | "logs"
   >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
@@ -643,11 +655,17 @@ export function AgentsPage() {
   const resumeMutation = useResumeAgent();
   const patchAgentRuntimeConfigMutation = usePatchAgentRuntimeConfig();
   const patchAgentMutation = usePatchAgent();
+  // #7749 review: the manifest editor's drawer must not read the rename
+  // flow's mutation state — a failed rename (duplicate name → 400) would
+  // render its error inside the editor drawer and an in-flight rename would
+  // disable its Save. Its own instance, like DescriptionSection and
+  // ChannelsSection have theirs.
+  const manifestPatchMutation = usePatchAgent();
   const cloneMutation = useCloneAgent();
   const resetSessionMutation = useResetAgentSession();
   const updateToolsMutation = useUpdateAgentTools();
   const setAgentMcpServersMutation = useSetAgentMcpServers();
-  const templateTomlMutation = useAgentTypeToml();
+  const templateTomlMutation = useAgentTemplateToml();
   const qc = useQueryClient();
 
   const rawDeleteMutation = useDeleteAgent();
@@ -937,11 +955,6 @@ export function AgentsPage() {
   });
   const setAgentSkillsMutation = useSetAgentSkills();
 
-  // Manifest version history — fetched only when the History tab is active.
-  const manifestHistoryQuery = useAgentManifestHistory(detailAgent?.id ?? "", {
-    enabled: !!detailAgent && agentTab === "history",
-  });
-
   useEffect(() => {
     if (agentTab !== "tools") {
       setToolsDraft(null);
@@ -1199,6 +1212,21 @@ export function AgentsPage() {
     setManifestEditorSeeded(false);
     setManifestEditorErrors(new Set());
     setManifestEditorParseError(null);
+    // The drawer renders `manifestPatchMutation.error` unconditionally, and a
+    // mutation keeps its last error until it is reset or re-run. Without this,
+    // a failed save → Cancel → reopen greets the operator with the previous
+    // attempt's error over a session that has submitted nothing (#7749 review).
+    manifestPatchMutation.reset();
+    // #7749 review: the query cache holds the TOML for `staleTime: 30_000`,
+    // so reopening inside that window serves the stale copy synchronously —
+    // the seed effect below marks the editor seeded from it and then
+    // discards the refetch, and a save writes the older manifest over
+    // whatever changed on the server since (file-watcher reload, another
+    // tab, POST /reload). Drop the cached entry so the enabled query
+    // refetches and the editor only seeds from post-open data.
+    if (detailAgent?.id) {
+      qc.removeQueries({ queryKey: agentQueries.manifest(detailAgent.id).queryKey });
+    }
     setManifestEditorOpen(true);
   };
   const closeManifestEditor = () => {
@@ -1228,7 +1256,7 @@ export function AgentsPage() {
     setManifestEditorErrors(new Set(errors));
     if (errors.length > 0) return;
     const toml = serializeManifestForm(manifestEditorFormState, manifestEditorExtras);
-    patchAgentMutation.mutate(
+    manifestPatchMutation.mutate(
       { agentId: detailAgent.id, body: { manifest_toml: toml } },
       {
         onSuccess: async () => {
@@ -1450,7 +1478,6 @@ export function AgentsPage() {
       { id: "routing",      label: t("agents.tab.routing",      { defaultValue: "Routing" }),      Icon: Route },
       { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
-      { id: "history",      label: t("agents.tab.history",      { defaultValue: "History" }),      Icon: History },
     ];
 
     const live = agentStatsQuery.data;
@@ -1700,7 +1727,6 @@ export function AgentsPage() {
       case "routing":           return renderRoutingTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
-      case "history":           return renderHistoryTab(agent);
     }
   };
 
@@ -2233,6 +2259,33 @@ export function AgentsPage() {
       if (server === undefined) return false;
       return isMcpServerGranted(server, mcpDraftArr, mcpModeEffective);
     };
+    // Both hard switches, read straight off the agent rather than through
+    // `mcpModeEffective` — that one folds them into "none", which is
+    // indistinguishable from "no server granted yet" and would label an inert
+    // card as grantable.
+    const mcpHardDisabled = !!(agent.tools_disabled || agent.mcp_disabled);
+    // One source of truth for what an MCP card may do and say, shared by the
+    // all-tools grid and the assigned/available lists (#7749 review).
+    const mcpCardStateOf = (groupName: string) =>
+      mcpGroupCardState({
+        granted: isMcpGroupGranted(groupName),
+        mode: mcpModeEffective,
+        hardDisabled: mcpHardDisabled,
+      });
+    // Never "click to assign" on a card that cannot be clicked.
+    const mcpGroupLabel = (state: McpGroupCardState): string => {
+      if (state === "hard-disabled") {
+        return t("agents.detail.tools_mcp_inert", {
+          defaultValue: "not granted — MCP is hard-disabled",
+        });
+      }
+      if (state === "grantable") {
+        return t("agents.detail.tools_mcp_not_granted", {
+          defaultValue: "not granted — click to grant",
+        });
+      }
+      return t("agents.detail.tools_mcp_granted", { defaultValue: "granted via mcp_servers" });
+    };
     // Whether one tool inside a group counts as active for display purposes.
     const isToolActive = (groupName: string, tool: ToolDefinition): boolean => {
       if (isMcpGroup(groupName)) {
@@ -2274,9 +2327,13 @@ export function AgentsPage() {
         // draft/endpoint from `capabilities_tools` (#6565 follow-up) — see
         // `handleSave`. Nothing to toggle once the server is already
         // granted through the `["*"]`/"all" wildcard; that requires
-        // editing the wildcard itself, not a per-server pin.
+        // editing the wildcard itself, not a per-server pin. And nothing to
+        // stage under a hard switch either: with `tools_disabled` or
+        // `mcp_disabled` the kernel skips MCP entirely, so a staged grant
+        // would arm a Save that changes nothing visible or effective
+        // (#7749 review) — the banner above the cards explains why instead.
         const server = mcpServerByGroup.get(groupName);
-        if (!server || mcpModeEffective === "all") return;
+        if (!server || !isMcpGroupCardActionable(mcpCardStateOf(groupName))) return;
         setMcpServersDraft((prev) => toggleMcpServerGrant(prev ?? persistedMcpServers, server));
         if (expandedToolGroup === groupName) setExpandedToolGroup(null);
         return;
@@ -2488,6 +2545,16 @@ export function AgentsPage() {
           </div>
         )}
 
+        {/* Above the view switch, not inside one arm of it: the MCP cards this
+            explains live in the all-tools grid and in the assigned/available
+            lists, and the branch it used to sit in is the one with no cards on
+            screen at all (#7749 review). */}
+        {!isLoading && mcpHardDisabled && (
+          <p className="text-xs text-warning">
+            {t("agents.detail.mcp_hard_disabled_note", { defaultValue: "MCP servers are hard-disabled for this agent (tools_disabled or mcp_disabled). Granting one here would change nothing until the hard switch is turned off, so the toggles are inert." })}
+          </p>
+        )}
+
         {isLoading ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
             <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
@@ -2500,12 +2567,21 @@ export function AgentsPage() {
                   // An empty `capabilities_tools` means "all builtin tools", but it says nothing about MCP: an MCP server is only reachable when `mcp_servers` grants it (#6565), so label MCP groups by their actual grant instead of "included".
                   const mcpGroup = isMcpGroup(groupName);
                   const granted = !mcpGroup || isMcpGroupGranted(groupName);
+                  // `mcp_servers` is its own draft and its own endpoint, so an
+                  // MCP grant can be toggled straight from this card. Routing it
+                  // through Customize instead made `isBuiltinDirty` true and had
+                  // Save write `capabilities_tools = [<every builtin that exists
+                  // today>]` as a side effect of an MCP-only intent, silently
+                  // ending the agent's "all tools" status (#7749 review).
+                  const cardState = mcpGroup ? mcpCardStateOf(groupName) : null;
+                  const actionable = cardState !== null && isMcpGroupCardActionable(cardState);
                   return (
                     <div
                       key={groupName}
+                      onClick={actionable ? () => handleToggleGroup(groupName) : undefined}
                       className={`px-3 py-2.5 rounded-md border bg-main/40 flex items-start justify-between gap-2 ${
                         granted ? "border-border-subtle" : "border-border-subtle opacity-60"
-                      }`}
+                      } ${actionable ? "cursor-pointer transition-colors hover:border-brand/40" : ""}`}
                     >
                       <div className="min-w-0 flex-1">
                         <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
@@ -2519,17 +2595,14 @@ export function AgentsPage() {
                         <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
                           {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
                           {" · "}
-                          {!mcpGroup
+                          {cardState === null
                             ? t("agents.detail.tools_included", { defaultValue: "included" })
-                            : granted
-                              ? t("agents.detail.tools_mcp_granted", {
-                                  defaultValue: "granted via mcp_servers",
-                                })
-                              : t("agents.detail.tools_mcp_not_granted", {
-                                  defaultValue: "not granted — customize to grant individual servers",
-                                })}
+                            : mcpGroupLabel(cardState)}
                         </div>
                       </div>
+                      {actionable && !granted && (
+                        <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                      )}
                     </div>
                   );
                 })}
@@ -2566,7 +2639,9 @@ export function AgentsPage() {
                   const activeCount = activeCountIn(groupName, groupTools);
                   const isExpanded = expandedToolGroup === groupName;
                   const mcpGroup = isMcpGroup(groupName);
-                  const mcpRemovable = mcpGroup && mcpModeEffective !== "all";
+                  // Same rule as the other two card lists rather than a third
+                  // inline reading of the mode (#7749 review).
+                  const mcpRemovable = mcpGroup && isMcpGroupCardActionable(mcpCardStateOf(groupName));
                   return (
                     <div key={groupName} className="flex flex-col">
                       <div
@@ -2636,11 +2711,19 @@ export function AgentsPage() {
                   {availableGroups.map(([groupName, groupTools]) => {
                     const mcpGroup = isMcpGroup(groupName);
                     const isExpanded = expandedToolGroup === groupName;
+                    // A builtin group is always assignable; an MCP one only in
+                    // the states that stage something. Dropping the pointer and
+                    // the hover highlight too, not just the label — an inert card
+                    // that still looks clickable is the same defect one layer down.
+                    const actionable =
+                      !mcpGroup || isMcpGroupCardActionable(mcpCardStateOf(groupName));
                     return (
                       <div key={groupName} className="flex flex-col">
                         <div
-                          onClick={() => handleToggleGroup(groupName)}
-                          className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 transition-colors flex items-start justify-between gap-2 cursor-pointer hover:border-brand/40"
+                          onClick={actionable ? () => handleToggleGroup(groupName) : undefined}
+                          className={`px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 transition-colors flex items-start justify-between gap-2 ${
+                            actionable ? "cursor-pointer hover:border-brand/40" : ""
+                          }`}
                         >
                           <div className="min-w-0 flex-1">
                             <div className="font-mono text-[12.5px] font-medium text-text-main truncate flex items-center gap-1.5">
@@ -2654,7 +2737,10 @@ export function AgentsPage() {
                             <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
                               {groupTools.length} tool{groupTools.length !== 1 ? "s" : ""}
                               {" · "}
-                              {t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })}
+                              {/* An MCP card under a hard switch stages nothing, so it must not read "click to assign" (#7749 review). */}
+                              {mcpGroup
+                                ? mcpGroupLabel(mcpCardStateOf(groupName))
+                                : t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })}
                             </div>
                           </div>
                           <div className="flex items-center gap-1 shrink-0 mt-0.5">
@@ -2670,7 +2756,7 @@ export function AgentsPage() {
                                 className={`w-3.5 h-3.5 transition-transform ${isExpanded ? "" : "-rotate-90"}`}
                               />
                             </button>
-                            <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0" />
+                            {actionable && <Plus className="w-3.5 h-3.5 text-brand/70 shrink-0" />}
                           </div>
                         </div>
                         {isExpanded && renderGroupToolList(groupName, groupTools, mcpGroup)}
@@ -2799,47 +2885,6 @@ export function AgentsPage() {
                   {formatLine(e)}
                 </span>
               </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  // ---------- History tab — manifest version timeline
-  const renderHistoryTab = (_agent: AgentDetail) => {
-    const versions = manifestHistoryQuery.data ?? [];
-    return (
-      <div className="flex flex-col gap-3">
-        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
-          {t("agents.detail.manifest_history", { defaultValue: "Manifest history" })} · {versions.length}
-        </div>
-        {manifestHistoryQuery.isLoading ? (
-          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading..." })}</div>
-        ) : manifestHistoryQuery.isError ? (
-          <div className="rounded-md border border-red-500/30 bg-red-500/10 p-4 text-[12px] text-red-500">
-            {t("agents.detail.manifest_history_load_err", { defaultValue: "Failed to load manifest history." })}
-          </div>
-        ) : versions.length === 0 ? (
-          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-            {t("agents.detail.no_history", { defaultValue: "No config changes recorded yet." })}
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {versions.map((v) => (
-              <details
-                key={v.id}
-                className="rounded-md border border-border-subtle bg-main/40 group"
-              >
-                <summary className="px-3 py-2 cursor-pointer text-[12px] flex items-center gap-2 select-none">
-                  <History className="w-3.5 h-3.5 text-text-dim shrink-0" />
-                  <span className="font-medium">{formatSqliteDateTime(v.timestamp)}</span>
-                  <span className="text-text-dim">· {v.change_source}</span>
-                </summary>
-                <pre className="px-3 pb-3 text-[11px] font-mono leading-[1.6] max-h-60 overflow-auto whitespace-pre-wrap break-all text-text-dim">
-                  {v.manifest_toml}
-                </pre>
-              </details>
             ))}
           </div>
         )}
@@ -3149,6 +3194,7 @@ export function AgentsPage() {
               <DescriptionSection
                 agentId={detailAgent.id}
                 description={(detailAgent as AgentView).description ?? ""}
+                onSaved={() => void refreshDetailAgent(detailAgent.id, detailAgent.is_hand)}
               />
 
               {/* Channels */}
@@ -3749,9 +3795,9 @@ export function AgentsPage() {
                 />
               </div>
             )}
-            {patchAgentMutation.error && (
+            {manifestPatchMutation.error && (
               <p className="text-xs text-error">
-                {toastErr(patchAgentMutation.error, String(patchAgentMutation.error))}
+                {toastErr(manifestPatchMutation.error, String(manifestPatchMutation.error))}
               </p>
             )}
             <div className="flex gap-2 pt-2">
@@ -3760,13 +3806,13 @@ export function AgentsPage() {
                 className="flex-1"
                 onClick={saveManifestEditor}
                 disabled={
-                  patchAgentMutation.isPending ||
+                  manifestPatchMutation.isPending ||
                   agentManifestQuery.isLoading ||
                   !!manifestEditorParseError ||
                   agentManifestQuery.isError
                 }
               >
-                {patchAgentMutation.isPending ? (
+                {manifestPatchMutation.isPending ? (
                   <Loader2 className="w-4 h-4 animate-spin mr-1" />
                 ) : (
                   <Save className="w-4 h-4 mr-1" />

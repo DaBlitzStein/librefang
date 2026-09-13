@@ -174,8 +174,8 @@ export function useResumeAgent() {
  * Manifest-level partial update: name, description, system_prompt,
  * mcp_servers, model, schedule — or, via `manifest_toml`, a full-manifest
  * replacement (#7742: the dashboard's full manifest editor). Distinct from
- * `usePatchAgentConfig` which targets `/agents/{id}/config` (model-tuning
- * only).
+ * `usePatchAgentRuntimeConfig`, which targets the role-appropriate
+ * model-tuning endpoint.
  *
  * `manifest_toml` can touch nearly every manifest field in one request, so
  * its invalidation fan-out is broader than the other partial fields:
@@ -216,6 +216,13 @@ export function usePatchAgent() {
         qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
       }
       qc.invalidateQueries({ queryKey: agentKeys.manifestHistory(variables.agentId) });
+      if (variables.body.manifest_toml !== undefined) {
+        qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
+      }
     },
   });
 }
@@ -590,10 +597,9 @@ export function useSetAgentSkills() {
  * detail Tools tab, which previously could only read MCP grant state and
  * pointed the operator at a non-existent "MCP servers tab" to change it.
  * `agentKeys.detail(id)` carries the `mcp_servers` / `mcp_servers_mode`
- * fields the group-level grant/revoke toggle reads, so invalidating it is
- * what refreshes that; `agentKeys.mcpServers(id)` is invalidated too since
- * `useAgentMcpServers` — the live GET behind this same tab's per-server
- * detail — derives from the same PUT.
+ * fields this tab reads, so invalidating it is what actually refreshes the
+ * grant state; `agentKeys.mcpServers(id)` is invalidated too for forward
+ * compatibility with a future dedicated GET hook.
  */
 export function useSetAgentMcpServers() {
   const qc = useQueryClient();
@@ -613,7 +619,7 @@ export function useSetAgentMcpServers() {
   });
 }
 
-export function useAgentTypeToml() {
+export function useAgentTemplateToml() {
   return useMutation({
     mutationFn: getAgentTemplateToml,
   });

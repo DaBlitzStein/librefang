@@ -1903,6 +1903,18 @@ export async function setAgentMcpServers(
 // that would tell an operator it happened.
 const AGENT_LIST_LIMIT = 500;
 
+/**
+ * PUT /api/agents/{id}/mcp_servers — replace the agent's MCP server grant
+ * list (`agent.toml: mcp_servers`).
+ *
+ * Distinct from `updateAgentTools` (`PUT /agents/{id}/tools`), which only
+ * carries `capabilities_tools` / `tool_allowlist` / `tool_blocklist` — MCP
+ * tools are granted through this allowlist instead, not through
+ * `capabilities_tools` (#6565). An empty array clears the grant (mode
+ * "none"); `["*"]` grants every connected server (mode "all"); anything
+ * else pins a specific set of server names (mode "allowlist").
+ */
+
 export async function listAgents(
   opts: { includeHands?: boolean } = {},
 ): Promise<AgentItem[]> {

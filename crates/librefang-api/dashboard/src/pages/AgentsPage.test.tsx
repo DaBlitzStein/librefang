@@ -277,3 +277,121 @@ describe("ChannelsSection (#7742)", () => {
     });
   });
 });
+
+
+describe("DescriptionSection (#7742)", () => {
+  let patchMutate: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    patchMutate = vi.fn();
+    usePatchAgentMock.mockReturnValue({ mutate: patchMutate, isPending: false });
+  });
+
+  it("Save is disabled until the description is edited", () => {
+    renderDescription("original description");
+    const save = screen.getByRole("button", { name: /common\.save/i });
+    expect(save).toBeDisabled();
+  });
+
+  it("editing the description and saving PATCHes description", () => {
+    renderDescription("original description");
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "updated description" } });
+    const save = screen.getByRole("button", { name: /common\.save/i });
+    expect(save).not.toBeDisabled();
+    fireEvent.click(save);
+    expect(patchMutate).toHaveBeenCalledTimes(1);
+    expect(patchMutate.mock.calls[0][0]).toEqual({
+      agentId: "agent-1",
+      body: { description: "updated description" },
+    });
+  });
+
+  it("allows setting a description from empty (the field is no longer hidden when blank)", () => {
+    renderDescription("");
+    expect(screen.getByRole("textbox")).toHaveValue("");
+  });
+});
+
+
+describe("ChannelsSection (#7742)", () => {
+  let setChannelsMutate: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setChannelsMutate = vi.fn();
+    useSetAgentChannelsMock.mockReturnValue({ mutate: setChannelsMutate, isPending: false });
+    useAgentChannelsMock.mockReturnValue({
+      data: { assigned: ["telegram"], available: ["telegram", "discord", "slack"], mode: "allowlist" },
+      isLoading: false,
+    });
+  });
+
+  it("renders the picker seeded with the assigned channels and no Save button while pristine", () => {
+    renderChannels();
+    // MultiSelectCmdk swaps its placeholder to "Add more…" once at least
+    // one chip is selected (see MultiSelectCmdk.tsx), so with "telegram"
+    // already assigned the combobox itself — not the custom placeholder —
+    // is the stable query target.
+    expect(screen.getByRole("combobox")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove telegram" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /common\.save/i })).not.toBeInTheDocument();
+  });
+
+  it("shows the 'no channels configured' message when the instance has none", () => {
+    useAgentChannelsMock.mockReturnValue({
+      data: { assigned: [], available: [], mode: "all" },
+      isLoading: false,
+    });
+    renderChannels();
+    expect(
+      screen.getByText("No channels configured on this instance."),
+    ).toBeInTheDocument();
+  });
+
+  it("still renders an allowlist whose channels are no longer configured on the instance (#7749 review)", async () => {
+    // `get_agent_channels` builds `available` from `config.sidecar_channels`
+    // alone, so an `agent.toml` carrying `channels = ["telegram"]` after that
+    // sidecar channel was removed from `config.toml` reports a non-empty
+    // `assigned` against an empty `available`. Gating the picker on
+    // `available` hid a live restriction behind "No channels configured" and
+    // left no way to clear it.
+    const user = userEvent.setup();
+    useAgentChannelsMock.mockReturnValue({
+      data: { assigned: ["telegram"], available: [], mode: "allowlist" },
+      isLoading: false,
+    });
+    renderChannels();
+
+    expect(
+      screen.queryByText("No channels configured on this instance."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove telegram" })).toBeInTheDocument();
+
+    // …and it is clearable from here, which is the half that mattered.
+    await user.click(screen.getByRole("button", { name: "Remove telegram" }));
+    fireEvent.click(screen.getByRole("button", { name: /common\.save/i }));
+    expect(setChannelsMutate).toHaveBeenCalledTimes(1);
+    expect(setChannelsMutate.mock.calls[0][0]).toEqual({ agentId: "agent-1", channels: [] });
+  });
+
+  it("picking a channel from the dropdown and saving PUTs the new allowlist (#7742)", async () => {
+    const user = userEvent.setup();
+    renderChannels();
+
+    const input = screen.getByRole("combobox");
+    await user.click(input);
+    const list = await screen.findByRole("listbox");
+    await user.click(within(list).getByText("discord"));
+
+    const save = screen.getByRole("button", { name: /common\.save/i });
+    fireEvent.click(save);
+
+    expect(setChannelsMutate).toHaveBeenCalledTimes(1);
+    expect(setChannelsMutate.mock.calls[0][0]).toEqual({
+      agentId: "agent-1",
+      channels: ["telegram", "discord"],
+    });
+  });
+});

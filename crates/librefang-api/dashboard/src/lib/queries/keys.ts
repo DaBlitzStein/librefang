@@ -94,6 +94,13 @@ export const agentKeys = {
     [...agentKeys.all, "channels", agentId] as const,
   manifestHistory: (agentId: string) =>
     [...agentKeys.all, "manifestHistory", agentId] as const,
+  // Full manifest as raw TOML (#7742) — backs the dashboard's full manifest
+  // editor, distinct from `detail(id)`'s curated JSON projection.
+  // Per-agent channel allowlist (#7742) — backs the Configure drawer's
+  // Channels section. Named distinctly from `channelKeys` (the
+  // instance-wide `/api/channels` integration domain) to avoid confusion
+  // between "channels this agent is reachable from" and "channels
+  // configured on this instance".
 };
 
 // Central prompt repository (#6160). The fleet-wide overview

@@ -18,7 +18,6 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
-import { useAgents } from "../lib/queries/agents";
 import { useTaskQueue } from "../lib/queries/runtime";
 import { useAgents } from "../lib/queries/agents";
 import {
@@ -528,12 +527,6 @@ export function TasksPage() {
     (task): task is TaskQueueItem & { id: string } => typeof task.id === "string" && task.id.length > 0,
   );
 
-  // The agent registry is the source of truth for who can hold a task. The
-  // previous list was derived from the `assigned_to` of tasks that already
-  // existed, which meant a new agent was unreachable until someone had already
-  // assigned it something, a deleted agent lingered forever, and an empty
-  // board offered no picker at all.
-  const agentsQuery = useAgents();
   const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
   const agentsById = useMemo(
     () => new Map(agents.map((a) => [a.id, a])),

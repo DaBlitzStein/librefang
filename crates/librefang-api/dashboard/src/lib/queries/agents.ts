@@ -165,6 +165,11 @@ export const agentQueries = {
       queryFn: () => getAgentChannels(agentId),
       enabled: !!agentId,
     }),
+  // Full manifest as raw TOML (#7742). Disabled by default — callers gate
+  // this on the full manifest editor being open via QueryOverrides, since
+  // the payload is only needed while that drawer is mounted.
+  // Per-agent channel allowlist (#7742) — backs the Configure drawer's
+  // Channels section.
   toolsList: () =>
     queryOptions({
       queryKey: toolKeys.list(),
@@ -250,3 +255,5 @@ export function useAgentManifest(agentId: string, options: QueryOverrides = {}) 
 export function useAgentManifestHistory(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.manifestHistory(agentId), options));
 }
+
+
