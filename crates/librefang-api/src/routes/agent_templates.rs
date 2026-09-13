@@ -643,6 +643,7 @@ pub async fn put_agent_template_toml(
     lang: Option<axum::Extension<RequestLanguage>>,
     body: String,
 ) -> impl IntoResponse {
+    let home_dir = state.kernel.config_ref().home_dir.clone();
     let lang = super::resolve_lang(lang.as_ref());
     // `ErrorTranslator` is `!Send`, so every message this handler might need is rendered and the
     // translator dropped before the first `.await` — see the note in the root `CLAUDE.md`.
@@ -662,8 +663,8 @@ pub async fn put_agent_template_toml(
             .into_json_tuple();
     }
 
-    if !agent_type_path(&name).exists() {
-        return if workspace_agent_manifest_path(&name).exists() {
+    if !agent_type_path_in(&home_dir, &name).exists() {
+        return if workspace_agent_manifest_path_in(&home_dir, &name).exists() {
             ApiErrorResponse::conflict(managed_elsewhere)
                 .with_code("template_not_editable")
                 .into_json_tuple()
@@ -694,10 +695,9 @@ pub async fn put_agent_template_toml(
         );
     }
 
-    let home_dir = state.kernel.config_ref().home_dir.clone();
     match persist_agent_type_in(&home_dir, &name, &manifest) {
         Ok(rendered) => {
-            record_template_version(&state, &name, &rendered, "toml");
+            let _ = record_template_version(&state, &name, &rendered, "toml");
             let mut detail =
                 agent_type_detail(&name, TemplateSource::AgentType, &manifest, &rendered);
             if !unknown_keys.is_empty() {
@@ -730,6 +730,7 @@ pub async fn post_agent_template_toml(
     lang: Option<axum::Extension<RequestLanguage>>,
     body: String,
 ) -> impl IntoResponse {
+    let home_dir = state.kernel.config_ref().home_dir.clone();
     let lang = super::resolve_lang(lang.as_ref());
     // `ErrorTranslator` is `!Send`, so every message this handler might need is rendered and the
     // translator dropped before the first `.await` — see the note in the root `CLAUDE.md`.
@@ -767,9 +768,9 @@ pub async fn post_agent_template_toml(
         );
     }
 
-    match store_create_from_manifest(&name, &manifest) {
+    match store_create_from_manifest_in(&home_dir, &name, &manifest) {
         Ok(rendered) => {
-            record_template_version(&state, &name, &rendered, "create");
+            let _ = record_template_version(&state, &name, &rendered, "create");
             let mut detail =
                 agent_type_detail(&name, TemplateSource::AgentType, &manifest, &rendered);
             if !unknown_keys.is_empty() {
@@ -833,10 +834,8 @@ fn parse_manifest_toml_body(
 // the tool writes through the kernel's own `home_dir` too (`kernel::handles::agent_control`), so
 // all three writers of `agent-types/` agree on where the file lands.
 use librefang_types::agent_type_store::{
-    create_agent_type as store_create,
-    create_agent_type_from_manifest as store_create_from_manifest,
-    create_agent_type_in as store_create_in, persist_agent_type, persist_agent_type_in,
-    CreateAgentTypeError,
+    create_agent_type_from_manifest_in as store_create_from_manifest_in,
+    create_agent_type_in as store_create_in, persist_agent_type_in, CreateAgentTypeError,
 };
 
 /// POST /api/templates — Create an operator-authored agent type.
@@ -1050,8 +1049,11 @@ pub async fn delete_agent_type(
 /// agent type in a directory-per-type layout: `agent-types/{name}/agent.toml`
 /// (or legacy `agents/{name}/agent.toml`).
 /// Returns `Ok(None)` when the type is not in the registry.
-async fn read_registry_agent_type(name: &str) -> std::io::Result<Option<String>> {
-    let registry_cache = librefang_types::agent_type_store::registry_cache_dir();
+async fn read_registry_agent_type(
+    home_dir: &std::path::Path,
+    name: &str,
+) -> std::io::Result<Option<String>> {
+    let registry_cache = librefang_types::agent_type_store::registry_cache_dir_in(home_dir);
 
     // Resolve the two candidate directory names directly rather than through
     // `resolve_agent_types_dir`. That resolver's "log once ever" missing-checkout
@@ -1214,9 +1216,11 @@ fn json_diff_count(a: &serde_json::Value, b: &serde_json::Value) -> usize {
     )
 )]
 pub async fn get_registry_diff(
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let home_dir = state.kernel.config_ref().home_dir.clone();
     let lang = super::resolve_lang(lang.as_ref());
     let (not_found, invalid_manifest, read_failed) = template_error_messages(lang, &name);
     let (registry_not_found, managed_elsewhere) = {
@@ -1233,7 +1237,7 @@ pub async fn get_registry_diff(
 
     // Read local version. Only an agent-type file is in scope — a live agent's own
     // manifest is refused with the same 409 `restore_from_registry` answers for it.
-    let local_content = match read_agent_type(&name).await {
+    let local_content = match read_agent_type_in(&home_dir, &name).await {
         Ok(Some((TemplateSource::WorkspaceAgent, _))) => {
             return ApiErrorResponse::conflict(managed_elsewhere)
                 .with_code("template_not_editable")
@@ -1256,7 +1260,7 @@ pub async fn get_registry_diff(
     };
 
     // Read registry version.
-    let registry_content = match read_registry_agent_type(&name).await {
+    let registry_content = match read_registry_agent_type(&home_dir, &name).await {
         Ok(Some(content)) => content,
         Ok(None) => {
             return ApiErrorResponse::not_found(registry_not_found)
@@ -1327,6 +1331,7 @@ pub async fn restore_from_registry(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let home_dir = state.kernel.config_ref().home_dir.clone();
     let lang = super::resolve_lang(lang.as_ref());
     let (not_found, invalid_manifest, read_failed) = template_error_messages(lang, &name);
     let (registry_not_found, managed_elsewhere, snapshot_failed) = {
@@ -1344,27 +1349,28 @@ pub async fn restore_from_registry(
 
     // Only agent-type files can be restored — a live agent is managed elsewhere.
     // Read (not just stat) so the pre-restore content can be snapshotted below.
-    let pre_restore_content = match tokio::fs::read_to_string(agent_type_path(&name)).await {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return if workspace_agent_manifest_path(&name).exists() {
-                ApiErrorResponse::conflict(managed_elsewhere)
-                    .with_code("template_not_editable")
-                    .into_json_tuple()
-            } else {
-                ApiErrorResponse::not_found(not_found)
-                    .with_code("template_not_found")
-                    .into_json_tuple()
-            };
-        }
-        Err(e) => {
-            tracing::warn!("Failed to check agent type '{name}': {e}");
-            return ApiErrorResponse::internal(read_failed).into_json_tuple();
-        }
-    };
+    let pre_restore_content =
+        match tokio::fs::read_to_string(agent_type_path_in(&home_dir, &name)).await {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return if workspace_agent_manifest_path_in(&home_dir, &name).exists() {
+                    ApiErrorResponse::conflict(managed_elsewhere)
+                        .with_code("template_not_editable")
+                        .into_json_tuple()
+                } else {
+                    ApiErrorResponse::not_found(not_found)
+                        .with_code("template_not_found")
+                        .into_json_tuple()
+                };
+            }
+            Err(e) => {
+                tracing::warn!("Failed to check agent type '{name}': {e}");
+                return ApiErrorResponse::internal(read_failed).into_json_tuple();
+            }
+        };
 
     // Read the registry version.
-    let registry_content = match read_registry_agent_type(&name).await {
+    let registry_content = match read_registry_agent_type(&home_dir, &name).await {
         Ok(Some(content)) => content,
         Ok(None) => {
             return ApiErrorResponse::not_found(registry_not_found)
@@ -1408,7 +1414,6 @@ pub async fn restore_from_registry(
     }
 
     // Write via the shared persist path (atomic rename).
-    let home_dir = state.kernel.config_ref().home_dir.clone();
     match persist_agent_type_in(&home_dir, &name, &manifest) {
         Ok(rendered) => {
             let _ = record_template_version(&state, &name, &rendered, "registry-restore");
@@ -1946,13 +1951,14 @@ mod registry_report_sharing_tests {
     #[tokio::test]
     async fn read_registry_agent_type_does_not_consume_the_shared_missing_checkout_report() {
         let tmp = tempfile::tempdir().unwrap();
-        // Safety: env mutation, same pattern the sibling integration test file
-        // uses. Nothing else in this crate's unit-test binary reads
-        // `LIBREFANG_HOME` concurrently.
-        std::env::set_var("LIBREFANG_HOME", tmp.path());
 
-        // No registry checkout at all under this fresh home.
-        let found = read_registry_agent_type("does-not-matter").await.unwrap();
+        // No registry checkout at all under this fresh home, which is handed in
+        // explicitly rather than through `LIBREFANG_HOME` — the route resolves the
+        // registry against the kernel's own `home_dir` (#8112), so a test that set the
+        // env var would be exercising a path production no longer takes.
+        let found = read_registry_agent_type(tmp.path(), "does-not-matter")
+            .await
+            .unwrap();
         assert!(found.is_none());
 
         let registry_cache = tmp.path().join("registry");
@@ -1973,7 +1979,5 @@ mod registry_report_sharing_tests {
              be pending — read_registry_agent_type must not have consumed it by \
              routing through the shared resolver: {logged}"
         );
-
-        std::env::remove_var("LIBREFANG_HOME");
     }
 }

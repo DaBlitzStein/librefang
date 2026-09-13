@@ -80,6 +80,14 @@ pub fn registry_cache_dir() -> PathBuf {
     librefang_home().join("registry")
 }
 
+/// The registry checkout root under an explicitly supplied home directory.
+///
+/// Same relationship to [`registry_cache_dir`] as [`agent_types_dir_in`] has to `agent_types_dir`: a caller holding a `KernelConfig` resolves against the home *that kernel* was configured with, which an embedder can point somewhere the process environment knows nothing about (#8112).
+/// Both spellings exist because the boot-time sync still runs before any kernel is available.
+pub fn registry_cache_dir_in(home_dir: &std::path::Path) -> PathBuf {
+    home_dir.join("registry")
+}
+
 /// The `agent.toml` of a live agent under an explicitly supplied home directory.
 ///
 /// The kernel resolves a live agent's manifest against a `home_dir` it was handed rather than against the process environment, so the same explicit-home spelling exists here as for the agent-type store.
@@ -186,7 +194,7 @@ pub fn create_agent_type_in(
     let rendered = toml::to_string_pretty(&manifest).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
     })?;
-    claim_and_write(name, &rendered)?;
+    claim_and_write_in(home_dir, name, &rendered)?;
 
     Ok(CreatedAgentType {
         name: name.to_string(),
@@ -206,27 +214,31 @@ pub fn create_agent_type_in(
 /// version-history snapshots for a document that only ever existed as its final form (#8028).
 /// This claims the name atomically exactly like `create_agent_type` and writes once, so there is
 /// no intermediate state and nothing to reconcile.
-pub fn create_agent_type_from_manifest(
+pub fn create_agent_type_from_manifest_in(
+    home_dir: &std::path::Path,
     name: &str,
     manifest: &AgentManifest,
 ) -> Result<String, CreateAgentTypeError> {
     validate_agent_type_name(name).map_err(|_| CreateAgentTypeError::InvalidName)?;
-    if workspace_agent_manifest_path(name).exists() {
+    if workspace_agent_manifest_path_in(home_dir, name).exists() {
         return Err(CreateAgentTypeError::ShadowsLiveAgent);
     }
 
     let rendered = toml::to_string_pretty(manifest).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
     })?;
-    claim_and_write(name, &rendered)?;
+    claim_and_write_in(home_dir, name, &rendered)?;
     Ok(rendered)
 }
 
 /// Claim `name`'s path atomically and write `rendered` into it — the shared landing of every
 /// create path, so the race-free claim and the leaves-nothing-behind cleanup on a failed write
 /// exist in exactly one place rather than risking drift between them.
-fn claim_and_write(name: &str, rendered: &str) -> Result<(), CreateAgentTypeError> {
-    let dir = agent_types_dir();
+fn claim_and_write_in(
+    home_dir: &std::path::Path,
+    name: &str,
+    rendered: &str,
+) -> Result<(), CreateAgentTypeError> {
     let dir = agent_types_dir_in(home_dir);
     std::fs::create_dir_all(&dir).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to create {}: {e}", dir.display()))
