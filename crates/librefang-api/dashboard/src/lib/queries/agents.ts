@@ -17,6 +17,8 @@ import {
   getAgentTools,
   getAgentSkills,
   getAgentMcpServers,
+  getAgentChannels,
+  getAgentManifestHistory,
 } from "../http/client";
 import { agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
@@ -164,6 +166,13 @@ export const agentQueries = {
       queryFn: listTools,
       staleTime: STALE_MS,
     }),
+  manifestHistory: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.manifestHistory(agentId),
+      queryFn: () => getAgentManifestHistory(agentId),
+      enabled: !!agentId,
+      staleTime: 60_000,
+    }),
 };
 
 export function useAgents(
@@ -231,4 +240,8 @@ export function useAgentManifest(agentId: string, options: QueryOverrides = {}) 
 
 export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.channels(agentId), options));
+}
+
+export function useAgentManifestHistory(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.manifestHistory(agentId), options));
 }
