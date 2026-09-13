@@ -4779,6 +4779,7 @@ dependencies = [
  "totp-rs",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "wiremock",
  "zeroize",
