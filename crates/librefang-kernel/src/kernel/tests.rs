@@ -18551,6 +18551,24 @@ fn ephemeral_spawn_wires_every_capability_the_permanent_path_wires() {
          kernel-backed tool answers `Unavailable`, and a worker could never reach \
          `agent_spawn`, which is what the depth guard exists to bound"
     );
+
+    // Same shape, same reason (#7789 review): the four `apply_model_override`
+    // unit tests exercise the extracted function, and nothing else asserts the
+    // spawn path still calls it. Whether it is called, and on what, *is* an
+    // argument at a call site — inline the block again, or narrow it back to
+    // `&mut manifest.model`, and every provider- and model-keyed field of the
+    // parent (its endpoint, its key, its window, its output cap, its extension
+    // params, its whole fallback chain) rides into the worker unchanged, with
+    // no test the poorer.
+    assert!(
+        ephemeral.contains("apply_model_override(&mut manifest, over)"),
+        "the ephemeral spawn path must hand the *whole* manifest to \
+         `apply_model_override`. Scoped to `manifest.model` it structurally \
+         cannot clear `fallback_models`, whose entries carry their own \
+         `api_key_env` and `base_url` — so the first fallback promotes the \
+         worker onto the parent's model with the parent's credential, past \
+         `allowed_profiles` and `cost_budget` alike"
+    );
 }
 
 /// A worker that spawns a worker is bounded by the same counter `agent_send`
