@@ -4184,7 +4184,6 @@
     "field_description": "Description",
     "field_description_placeholder": "Describe the task for the agent...",
     "field_assignee": "Assignee (optional)",
-    "field_assignee_placeholder": "Agent name or ID",
     "field_priority": "Priority (optional)",
     "field_priority_placeholder": "Higher runs first, default 0",
     "field_timeout": "Claim timeout, seconds (optional)",
@@ -4202,7 +4201,10 @@
     "status_pending": "Pending",
     "status_in_progress": "In Progress",
     "status_completed": "Completed",
-    "status_failed": "Failed"
+    "status_failed": "Failed",
+    "assignee_none": "Unassigned — any agent may claim it",
+    "no_agents_hint": "No agents registered yet. Create an agent before assigning tasks.",
+    "field_description_hint": "The agent reads this verbatim. Include the goal, the constraints, and what \"done\" looks like."
   },
   "prompts": {
     "title": "Prompts",

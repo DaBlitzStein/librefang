@@ -4196,7 +4196,6 @@
     "field_description": "Опис",
     "field_description_placeholder": "Опишіть таску для агента...",
     "field_assignee": "Виконавець (необов'язково)",
-    "field_assignee_placeholder": "Ім'я або ID агента",
     "field_priority": "Пріоритет (необов'язково)",
     "field_priority_placeholder": "Вищий виконується першим, за замовчуванням 0",
     "field_timeout": "Тайм-аут захоплення в секундах (необов'язково)",
@@ -4214,7 +4213,10 @@
     "status_pending": "В очікуванні",
     "status_in_progress": "У процесі",
     "status_completed": "Завершено",
-    "status_failed": "Провалено"
+    "status_failed": "Провалено",
+    "assignee_none": "Без виконавця — будь-який агент може взяти",
+    "no_agents_hint": "Жодного агента ще не зареєстровано. Створіть агента, перш ніж призначати таски.",
+    "field_description_hint": "Агент читає це дослівно. Вкажіть мету, обмеження та критерій завершення."
   },
   "prompts": {
     "title": "Промпти",

@@ -4183,7 +4183,6 @@
     "field_description": "描述",
     "field_description_placeholder": "描述要分配给智能体的任务...",
     "field_assignee": "分配给（可选）",
-    "field_assignee_placeholder": "智能体名称或 ID",
     "field_priority": "优先级（可选）",
     "field_priority_placeholder": "数值越高越先执行，默认 0",
     "field_timeout": "认领超时，秒（可选）",
@@ -4201,7 +4200,10 @@
     "status_pending": "待处理",
     "status_in_progress": "进行中",
     "status_completed": "已完成",
-    "status_failed": "失败"
+    "status_failed": "失败",
+    "assignee_none": "未分配 — 任何智能体都可认领",
+    "no_agents_hint": "尚未注册任何智能体。请先创建智能体再分配任务。",
+    "field_description_hint": "智能体会逐字读取此内容。请写明目标、约束以及完成标准。"
   },
   "prompts": {
     "title": "提示词",
