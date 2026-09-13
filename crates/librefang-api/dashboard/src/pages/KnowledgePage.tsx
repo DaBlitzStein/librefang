@@ -21,7 +21,7 @@ import { useTranslation } from "react-i18next";
 
 import { FileText, Library, Plus, Search, Trash2, Upload, Users } from "lucide-react";
 
-import type { KnowledgeBase } from "../api";
+import type { KnowledgeBase, KnowledgeDocument } from "../api";
 import { useKnowledgeBases, useKnowledgeDocuments } from "../lib/queries/knowledge";
 import { useAgents } from "../lib/queries/agents";
 import {
@@ -31,6 +31,7 @@ import {
   useSetKnowledgeHolders,
   useUploadKnowledgeDocument,
 } from "../lib/mutations/knowledge";
+import { isValidBaseName, isValidDocumentName } from "../lib/knowledgeNames";
 import { useUIStore } from "../lib/store";
 
 import { PageHeader } from "../components/ui/PageHeader";
@@ -41,30 +42,28 @@ import { Input } from "../components/ui/Input";
 import { Modal } from "../components/ui/Modal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { CardSkeleton } from "../components/ui/Skeleton";
 
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? err.message : fallback;
 }
 
+/**
+ * Largest document the server will store, mirroring `MAX_DOCUMENT_BYTES` in
+ * `routes/knowledge.rs`.
+ *
+ * Checked here so an oversized file is refused by name and size in one legible
+ * sentence. Left to the server it arrives as a 413 whose body is not JSON, so
+ * the toast degrades to the bare status text with no filename and no limit.
+ */
+export const MAX_DOCUMENT_BYTES = 4 * 1024 * 1024;
+
 /** Bytes as something an operator reads at a glance rather than counts. */
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/**
- * The server's rule for a base name and a document filename, mirrored so the
- * form can refuse before the round trip.
- *
- * Deliberately a mirror and not the authority: `is_valid_segment` in
- * `routes/knowledge.rs` is what actually protects the path join, and a client
- * check that drifted looser would only produce a confusing 400 rather than an
- * escape.
- */
-export function isValidSegment(segment: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(segment);
 }
 
 export function KnowledgePage() {
@@ -93,7 +92,13 @@ export function KnowledgePage() {
     );
   }, [basesQuery.data, search]);
 
-  const nameIsValid = isValidSegment(newName.trim());
+  // Only the safety rule. The server also refuses a name that reads as an
+  // instruction, and that answer is a 400 rendered verbatim rather than a
+  // second scanner here — see `lib/knowledgeNames.ts`.
+  const nameIsValid = isValidBaseName(newName.trim());
+  // An empty list means two different things, and "create your first base" is
+  // actively wrong advice for the one where bases exist but none match.
+  const searching = search.trim().length > 0;
 
   async function handleCreate() {
     const name = newName.trim();
@@ -156,16 +161,34 @@ export function KnowledgePage() {
         />
       </div>
 
-      {basesQuery.isLoading ? (
+      {basesQuery.isError ? (
+        // Before the error branch existed, a failed request fell through to the
+        // empty state and told the operator their bases did not exist.
+        <ErrorState
+          message={basesQuery.error?.message}
+          onRetry={() => void basesQuery.refetch()}
+        />
+      ) : basesQuery.isLoading ? (
         <CardSkeleton />
       ) : bases.length === 0 ? (
         <EmptyState
           icon={<Library className="h-5 w-5" />}
-          title={t("knowledge.empty_title", { defaultValue: "No knowledge bases yet" })}
-          description={t("knowledge.empty_description", {
-            defaultValue:
-              "Create one, upload the documents your agents should be able to read, then pick which agents get it.",
-          })}
+          title={
+            searching
+              ? t("knowledge.no_matches_title", { defaultValue: "No matching bases" })
+              : t("knowledge.empty_title", { defaultValue: "No knowledge bases yet" })
+          }
+          description={
+            searching
+              ? t("knowledge.no_matches_description", {
+                  defaultValue: "No base or agent matches {{query}}.",
+                  query: search.trim(),
+                })
+              : t("knowledge.empty_description", {
+                  defaultValue:
+                    "Create one, upload the documents your agents should be able to read, then pick which agents get it.",
+                })
+          }
         />
       ) : (
         <div className="space-y-3">
@@ -218,7 +241,13 @@ export function KnowledgePage() {
                     <FileText className="h-4 w-4" />
                     {t("knowledge.documents", { defaultValue: "Documents" })}
                   </Button>
-                  <Button variant="danger" onClick={() => setConfirmDelete(base)}>
+                  <Button
+                    variant="danger"
+                    aria-label={t("knowledge.delete_base", {
+                      defaultValue: "Delete this knowledge base",
+                    })}
+                    onClick={() => setConfirmDelete(base)}
+                  >
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>
@@ -245,7 +274,7 @@ export function KnowledgePage() {
           <p className="text-xs text-text-dim">
             {t("knowledge.name_hint", {
               defaultValue:
-                "Letters, digits, '.', '_' and '-', starting with a letter or digit. Agents will read it as @name.",
+                "Any language. Not a slash, a leading or trailing dot, or surrounding spaces. Agents will read it as @name.",
             })}
           </p>
           <div className="flex justify-end gap-2">
@@ -289,15 +318,25 @@ function DocumentList({ baseName }: { baseName: string }) {
   const documentsQuery = useKnowledgeDocuments(baseName);
   const upload = useUploadKnowledgeDocument();
   const remove = useDeleteKnowledgeDocument();
+  const [confirmRemove, setConfirmRemove] = useState<KnowledgeDocument | null>(null);
 
   async function handleFiles(files: FileList | null) {
     if (!files) return;
     for (const file of Array.from(files)) {
-      if (!isValidSegment(file.name)) {
+      if (!isValidDocumentName(file.name)) {
         addToast(t("knowledge.bad_filename", {
             defaultValue:
-              "{{name}} cannot be used as a document name — letters, digits, '.', '_' and '-' only, starting with a letter or digit.",
+              "{{name}} cannot be used as a document name. Any language is fine, but not a slash, a leading or trailing dot, or surrounding spaces.",
             name: file.name,
+          }), "error");
+        continue;
+      }
+      if (file.size > MAX_DOCUMENT_BYTES) {
+        addToast(t("knowledge.too_large", {
+            defaultValue: "{{name}} is {{size}} — a document may be at most {{limit}}.",
+            name: file.name,
+            size: formatBytes(file.size),
+            limit: formatBytes(MAX_DOCUMENT_BYTES),
           }), "error");
         continue;
       }
@@ -318,24 +357,39 @@ function DocumentList({ baseName }: { baseName: string }) {
         <span className="text-xs font-bold uppercase tracking-wide text-text-dim">
           {t("knowledge.documents", { defaultValue: "Documents" })}
         </span>
-        <label className="inline-flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-xs text-brand hover:bg-surface-hover">
-          <Upload className="h-3.5 w-3.5" />
-          {t("knowledge.upload", { defaultValue: "Upload" })}
-          <input
-            type="file"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              void handleFiles(e.target.files);
-              // Clear it, or picking the same file twice in a row is a no-op
-              // because `change` never fires for an unchanged value.
-              e.target.value = "";
-            }}
-          />
-        </label>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-text-dim">
+            {t("knowledge.size_hint", {
+              defaultValue: "Up to {{limit}} per document",
+              limit: formatBytes(MAX_DOCUMENT_BYTES),
+            })}
+          </span>
+          <label className="inline-flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-xs text-brand hover:bg-surface-hover">
+            <Upload className="h-3.5 w-3.5" />
+            {t("knowledge.upload", { defaultValue: "Upload" })}
+            <input
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                void handleFiles(e.target.files);
+                // Clear it, or picking the same file twice in a row is a no-op
+                // because `change` never fires for an unchanged value.
+                e.target.value = "";
+              }}
+            />
+          </label>
+        </div>
       </div>
 
-      {documentsQuery.isLoading ? (
+      {documentsQuery.isError ? (
+        // Without this the panel claimed "No documents yet." directly under a
+        // card header still reporting the base's document count and size.
+        <ErrorState
+          message={documentsQuery.error?.message}
+          onRetry={() => void documentsQuery.refetch()}
+        />
+      ) : documentsQuery.isLoading ? (
         <p className="text-xs text-text-dim">{t("common.loading", { defaultValue: "Loading..." })}</p>
       ) : (documentsQuery.data ?? []).length === 0 ? (
         <p className="text-xs text-text-dim">
@@ -357,9 +411,7 @@ function DocumentList({ baseName }: { baseName: string }) {
                 type="button"
                 aria-label={t("knowledge.remove_document", { defaultValue: "Remove this document" })}
                 className="rounded p-1 text-text-dim hover:text-error"
-                onClick={() => {
-                  void remove.mutateAsync({ name: baseName, filename: doc.filename });
-                }}
+                onClick={() => setConfirmRemove(doc)}
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
@@ -367,6 +419,25 @@ function DocumentList({ baseName }: { baseName: string }) {
           ))}
         </ul>
       )}
+
+      <ConfirmDialog
+        isOpen={confirmRemove !== null}
+        onClose={() => setConfirmRemove(null)}
+        // ConfirmDialog closes itself once this resolves, and keeps the dialog
+        // open when it rejects so a failed removal can be retried.
+        onConfirm={async () => {
+          if (!confirmRemove) return;
+          await remove.mutateAsync({ name: baseName, filename: confirmRemove.filename });
+        }}
+        title={t("knowledge.delete_document_title", { defaultValue: "Remove this document?" })}
+        message={t("knowledge.delete_document_message", {
+          defaultValue:
+            "{{name}} is deleted from the base, so every agent holding it loses the document. This cannot be undone.",
+          name: confirmRemove?.filename ?? "",
+        })}
+        confirmLabel={t("common.delete", { defaultValue: "Delete" })}
+        tone="destructive"
+      />
     </div>
   );
 }
@@ -375,7 +446,11 @@ function DocumentList({ baseName }: { baseName: string }) {
 function ShareModal({ base, onClose }: { base: KnowledgeBase; onClose: () => void }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
-  const agentsQuery = useAgents();
+  // Hands are included deliberately: `holders_of` walks the whole agent
+  // registry, so a hand member holding this base shows as a badge on the card.
+  // Excluding hands here would render that holder unrevocable — visible on the
+  // card, absent from the only list that can untick it.
+  const agentsQuery = useAgents({ includeHands: true });
   const setHolders = useSetKnowledgeHolders();
 
   // Seeded from the base's current holders, then edited locally so the whole
@@ -419,56 +494,74 @@ function ShareModal({ base, onClose }: { base: KnowledgeBase; onClose: () => voi
             name: base.name,
           })}
         </p>
-        <div className="max-h-80 space-y-1 overflow-y-auto scrollbar-thin">
-          {agents.map((agent) => {
-            const mode = selection[agent.id];
-            return (
-              <div
-                key={agent.id}
-                className="flex items-center justify-between rounded px-2 py-1.5 text-sm hover:bg-surface-hover"
-              >
-                <label className="flex min-w-0 cursor-pointer items-center gap-2">
-                  <input
-                    type="checkbox"
-                    className="rounded"
-                    checked={mode !== undefined}
-                    onChange={(e) => {
-                      setSelection((current) => {
-                        const next = { ...current };
-                        if (e.target.checked) {
-                          next[agent.id] = "r";
-                        } else {
-                          delete next[agent.id];
-                        }
-                        return next;
-                      });
-                    }}
-                  />
-                  <span className="truncate">{agent.name}</span>
-                </label>
-                <label
-                  className={`flex shrink-0 items-center gap-1 text-xs ${
-                    mode === undefined ? "opacity-40" : "cursor-pointer"
-                  }`}
+        {agentsQuery.isError ? (
+          // The query is cold until this modal opens, so without the three
+          // states below the first paint was an empty list that read as
+          // "there are no agents to share with".
+          <ErrorState
+            message={agentsQuery.error?.message}
+            onRetry={() => void agentsQuery.refetch()}
+          />
+        ) : agentsQuery.isLoading ? (
+          <p className="text-xs text-text-dim">
+            {t("common.loading", { defaultValue: "Loading..." })}
+          </p>
+        ) : agents.length === 0 ? (
+          <p className="text-xs text-text-dim">
+            {t("knowledge.no_agents", { defaultValue: "No agents to share with yet." })}
+          </p>
+        ) : (
+          <div className="max-h-80 space-y-1 overflow-y-auto scrollbar-thin">
+            {agents.map((agent) => {
+              const mode = selection[agent.id];
+              return (
+                <div
+                  key={agent.id}
+                  className="flex items-center justify-between rounded px-2 py-1.5 text-sm hover:bg-surface-hover"
                 >
-                  <input
-                    type="checkbox"
-                    className="rounded"
-                    disabled={mode === undefined}
-                    checked={mode === "rw"}
-                    onChange={(e) => {
-                      setSelection((current) => ({
-                        ...current,
-                        [agent.id]: e.target.checked ? "rw" : "r",
-                      }));
-                    }}
-                  />
-                  {t("knowledge.mode_rw", { defaultValue: "read-write" })}
-                </label>
-              </div>
-            );
-          })}
-        </div>
+                  <label className="flex min-w-0 cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      className="rounded"
+                      checked={mode !== undefined}
+                      onChange={(e) => {
+                        setSelection((current) => {
+                          const next = { ...current };
+                          if (e.target.checked) {
+                            next[agent.id] = "r";
+                          } else {
+                            delete next[agent.id];
+                          }
+                          return next;
+                        });
+                      }}
+                    />
+                    <span className="truncate">{agent.name}</span>
+                  </label>
+                  <label
+                    className={`flex shrink-0 items-center gap-1 text-xs ${
+                      mode === undefined ? "opacity-40" : "cursor-pointer"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="rounded"
+                      disabled={mode === undefined}
+                      checked={mode === "rw"}
+                      onChange={(e) => {
+                        setSelection((current) => ({
+                          ...current,
+                          [agent.id]: e.target.checked ? "rw" : "r",
+                        }));
+                      }}
+                    />
+                    {t("knowledge.mode_rw", { defaultValue: "read-write" })}
+                  </label>
+                </div>
+              );
+            })}
+          </div>
+        )}
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose}>
             {t("common.cancel", { defaultValue: "Cancel" })}
