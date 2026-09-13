@@ -76,6 +76,15 @@ impl GoalInfo {
     pub fn is_running(&self) -> bool {
         self.run_phase.as_deref() == Some("running")
     }
+
+    /// Whether the run registry reports this goal as paused.
+    ///
+    /// Kept separate from [`Self::is_running`] rather than folded into it: a
+    /// paused run is neither running nor absent, and the pause key has to tell
+    /// the two apart to know whether it should pause or resume.
+    pub fn is_paused(&self) -> bool {
+        self.run_phase.as_deref() == Some("paused")
+    }
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -145,6 +154,14 @@ pub enum GoalsAction {
     StopRun {
         goal_id: String,
     },
+    /// Checkpoint a running goal so it can be resumed from where it stopped.
+    PauseRun {
+        goal_id: String,
+    },
+    /// Continue a paused goal from its checkpoint.
+    ResumeRun {
+        goal_id: String,
+    },
     DeleteGoal {
         goal_id: String,
     },
@@ -188,6 +205,33 @@ impl GoalsState {
 
     pub fn tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
+    }
+
+    /// Replace the list, carrying forward run state already fetched for the goals still in it.
+    ///
+    /// `GET /api/goals` answers with stored goal documents, which never carry run state, so every row it produces has `run_phase: None`.
+    /// Assigning the vector wholesale therefore erased whatever [`Self::apply_run_state`] had written — and pause, resume, start and stop each fire a list refresh and a run-state refresh on independent threads, so whenever the list response landed second it wiped the phase the other had just fetched.
+    /// That left `p` reading `None` and going inert, which is precisely the state a paused run cannot be resumed from.
+    ///
+    /// A goal absent from the incoming list keeps nothing: its run state goes away with it rather than being re-attached to a later goal that happens to reuse the id.
+    pub fn replace_goals(&mut self, mut list: Vec<GoalInfo>) {
+        for fresh in &mut list {
+            if let Some(known) = self.goals.iter().find(|g| g.id == fresh.id) {
+                fresh.run_phase = known.run_phase.clone();
+                fresh.run_iteration = known.run_iteration;
+                fresh.run_max_iterations = known.run_max_iterations;
+                // Carried for the same reason as the three above, and added
+                // when #8224's refresh fix met this branch's budget control:
+                // `apply_run_state` writes this field too, so leaving it out
+                // let a list refresh landing second blank it — and then
+                // `adjust_verify_max_retries` fell back to the compiled
+                // default instead of the budget the live run is actually
+                // under, moving a number the operator was not looking at.
+                fresh.run_verify_max_retries = known.run_verify_max_retries;
+            }
+        }
+        self.goals = list;
+        self.refilter();
     }
 
     /// Merge a freshly fetched run state into the matching goal.
@@ -286,6 +330,26 @@ impl GoalsState {
         self.pending_verify_max_retries.insert(id, next);
     }
 
+    /// Pause or resume `goal`, whichever its live phase calls for.
+    ///
+    /// A goal that is neither running nor paused has nothing to toggle, so the
+    /// key is inert rather than guessing — starting a run is what `s` is for,
+    /// and silently starting one from a pause key would be a surprise on a
+    /// screen where the two states look similar.
+    fn toggle_pause(goal: &GoalInfo) -> GoalsAction {
+        if goal.is_running() {
+            GoalsAction::PauseRun {
+                goal_id: goal.id.clone(),
+            }
+        } else if goal.is_paused() {
+            GoalsAction::ResumeRun {
+                goal_id: goal.id.clone(),
+            }
+        } else {
+            GoalsAction::Continue
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> GoalsAction {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return GoalsAction::Continue;
@@ -375,6 +439,11 @@ impl GoalsState {
                     return self.toggle_run(g);
                 }
             }
+            KeyCode::Char('p') => {
+                if let Some(g) = self.selected_in_list() {
+                    return Self::toggle_pause(g);
+                }
+            }
             KeyCode::Char('/') => {
                 self.search_mode = true;
                 self.search_buf.clear();
@@ -406,6 +475,13 @@ impl GoalsState {
                     -1
                 };
                 self.adjust_verify_max_retries(delta);
+            }
+            KeyCode::Char('p') => {
+                if let Some(idx) = self.selected_goal {
+                    if let Some(g) = self.goals.get(idx) {
+                        return Self::toggle_pause(g);
+                    }
+                }
             }
             KeyCode::Char('r') => return GoalsAction::Refresh,
             _ => {}
@@ -1081,6 +1157,109 @@ mod tests {
         s.goals = goals;
         s.refilter();
         s
+    }
+
+    /// `p` has to read the live phase, not the goal document: a running goal
+    /// pauses, a paused one resumes, and one that is doing neither is left
+    /// alone rather than being started — `s` is the key that starts a run, and
+    /// a pause key that silently launched one would be a surprise on a screen
+    /// where "stopped" and "paused" sit next to each other.
+    #[test]
+    fn pause_key_pauses_a_running_goal_and_resumes_a_paused_one() {
+        let mut running = goal("1", "Ship the report", None);
+        running.run_phase = Some("running".to_string());
+        let mut s = state_with(vec![running]);
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Char('p'))),
+            GoalsAction::PauseRun { ref goal_id } if goal_id == "1"
+        ));
+
+        let mut paused = goal("2", "Ship the report", None);
+        paused.run_phase = Some("paused".to_string());
+        let mut s = state_with(vec![paused]);
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Char('p'))),
+            GoalsAction::ResumeRun { ref goal_id } if goal_id == "2"
+        ));
+    }
+
+    /// A goal with no live run, and one whose run already finished, both leave
+    /// the key inert. `run_phase` is `None` until the detail pane fetches it,
+    /// so this is also the state the list is in before anything is opened.
+    #[test]
+    fn pause_key_is_inert_when_there_is_no_run_to_pause() {
+        for phase in [None, Some("completed"), Some("stopped"), Some("failed")] {
+            let mut g = goal("1", "Ship the report", None);
+            g.run_phase = phase.map(str::to_string);
+            let mut s = state_with(vec![g]);
+            assert!(
+                matches!(s.handle_key(key(KeyCode::Char('p'))), GoalsAction::Continue),
+                "phase {phase:?} must not produce a pause or resume"
+            );
+        }
+    }
+
+    /// Pause, resume, start and stop each fire a list refresh alongside the
+    /// run-state refresh, on independent threads. The list payload carries no
+    /// run state, so if it lands second it used to wipe the phase the other
+    /// fetch had just written — and `p` reading `None` is inert, which is the
+    /// one state a paused run cannot be resumed from. `r` did the same.
+    #[test]
+    fn a_list_reload_keeps_run_state_already_fetched_so_pause_stays_live() {
+        let mut s = state_with(vec![goal("1", "Ship the report", None)]);
+        s.apply_run_state("1", Some("paused".to_string()), Some(3), Some(25), Some(4));
+
+        // Exactly what `spawn_fetch_goals` builds: every row `run_phase: None`.
+        s.replace_goals(vec![
+            goal("1", "Ship the report", None),
+            goal("2", "File the return", None),
+        ]);
+
+        assert_eq!(s.goals[0].run_phase.as_deref(), Some("paused"));
+        assert_eq!(s.goals[0].run_iteration, Some(3));
+        assert_eq!(s.goals[0].run_max_iterations, Some(25));
+        // The budget this branch adds is written by the same `apply_run_state`
+        // and has to survive the same reload: without it `+`/`-` would start
+        // from the compiled default rather than the run's own budget.
+        assert_eq!(s.goals[0].run_verify_max_retries, Some(4));
+        // A goal the reload brought in for the first time has nothing to carry.
+        assert!(s.goals[1].run_phase.is_none());
+        assert!(s.goals[1].run_verify_max_retries.is_none());
+
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Char('p'))),
+            GoalsAction::ResumeRun { ref goal_id } if goal_id == "1"
+        ));
+    }
+
+    /// A goal that has left the list takes its run state with it, rather than
+    /// having it re-attached to whatever later occupies the same position.
+    #[test]
+    fn a_goal_absent_from_the_reload_does_not_carry_its_run_state_over() {
+        let mut s = state_with(vec![goal("1", "Ship the report", None)]);
+        s.apply_run_state("1", Some("running".to_string()), Some(2), Some(10), Some(4));
+
+        s.replace_goals(vec![goal("2", "File the return", None)]);
+
+        assert_eq!(s.goals.len(), 1);
+        assert_eq!(s.goals[0].id, "2");
+        assert!(s.goals[0].run_phase.is_none());
+        assert!(s.goals[0].run_verify_max_retries.is_none());
+    }
+
+    /// The detail pane binds the same key against the goal it has open, which
+    /// is a different selection path from the list's.
+    #[test]
+    fn pause_key_works_from_the_detail_pane_too() {
+        let mut running = goal("7", "Ship the report", None);
+        running.run_phase = Some("running".to_string());
+        let mut s = state_with(vec![running]);
+        s.detail_open = true;
+        s.selected_goal = Some(0);
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Char('p'))),
+            GoalsAction::PauseRun { ref goal_id } if goal_id == "7"
+        ));
     }
 
     #[test]

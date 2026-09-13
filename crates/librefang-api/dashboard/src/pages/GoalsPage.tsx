@@ -9,6 +9,8 @@ import {
   useDeleteGoal,
   useStartGoalRun,
   useStopGoalRun,
+  usePauseGoalRun,
+  useResumeGoalRun,
 } from "../lib/mutations/goals";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
@@ -20,7 +22,7 @@ import { Badge, type BadgeVariant } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { toastErr } from "../lib/errors";
-import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight, Zap, Ban, Activity } from "lucide-react";
+import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Pause, Square, ChevronDown, ChevronRight, Zap, Ban, Activity } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -137,6 +139,7 @@ const goalRunPhaseBadge = (
 ): { variant: BadgeVariant; icon?: React.ComponentType<{ className?: string }> } => {
   switch (phase) {
     case "running":                 return { variant: "brand",   icon: Activity };
+    case "paused":                  return { variant: "warning", icon: Pause };
     case "finished":                return { variant: "success", icon: CheckCircle2 };
     case "stopped":                 return { variant: "warning", icon: Ban };
     case "rate_limited":            return { variant: "error",   icon: AlertTriangle };
@@ -191,9 +194,12 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
   const runQuery = useGoalRun(goal.id, { enabled: hasAgent });
   const startMutation = useStartGoalRun();
   const stopMutation = useStopGoalRun();
+  const pauseMutation = usePauseGoalRun();
+  const resumeMutation = useResumeGoalRun();
 
   const run = runQuery.data?.run;
   const isRunning = runQuery.data?.running === true && run?.phase === "running";
+  const isPaused = run?.phase === "paused";
 
   if (!hasAgent) {
     return (
@@ -222,23 +228,85 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
       addToast(toastErr(err, t("common.error")), "error");
     }
   };
+  const onPause = async () => {
+    try {
+      await pauseMutation.mutateAsync(goal.id);
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
+    }
+  };
+  const onResume = async () => {
+    try {
+      await resumeMutation.mutateAsync(goal.id);
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
+    }
+  };
 
   // No `&& run` guard: `isRunning` already requires `run?.phase === "running"`, and the daemon computes `running` as `run.phase == GoalRunPhase::Running` with no `run` field at all when there is no run, so the two cannot disagree. Written as a guard it would have rendered the *start* button for a live run — the opposite of safe for a state it implied it was handling.
   if (isRunning) {
     return (
-      <button
-        type="button"
-        onClick={() => void onStop()}
-        disabled={stopMutation.isPending}
-        className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
-        title={t("goals.run_stop")}
-      >
-        {stopMutation.isPending ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <Square className="h-3.5 w-3.5" />
-        )}
-      </button>
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          onClick={() => void onPause()}
+          disabled={pauseMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-colors"
+          title={t("goals.run_pause")}
+        >
+          {pauseMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Pause className="h-3.5 w-3.5" />
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => void onStop()}
+          disabled={stopMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
+          title={t("goals.run_stop")}
+        >
+          {stopMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Square className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
+    );
+  }
+
+  if (isPaused) {
+    return (
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          onClick={() => void onResume()}
+          disabled={resumeMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-success/10 text-text-dim hover:text-success transition-colors"
+          title={t("goals.run_resume")}
+        >
+          {resumeMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Play className="h-3.5 w-3.5" />
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => void onStop()}
+          disabled={stopMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
+          title={t("goals.run_stop")}
+        >
+          {stopMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Square className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
     );
   }
 
@@ -643,7 +711,8 @@ export function GoalsPage() {
                     <label htmlFor="goal-create-description" className="sr-only">{t("goals.goal_desc_placeholder")}</label>
                     <textarea id="goal-create-description" value={createDraft.description} onChange={e => setCreateDraft({...createDraft, description: e.target.value})} placeholder={t("goals.goal_desc_placeholder")} className={`${inputClass} resize-none`} rows={3} />
                     <label htmlFor="goal-create-agent" className="sr-only">{t("goals.assigned_agent")}</label>
-                    <select id="goal-create-agent" value={createDraft.agent_id} onChange={e => setCreateDraft({...createDraft, agent_id: e.target.value})} className={inputClass}>
+                    {/* Picking the agent that is already the verifier drops the verifier: the option below is filtered out for that pair, so keeping the id would leave a blank select carrying a value the backend rejects with a 400. */}
+                    <select id="goal-create-agent" value={createDraft.agent_id} onChange={e => setCreateDraft({...createDraft, agent_id: e.target.value, verify_agent_id: createDraft.verify_agent_id === e.target.value ? "" : createDraft.verify_agent_id})} className={inputClass}>
                       <option value="">{t("goals.no_agent_selected")}</option>
                       {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
                     </select>
@@ -656,7 +725,8 @@ export function GoalsPage() {
                         <label htmlFor="goal-create-verifier" className="sr-only">{t("goals.verifier_agent")}</label>
                         <select id="goal-create-verifier" value={createDraft.verify_agent_id} onChange={e => setCreateDraft({...createDraft, verify_agent_id: e.target.value})} className={inputClass}>
                           <option value="">{t("goals.no_verifier_selected")}</option>
-                          {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+                          {/* The assigned agent is not offered: it would be grading its own work, which is the one rule the pattern exists for, and the backend now rejects the pair with a 400. */}
+                          {agents.filter(a => a.id !== createDraft.agent_id).map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
                         </select>
                         <label htmlFor="goal-create-evaluator" className="sr-only">{t("goals.evaluator_model")}</label>
                         <input id="goal-create-evaluator" value={createDraft.evaluator_model} onChange={e => setCreateDraft({...createDraft, evaluator_model: e.target.value})} placeholder={t("goals.evaluator_model_placeholder")} className={inputClass} />
@@ -719,7 +789,8 @@ export function GoalsPage() {
                                   <label htmlFor="goal-edit-progress" className="sr-only">{t("goals.progress")}</label>
                                   <input id="goal-edit-progress" type="number" value={editDraft.progress} onChange={e => setEditDraft({...editDraft, progress: Number(e.target.value)})} className={inputClass} min={0} max={100} style={{ width: "80px" }} />
                                   <label htmlFor="goal-edit-agent" className="sr-only">{t("goals.assigned_agent")}</label>
-                                  <select id="goal-edit-agent" value={editDraft.agent_id} onChange={e => setEditDraft({...editDraft, agent_id: e.target.value})} className={`${inputClass} flex-1 min-w-[120px]`}>
+                                  {/* Same rule as the create form: reassigning the goal to its own verifier clears the verifier instead of leaving a blank select. */}
+                                  <select id="goal-edit-agent" value={editDraft.agent_id} onChange={e => setEditDraft({...editDraft, agent_id: e.target.value, verify_agent_id: editDraft.verify_agent_id === e.target.value ? "" : editDraft.verify_agent_id})} className={`${inputClass} flex-1 min-w-[120px]`}>
                                     <option value="">{t("goals.no_agent_selected")}</option>
                                     {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
                                   </select>
@@ -735,7 +806,8 @@ export function GoalsPage() {
                                     <label htmlFor="goal-edit-verifier" className="sr-only">{t("goals.verifier_agent")}</label>
                                     <select id="goal-edit-verifier" value={editDraft.verify_agent_id} onChange={e => setEditDraft({...editDraft, verify_agent_id: e.target.value})} className={`${inputClass} flex-1 min-w-[120px]`}>
                                       <option value="">{t("goals.no_verifier_selected")}</option>
-                                      {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+                                      {/* Same rule as the create form: an agent cannot verify its own work. */}
+                                      {agents.filter(a => a.id !== editDraft.agent_id).map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
                                     </select>
                                     <label htmlFor="goal-edit-evaluator" className="sr-only">{t("goals.evaluator_model")}</label>
                                     <input id="goal-edit-evaluator" value={editDraft.evaluator_model} onChange={e => setEditDraft({...editDraft, evaluator_model: e.target.value})} placeholder={t("goals.evaluator_model_placeholder")} className={`${inputClass} flex-1 min-w-[120px]`} />
