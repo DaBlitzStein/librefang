@@ -886,8 +886,13 @@ fn test_agent_spawn_manifest_all_cases() {
 // agent_spawn `profile` — the spawned agent runs on the named profile
 // -----------------------------------------------------------------------
 
-/// A profile for tests. Only `provider` / `model` / `context_window` reach the
-/// spawned manifest; the routing fields are irrelevant at spawn time.
+/// A profile for tests. Only `provider` / `model` / `context_window` /
+/// `max_output_tokens` reach the spawned manifest; the routing fields are
+/// irrelevant at spawn time.
+///
+/// `max_output_tokens` is not a parameter because only the two tests about it
+/// set one — the rest assign it on the returned value, the way they already do
+/// for `cost_tier`.
 fn spawn_test_profile(
     name: &str,
     provider: &str,
@@ -900,6 +905,7 @@ fn spawn_test_profile(
         provider: provider.to_string(),
         model: model.to_string(),
         context_window,
+        max_output_tokens: None,
         cost_tier: librefang_types::model_profile::CostTier::Cheap,
         priority: 0,
         max_complexity: 1.0,
@@ -983,6 +989,54 @@ fn agent_spawn_profile_without_context_window_leaves_it_unset() {
     assert!(
         !toml.contains("context_window"),
         "no window in the profile means no window pinned, got:\n{toml}"
+    );
+}
+
+/// The output cap #7781 added to `ModelProfile` has to reach the spawned child
+/// the same way `context_window` does, because the kernel's per-turn routing
+/// applies the two together. Without this the cap holds on a routed turn and
+/// silently does not hold on a spawn pinned to the same profile.
+#[test]
+fn agent_spawn_profile_carries_the_max_output_tokens() {
+    let mut profile = spawn_test_profile("coder", "deepseek", "deepseek-v4-pro", Some(131072));
+    profile.max_output_tokens = Some(8192);
+    let toml = build_agent_manifest_toml(
+        "worker",
+        "You write code.",
+        vec![],
+        vec![],
+        false,
+        Some(&profile),
+        None,
+    )
+    .unwrap();
+
+    let manifest: librefang_types::agent::AgentManifest =
+        toml::from_str(&toml).expect("spawned manifest must deserialize");
+    assert_eq!(manifest.model.context_window, Some(131072));
+    assert_eq!(manifest.model.max_output_tokens, Some(8192));
+}
+
+/// The mirror of `agent_spawn_profile_without_context_window_leaves_it_unset`:
+/// a profile that states no output cap must not pin one, so the runtime keeps
+/// resolving it from the registry / cache / live probe.
+#[test]
+fn agent_spawn_profile_without_max_output_tokens_leaves_it_unset() {
+    let profile = spawn_test_profile("quick", "anthropic", "claude-haiku-4-5", None);
+    let toml = build_agent_manifest_toml(
+        "verifier",
+        "You check things.",
+        vec![],
+        vec![],
+        false,
+        Some(&profile),
+        None,
+    )
+    .unwrap();
+
+    assert!(
+        !toml.contains("max_output_tokens"),
+        "no output cap in the profile means none pinned, got:\n{toml}"
     );
 }
 

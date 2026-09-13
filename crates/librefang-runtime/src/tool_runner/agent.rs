@@ -239,6 +239,16 @@ pub(super) fn build_agent_manifest_toml(
         if let Some(context_window) = profile.context_window {
             model_json["context_window"] = serde_json::json!(context_window);
         }
+        // `max_output_tokens` is the other half of the same pair: #7781 gave
+        // `ModelProfile` an output cap with the same precedence and semantics
+        // as `context_window`, and the kernel's per-turn routing applies both
+        // together. A spawn that carried only the window would cap the child's
+        // input and leave its output on whatever the parent was using — the
+        // profile's cap would hold on a routed turn and silently not hold on a
+        // pinned spawn.
+        if let Some(max_output_tokens) = profile.max_output_tokens {
+            model_json["max_output_tokens"] = serde_json::json!(max_output_tokens);
+        }
     }
     if let Some(parent_override) = parent_override {
         model_json["router_override"] = serde_json::to_value(parent_override)
