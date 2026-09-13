@@ -662,8 +662,7 @@ impl App {
 
             // ── Goals events ──
             AppEvent::GoalsLoaded(list) => {
-                self.goals.goals = list;
-                self.goals.refilter();
+                self.goals.replace_goals(list);
                 self.goals.loading = false;
             }
             AppEvent::GoalRunLoaded {
@@ -671,9 +670,15 @@ impl App {
                 phase,
                 iteration,
                 max_iterations,
+                verify_max_retries,
             } => {
-                self.goals
-                    .apply_run_state(&goal_id, phase, iteration, max_iterations);
+                self.goals.apply_run_state(
+                    &goal_id,
+                    phase,
+                    iteration,
+                    max_iterations,
+                    verify_max_retries,
+                );
             }
             AppEvent::GoalRunFailed { goal_id, failure } => {
                 // Deliberately does NOT touch the cached run state: the last
@@ -710,6 +715,16 @@ impl App {
             }
             AppEvent::GoalRunStopped(id) => {
                 self.goals.status_msg = crate::i18n::t_args("tui-goal-run-stopped", &[("id", &id)]);
+                self.refresh_goal_run(id);
+                self.refresh_goals();
+            }
+            AppEvent::GoalRunPaused(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-paused", &[("id", &id)]);
+                self.refresh_goal_run(id);
+                self.refresh_goals();
+            }
+            AppEvent::GoalRunResumed(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-resumed", &[("id", &id)]);
                 self.refresh_goal_run(id);
                 self.refresh_goals();
             }
@@ -2400,6 +2415,10 @@ impl App {
                 title,
                 description,
                 agent_id,
+                loop_engineering,
+                verify_agent_id,
+                evaluator_model,
+                tick_interval_secs,
             } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_create_goal(
@@ -2407,6 +2426,10 @@ impl App {
                         title,
                         description,
                         agent_id,
+                        loop_engineering,
+                        verify_agent_id,
+                        evaluator_model,
+                        tick_interval_secs,
                         self.event_tx.clone(),
                     );
                 }
@@ -2416,14 +2439,32 @@ impl App {
                     event::spawn_delete_goal(backend, goal_id, self.event_tx.clone());
                 }
             }
-            goals::GoalsAction::StartRun { goal_id } => {
+            goals::GoalsAction::StartRun {
+                goal_id,
+                verify_max_retries,
+            } => {
                 if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_start_goal_run(backend, goal_id, self.event_tx.clone());
+                    event::spawn_start_goal_run(
+                        backend,
+                        goal_id,
+                        verify_max_retries,
+                        self.event_tx.clone(),
+                    );
                 }
             }
             goals::GoalsAction::StopRun { goal_id } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_stop_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::PauseRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_pause_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::ResumeRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_resume_goal_run(backend, goal_id, self.event_tx.clone());
                 }
             }
         }
