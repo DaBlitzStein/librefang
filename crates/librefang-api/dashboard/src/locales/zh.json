@@ -883,8 +883,7 @@
     "select_provider_first": "请先选择供应商",
     "token_usage_title": "令牌占用",
     "token_injected_total": "每次请求注入",
-    "token_recent": "最近调用"
-    "select_provider_first": "请先选择供应商",
+    "token_recent": "最近调用",
     "routing": {
       "title": "模型路由",
       "description": "选择该智能体是始终使用自己的模型，还是由路由器根据任务复杂度为每个任务挑选模型。",

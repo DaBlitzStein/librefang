@@ -885,8 +885,7 @@
     "select_provider_first": "Najpierw wybierz dostawcę",
     "token_usage_title": "Zużycie tokenów",
     "token_injected_total": "Wstrzykiwane na żądanie",
-    "token_recent": "Ostatnie wywołania"
-    "select_provider_first": "Najpierw wybierz dostawcę",
+    "token_recent": "Ostatnie wywołania",
     "routing": {
       "title": "Routing modeli",
       "description": "Zdecyduj, czy ten agent zawsze używa własnego modelu, czy router dobiera model do każdego zadania na podstawie jego złożoności.",

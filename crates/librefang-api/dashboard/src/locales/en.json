@@ -883,8 +883,7 @@
     "select_provider_first": "Select provider first",
     "token_usage_title": "Token footprint",
     "token_injected_total": "Injected per request",
-    "token_recent": "Recent calls"
-    "select_provider_first": "Select provider first",
+    "token_recent": "Recent calls",
     "routing": {
       "title": "Model routing",
       "description": "Choose whether this agent always uses its own model, or lets the router pick one per task based on the work's complexity.",
