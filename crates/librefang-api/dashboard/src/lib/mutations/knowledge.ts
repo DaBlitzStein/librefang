@@ -26,7 +26,9 @@ export function useCreateKnowledgeBase() {
   return useMutation({
     mutationFn: (name: string) => createKnowledgeBase(name),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: knowledgeKeys.all });
+      // Only the list: a new base is empty and cannot have changed any other
+      // base's documents, so sweeping `all` would refetch every open panel.
+      qc.invalidateQueries({ queryKey: knowledgeKeys.lists() });
     },
   });
 }
