@@ -625,10 +625,19 @@ export interface WorkflowLastRunSummary {
   completed_at: string | null;
 }
 
+export interface WorkflowInputParam {
+  name: string;
+  param_type?: string;
+  required?: boolean;
+  description?: string;
+  default?: unknown;
+}
+
 export interface WorkflowItem {
   id: string;
   name: string;
   description?: string;
+  input_schema?: WorkflowInputParam[];
   steps?: number | WorkflowStep[];
   created_at?: string;
   layout?: unknown;
@@ -3106,6 +3115,7 @@ export interface WorkflowRunDetail {
   started_at: string;
   completed_at?: string | null;
   step_results: WorkflowStepResult[];
+  total_steps?: number;
 }
 
 /** Per-step preview returned by dry-run. */
