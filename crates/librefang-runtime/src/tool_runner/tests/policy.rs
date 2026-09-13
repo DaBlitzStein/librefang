@@ -888,6 +888,7 @@ fn spawn_test_profile(
     context_window: Option<u64>,
 ) -> librefang_types::model_profile::ModelProfile {
     librefang_types::model_profile::ModelProfile {
+        max_output_tokens: None,
         name: name.to_string(),
         tags: Default::default(),
         provider: provider.to_string(),

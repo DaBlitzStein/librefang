@@ -794,60 +794,6 @@ priority = 10
         }
     }
 
-    #[test]
-    fn match_ignores_a_tag_that_is_only_a_substring_of_a_word() {
-        // Traced end to end over the builtin catalog with default config and
-        // no agent override. The task scores 0.0, which caps the tier at the
-        // cheapest permitted one, leaving `quick` the only candidate — and
-        // `quick` is tagged "ping", a substring of "grouping". Substring
-        // matching turned that into a tag hit and reported the investigation
-        // as deliberately routed to the cheapest model; word matching leaves
-        // it with no candidate, so the agent keeps its own model.
-        let catalog = ProfileCatalog::builtin();
-        let cfg = ModelRouterConfig {
-            enabled: true,
-            ..Default::default()
-        };
-        let task = "Investigate why grouping fails";
-        let complexity = evaluate_complexity_heuristic(task);
-
-        let (matched, decision) = match_profile(task, &complexity, catalog.profiles(), &cfg, None);
-        assert_eq!(
-            decision,
-            RoutingDecision::NoCandidate,
-            "matched {:?}",
-            matched.map(|p| p.name.as_str())
-        );
-        assert!(matched.is_none());
-    }
-
-    #[test]
-    fn builtin_tags_and_keywords_survive_the_word_tokenizer() {
-        // The word matcher can only ever fire for a tag or keyword that its
-        // own tokenizer leaves intact, so every one of them has to be a
-        // single lowercase token. This is what makes splitting on
-        // non-alphanumerics-except-`-` safe for the whole catalog.
-        for profile in ProfileCatalog::builtin().profiles() {
-            for tag in &profile.tags {
-                assert_eq!(
-                    tag,
-                    &tag.to_lowercase(),
-                    "builtin tag {tag:?} is not lowercase, so it can never match"
-                );
-                assert!(
-                    word_set(tag).contains(tag.as_str()),
-                    "builtin tag {tag:?} does not survive tokenising as one word"
-                );
-            }
-        }
-        for keyword in COMPLEX_KEYWORDS.iter().chain(SIMPLE_KEYWORDS) {
-            assert!(
-                word_set(keyword).contains(keyword),
-                "keyword {keyword:?} does not survive tokenising as one word"
-            );
-        }
-    }
-
     // ---- per-agent override ---------------------------------------------
 
     #[test]

@@ -1245,38 +1245,6 @@ mod tests {
     }
 
     #[test]
-    fn update_tags_syncs_entry_tags_manifest_tags_and_tag_index_7742() {
-        let registry = AgentRegistry::new();
-        let mut entry = test_entry("tag-update-agent");
-        entry.tags = vec!["alpha".to_string(), "beta".to_string()];
-        entry.manifest.tags = vec!["alpha".to_string(), "beta".to_string()];
-        let id = entry.id;
-        registry.register(entry).unwrap();
-
-        // Drop "alpha", keep "beta", add "gamma".
-        registry
-            .update_tags(id, vec!["beta".to_string(), "gamma".to_string()])
-            .unwrap();
-
-        let refreshed = registry.get(id).unwrap();
-        assert_eq!(
-            refreshed.tags,
-            vec!["beta".to_string(), "gamma".to_string()]
-        );
-        assert_eq!(
-            refreshed.manifest.tags, refreshed.tags,
-            "manifest.tags must mirror entry.tags after update_tags"
-        );
-
-        assert!(
-            !registry.tag_index.contains_key("alpha"),
-            "dropped tag's bucket should be pruned once empty"
-        );
-        assert_eq!(registry.tag_index.get("beta").unwrap().as_slice(), &[id]);
-        assert_eq!(registry.tag_index.get("gamma").unwrap().as_slice(), &[id]);
-    }
-
-    #[test]
     fn update_tags_removing_last_tag_leaves_no_empty_bucket_7742() {
         let registry = AgentRegistry::new();
         let mut entry = test_entry("tag-cleanup-agent");

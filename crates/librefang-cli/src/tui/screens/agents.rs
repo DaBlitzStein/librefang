@@ -3201,10 +3201,6 @@ mod workspaces_tests {
         assert!(matches!(state.sub, AgentSubScreen::AgentDetail));
     }
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
     /// #7781 review: `default_profile` is not editable from this screen, so
     /// saving a routing edit (Enter) must carry through whatever value was
     /// loaded rather than silently dropping it.

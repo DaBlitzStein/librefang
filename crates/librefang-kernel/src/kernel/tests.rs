@@ -15454,6 +15454,7 @@ async fn streaming_turn_on_non_canonical_session_survives_in_turn_auto_compactio
                 .collect(),
             context_window_tokens: 0,
             label: None,
+            parent_session_id: None,
             model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,

@@ -288,6 +288,13 @@ pub enum SettingsAction {
         task: String,
         chain: Vec<String>,
     },
+    /// Fetch `GET /api/config/schema` + `GET /api/config` for the config editor.
+    RefreshConfig,
+    /// One `POST /api/config/set` write. `value` is `Null` to remove the key.
+    SaveConfigValue {
+        path: String,
+        value: serde_json::Value,
+    },
 }
 
 impl SettingsState {

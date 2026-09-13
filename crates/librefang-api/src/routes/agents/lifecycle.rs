@@ -1569,18 +1569,6 @@ pub async fn reload_agent_manifest(
         }
     }
 }
-
-/// GET /api/agents/{id}/manifest — Get the agent's full manifest as raw TOML.
-///
-/// Powers the dashboard's full manifest editor (#7742): the Configure
-/// drawer's quick-edit widgets only cover a handful of fields, so this
-/// endpoint hands back every field `AgentManifest` carries for
-/// `AgentManifestForm` to parse and pre-fill, with `PATCH /api/agents/{id}`
-/// (`manifest_toml`) as the matching write path. Renders the live
-/// in-memory manifest the same way `persist_manifest_to_disk` writes
-/// `agent.toml`, rather than re-reading the on-disk file, so the response
-/// always reflects the latest state even if a prior partial PATCH hasn't
-
 /// GET /api/agents/{id}/manifest — Get the agent's full manifest as raw TOML.
 ///
 /// Powers the dashboard's full manifest editor (#7742): the Configure

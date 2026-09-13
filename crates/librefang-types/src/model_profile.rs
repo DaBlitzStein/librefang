@@ -334,6 +334,7 @@ cost_budget = "medium"
                 provider: "provider".into(),
                 model: "model".into(),
                 context_window: None,
+                max_output_tokens: None,
                 cost_tier: tier,
                 priority: 0,
                 max_complexity: 1.0,
