@@ -17,6 +17,8 @@ import {
   useDeleteGoal,
   useStartGoalRun,
   useStopGoalRun,
+  usePauseGoalRun,
+  useResumeGoalRun,
 } from "../lib/mutations/goals";
 import type { AgentItem, GoalItem, GoalTemplate } from "../api";
 
@@ -36,6 +38,8 @@ vi.mock("../lib/mutations/goals", () => ({
   useDeleteGoal: vi.fn(),
   useStartGoalRun: vi.fn(),
   useStopGoalRun: vi.fn(),
+  usePauseGoalRun: vi.fn(),
+  useResumeGoalRun: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -60,6 +64,8 @@ const useUpdateGoalMock = useUpdateGoal as unknown as ReturnType<typeof vi.fn>;
 const useDeleteGoalMock = useDeleteGoal as unknown as ReturnType<typeof vi.fn>;
 const useStartGoalRunMock = useStartGoalRun as unknown as ReturnType<typeof vi.fn>;
 const useStopGoalRunMock = useStopGoalRun as unknown as ReturnType<typeof vi.fn>;
+const usePauseGoalRunMock = usePauseGoalRun as unknown as ReturnType<typeof vi.fn>;
+const useResumeGoalRunMock = useResumeGoalRun as unknown as ReturnType<typeof vi.fn>;
 
 interface QueryShape<T> {
   data: T;
@@ -104,6 +110,8 @@ function setMutations(opts: {
   useDeleteGoalMock.mockReturnValue({ mutateAsync: del, isPending: false });
   useStartGoalRunMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
   useStopGoalRunMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
+  usePauseGoalRunMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
+  useResumeGoalRunMock.mockReturnValue({ mutateAsync: vi.fn(), isPending: false });
   return { create, update, del };
 }
 
@@ -656,6 +664,49 @@ describe("GoalsPage", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("3/10")).toBeInTheDocument();
   });
+
+  const RUNNING_RUN = {
+    goal_id: "g-r",
+    agent_id: "a1",
+    phase: "running",
+    iteration: 2,
+    max_iterations: 10,
+    last_progress: 20,
+    started_at: "",
+    updated_at: "",
+  } as const;
+
+  it("fires usePauseGoalRun from the pause button on a running goal", async () => {
+    const goalWithAgent: GoalItem = { ...PARENT_GOAL, agent_id: "a1" };
+    useGoalsMock.mockReturnValue(makeQuery([goalWithAgent]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    useGoalRunMock.mockReturnValue(makeQuery({ running: true, run: RUNNING_RUN }));
+    const pause = vi.fn().mockResolvedValue({});
+    usePauseGoalRunMock.mockReturnValue({ mutateAsync: pause, isPending: false });
+    renderPage();
+
+    fireEvent.click(screen.getByTitle("goals.run_pause"));
+    await Promise.resolve();
+
+    expect(pause).toHaveBeenCalledWith("g-parent");
+  });
+
+  it("fires useResumeGoalRun from the resume button on a paused run", async () => {
+    const goalWithAgent: GoalItem = { ...PARENT_GOAL, agent_id: "a1" };
+    useGoalsMock.mockReturnValue(makeQuery([goalWithAgent]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    useGoalRunMock.mockReturnValue(
+      makeQuery({ running: false, run: { ...RUNNING_RUN, phase: "paused" } }),
+    );
+    const resume = vi.fn().mockResolvedValue(undefined);
+    useResumeGoalRunMock.mockReturnValue({ mutateAsync: resume, isPending: false });
+    renderPage();
+
+    fireEvent.click(screen.getByTitle("goals.run_resume"));
+    await Promise.resolve();
+
+    expect(resume).toHaveBeenCalledWith("g-parent");
+  });
 });
 
 describe("GoalsPage helpers", () => {
@@ -709,6 +760,7 @@ describe("GoalsPage helpers", () => {
 describe("GoalRunPhaseBadge", () => {
   const API_PHASES = [
     "running",
+    "paused",
     "finished",
     "max_iterations_reached",
     "rate_limited",
@@ -750,12 +802,22 @@ describe("GoalRunPhaseBadge", () => {
     expect(badge!.querySelector("svg")!.getAttribute("class")).not.toMatch(/\bmr-/);
   });
 
-  // #8067 wrote this case against "paused", the phase this branch adds. Now that
-  // the switch knows "paused" the case needs a phase no build knows, or it would
-  // assert the neutral variant against an arm that is deliberately not neutral —
-  // and pass again the moment someone deleted that arm.
+  // "paused" reached the switch's `default` arm until this PR, so it rendered with the same neutral styling as a phase the dashboard had never heard of.
+  // Asserting the variant is what separates the two: without it the badge passes whether or not `paused` has an arm of its own.
+  it("gives paused its own warning variant and icon rather than the unknown-phase fallback", () => {
+    const { container } = render(<GoalRunPhaseBadge phase="paused" />);
+    const badge = container.querySelector("span.inline-flex")!;
+    expect(badge.className).toContain("bg-warning/10");
+    expect(badge.className).not.toContain("bg-main");
+    // A known phase leads with its icon and drops `Badge`'s dot.
+    expect(badge.querySelectorAll("svg")).toHaveLength(1);
+    expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(0);
+  });
+
   it("renders an unknown phase under the neutral variant with its own key, not a confident Stopped", () => {
-    const { container } = render(<GoalRunPhaseBadge phase="quiesced" />);
+    // This used to render "paused", which was unknown to the switch until this PR gave it its own arm.
+    // The case being guarded is a phase the daemon emits before the dashboard has learned it, so the example has to be one the switch still does not know.
+    const { container } = render(<GoalRunPhaseBadge phase="quiescing" />);
 
     // The label is asked of i18n by the phase's own key with the raw phase as
     // the fallback, so a locale that gains `run_phase_quiesced` starts using it
@@ -764,7 +826,7 @@ describe("GoalRunPhaseBadge", () => {
     // (`t` is mocked here as `key:{options}`; in production this renders the
     // translation when the key exists and "quiesced" when it does not.)
     expect(
-      screen.getByText('goals.run_phase_quiesced:{"defaultValue":"quiesced"}'),
+      screen.getByText('goals.run_phase_quiescing:{"defaultValue":"quiescing"}'),
     ).toBeInTheDocument();
     expect(screen.queryByText(/goals\.run_phase_stopped/)).not.toBeInTheDocument();
 
