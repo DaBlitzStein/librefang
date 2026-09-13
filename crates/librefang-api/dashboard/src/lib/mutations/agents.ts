@@ -215,6 +215,7 @@ export function usePatchAgent() {
         qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
         qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
       }
+      qc.invalidateQueries({ queryKey: agentKeys.manifestHistory(variables.agentId) });
     },
   });
 }
@@ -237,6 +238,7 @@ export function usePatchAgentRuntimeConfig() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.manifestHistory(variables.agentId) });
       if (variables.isHand) {
         qc.invalidateQueries({ queryKey: handKeys.details() });
       }

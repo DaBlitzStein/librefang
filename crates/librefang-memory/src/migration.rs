@@ -292,10 +292,6 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(59, migrate_v59);
     run_step!(60, migrate_v60);
 
-    // v56: persist workflow_runs.total_steps so a run recovered after a
-    // daemon restart reports real progress instead of "step X of 0".
-    run_step!(56, migrate_v56);
-
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
     // applied DDL without recording its audit row — operator tooling
@@ -4115,6 +4111,38 @@ mod tests {
         migrate_v33(&conn).unwrap();
         run_migrations(&conn).unwrap();
         assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    /// v58 is a no-op against a database that already has `manifest_versions`.
+    ///
+    /// This is not hypothetical. `fix/schema-forward-compat-59` creates the
+    /// same table under the same number with byte-identical DDL, so whichever
+    /// of the two reaches a deployment first, the other one runs against a
+    /// database that already has the table. `CREATE TABLE IF NOT EXISTS` plus
+    /// `INSERT OR IGNORE` is what makes that a no-op instead of
+    /// "table manifest_versions already exists" on boot — this test is what
+    /// stops someone simplifying either clause away.
+    #[test]
+    fn test_migrate_v58_is_a_noop_when_the_table_already_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(try_table_exists(&conn, "manifest_versions").unwrap());
+
+        // Second run, directly and then through the ladder.
+        migrate_v58(&conn).expect("re-running v58 on an existing table must not error");
+        run_migrations(&conn).expect("a second full run must not error");
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        // The audit row is recorded exactly once — `INSERT OR IGNORE` rather
+        // than a second row claiming the same version was applied twice.
+        let audit_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE version = 58",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_rows, 1, "v58 must record exactly one migrations row");
     }
 
     #[test]
