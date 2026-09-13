@@ -495,6 +495,37 @@ async fn registry_diff_refuses_a_name_that_only_resolves_through_a_live_agent() 
     cleanup(name);
 }
 
+/// The 409 the test above claims `restore` answers, asserted on `restore`
+/// itself rather than inferred from the diff route.
+///
+/// Both routes reach the refusal through different code — the diff route from
+/// `read_agent_type` returning a `WorkspaceAgent` source, the restore route
+/// from the local read missing and `workspace_agent_manifest_path` existing —
+/// so a change to one leaves the other's guard untested.
+/// Without this, dropping the restore guard turns a refusal into a write that
+/// materialises an agent-type file shadowing a live agent's name, and the
+/// suite stays green (#8054).
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_refuses_a_name_that_only_resolves_through_a_live_agent() {
+    let _g = lock().lock().await;
+    let name = "at_registry_restore_liveagent";
+    cleanup(name);
+    write_workspace_agent(name, &manifest_with_non_form_fields(name));
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 42));
+
+    let h = boot().await;
+
+    let (status, body) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_not_editable", "{body}");
+    assert!(
+        !agent_type_file(name).exists(),
+        "a refused restore must not materialise an agent type shadowing the live agent's name"
+    );
+
+    cleanup(name);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn create_refuses_a_name_that_belongs_to_a_live_agent() {
     let _g = lock().lock().await;
