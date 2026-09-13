@@ -200,11 +200,11 @@ pub enum SettingsSub {
     Config,
     /// Bound to `7`, not to the next free digit.
     ///
-    /// `5` is claimed by the Auxiliary panel (#8059) and `6` by the
-    /// configuration editor (#8184); both land after this branch, and whichever
-    /// arrived second would have silently lost its key. Pick the next unclaimed
-    /// digit when adding a tab here, and check the open PRs before assuming one
-    /// is free.
+    /// `5` is claimed by the Auxiliary panel (#8059, now on `origin/main`) and
+    /// `6` by the configuration editor (#8184, also on `origin/main`), and
+    /// whichever arrived second would have silently lost its key. Pick the next
+    /// unclaimed digit when adding a tab here, and check the open PRs before
+    /// assuming one is free.
     ///
     /// The digit also lives inside the translated label
     /// (`tui-settings-tab-vault = 7 Vault`) in all four locales, so renumbering
