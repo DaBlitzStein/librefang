@@ -20,12 +20,7 @@ import { Badge, type BadgeVariant } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { toastErr } from "../lib/errors";
-import {
-  DEFAULT_GOAL_TICK_INTERVAL_SECS,
-  MAX_GOAL_TICK_INTERVAL_SECS,
-  MIN_GOAL_TICK_INTERVAL_SECS,
-  parseGoalTickInterval,
-} from "../lib/goalTickInterval";
+import { DEFAULT_GOAL_TICK_INTERVAL_SECS, MAX_GOAL_TICK_INTERVAL_SECS, MIN_GOAL_TICK_INTERVAL_SECS, parseGoalTickInterval } from "../lib/goalTickInterval";
 import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Pause, Square, ChevronDown, ChevronRight, Zap, Ban, Activity } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
