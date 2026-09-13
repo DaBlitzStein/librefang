@@ -404,6 +404,17 @@ pub enum AppEvent {
         mode: String,
         allowed_profiles: Vec<String>,
         cost_budget: Option<String>,
+        /// The fallback profile used when nothing else matches. Not
+        /// editable from this screen — carried through so a save that
+        /// only touches mode/allowlist/budget does not silently clear it
+        /// (#7781 review).
+        default_profile: Option<String>,
+        /// The per-agent router bypass (`AgentRouterOverride::fixed`). Not
+        /// editable from this screen — carried through for the same reason
+        /// as `default_profile`: an InProcess save that hardcoded this to
+        /// `false` would silently re-enable routing for an agent an
+        /// operator opted out (#7781 review).
+        fixed: bool,
         available: Vec<String>,
     },
     /// Agent model routing updated.
@@ -2438,10 +2449,14 @@ pub fn spawn_fetch_agent_model_routing(
                         })
                         .unwrap_or_default();
                     let cost_budget = body["cost_budget"].as_str().map(String::from);
+                    let default_profile = body["default_profile"].as_str().map(String::from);
+                    let fixed = body["fixed"].as_bool().unwrap_or(false);
                     let _ = tx.send(AppEvent::AgentModelRoutingLoaded {
                         mode,
                         allowed_profiles,
                         cost_budget,
+                        default_profile,
+                        fixed,
                         available,
                     });
                     return;
@@ -2485,11 +2500,15 @@ pub fn spawn_fetch_agent_model_routing(
             let cost_budget = router_override
                 .and_then(|o| o.cost_budget)
                 .map(|t| t.as_str().to_string());
+            let default_profile = router_override.and_then(|o| o.default_profile.clone());
+            let fixed = router_override.map(|o| o.fixed).unwrap_or(false);
 
             let _ = tx.send(AppEvent::AgentModelRoutingLoaded {
                 mode,
                 allowed_profiles,
                 cost_budget,
+                default_profile,
+                fixed,
                 available,
             });
         }
@@ -2497,12 +2516,20 @@ pub fn spawn_fetch_agent_model_routing(
 }
 
 /// Persist an agent's model routing mode and router override.
+///
+/// `default_profile` and `fixed` are not editable from this screen; they are
+/// the values the preceding [`spawn_fetch_agent_model_routing`] loaded,
+/// threaded through so a save of mode/allowlist/budget does not clear them
+/// (#7781 review).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_update_agent_model_routing(
     backend: BackendRef,
     agent_id: String,
     mode: String,
     allowed_profiles: Vec<String>,
     cost_budget: Option<String>,
+    default_profile: Option<String>,
+    fixed: bool,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
@@ -2538,12 +2565,12 @@ pub fn spawn_update_agent_model_routing(
                 };
                 let router_override =
                     flexible.then(|| librefang_types::model_profile::AgentRouterOverride {
-                        fixed: false,
+                        fixed,
                         allowed_profiles: allowed_profiles.into_iter().collect(),
                         cost_budget: cost_budget
                             .as_deref()
                             .and_then(librefang_types::model_profile::CostTier::parse),
-                        default_profile: None,
+                        default_profile,
                     });
                 match kernel.set_agent_model_routing(aid, router_mode, router_override) {
                     Ok(()) => {

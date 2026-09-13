@@ -298,7 +298,20 @@ struct ProfilesFile {
 }
 
 fn parse_profiles(raw: &str) -> Result<Vec<ModelProfile>, toml::de::Error> {
-    Ok(toml::from_str::<ProfilesFile>(raw)?.profiles)
+    let mut profiles = toml::from_str::<ProfilesFile>(raw)?.profiles;
+    // #7781 review: normalize tag case here, once, rather than at match
+    // time on every turn. Tags are operator input read verbatim out of
+    // TOML; lowercasing only at comparison time left the `BTreeSet` itself
+    // case-sensitive, so `tags = ["Review", "review"]` kept both members
+    // and double-counted a single word as two tag hits, letting a
+    // mis-cased profile out-rank a correctly-written one with the same
+    // (single) real tag. Normalizing on insert makes the dedup and the
+    // ranking correct together, and drops the per-tag `to_lowercase()`
+    // allocation from the per-turn matching path below.
+    for profile in &mut profiles {
+        profile.tags = profile.tags.iter().map(|t| t.to_lowercase()).collect();
+    }
+    Ok(profiles)
 }
 
 fn sorted_by_name(mut profiles: Vec<ModelProfile>) -> Vec<ModelProfile> {
@@ -380,6 +393,13 @@ pub fn match_profile<'a>(
         .copied()
         .filter(|p| complexity.score <= p.max_complexity && p.cost_tier <= tier_ceiling)
         .map(|p| {
+            // `words` is lowercased and so is every `p.tags` member —
+            // `parse_profiles` normalizes tag case on load, once, rather
+            // than here on every turn (#7781 review). Normalizing at parse
+            // time rather than at compare time is also what makes the
+            // `BTreeSet<String>` dedup effective: two tags differing only
+            // in case collapse into one member instead of double-counting
+            // a single word as two hits.
             let tag_hits = p.tags.iter().filter(|t| words.contains(t.as_str())).count() as u32;
             (p, tag_hits)
         })
@@ -408,9 +428,16 @@ pub fn match_profile<'a>(
         .and_then(|o| o.default_profile.as_deref())
         .or(config.default_profile.as_deref());
     if let Some(name) = fallback_name {
-        // Re-check permissions: a `default_profile` naming an expensive
-        // profile must not become a way around the agent's cost budget.
-        if let Some(p) = permitted.iter().copied().find(|p| p.name == name) {
+        // Re-check permissions AND the ranking filters: a `default_profile`
+        // naming an expensive profile must not become a way around the
+        // agent's cost budget, and one naming a heavy profile for a trivial
+        // task must not escape the complexity ceiling either — both filters
+        // above apply to `candidates`, not to this lookup, so a default
+        // could otherwise return a profile the ranking had excluded
+        // (#7781 review).
+        if let Some(p) = permitted.iter().copied().find(|p| {
+            p.name == name && complexity.score <= p.max_complexity && p.cost_tier <= tier_ceiling
+        }) {
             return (Some(p), RoutingDecision::Fellback);
         }
         warn!(
@@ -454,6 +481,7 @@ mod tests {
             provider: "anthropic".to_string(),
             model: format!("model-{name}"),
             context_window: None,
+            max_output_tokens: None,
             cost_tier: tier,
             priority,
             max_complexity: max,
@@ -670,6 +698,75 @@ mod tests {
         assert!(matched.is_none());
     }
 
+    /// A profile tag written with any uppercase letter must still match: the
+    /// task word set is lowercased before comparison, but a tag read
+    /// verbatim from `model_profiles.toml` was compared case-sensitively
+    /// before, so `"API"` could never hit a task that only ever wrote
+    /// lowercase words (#7781 review).
+    #[test]
+    fn tag_with_uppercase_matches_the_lowercased_task_word_set() {
+        // Through `parse_profiles`, the real pipeline every profile enters
+        // through (builtin asset and `~/.librefang/model_profiles.toml`
+        // override both funnel through it) — not the raw `ModelProfile`
+        // struct literal the `profile()` helper builds, which would bypass
+        // the parse-time normalization this test is meant to exercise.
+        let toml = r#"
+[[profiles]]
+name = "custom"
+tags = ["API"]
+provider = "anthropic"
+model = "model-custom"
+"#;
+        let profiles = parse_profiles(toml).expect("profile parses");
+        let cfg = enabled_config();
+        let (matched, decision) = match_profile(
+            "please wire up the api client",
+            &score(0.4),
+            &profiles,
+            &cfg,
+            None,
+        );
+        assert_eq!(decision, RoutingDecision::Matched);
+        assert_eq!(matched.unwrap().name, "custom");
+    }
+
+    /// #7781 review: a case-duplicated tag must not double-count a single
+    /// word as two hits and let a mis-written profile out-rank a correctly
+    /// written, higher-priority one that matched the same word.
+    #[test]
+    fn case_duplicated_tags_collapse_and_do_not_double_count() {
+        let toml = r#"
+[[profiles]]
+name = "sloppy"
+tags = ["Review", "review", "audit"]
+provider = "anthropic"
+model = "model-sloppy"
+priority = 1
+
+[[profiles]]
+name = "correct"
+tags = ["review"]
+provider = "anthropic"
+model = "model-correct"
+priority = 10
+"#;
+        let profiles = parse_profiles(toml).expect("profiles parse");
+        let sloppy = profiles.iter().find(|p| p.name == "sloppy").unwrap();
+        assert_eq!(
+            sloppy.tags.len(),
+            2,
+            "\"Review\" and \"review\" must collapse into one BTreeSet member"
+        );
+
+        let cfg = enabled_config();
+        let (matched, _) = match_profile("please review this", &score(0.4), &profiles, &cfg, None);
+        // Both profiles now score exactly one hit on "review", so priority
+        // breaks the tie: "correct" (10) must win over "sloppy" (1). Before
+        // the fix, "sloppy" scored two hits (Review + review) and won
+        // regardless of priority.
+        assert_eq!(matched.unwrap().name, "correct");
+    }
+
     #[test]
     fn builtin_tags_and_keywords_survive_the_word_tokenizer() {
         // The word matcher can only ever fire for a tag or keyword that its
@@ -875,6 +972,45 @@ mod tests {
         };
         let (matched, decision) =
             match_profile("do the thing", &score(0.2), &profiles, &cfg, Some(&ov));
+        assert_eq!(decision, RoutingDecision::NoCandidate);
+        assert!(matched.is_none());
+    }
+
+    /// The fallback lookup re-applies the same `max_complexity` filter the
+    /// ranking pass applies to `candidates` — a `default_profile` naming a
+    /// profile too weak for this task's score must not become a way around
+    /// that ceiling (#7781 review).
+    #[test]
+    fn fallback_cannot_escape_the_complexity_ceiling() {
+        let profiles = test_profiles();
+        let cfg = ModelRouterConfig {
+            enabled: true,
+            complexity_threshold: 0.0,
+            // "quick" caps out at 0.3; the task below scores well above it.
+            default_profile: Some("quick".to_string()),
+            ..Default::default()
+        };
+        let (matched, decision) = match_profile("do the thing", &score(0.5), &profiles, &cfg, None);
+        assert_eq!(decision, RoutingDecision::NoCandidate);
+        assert!(matched.is_none());
+    }
+
+    /// Same guard, the tier half: a sub-threshold task caps the tier ceiling
+    /// at the cheapest permitted tier, and a `default_profile` naming a
+    /// more expensive profile must not bypass that cap either (#7781
+    /// review).
+    #[test]
+    fn fallback_cannot_escape_the_tier_ceiling() {
+        let profiles = test_profiles();
+        let cfg = ModelRouterConfig {
+            enabled: true,
+            complexity_threshold: 0.5,
+            // "architect" is Expensive; the task scores below the
+            // threshold, which caps the ceiling at "quick"'s Cheap tier.
+            default_profile: Some("architect".to_string()),
+            ..Default::default()
+        };
+        let (matched, decision) = match_profile("do the thing", &score(0.1), &profiles, &cfg, None);
         assert_eq!(decision, RoutingDecision::NoCandidate);
         assert!(matched.is_none());
     }

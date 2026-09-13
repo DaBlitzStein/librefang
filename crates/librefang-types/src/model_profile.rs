@@ -41,6 +41,15 @@ pub struct ModelProfile {
     /// Maximum context window in tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// Maximum output tokens for this profile's model.
+    ///
+    /// Same precedence and semantics as [`Self::context_window`]: it is a
+    /// property of the routed endpoint, not the agent, so
+    /// `librefang_kernel`'s routing applies it to `ModelConfig::max_output_tokens`
+    /// the same way it applies `context_window` — including clearing a
+    /// previous model's value when this profile does not set one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     /// Cost tier: `"cheap"`, `"medium"`, or `"expensive"`.
     #[serde(default)]
     pub cost_tier: CostTier,
@@ -325,6 +334,7 @@ cost_budget = "medium"
                 provider: "provider".into(),
                 model: "model".into(),
                 context_window: None,
+                max_output_tokens: None,
                 cost_tier: tier,
                 priority: 0,
                 max_complexity: 1.0,

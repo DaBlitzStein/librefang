@@ -6,8 +6,10 @@
 //!
 //! Routes covered:
 //!   GET  /api/agents/{id}/model_routing  (default shape, flexible shape)
-//!   PUT  /api/agents/{id}/model_routing  (round-trip, clear back to fixed,
-//!                                         validation, bad id, unknown agent)
+//!   PUT  /api/agents/{id}/model_routing  (round-trip, fixed/default_profile
+//!                                         partial-save preservation, clear
+//!                                         back to fixed, validation, bad id,
+//!                                         unknown agent, non-owner)
 //!   GET  /api/model-router/profiles      (builtin catalog, home override,
 //!                                         deterministic ordering)
 //!
@@ -15,6 +17,7 @@
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use librefang_api::middleware;
 use librefang_api::routes::AppState;
 use librefang_api::server;
 use librefang_kernel::LibreFangKernel;
@@ -227,6 +230,101 @@ async fn put_model_routing_flexible_round_trips() {
     );
 }
 
+/// #7781 review: `fixed` — the documented per-agent router bypass — must be
+/// readable through GET so a client can round-trip it (it was write-only
+/// before), and `default_profile` must survive a save that omits it or
+/// sends an explicit `null`; only an explicit empty string clears it.
+#[tokio::test(flavor = "multi_thread")]
+async fn put_model_routing_preserves_fixed_and_default_profile_across_partial_saves() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "routing-fixed-and-default");
+
+    // Establish fixed=true and default_profile="coder".
+    send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({
+                "mode": "flexible",
+                "fixed": true,
+                "default_profile": "coder",
+            }),
+        ),
+    )
+    .await;
+    let (_, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/model_routing")),
+    )
+    .await;
+    assert_eq!(
+        body["fixed"], true,
+        "GET must round-trip the stored fixed flag"
+    );
+    assert_eq!(body["default_profile"], "coder");
+
+    // A save that omits both keys must not clear either.
+    send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({ "mode": "flexible", "allowed_profiles": ["coder"] }),
+        ),
+    )
+    .await;
+    let (_, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/model_routing")),
+    )
+    .await;
+    assert_eq!(
+        body["fixed"], true,
+        "omitting fixed must preserve the stored value"
+    );
+    assert_eq!(
+        body["default_profile"], "coder",
+        "omitting default_profile must preserve it"
+    );
+
+    // An explicit null for default_profile must also preserve it, not clear it.
+    send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({ "mode": "flexible", "default_profile": null }),
+        ),
+    )
+    .await;
+    let (_, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/model_routing")),
+    )
+    .await;
+    assert_eq!(
+        body["default_profile"], "coder",
+        "explicit null must preserve, not clear"
+    );
+
+    // Only an explicit empty string clears it.
+    send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({ "mode": "flexible", "default_profile": "" }),
+        ),
+    )
+    .await;
+    let (_, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/model_routing")),
+    )
+    .await;
+    assert!(
+        body["default_profile"].is_null(),
+        "an explicit empty string is the one way to clear it"
+    );
+}
+
 /// The allowlist is a set: duplicates collapse and order is normalised, so
 /// two clients sending the same names in different orders converge on the
 /// same manifest and the same provider prompt cache (#3298).
@@ -326,6 +424,35 @@ async fn put_model_routing_rejects_an_unknown_cost_budget() {
     assert_eq!(after["mode"], "fixed");
 }
 
+/// A non-string, non-null `cost_budget` (a number, or a boolean left behind
+/// by an unset form toggle) must not silently read as "no cap" — that would
+/// hand the agent the most expensive tier with no cap at all (#7781 review).
+#[tokio::test(flavor = "multi_thread")]
+async fn put_model_routing_rejects_a_non_string_cost_budget() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "routing-numeric-budget");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/model_routing"),
+            serde_json::json!({ "mode": "flexible", "cost_budget": 5 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+
+    let (_, after) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/model_routing")),
+    )
+    .await;
+    assert_eq!(
+        after["mode"], "fixed",
+        "the rejected write must not take effect"
+    );
+}
+
 /// An explicit `null` budget is the documented "no cap" value and is accepted.
 #[tokio::test(flavor = "multi_thread")]
 async fn put_model_routing_accepts_a_null_cost_budget() {
@@ -365,6 +492,90 @@ async fn put_model_routing_rejects_an_unknown_mode() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// #7781 review: an unknown agent id must 404, the same as the GET side,
+/// instead of falling through to the kernel call and coming back as a 400
+/// — the shape a malformed body gets, which hides "this agent does not
+/// exist" behind "you sent something wrong".
+#[tokio::test(flavor = "multi_thread")]
+async fn put_model_routing_404s_for_an_unknown_agent() {
+    let h = boot().await;
+    let missing = AgentId::new();
+    let (status, _) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{missing}/model_routing"),
+            serde_json::json!({ "mode": "flexible" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// #7781 review: the write side of this route must apply the same
+/// per-agent ownership scoping the GET side already does (`can_access_agent`)
+/// — a caller who cannot see this agent must not be able to mutate its
+/// routing settings either.
+///
+/// The full server's RBAC role gate (`middleware::user_role_allows_request`)
+/// requires Admin+ for any non-GET verb, and `can_access_agent` itself
+/// admits Admin+ unconditionally, so a real request through the whole
+/// stack can never exercise a denial here. This mounts the agents router
+/// directly and injects the caller identity the same way
+/// `api_integration_test.rs` does for its handler-level ownership checks,
+/// isolating `can_access_agent` from that unrelated role gate one layer up.
+#[tokio::test(flavor = "multi_thread")]
+async fn put_model_routing_404s_for_a_non_owner() {
+    let h = boot().await;
+    let agent_id = h
+        .state
+        .kernel
+        .spawn_agent_typed(AgentManifest {
+            name: "routing-owner-scope".to_string(),
+            author: "Alice".to_string(),
+            ..AgentManifest::default()
+        })
+        .expect("spawn authored agent");
+
+    let app = axum::Router::new()
+        .nest("/api", librefang_api::routes::agents::router())
+        .with_state(h.state.clone());
+
+    let mut request = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/api/agents/{agent_id}/model_routing"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({ "mode": "flexible" }).to_string(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(middleware::AuthenticatedApiUser {
+            name: "Bob".to_string(),
+            role: middleware::UserRole::User,
+            user_id: librefang_types::agent::UserId::from_name("Bob"),
+        });
+
+    let response = app.oneshot(request).await.expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "a non-owner must not be able to see or mutate another user's agent"
+    );
+
+    // The refused write must not have taken effect.
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .expect("agent still registered");
+    assert_eq!(
+        entry.manifest.model.mode,
+        librefang_types::agent::ModelMode::Fixed
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
