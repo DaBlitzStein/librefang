@@ -235,6 +235,7 @@ impl GoalsState {
                 fresh.run_phase = known.run_phase.clone();
                 fresh.run_iteration = known.run_iteration;
                 fresh.run_max_iterations = known.run_max_iterations;
+                fresh.run_verify_max_retries = known.run_verify_max_retries;
             }
         }
         self.goals = list;
@@ -1338,7 +1339,7 @@ mod tests {
     #[test]
     fn a_list_reload_keeps_run_state_already_fetched_so_pause_stays_live() {
         let mut s = state_with(vec![goal("1", "Ship the report", None)]);
-        s.apply_run_state("1", Some("paused".to_string()), Some(3), Some(25));
+        s.apply_run_state("1", Some("paused".to_string()), Some(3), Some(25), Some(4));
 
         // Exactly what `spawn_fetch_goals` builds: every row `run_phase: None`.
         s.replace_goals(vec![
@@ -1349,8 +1350,13 @@ mod tests {
         assert_eq!(s.goals[0].run_phase.as_deref(), Some("paused"));
         assert_eq!(s.goals[0].run_iteration, Some(3));
         assert_eq!(s.goals[0].run_max_iterations, Some(25));
+        // The verification budget is run state like the three above it, and
+        // `adjust_verify_max_retries` reads it as the base the `+` / `-` keys
+        // count from, so a reload that drops it moves the next start's budget.
+        assert_eq!(s.goals[0].run_verify_max_retries, Some(4));
         // A goal the reload brought in for the first time has nothing to carry.
         assert!(s.goals[1].run_phase.is_none());
+        assert!(s.goals[1].run_verify_max_retries.is_none());
 
         assert!(matches!(
             s.handle_key(key(KeyCode::Char('p'))),
@@ -1363,13 +1369,14 @@ mod tests {
     #[test]
     fn a_goal_absent_from_the_reload_does_not_carry_its_run_state_over() {
         let mut s = state_with(vec![goal("1", "Ship the report", None)]);
-        s.apply_run_state("1", Some("running".to_string()), Some(2), Some(10));
+        s.apply_run_state("1", Some("running".to_string()), Some(2), Some(10), Some(4));
 
         s.replace_goals(vec![goal("2", "File the return", None)]);
 
         assert_eq!(s.goals.len(), 1);
         assert_eq!(s.goals[0].id, "2");
         assert!(s.goals[0].run_phase.is_none());
+        assert!(s.goals[0].run_verify_max_retries.is_none());
     }
 
     /// The detail pane binds the same key against the goal it has open, which
