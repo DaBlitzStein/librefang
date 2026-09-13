@@ -4263,15 +4263,12 @@
     "history_empty": "No version history yet",
     "history_empty_desc": "Version snapshots are recorded when a template is created or edited.",
     "history_title": "History: {{name}}",
-    "inherit_placeholder": "default",
     "managed_elsewhere": "Managed via Agents",
     "managed_elsewhere_hint": "This entry is a live agent's own manifest. Edit it on the Agents page.",
     "name": "Name",
     "name_hint": "Letters, digits, hyphen and underscore only. Cannot be changed later.",
     "name_placeholder": "customer-support",
     "new": "New agent type",
-    "preserved_note": "Saving rewrites only the fields above. Anything else in this type's agent.toml — triggers, compaction, MCP allowlists, session mode — is preserved.",
-    "promote": "Promote",
     "promote_copied": "Copied the sanitized TOML",
     "promote_copy": "Copy TOML",
     "promote_copy_failed": "Could not copy the TOML",
@@ -4304,12 +4301,7 @@
     "saved": "Agent type saved",
     "unknown_keys_dropped": "The daemon didn't recognize and dropped: {{keys}}",
     "subtitle": "Reusable agent manifests you can spawn from.",
-    "system_prompt": "System prompt",
-    "system_prompt_hint": "Left blank, the agent type stores a blank prompt — nothing is substituted for you.",
     "title": "Agent Types",
-    "tools": "Tools",
-    "tools_hint": "Picked from the tools this daemon exposes; unknown identifiers can still be typed.",
-    "tools_search": "Search tools…",
     "promote": "Promote to registry",
     "promote_preview": "Promotion preview",
     "confirm_promote": "Promote the agent type '{{name}}' to the public registry? The manifest will be sanitized for publication and submitted as a GitHub pull request.",
@@ -4334,6 +4326,5 @@
     "temperature_placeholder": "0 to 2",
     "top_p": "Top-p",
     "top_p_placeholder": "0 to 1"
-    "title": "Agent Types"
   }
 }

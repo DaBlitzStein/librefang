@@ -4261,15 +4261,12 @@
     "history_empty": "No version history yet",
     "history_empty_desc": "Version snapshots are recorded when a template is created or edited.",
     "history_title": "History: {{name}}",
-    "inherit_placeholder": "default",
     "managed_elsewhere": "에이전트에서 관리",
     "managed_elsewhere_hint": "이 항목은 실행 중인 에이전트의 매니페스트입니다. 에이전트 페이지에서 편집하세요.",
     "name": "이름",
     "name_hint": "영문자, 숫자, 하이픈, 밑줄만 사용할 수 있으며 나중에 변경할 수 없습니다.",
     "name_placeholder": "customer-support",
     "new": "새 에이전트 타입",
-    "preserved_note": "저장 시 위 필드만 다시 기록됩니다. 이 타입의 agent.toml에 있는 트리거, 컴팩션, MCP 허용 목록, 세션 모드 등 나머지는 그대로 유지됩니다.",
-    "promote": "승격",
     "promote_copied": "정제된 TOML을 복사했습니다",
     "promote_copy": "TOML 복사",
     "promote_copy_failed": "TOML을 복사하지 못했습니다",
@@ -4302,12 +4299,7 @@
     "saved": "에이전트 타입을 저장했습니다",
     "unknown_keys_dropped": "데몬이 인식하지 못해 삭제한 키: {{keys}}",
     "subtitle": "스폰에 재사용할 수 있는 에이전트 매니페스트입니다.",
-    "system_prompt": "시스템 프롬프트",
-    "system_prompt_hint": "비워 두면 빈 프롬프트가 그대로 저장되며 임의의 문구로 대체되지 않습니다.",
     "title": "에이전트 타입",
-    "tools": "도구",
-    "tools_hint": "이 데몬이 제공하는 도구 목록에서 선택하며, 목록에 없는 식별자도 입력할 수 있습니다.",
-    "tools_search": "도구 검색…",
     "promote": "레지스트리에 등록",
     "promote_preview": "승격 미리보기",
     "confirm_promote": "에이전트 유형 '{{name}}'을(를) 공개 레지스트리에 등록하시겠습니까? 매니페스트가 정리된 후 GitHub pull request로 제출됩니다.",
@@ -4332,6 +4324,5 @@
     "temperature_placeholder": "0 ~ 2",
     "top_p": "Top-p",
     "top_p_placeholder": "0 ~ 1"
-    "title": "에이전트 타입"
   }
 }
