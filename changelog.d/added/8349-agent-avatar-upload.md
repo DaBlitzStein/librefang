@@ -1,0 +1,5 @@
+An agent can now be given an actual picture, not just a link to one somewhere else.
+`POST /api/agents/{id}/avatar` takes the image, the daemon stores and serves it behind the same authentication as the rest of the API, and `avatar_url` stops being a free-text field in the process.
+The client's filename is never stored, because there is none to store: the body is the image, the name on disk comes from the agent's id, and the format is decided by the bytes rather than by anything the request claims — so the two things a filename could have done here, escape its directory or turn into an instruction the agent later reads out of its own workspace, have nothing to work with.
+Where the file lives is part of that: not in the agent's workspace, which the agent can list, and not under the dashboard directory, whose assets are served to anyone who asks.
+`avatar_url` itself now accepts only the daemon's own route for that agent — a remote URL made every agent list a set of outbound requests nobody asked for, and a `data:` URI stored unbounded arbitrary content inside the agent manifest. (#8349) (@DaBlitzStein)
