@@ -1166,6 +1166,7 @@ pub async fn restore_from_registry(
         (status = 401, description = "No GitHub token configured"),
         (status = 404, description = "Agent type not found"),
         (status = 409, description = "Manifest still contains private details that require review"),
+        (status = 500, description = "Invalid skills.promotion configuration"),
         (status = 502, description = "GitHub request failed")
     )
 )]
@@ -1235,10 +1236,8 @@ pub async fn promote_agent_type(
         }
     };
 
-    let registry_repo = state
-        .kernel
-        .config_snapshot()
-        .skills
+    let skills_config = state.kernel.config_snapshot().skills.clone();
+    let registry_repo = skills_config
         .registry_repo
         .clone()
         .filter(|r| !r.trim().is_empty())
@@ -1265,6 +1264,7 @@ pub async fn promote_agent_type(
         files: vec![("agent.toml".to_string(), manifest_toml.into_bytes())],
         pr_title: format!("agent-type: contribute `{name}`"),
         pr_body: body,
+        promotion: &skills_config.promotion,
     };
 
     match librefang_skills::registry_pr::propose_files_to_registry(req).await {
@@ -1281,6 +1281,12 @@ pub async fn promote_agent_type(
         }
         Err(librefang_skills::SkillError::InvalidManifest(msg)) => {
             ApiErrorResponse::bad_request(msg).into_json_tuple()
+        }
+        // A server-side promotion-configuration error maps to 500, not 400 —
+        // the request was well-formed; the daemon's own config is not (#8179
+        // review).
+        Err(librefang_skills::SkillError::InvalidConfig(msg)) => {
+            ApiErrorResponse::internal(msg).into_json_tuple()
         }
         Err(librefang_skills::SkillError::NotFound(msg)) => {
             ApiErrorResponse::not_found(msg).into_json_tuple()
