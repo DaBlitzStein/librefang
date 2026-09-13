@@ -1272,6 +1272,7 @@ async fn agent_spawn_propagates_parent_cost_budget_to_the_child() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1363,6 +1364,7 @@ async fn agent_spawn_propagates_parent_fixed_pin_to_the_child() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1437,6 +1439,7 @@ async fn agent_spawn_refused_when_the_parent_override_cannot_be_looked_up() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1507,6 +1510,7 @@ async fn agent_spawn_without_profile_survives_an_unresolvable_parent() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1569,6 +1573,7 @@ async fn agent_spawn_profile_mistyped_value_is_refused() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1640,6 +1645,7 @@ async fn agent_spawn_profile_refused_when_the_provider_has_no_credentials() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1717,6 +1723,7 @@ async fn agent_spawn_ephemeral_profile_pins_the_worker_model() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1802,6 +1809,7 @@ async fn agent_spawn_ephemeral_profile_refused_over_parent_cost_budget() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1869,6 +1877,7 @@ async fn agent_spawn_ephemeral_model_override_refused_when_parent_capped() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -1933,6 +1942,7 @@ async fn agent_spawn_ephemeral_model_override_honoured_when_parent_uncapped() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
@@ -2007,6 +2017,7 @@ async fn agent_spawn_ephemeral_profile_and_model_are_mutually_exclusive() {
         None, // media_drivers
         None, // exec_policy
         None, // tts_engine
+        None, // tts_config
         None, // docker_config
         None, // process_manager
         None, // process_registry
