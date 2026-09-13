@@ -504,7 +504,7 @@
       "max_restarts_placeholder": "3",
       "heartbeat_interval_placeholder": "60",
       "auto_placeholder": "auto",
-      "heartbeat_channel_placeholder": "telegram:123456",
+      "heartbeat_channel_placeholder": "heartbeat",
       "heartbeat_channel_hint": "Dokąd trafia alert o braku odpowiedzi tego agenta: sam kanał (odbiorca z powiązania kanału właściciela) albo channel:recipient. Wpis [[notification.agent_rules]] dla health_check_failed nadal ma pierwszeństwo.",
       "quiet_hours_hint": "Wyrażenie cron określające godziny, w których agent nie powinien działać (np. 0 22 * * *)",
       "quiet_hours_placeholder": "0 22 * * *",
@@ -512,7 +512,18 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "mój_schemat",
       "remove_fallback": "usuń opcję awaryjną",
-      "remove_context_injection": "usuń wstrzykiwanie kontekstu"
+      "remove_context_injection": "usuń wstrzykiwanie kontekstu",
+      "temperature": "Temperatura",
+      "max_tokens": "Maksymalna liczba tokenów",
+      "max_tokens_placeholder": "4096",
+      "top_p": "Top-p",
+      "frequency_penalty": "Kara za częstotliwość",
+      "presence_penalty": "Kara za obecność",
+      "context_window": "Okno kontekstu",
+      "context_window_placeholder": "tokeny, które model może odczytać",
+      "max_output_tokens": "Limit wyjścia",
+      "max_output_tokens_placeholder": "tokeny, które model może wygenerować",
+      "custom": "Własna wartość"
     },
     "delete_confirm": "Czy na pewno chcesz usunąć agenta \"{{name}}\"?",
     "prompts": "Prompty",
@@ -1030,7 +1041,9 @@
     "all_suppressed": "Wszyscy pozostali dostawcy są ukryci",
     "empty_all_suppressed_title": "Wszyscy dostawcy są ukryci",
     "empty_all_suppressed_body": "Usunięto wszystkich skonfigurowanych dostawców. Nadal tu są — pokaż ich, aby przywrócić.",
-    "empty_all_suppressed_cta": "Pokaż ukrytych dostawców"
+    "empty_all_suppressed_cta": "Pokaż ukrytych dostawców",
+    "max_tokens_placeholder": "np. 8192",
+    "context_window_placeholder": "np. 32768"
   },
   "channels": {
     "add": "Dodaj",
@@ -2939,7 +2952,7 @@
     "attachment_uploading": "Przesyłanie…",
     "attachment_remove": "Usuń załącznik",
     "attachment_unsupported_type": "Nieobsługiwany typ pliku. Dozwolone: obrazy, PDF oraz popularne pliki tekstowe/kodu.",
-    "attachment_too_large": "Plik jest zbyt duży (maks. {{max}})",
+    "attachment_too_large": "Plik jest zbyt duży (maks. 10 MB)",
     "attachment_drop_hint": "Upuść, aby dołączyć",
     "attachment_add": "Dołącz plik",
     "open_agent_picker": "Otwórz wybór agenta",
@@ -3288,7 +3301,12 @@
     "media_key_required_inert": "Bez efektu, dopóki zmienna środowiskowa klucza API nie jest ustawiona — wymuszanie działa tylko wtedy, gdy zmienna jest wskazana.",
     "filter_provider": "Filtruj według dostawcy",
     "filter_tier": "Filtruj według poziomu",
-    "catalog_value": "Model deklaruje {{value}}"
+    "catalog_value": "Model deklaruje {{value}}",
+    "temperature": "Temperatura",
+    "top_p": "Top P",
+    "max_tokens_param": "Maksymalna liczba tokenów",
+    "frequency_penalty": "Kara za częstotliwość",
+    "presence_penalty": "Kara za obecność"
   },
   "media": {
     "section": "Multimedia",
@@ -4370,7 +4388,18 @@
     "promoted": "PR w rejestrze utworzony",
     "promote_failed": "Nie udało się opublikować typu agenta",
     "promote_success": "Pull request został utworzony w rejestrze. Sprawdź i scal, gdy będzie gotowy.",
-    "view_pr": "Zobacz pull request"
+    "view_pr": "Zobacz pull request",
+    "restore_from_registry": "Przywróć",
+    "restore_title": "Przywróć z rejestru — {{name}}",
+    "restore_confirm": "Zastąpić lokalny typ agenta wersją z rejestru? Tej operacji nie można cofnąć.",
+    "restore_identical": "Ten typ agenta jest identyczny z wersją z rejestru.",
+    "restore_no_registry": "Ten typ agenta nie istnieje w rejestrze.",
+    "restore_success": "Przywrócono typ agenta z rejestru",
+    "restore_from_registry_failed": "Nie udało się przywrócić z rejestru",
+    "restore_diff_field": "Pole",
+    "restore_diff_local": "Lokalnie",
+    "restore_diff_registry": "Rejestr",
+    "restore_diff_more": "…oraz {{count}} innych różnic nieuwzględnionych"
   },
   "model_param": {
     "context_window": "Okno kontekstu",

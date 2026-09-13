@@ -504,7 +504,7 @@
       "max_restarts_placeholder": "3",
       "heartbeat_interval_placeholder": "60",
       "auto_placeholder": "авто",
-      "heartbeat_channel_placeholder": "telegram:123456",
+      "heartbeat_channel_placeholder": "heartbeat",
       "heartbeat_channel_hint": "Куди надсилати сповіщення про непрацездатність цього агента: сам канал (одержувача взято з прив'язки каналу власника) або channel:recipient. Запис [[notification.agent_rules]] для health_check_failed усе одно має пріоритет.",
       "quiet_hours_hint": "Вираз cron для годин, коли агент не повинен працювати (наприклад, 0 22 * * *)",
       "quiet_hours_placeholder": "0 22 * * *",
@@ -512,7 +512,18 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "видалити fallback",
-      "remove_context_injection": "видалити інʼєкцію контексту"
+      "remove_context_injection": "видалити інʼєкцію контексту",
+      "temperature": "Температура",
+      "max_tokens": "Макс. токенів",
+      "max_tokens_placeholder": "4096",
+      "top_p": "Top-p",
+      "frequency_penalty": "Штраф за частоту",
+      "presence_penalty": "Штраф за присутність",
+      "context_window": "Вікно контексту",
+      "context_window_placeholder": "токени, які модель може прочитати",
+      "max_output_tokens": "Ліміт виводу",
+      "max_output_tokens_placeholder": "токени, які модель може згенерувати",
+      "custom": "Своє значення"
     },
     "delete_confirm": "Ви впевнені, що хочете видалити агента \"{{name}}\"?",
     "prompts": "Промпти",
@@ -1030,7 +1041,9 @@
     "all_suppressed": "Усі інші постачальники приховані",
     "empty_all_suppressed_title": "Усі постачальники приховані",
     "empty_all_suppressed_body": "Ви вилучили всіх налаштованих постачальників. Вони досі тут — покажіть їх, щоб повернути.",
-    "empty_all_suppressed_cta": "Показати прихованих постачальників"
+    "empty_all_suppressed_cta": "Показати прихованих постачальників",
+    "max_tokens_placeholder": "напр. 8192",
+    "context_window_placeholder": "напр. 32768"
   },
   "channels": {
     "add": "Додати",
@@ -2939,7 +2952,7 @@
     "attachment_add": "Прикріпити файл",
     "attachment_drop_hint": "Відпустіть, щоб прикріпити",
     "attachment_remove": "Видалити вкладення",
-    "attachment_too_large": "Файл завеликий (макс. {{max}})",
+    "attachment_too_large": "Файл завеликий (макс. 10 МБ)",
     "attachment_unsupported_type": "Непідтримуваний тип файлу. Дозволено: зображення, PDF і поширені текстові/код-файли.",
     "attachment_uploading": "Завантаження…",
     "open_agent_picker": "Відкрити вибір агента",
@@ -3288,7 +3301,12 @@
     "media_key_required_inert": "Не діє, поки змінна середовища з ключем API не задана — перевірка виконується лише за наявності названої змінної.",
     "filter_provider": "Фільтрувати за постачальником",
     "filter_tier": "Фільтрувати за рівнем",
-    "catalog_value": "Модель заявляє {{value}}"
+    "catalog_value": "Модель заявляє {{value}}",
+    "temperature": "Температура",
+    "top_p": "Top P",
+    "max_tokens_param": "Макс. токенів",
+    "frequency_penalty": "Штраф за частоту",
+    "presence_penalty": "Штраф за присутність"
   },
   "media": {
     "section": "Медіа",
@@ -4370,7 +4388,18 @@
     "promoted": "PR в реєстр створено",
     "promote_failed": "Не вдалося опублікувати тип агента",
     "promote_success": "Pull request створено в реєстрі. Перегляньте і злийте, коли буде готово.",
-    "view_pr": "Переглянути pull request"
+    "view_pr": "Переглянути pull request",
+    "restore_from_registry": "Відновити",
+    "restore_title": "Відновити з реєстру — {{name}}",
+    "restore_confirm": "Перезаписати локальний тип агента версією з реєстру? Цю дію не можна скасувати.",
+    "restore_identical": "Цей тип агента ідентичний версії з реєстру.",
+    "restore_no_registry": "Цей тип агента не існує в реєстрі.",
+    "restore_success": "Тип агента відновлено з реєстру",
+    "restore_from_registry_failed": "Не вдалося відновити з реєстру",
+    "restore_diff_field": "Поле",
+    "restore_diff_local": "Локально",
+    "restore_diff_registry": "Реєстр",
+    "restore_diff_more": "…і ще {{count}} інших відмінностей не показано"
   },
   "model_param": {
     "context_window": "Вікно контексту",

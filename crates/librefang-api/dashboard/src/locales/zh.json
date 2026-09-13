@@ -504,7 +504,7 @@
       "max_restarts_placeholder": "3",
       "heartbeat_interval_placeholder": "60",
       "auto_placeholder": "自动",
-      "heartbeat_channel_placeholder": "telegram:123456",
+      "heartbeat_channel_placeholder": "heartbeat",
       "heartbeat_channel_hint": "该智能体失联告警的投递目标：只写通道（收件人取自 owner 的通道绑定），或写 channel:recipient。匹配 health_check_failed 的 [[notification.agent_rules]] 条目优先级更高。",
       "quiet_hours_hint": "Cron 表达式，指定智能体不应运行的时间段（如 0 22 * * *）",
       "quiet_hours_placeholder": "0 22 * * *",
@@ -512,7 +512,18 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "移除 fallback",
-      "remove_context_injection": "移除上下文注入"
+      "remove_context_injection": "移除上下文注入",
+      "temperature": "温度",
+      "max_tokens": "最大 Token 数",
+      "max_tokens_placeholder": "4096",
+      "top_p": "Top-p",
+      "frequency_penalty": "频率惩罚",
+      "presence_penalty": "存在惩罚",
+      "context_window": "上下文窗口",
+      "context_window_placeholder": "模型可读取的 token 数",
+      "max_output_tokens": "输出上限",
+      "max_output_tokens_placeholder": "模型可生成的 token 数",
+      "custom": "自定义"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",
@@ -1025,7 +1036,9 @@
     "all_suppressed": "其余提供商均已隐藏",
     "empty_all_suppressed_title": "所有提供商均已隐藏",
     "empty_all_suppressed_body": "你移除了所有已配置的提供商。它们仍在这里，显示后即可恢复。",
-    "empty_all_suppressed_cta": "显示隐藏的提供商"
+    "empty_all_suppressed_cta": "显示隐藏的提供商",
+    "max_tokens_placeholder": "例如 8192",
+    "context_window_placeholder": "例如 32768"
   },
   "channels": {
     "add": "添加",
@@ -2896,7 +2909,7 @@
     "attachment_uploading": "正在上传…",
     "attachment_remove": "移除附件",
     "attachment_unsupported_type": "不支持的文件类型。允许：图片、PDF 和常见文本/代码文件。",
-    "attachment_too_large": "文件过大（最大 {{max}}）",
+    "attachment_too_large": "文件过大（最大 10MB）",
     "attachment_drop_hint": "松开以附加",
     "attachment_add": "附加文件",
     "open_agent_picker": "打开智能体选择器",
@@ -3245,7 +3258,12 @@
     "media_key_required_inert": "在未设置 API 密钥环境变量前无效 —— 仅当指定了变量时才会执行检查。",
     "filter_provider": "按提供商筛选",
     "filter_tier": "按层级筛选",
-    "catalog_value": "模型声明为 {{value}}"
+    "catalog_value": "模型声明为 {{value}}",
+    "temperature": "温度",
+    "top_p": "Top P",
+    "max_tokens_param": "最大 Tokens",
+    "frequency_penalty": "频率惩罚",
+    "presence_penalty": "存在惩罚"
   },
   "media": {
     "section": "媒体",
@@ -4355,7 +4373,18 @@
     "promoted": "注册表 PR 已创建",
     "promote_failed": "无法推广代理类型",
     "promote_success": "已在注册表中创建 pull request。审查后合并即可。",
-    "view_pr": "查看 pull request"
+    "view_pr": "查看 pull request",
+    "restore_from_registry": "恢复",
+    "restore_title": "从注册表恢复 — {{name}}",
+    "restore_confirm": "用注册表版本覆盖本地智能体类型？此操作无法撤销。",
+    "restore_identical": "此智能体类型与注册表版本完全一致。",
+    "restore_no_registry": "注册表中不存在此智能体类型。",
+    "restore_success": "已从注册表恢复智能体类型",
+    "restore_from_registry_failed": "无法从注册表恢复",
+    "restore_diff_field": "字段",
+    "restore_diff_local": "本地",
+    "restore_diff_registry": "注册表",
+    "restore_diff_more": "…另有 {{count}} 处未列出的差异"
   },
   "model_param": {
     "context_window": "上下文窗口",
