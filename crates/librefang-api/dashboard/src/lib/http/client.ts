@@ -21,7 +21,6 @@ export {
   listAgents,
   getAgentDetail,
   getAgentManifest,
-  getAgentChannels,
   getAgentStats,
   listAgentEvents,
   listAgentSessions,
