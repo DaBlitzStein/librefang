@@ -4603,7 +4603,7 @@ mod tests {
 
         run_migrations(&conn).expect("a database stamped at 59 must still open");
         // And is carried the rest of the way rather than left where it was.
-        assert_eq!(get_schema_version(&conn).unwrap(), 60);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 
     /// The other half: a database that stopped at 57 climbs to 59 without
@@ -4622,7 +4622,7 @@ mod tests {
 
         run_migrations(&conn)
             .expect("re-running the forward-compat steps over their own result must not fail");
-        assert_eq!(get_schema_version(&conn).unwrap(), 60);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
 
         // Exactly one of each, not a duplicate from the second pass.
         for (kind, name) in [
@@ -4733,7 +4733,7 @@ mod tests {
             try_table_exists(&conn, "manifest_versions").unwrap(),
             "the cascade issues an unconditional DELETE against this table, so it has to be here"
         );
-        assert_eq!(get_schema_version(&conn).unwrap(), 60);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
     }
 
     #[test]
