@@ -2087,6 +2087,8 @@ mod tests {
                     "body",
                     Some(assignee),
                     Some("boss"),
+                    0,
+                    None,
                     TaskQueueCaps::UNLIMITED,
                 )
                 .await
