@@ -1615,3 +1615,38 @@ fn real_channels_keep_the_channel_send_recipient_instruction() {
         "telegram must not be told to avoid channel_send, got: {section}"
     );
 }
+
+/// A cron job whose entry configures a delivery target hands `result.response` to a real person, so the background-run guidance must not claim nobody is reading it.
+/// `KernelCronBridge::deliver_cron_output` (`kernel/cron_bridge.rs:21`) is called from the tick with `&result.response` (`kernel/cron_tick.rs:371`) and forwards it through `cron_deliver_response` / `cron_fan_out_targets`.
+/// `autonomous` really has no watcher — `kernel/background_lifecycle.rs:1386` matches the tick result as `Ok(_)` and drops it — but that is not a licence to say the same thing for `cron` (#8149).
+#[test]
+fn test_channel_send_hint_cron_does_not_claim_nobody_reads_the_response() {
+    let tools = vec!["channel_send".to_string()];
+    let section = build_channel_section("cron", Some("Alice"), Some("12345"), false, false, &tools);
+    assert!(
+        !section.contains("live user watching"),
+        "cron delivery can reach a real person; the prompt must not claim nobody reads the \
+         response: {section}"
+    );
+    assert!(
+        section.contains("background run"),
+        "channel_send still cannot deliver a reply into the cron system channel: {section}"
+    );
+}
+
+/// `notify_owner` is a dead end on a background turn, so the guidance must not offer it as the way to reach a person.
+/// `tool_notify_owner` only sets `ToolResult.owner_notice` (`tool_runner/notify.rs`), and that field is read exclusively by the interactive request surfaces — `routes/agents/messaging.rs:370`, `routes/agents/sessions.rs:1018` and `routes/skills/hands.rs:1727`.
+/// The cron tick reads `result.response` and `result.silent` and nothing else, and the autonomous tick discards the result entirely, so on both paths the notice is dropped on the floor (#8149).
+#[test]
+fn test_channel_send_hint_background_run_does_not_recommend_notify_owner() {
+    let tools = vec!["channel_send".to_string()];
+    for channel in ["cron", "autonomous"] {
+        let section =
+            build_channel_section(channel, Some("Alice"), Some("12345"), false, false, &tools);
+        assert!(
+            !section.contains("notify_owner"),
+            "{channel}: notify_owner delivers nothing on this path, so recommending it is a \
+             dead end: {section}"
+        );
+    }
+}
