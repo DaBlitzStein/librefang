@@ -17,7 +17,6 @@ import {
   getAgentTools,
   getAgentSkills,
   getAgentMcpServers,
-  getAgentChannels,
 } from "../http/client";
 import { agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
@@ -238,8 +237,4 @@ export function useAgentChannels(agentId: string, options: QueryOverrides = {}) 
 
 export function useAgentManifest(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.manifest(agentId), options));
-}
-
-export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(agentQueries.channels(agentId), options));
 }

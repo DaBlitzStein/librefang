@@ -140,7 +140,6 @@ const goalRunPhaseBadge = (
 ): { variant: BadgeVariant; icon?: React.ComponentType<{ className?: string }> } => {
   switch (phase) {
     case "running":                 return { variant: "brand",   icon: Activity };
-    case "paused":                  return { variant: "warning", icon: Pause };
     // #7973's phase, carried over into #8067's `BadgeVariant` vocabulary
     // rather than the `{bg,text,dot}` shape it was written against.
     case "paused":                  return { variant: "warning", icon: Pause };

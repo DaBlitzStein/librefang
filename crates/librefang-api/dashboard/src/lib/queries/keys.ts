@@ -81,8 +81,6 @@ export const agentKeys = {
   // MCP read.
   mcpServers: (agentId: string) =>
     [...agentKeys.all, "mcpServers", agentId] as const,
-  channels: (agentId: string) =>
-    [...agentKeys.all, "channels", agentId] as const,
   // Full manifest as raw TOML (#7742) — backs the dashboard's full manifest
   // editor, distinct from `detail(id)`'s curated JSON projection.
   manifest: (agentId: string) =>

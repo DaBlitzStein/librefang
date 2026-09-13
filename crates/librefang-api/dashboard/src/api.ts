@@ -1837,13 +1837,6 @@ export interface AgentChannelsResponse {
   mode: "all" | "allowlist";
 }
 
-export async function getAgentChannels(
-  agentId: string,
-): Promise<AgentChannelsResponse> {
-  return get<AgentChannelsResponse>(
-    `/api/agents/${encodeURIComponent(agentId)}/channels`,
-  );
-}
 
 /**
  * PUT /api/agents/{id}/skills — replace the agent's skill allowlist.
