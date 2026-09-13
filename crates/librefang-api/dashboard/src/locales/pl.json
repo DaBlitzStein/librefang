@@ -4196,7 +4196,6 @@
     "field_description": "Opis",
     "field_description_placeholder": "Opisz zadanie dla agenta...",
     "field_assignee": "Przypisany agent (opcjonalnie)",
-    "field_assignee_placeholder": "Nazwa lub ID agenta",
     "field_priority": "Priorytet (opcjonalnie)",
     "field_priority_placeholder": "Wyższy jest realizowany pierwszy, domyślnie 0",
     "field_timeout": "Limit czasu przypisania w sekundach (opcjonalnie)",
@@ -4214,7 +4213,10 @@
     "status_pending": "Oczekujące",
     "status_in_progress": "W toku",
     "status_completed": "Zakończone",
-    "status_failed": "Nieudane"
+    "status_failed": "Nieudane",
+    "assignee_none": "Nieprzypisane — dowolny agent może pobrać",
+    "no_agents_hint": "Nie zarejestrowano jeszcze żadnych agentów. Utwórz agenta przed przypisywaniem zadań.",
+    "field_description_hint": "Agent czyta to dosłownie. Podaj cel, ograniczenia i kryteria ukończenia."
   },
   "prompts": {
     "title": "Prompty",
