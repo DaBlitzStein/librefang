@@ -306,8 +306,8 @@ mod engine {
 /// any of these holds:
 ///
 /// - the turn carries no images;
-/// - the model supports vision, per the catalog (`supports_vision_for` fails
-///   open, so an unknown model keeps receiving pixels);
+/// - the catalog does not positively say the model lacks vision (`vision_support_for`
+///   fails open, so an unknown model keeps receiving pixels);
 /// - no `MediaEngine` is wired, or the operator turned
 ///   `[media] image_description` off;
 /// - the images already carry descriptions from the channel bridge.
@@ -325,14 +325,21 @@ pub(super) async fn describe_images_for_text_only_model(
     let blocks = blocks?;
     let has_images = blocks_contain_images(&blocks);
     let api_model = super::strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
-    // `supports_vision_for` fails open: no kernel handle wired, or a model the
+    // `vision_support_for` fails open: no kernel handle wired, or a model the
     // catalog does not know, means the image is left alone rather than being
     // needlessly described. Only consulted when there is an image to gate —
     // otherwise the catalog lookup is pure overhead on every text turn.
     let model_supports_vision = !has_images
-        || kernel
-            .map(|k| k.supports_vision_for(&api_model))
-            .unwrap_or(true);
+        || kernel.map_or(true, |k| {
+            // Tres respuestas, no dos: solo `Unsupported` —una fuente que SABE que el
+            // modelo no acepta imágenes— justifica describirlas. `Unknown` cubre tanto
+            // el modelo ausente del catálogo como el que solo tiene el valor inferido
+            // de su nombre, y las dos llevan la misma cantidad de información.
+            !matches!(
+                k.vision_support_for(&api_model),
+                librefang_types::model_catalog::VisionSupport::Unsupported
+            )
+        });
 
     let decision = routing_decision(RoutingInputs {
         has_images,
