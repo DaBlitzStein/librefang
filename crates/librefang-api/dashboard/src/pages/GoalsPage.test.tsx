@@ -309,6 +309,121 @@ describe("GoalsPage", () => {
     // verify_agent_id outright, and `""` is not a UUID.
     expect(payload).not.toHaveProperty("verify_agent_id");
     expect(payload).not.toHaveProperty("evaluator_model");
+    // And a blank cadence: `""` fails the backend's integer check, while
+    // omitting the field is what leaves the goal on the default 2s.
+    expect(payload).not.toHaveProperty("tick_interval_secs");
+  });
+
+  // The runner reads the cadence on every autonomous run, so the control must
+  // be reachable without ticking loop engineering first.
+  it("sends the tick interval as a number on create, ungated by loop engineering", async () => {
+    useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { create } = setMutations();
+    renderPage();
+
+    fireEvent.change(
+      screen.getByPlaceholderText("goals.goal_title_placeholder"),
+      { target: { value: "Slow burn" } },
+    );
+    // By label, not by placeholder: the placeholder now interpolates the
+    // default so the number is not spelled into five translations.
+    fireEvent.change(screen.getByLabelText("goals.tick_interval"), {
+      target: { value: "900" },
+    });
+
+    const submitBtn = screen
+      .getAllByText("goals.create_goal")
+      .map((el) => el.closest("button"))
+      .find((b): b is HTMLButtonElement => !!b && b.type === "submit");
+    fireEvent.click(submitBtn!);
+
+    await Promise.resolve();
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const payload = create.mock.calls[0][0] as Record<string, unknown>;
+    // A string would fail the backend's `as_u64()` check with a 400.
+    expect(payload.tick_interval_secs).toBe(900);
+    expect(payload).toMatchObject({ title: "Slow burn", loop_engineering: false });
+  });
+
+  // The edit block is not a `<form>` and Save is a plain button, so the input's
+  // own `min` / `max` never trigger constraint validation. The cadence rides in
+  // the same payload as the title, status, progress and agent changes, and
+  // `validate_tick_interval` refuses the request before the `structured_modify`
+  // transaction — so sending it threw away every other change in the edit and
+  // reported only the cadence.
+  it("refuses an out-of-range cadence on edit rather than discarding the rest of the edit", async () => {
+    const paced: GoalItem = { ...PARENT_GOAL, tick_interval_secs: 30 };
+    useGoalsMock.mockReturnValue(makeQuery([paced]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { update } = setMutations();
+    renderPage();
+
+    fireEvent.click(screen.getByTitle("common.edit"));
+
+    fireEvent.change(screen.getByDisplayValue("Parent goal"), {
+      target: { value: "Renamed while I was here" },
+    });
+    fireEvent.change(screen.getByDisplayValue("30"), {
+      target: { value: "90000" },
+    });
+
+    fireEvent.click(screen.getByText("common.save"));
+    await Promise.resolve();
+
+    expect(update).not.toHaveBeenCalled();
+    // The row stays open with the title edit intact, so it is not lost.
+    expect(screen.getByDisplayValue("Renamed while I was here")).toBeTruthy();
+    expect(screen.getByDisplayValue("90000")).toBeTruthy();
+  });
+
+  // Submitted directly rather than by clicking, on purpose: a click runs the
+  // browser's constraint validation, which already stops these values on the
+  // create form. `submit` is the path that skips it, so this is the case the
+  // handler's own check is the only thing standing in front of.
+  it.each([
+    ["a fraction the API's integer check refuses", "1.5"],
+    ["one under the floor", "0"],
+    ["one over the ceiling", "90000"],
+  ])("refuses %s on create even when constraint validation is bypassed", async (_label, raw) => {
+    useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { create } = setMutations();
+    renderPage();
+
+    const title = screen.getByPlaceholderText("goals.goal_title_placeholder");
+    fireEvent.change(title, { target: { value: "Slow burn" } });
+    fireEvent.change(screen.getByLabelText("goals.tick_interval"), {
+      target: { value: raw },
+    });
+
+    fireEvent.submit(title.closest("form")!);
+    await Promise.resolve();
+
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("pre-fills the tick interval on edit and clears it with null when emptied", async () => {
+    const paced: GoalItem = { ...PARENT_GOAL, tick_interval_secs: 30 };
+    useGoalsMock.mockReturnValue(makeQuery([paced]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    const { update } = setMutations();
+    renderPage();
+
+    fireEvent.click(screen.getByTitle("common.edit"));
+
+    const tickInput = screen.getByDisplayValue("30") as HTMLInputElement;
+    fireEvent.change(tickInput, { target: { value: "" } });
+
+    fireEvent.click(screen.getByText("common.save"));
+    await Promise.resolve();
+
+    expect(update).toHaveBeenCalledTimes(1);
+    const { data } = update.mock.calls[0][0] as { data: Record<string, unknown> };
+    // `null` is the backend's clear signal; `""` would be rejected as a
+    // malformed integer instead of restoring the default cadence.
+    expect(data.tick_interval_secs).toBeNull();
   });
 
   // Loop engineering is opt-in, so the controls that configure it stay out of
@@ -666,18 +781,21 @@ describe("GoalRunPhaseBadge", () => {
     expect(badge!.querySelector("svg")!.getAttribute("class")).not.toMatch(/\bmr-/);
   });
 
+  // #8067 wrote this case against "paused", the phase this branch adds. Now that
+  // the switch knows "paused" the case needs a phase no build knows, or it would
+  // assert the neutral variant against an arm that is deliberately not neutral —
+  // and pass again the moment someone deleted that arm.
   it("renders an unknown phase under the neutral variant with its own key, not a confident Stopped", () => {
-    // "paused" is the phase #7973 adds — the unknown-phase case that fires first here.
-    const { container } = render(<GoalRunPhaseBadge phase="paused" />);
+    const { container } = render(<GoalRunPhaseBadge phase="quiesced" />);
 
     // The label is asked of i18n by the phase's own key with the raw phase as
-    // the fallback, so a locale that gains `run_phase_paused` starts using it
+    // the fallback, so a locale that gains `run_phase_quiesced` starts using it
     // with no code change. The previous shape gated translation on a hardcoded
     // `labelKey` per phase, so an unknown phase could never pick one up.
     // (`t` is mocked here as `key:{options}`; in production this renders the
-    // translation when the key exists and "paused" when it does not.)
+    // translation when the key exists and "quiesced" when it does not.)
     expect(
-      screen.getByText('goals.run_phase_paused:{"defaultValue":"paused"}'),
+      screen.getByText('goals.run_phase_quiesced:{"defaultValue":"quiesced"}'),
     ).toBeInTheDocument();
     expect(screen.queryByText(/goals\.run_phase_stopped/)).not.toBeInTheDocument();
 
@@ -690,6 +808,23 @@ describe("GoalRunPhaseBadge", () => {
     // The unknown branch is the one that keeps the dot, having no icon.
     expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(1);
     expect(badge.querySelectorAll("svg")).toHaveLength(0);
+  });
+
+  // The arm this branch adds, and the one a merge with #8067 could have dropped
+  // without any other test noticing: without it "paused" falls through to
+  // `default`, which is what the unknown-phase case above asserts and would
+  // therefore still be green.
+  it("gives paused its own warning variant and icon rather than the unknown fallback", () => {
+    const { container } = render(<GoalRunPhaseBadge phase="paused" />);
+    const badge = container.querySelector("span.inline-flex")!;
+
+    expect(
+      screen.getByText('goals.run_phase_paused:{"defaultValue":"paused"}'),
+    ).toBeInTheDocument();
+    expect(badge.className).toContain("bg-warning/10");
+    expect(badge.className).not.toContain("bg-main");
+    expect(badge.querySelectorAll("svg")).toHaveLength(1);
+    expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(0);
   });
 });
 

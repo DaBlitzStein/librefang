@@ -2956,6 +2956,7 @@
     "run_start": "Uruchom autonomicznie",
     "run_needs_agent": "Przypisz agenta, aby uruchomić ten cel autonomicznie",
     "run_phase_running": "Działa",
+    "run_phase_paused": "Wstrzymano",
     "run_phase_finished": "Zakończono",
     "run_phase_stopped": "Zatrzymano",
     "run_phase_rate_limited": "Limit szybkości",
@@ -2970,7 +2971,10 @@
     "verifier_agent": "Agent weryfikujący",
     "no_verifier_selected": "Bez weryfikatora (bez kontroli)",
     "evaluator_model": "Model oceniający",
-    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)"
+    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)",
+    "tick_interval": "Odstęp między iteracjami",
+    "tick_interval_placeholder": "Sekundy między iteracjami pętli (domyślnie {{defaultSecs}})",
+    "tick_interval_out_of_range": "Odstęp między iteracjami musi być liczbą całkowitą od {{min}} do {{max}} sekund."
   },
   "sessions": {
     "title": "Sesje",

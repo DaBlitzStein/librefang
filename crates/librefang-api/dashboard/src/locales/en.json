@@ -2950,6 +2950,7 @@
     "run_start": "Run autonomously",
     "run_needs_agent": "Assign an agent to run this goal autonomously",
     "run_phase_running": "Running",
+    "run_phase_paused": "Paused",
     "run_phase_finished": "Finished",
     "run_phase_stopped": "Stopped",
     "run_phase_rate_limited": "Rate Limited",
@@ -2964,7 +2965,10 @@
     "verifier_agent": "Verifier agent",
     "no_verifier_selected": "No verifier (run ungated)",
     "evaluator_model": "Evaluator model",
-    "evaluator_model_placeholder": "Evaluator model (optional)"
+    "evaluator_model_placeholder": "Evaluator model (optional)",
+    "tick_interval": "Tick interval",
+    "tick_interval_placeholder": "Seconds between loop iterations (default {{defaultSecs}})",
+    "tick_interval_out_of_range": "Tick interval must be an integer between {{min}} and {{max}} seconds."
   },
   "sessions": {
     "title": "Sessions",

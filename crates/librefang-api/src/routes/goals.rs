@@ -20,6 +20,8 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/goals/{id}/run", axum::routing::get(get_goal_run))
         .route("/goals/{id}/start", axum::routing::post(start_goal_run))
         .route("/goals/{id}/stop", axum::routing::post(stop_goal_run))
+        .route("/goals/{id}/pause", axum::routing::post(pause_goal_run))
+        .route("/goals/{id}/resume", axum::routing::post(resume_goal_run))
 }
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -189,15 +191,72 @@ pub async fn get_goal_run(
 /// request, so every caller — dashboard, CLI, script — gets the verification
 /// the operator configured once. Only the per-run retry budget is a body
 /// field.
+/// A goal that was paused resumes from its checkpoint rather than restarting;
+/// see [`resume_goal_run`] for the variant that requires one to exist. The
+/// loop cadence is read from the goal document's own `tick_interval_secs`
+/// (set via `POST /api/goals` / `PUT /api/goals/{id}`), not from this body.
+///
+/// Optional body: `{ "max_iterations": <u32> }`.
 pub async fn start_goal_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     body: Option<Json<serde_json::Value>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    start_or_resume(state, id, body, false).await
+}
+
+/// POST /api/goals/{id}/resume — Continue a paused run from its checkpoint.
+///
+/// Differs from [`start_goal_run`] only in refusing when there is nothing to
+/// resume: without that guard "resume" on a goal with no checkpoint would
+/// silently restart it from iteration 0.
+///
+/// Optional body: `{ "max_iterations": <u32> }`, which **re-budgets** the resumed run — an operator extending a run that is about to hit its cap has no other way to say so.
+/// Omitting it restores the cap the paused run was already under rather than substituting the default, which is what this route did before: with the iteration count restored from the same checkpoint, a smaller default ends the resumed run at the top of its first loop, and that exit clears the checkpoint, so the progress the resume was asked to continue is gone.
+/// It is a total ceiling compared against the restored iteration count, not additional headroom on top of it — a value at or below that count is rejected with a 400 rather than silently destroying the checkpoint the same way.
+pub async fn resume_goal_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<serde_json::Value>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    start_or_resume(state, id, body, true).await
+}
+
+/// Shared body of [`start_goal_run`] and [`resume_goal_run`].
+///
+/// `require_paused` is the only difference between the two: the kernel
+/// resumes from a persisted checkpoint automatically when one exists, so
+/// `/resume` is `/start` plus a precondition.
+///
+/// `max_iterations` is passed down as the `Option` it arrived as.
+/// Resolving it here would erase the distinction between "the operator asked for 25" and "the operator said nothing", and only the runner — which holds the checkpoint — can tell what the second one should mean.
+async fn start_or_resume(
+    state: Arc<AppState>,
+    id: String,
+    body: Option<Json<serde_json::Value>>,
+    require_paused: bool,
+) -> (StatusCode, Json<serde_json::Value>) {
     let (goal_id, id) = match parse_goal_id(&id) {
         Ok(parsed) => parsed,
         Err(error) => return error,
     };
+
+    // Read once and reuse below: `/start` also auto-resumes from an existing
+    // checkpoint (same as `/resume`), so both routes need the checkpoint's
+    // iteration count to validate an explicit `max_iterations` against it.
+    let run_state = state.kernel.goal_run_state(goal_id);
+    let paused_run = run_state
+        .as_ref()
+        .filter(|run| run.phase == librefang_types::goal::GoalRunPhase::Paused);
+
+    if require_paused && paused_run.is_none() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "This goal has no paused run to resume. Use POST /api/goals/{id}/start to begin a new run."
+            })),
+        );
+    }
 
     // Same swallow as #6654/#6653 on a start rather than a read: the old catch-all `_ => Vec::new()` folded a substrate failure into the empty array, so an unreadable store answered `404 Goal '<id>' not found` for a goal that exists — sending the operator to re-create it instead of to the host.
     // Only a genuinely absent / non-array key is an empty list.
@@ -251,6 +310,25 @@ pub async fn start_goal_run(
             Some(value) => Some(value),
         },
     };
+    // An explicit cap is a total budget, not a top-up on top of the
+    // checkpoint's already-spent iterations (`GoalRunner::start` compares
+    // it against the RESTORED iteration count, not against 0) — so a cap at
+    // or below that count would resume, immediately trip the iteration-cap
+    // check on the very first pass with no turn run, and clear the
+    // checkpoint on the way out. Refusing it up front keeps the checkpoint
+    // (and the learnings it carries) intact instead of destroying it for a
+    // request that could never have advanced the run.
+    if let (Some(cap), Some(run)) = (max_iterations, paused_run) {
+        if cap <= run.iteration {
+            return ApiErrorResponse::bad_request(format!(
+                "max_iterations ({cap}) must exceed the paused run's already-completed \
+                 iteration count ({}); the run would resume only to hit the cap immediately \
+                 and discard its checkpoint",
+                run.iteration
+            ))
+            .into_json_tuple();
+        }
+    }
 
     // Loop-engineering configuration lives on the goal, not on the request, so
     // a run started from the dashboard, the CLI or a script all get the same
@@ -297,15 +375,27 @@ pub async fn start_goal_run(
         },
     };
 
-    let started = state.kernel.start_goal_run(
-        goal_id,
-        agent_id,
-        max_iterations,
-        loop_engineering,
-        verify_agent_id,
-        verify_max_retries,
-        evaluator_model,
-    );
+    let started = if require_paused {
+        state.kernel.resume_goal_run(
+            goal_id,
+            agent_id,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        )
+    } else {
+        state.kernel.start_goal_run(
+            goal_id,
+            agent_id,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        )
+    };
     if !started {
         // #7785 review: the only way `start_goal_run` refuses is the goal
         // vanishing between the read above and the runner's own reload —
@@ -360,7 +450,11 @@ pub async fn start_goal_run(
     }
 }
 
-/// POST /api/goals/{id}/stop — Stop an active autonomous run for a goal.
+/// POST /api/goals/{id}/stop — Cancel an active autonomous run for a goal.
+///
+/// Terminal: the run's resume checkpoint is discarded, so starting the goal
+/// again begins from iteration 0. Use `POST /api/goals/{id}/pause` to suspend
+/// a run that should later continue where it left off.
 pub async fn stop_goal_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -373,6 +467,31 @@ pub async fn stop_goal_run(
     (
         StatusCode::OK,
         Json(serde_json::json!({ "ok": true, "stopped": stopped })),
+    )
+}
+
+/// POST /api/goals/{id}/pause — Suspend an active run, keeping its checkpoint.
+///
+/// The loop finishes the turn it is on, then checkpoints its iteration count
+/// and progress and exits in the `paused` phase. Because the in-flight agent
+/// turn is allowed to complete rather than being aborted, a `200` here means
+/// "pause requested and will be honoured", not "already stopped" — poll
+/// `GET /api/goals/{id}/run` for the phase to reach `paused`.
+///
+/// Mirrors [`stop_goal_run`]'s response shape: `paused` reports whether a live
+/// run was there to signal.
+pub async fn pause_goal_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let (goal_id, _) = match parse_goal_id(&id) {
+        Ok(parsed) => parsed,
+        Err(error) => return error,
+    };
+    let paused = state.kernel.pause_goal_run(goal_id);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "paused": paused })),
     )
 }
 
@@ -404,6 +523,39 @@ fn optional_u64_field(req: &serde_json::Value, key: &str) -> Result<Option<u64>,
         None => Ok(None),
         Some(value) => value.as_u64().map(Some).ok_or(()),
     }
+}
+
+/// Validate an optional `tick_interval_secs` on a create/update payload.
+///
+/// Returns the parsed value on success, or the 400 response to hand straight
+/// back. Rejecting rather than clamping here is deliberate: the runner clamps
+/// so a bad stored value can never wedge a run, but an operator typing a
+/// cadence into the dashboard should be told their number was refused rather
+/// than discover later that the loop ticks at a rate they never chose.
+///
+/// A blank string or `null` is a clear signal, not a malformed number —
+/// matching `parent_id` / `agent_id` (#6562).
+fn validate_tick_interval(req: &serde_json::Value) -> Result<Option<u64>, JsonResponse> {
+    let Some(raw) = req.get("tick_interval_secs") else {
+        return Ok(None);
+    };
+    if is_clear_signal(raw) {
+        return Ok(None);
+    }
+    let Some(secs) = raw.as_u64() else {
+        return Err(ApiErrorResponse::bad_request(
+            "tick_interval_secs must be a non-negative integer number of seconds",
+        )
+        .into_json_tuple());
+    };
+    use librefang_types::goal::{MAX_GOAL_TICK_INTERVAL_SECS, MIN_GOAL_TICK_INTERVAL_SECS};
+    if !(MIN_GOAL_TICK_INTERVAL_SECS..=MAX_GOAL_TICK_INTERVAL_SECS).contains(&secs) {
+        return Err(ApiErrorResponse::bad_request(format!(
+            "tick_interval_secs must be {MIN_GOAL_TICK_INTERVAL_SECS}-{MAX_GOAL_TICK_INTERVAL_SECS} seconds, got {secs}"
+        ))
+        .into_json_tuple());
+    }
+    Ok(Some(secs))
 }
 
 /// POST /api/goals — Create a new goal.
@@ -463,10 +615,10 @@ pub async fn create_goal(
     };
 
     let loop_engineering = req["loop_engineering"].as_bool().unwrap_or(false);
-    // Same boundary rule as `agent_id`, through the same helper: blank or
-    // null clears (nothing to store on a create), a non-empty value must be
-    // a UUID, and a non-string value is a 400 rather than a silently
-    // dropped field (#7785 review).
+    // Same boundary rule as `agent_id` / `parent_id`: `optional_uuid_field`
+    // treats a blank string or `null` as "not set" rather than a malformed
+    // UUID (#6562), so a verifier field left blank in a form no longer 400s
+    // as "Invalid verify_agent_id" — only a non-blank, non-UUID value does.
     let verify_agent_id_str = match optional_uuid_field(&req, "verify_agent_id") {
         Ok(value) => value.flatten(),
         Err(()) => {
@@ -501,6 +653,10 @@ pub async fn create_goal(
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let tick_interval_secs = match validate_tick_interval(&req) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
     let now = chrono::Utc::now().to_rfc3339();
     let goal_id = uuid::Uuid::new_v4().to_string();
@@ -526,6 +682,9 @@ pub async fn create_goal(
     }
     if let Some(ref em) = evaluator_model_str {
         entry["evaluator_model"] = serde_json::Value::String(em.clone());
+    }
+    if let Some(secs) = tick_interval_secs {
+        entry["tick_interval_secs"] = serde_json::json!(secs);
     }
 
     // Atomic read-modify-write under BEGIN IMMEDIATE (#5138). Parent
@@ -606,6 +765,10 @@ pub async fn update_goal_by_id(
         if !["pending", "in_progress", "completed", "cancelled"].contains(&status) {
             return ApiErrorResponse::bad_request("Invalid status").into_json_tuple();
         }
+    }
+
+    if let Err(resp) = validate_tick_interval(&req) {
+        return resp;
     }
 
     let progress = match optional_u64_field(&req, "progress") {
@@ -758,6 +921,18 @@ pub async fn update_goal_by_id(
                     if effective_verifier.is_some() && effective_verifier == g["agent_id"].as_str()
                     {
                         return Err(LibreFangError::InvalidInput(SELF_VERIFY.to_string()));
+                    }
+                    // A blank string or `null` clears the override back to the
+                    // default cadence, matching `parent_id` / `agent_id`
+                    // above. Range already checked above, before the
+                    // transaction.
+                    if let Some(ti) = req.get("tick_interval_secs") {
+                        if is_clear_signal(ti) {
+                            g.as_object_mut()
+                                .map(|obj| obj.remove("tick_interval_secs"));
+                        } else if let Some(v) = ti.as_u64() {
+                            g["tick_interval_secs"] = serde_json::json!(v);
+                        }
                     }
                     g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
                     updated = Some(g.clone());
