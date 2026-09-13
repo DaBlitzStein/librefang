@@ -290,12 +290,17 @@ async fn writing_into_a_base_that_does_not_exist_is_404_not_a_new_directory() {
 
 /// The cap exists because these files land in an agent's context window, so an
 /// oversize document has to fail at upload rather than at the turn that reads it.
+///
+/// Asserting on the message body, not just the status, is what makes this test
+/// mean anything: until the route carried its own `DefaultBodyLimit`, axum's
+/// 2 MiB extractor default answered 413 first and this test passed with the
+/// handler's cap deleted entirely.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_oversize_document_is_refused() {
     let h = boot().await;
     create_base(&h, "handbook").await;
 
-    let (status, _) = send(
+    let (status, body) = send(
         h.app.clone(),
         raw_put(
             "/api/knowledge/handbook/documents/huge.md",
@@ -304,11 +309,104 @@ async fn an_oversize_document_is_refused() {
     )
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("4194304"),
+        "the 413 must come from the handler's own cap and name it, not from the \
+         extractor default: {body:?}"
+    );
+}
+
+/// The other side of the cap, and the half that fails without the route's own
+/// `DefaultBodyLimit`: a document just under the ceiling has to be accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_document_just_under_the_cap_is_accepted() {
+    let h = boot().await;
+    create_base(&h, "handbook").await;
+
+    let size = 4 * 1024 * 1024 - 1;
+    let (status, body) = send(
+        h.app.clone(),
+        raw_put("/api/knowledge/handbook/documents/big.md", vec![b'x'; size]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["bytes"], serde_json::json!(size));
 }
 
 // ---------------------------------------------------------------------------
 // Sharing
 // ---------------------------------------------------------------------------
+
+/// An agent may already declare a workspace under the alias a new base wants.
+///
+/// The rewrite in `set_holders` drops declarations by *path* and re-adds by
+/// *alias*, so without a guard the operator's hand-written declaration is
+/// replaced rather than kept — and once the base is later revoked, the alias
+/// goes with it and the original is unrecoverable from the daemon. Refusing is
+/// the only answer that does not decide on the operator's behalf.
+///
+/// Remove the conflict check in `set_holders` and this test goes red twice: the
+/// status becomes 200, and `shared/handbook` is gone from the manifest.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_base_that_collides_with_an_existing_alias_is_refused_and_changes_nothing() {
+    use librefang_types::agent::{WorkspaceDecl, WorkspaceMode};
+    use std::path::PathBuf;
+
+    let h = boot().await;
+    create_base(&h, "handbook").await;
+
+    let agent = spawn_named(&h.state, "alice");
+    let mut hand_written = std::collections::HashMap::new();
+    hand_written.insert(
+        "handbook".to_string(),
+        WorkspaceDecl {
+            path: Some(PathBuf::from("shared/handbook")),
+            mount: None,
+            mode: WorkspaceMode::ReadWrite,
+        },
+    );
+    h.state
+        .kernel
+        .set_agent_workspaces(agent, hand_written)
+        .expect("seed the pre-existing declaration");
+
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(
+            Method::PUT,
+            "/api/knowledge/handbook/agents",
+            serde_json::json!({ "agents": [{ "agent_id": agent.to_string() }] }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "body={body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("shared/handbook"),
+        "the refusal must name the declaration it would have destroyed: {body:?}"
+    );
+
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent)
+        .expect("agent still registered");
+    let kept = entry
+        .manifest
+        .workspaces
+        .get("handbook")
+        .expect("the hand-written declaration survives a refused request");
+    assert_eq!(
+        kept.path.as_deref(),
+        Some(std::path::Path::new("shared/handbook"))
+    );
+    assert_eq!(kept.mode, WorkspaceMode::ReadWrite);
+}
 
 /// The point of the whole feature: granting a base to chosen agents writes a
 /// real named-workspace declaration into each manifest, visible from both sides.

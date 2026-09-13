@@ -6058,9 +6058,14 @@ export async function listKnowledgeDocuments(name: string): Promise<KnowledgeDoc
 }
 
 /**
- * Upload one document. The body is the raw file, matching `uploadAgentFile`
- * and the `POST /api/agents/{id}/upload` convention rather than introducing
- * multipart for a single-file payload.
+ * Upload one document. The body is the raw file, following the
+ * `POST /api/agents/{id}/upload` convention rather than introducing multipart
+ * for a single-file payload.
+ *
+ * Unlike `uploadAgentFile`, which forwards the browser's `file.type`, the
+ * content type is pinned to `application/octet-stream`: the handler takes the
+ * body as `Bytes` and stores it under the filename from the path, so a media
+ * type would be recorded nowhere and only risks tripping a content-type guard.
  *
  * The filename travels in the path, not a header, because it is also the
  * document's identity for the delete route — one place for the server to
