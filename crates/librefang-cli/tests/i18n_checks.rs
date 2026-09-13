@@ -1251,6 +1251,35 @@ fn test_no_dead_locale_keys() {
     }
 }
 
+/// A message id defined twice does not quietly win, it makes the whole bundle unloadable.
+/// `FluentBundle::add_resource` rejects the resource with `Overriding { kind: Message, id }` and `i18n::init` turns that into a panic, so a single duplicated key takes down every test and every command that renders one string — a failure whose message names Fluent rather than the line that caused it.
+///
+/// Nothing else in this file catches it.
+/// A branch that edits a hint bar ships exactly one definition and is individually correct; the duplicate exists only in the merge of two such branches, which is a tree no branch's CI ever builds.
+#[test]
+fn test_no_duplicate_locale_keys() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
+    let manifest_dir = Path::new(&manifest_dir);
+
+    let mut duplicates = Vec::new();
+    for locale in shipped_locales(manifest_dir) {
+        let locale_file = manifest_dir.join("locales").join(&locale).join("main.ftl");
+        let mut seen = std::collections::BTreeSet::new();
+        for key in collect_locale_keys(&locale_file) {
+            if !seen.insert(key.clone()) {
+                duplicates.push(format!("{locale}/{key}"));
+            }
+        }
+    }
+
+    assert!(
+        duplicates.is_empty(),
+        "Found locale keys defined more than once. Fluent refuses the whole bundle over this, \
+         so the effect is every localized string failing, not just these:\n{}",
+        duplicates.join("\n")
+    );
+}
+
 #[test]
 fn test_locales_cover_used_i18n_keys() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");

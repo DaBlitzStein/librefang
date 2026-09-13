@@ -2180,9 +2180,7 @@ tui-agents-opt-create-new = 새 에이전트 생성
 
 tui-agents-hints-filter =   [입력] 필터  [Enter] 적용  [Esc] 검색 취소
 tui-agents-hints-list =   [↑↓] 탐색  [Enter] 상세  [/] 검색  [Esc] 뒤로
-tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [p] 모델 파라미터  [$] 토큰  [c] 채팅  [k] 종료  [Esc] 뒤로
-tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [w] 공유 폴더  [p] 모델 파라미터  [c] 채팅  [k] 종료  [Esc] 뒤로
-tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [p] 모델 파라미터  [h] 설정 기록  [c] 채팅  [k] 종료  [Esc] 뒤로
+tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [w] 공유 폴더  [p] 모델 파라미터  [$] 토큰  [h] 설정 기록  [c] 채팅  [k] 종료  [Esc] 뒤로
 tui-agents-title-manifest-history = 설정 기록
 tui-agents-label-manifest-history-loading = 설정 기록을 불러오는 중...
 tui-agents-label-manifest-history-empty = 이 에이전트에 기록된 설정 변경이 아직 없습니다.

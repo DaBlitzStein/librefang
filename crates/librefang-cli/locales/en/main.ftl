@@ -2186,9 +2186,7 @@ tui-agents-opt-create-new = Create new agent
 
 tui-agents-hints-filter =   [Type] Filter  [Enter] Accept  [Esc] Cancel search
 tui-agents-hints-list =   [↑↓] Navigate  [Enter] Detail  [/] Search  [Esc] Back
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [p] Model params  [$] Tokens  [c] Chat  [k] Kill  [Esc] Back
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [w] Shared folders  [p] Model params  [c] Chat  [k] Kill  [Esc] Back
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [p] Model params  [h] Config history  [c] Chat  [k] Kill  [Esc] Back
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [w] Shared folders  [p] Model params  [$] Tokens  [h] Config history  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-title-manifest-history = Configuration history
 tui-agents-label-manifest-history-loading = Loading configuration history...
 tui-agents-label-manifest-history-empty = No configuration changes recorded for this agent yet.
