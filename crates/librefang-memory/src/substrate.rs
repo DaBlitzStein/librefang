@@ -1926,7 +1926,7 @@ mod tests {
 
         for (title, assignee) in [("a", "agent-1"), ("b", "agent-1"), ("c", "agent-2")] {
             substrate
-                .task_post(title, "body", Some(assignee), Some("boss"))
+                .task_post(title, "body", Some(assignee), Some("boss"), 0, None)
                 .await
                 .expect("post");
         }
