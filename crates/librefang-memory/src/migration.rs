@@ -304,7 +304,6 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // first keeps it and the rest renumber to 59, 60, … on rebase.
     run_step!(58, migrate_v58);
 
-
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
     // applied DDL without recording its audit row — operator tooling
@@ -4045,6 +4044,39 @@ mod tests {
         migrate_v33(&conn).unwrap();
         run_migrations(&conn).unwrap();
         assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    /// v58 is a no-op against a database that already has the column.
+    ///
+    /// SQLite has no `ADD COLUMN IF NOT EXISTS`, so the `try_column_exists`
+    /// guard is the only thing standing between a re-run and
+    /// "duplicate column name: parent_session_id" on boot. That re-run is not
+    /// hypothetical: three other open PRs want this same slot, so this
+    /// migration will be renumbered at least once before it merges, and a
+    /// renumbered migration is one that runs against databases which may
+    /// already carry its DDL.
+    #[test]
+    fn test_migrate_v58_is_a_noop_when_the_column_already_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(try_column_exists(&conn, "sessions", "parent_session_id").unwrap());
+
+        // Second run, directly and then through the ladder.
+        migrate_v58(&conn).expect("re-running v58 on an existing column must not error");
+        run_migrations(&conn).expect("a second full run must not error");
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(try_column_exists(&conn, "sessions", "parent_session_id").unwrap());
+
+        // The audit row is recorded exactly once — `INSERT OR IGNORE` rather
+        // than a second row claiming the same version was applied twice.
+        let audit_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE version = 58",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_rows, 1, "v58 must record exactly one migrations row");
     }
 
     #[test]
