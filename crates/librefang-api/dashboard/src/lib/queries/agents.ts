@@ -17,7 +17,6 @@ import {
   getAgentTools,
   getAgentSkills,
   getAgentMcpServers,
-  getAgentChannels,
 } from "../http/client";
 import { agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
