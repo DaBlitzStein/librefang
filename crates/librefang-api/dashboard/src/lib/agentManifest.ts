@@ -709,8 +709,6 @@ export const serializeManifestForm = (
   writeStringScalar(modelBody, "provider", form.model.provider.trim());
   writeStringScalar(modelBody, "model", form.model.model.trim());
   writeSystemPrompt(modelBody, form.model.system_prompt);
-  writeNumberScalar(modelBody, "temperature", parseFloatish(form.model.temperature));
-  writeStringScalar(modelBody, "system_prompt", form.model.system_prompt);
   writeNumberScalar(modelBody, "temperature", parseSignedFloat(form.model.temperature));
   writeNumberScalar(modelBody, "max_tokens", parseInteger(form.model.max_tokens));
   writeNumberScalar(modelBody, "top_p", parseSignedFloat(form.model.top_p));
