@@ -290,10 +290,18 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(57, migrate_v57);
 
     // v58: agent manifest version history so operators can see how an
-    // agent's config changed over time and roll back to a prior state.
+    // agent's config changed over time. Viewing only — there is no restore
+    // endpoint for agent manifests.
     // Purely additive: one new table, no existing row changes meaning.
+    //
+    // 58 is the next free number above main's 57. Two other open branches
+    // create this same table with byte-identical DDL — #8041 (the dashboard
+    // view of the same history, whose commits this branch is built on) and
+    // `fix/schema-forward-compat-59` — so whichever merges first keeps 58 and
+    // the rest renumber on rebase rather than redefining the function. The migration itself is a no-op against a
+    // database that already has the table; see
+    // `test_migrate_v58_is_a_noop_when_the_table_already_exists`.
     run_step!(58, migrate_v58);
-
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -4039,6 +4047,38 @@ mod tests {
         migrate_v33(&conn).unwrap();
         run_migrations(&conn).unwrap();
         assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    /// v58 is a no-op against a database that already has `manifest_versions`.
+    ///
+    /// This is not hypothetical. `fix/schema-forward-compat-59` creates the
+    /// same table under the same number with byte-identical DDL, so whichever
+    /// of the two reaches a deployment first, the other one runs against a
+    /// database that already has the table. `CREATE TABLE IF NOT EXISTS` plus
+    /// `INSERT OR IGNORE` is what makes that a no-op instead of
+    /// "table manifest_versions already exists" on boot — this test is what
+    /// stops someone simplifying either clause away.
+    #[test]
+    fn test_migrate_v58_is_a_noop_when_the_table_already_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(try_table_exists(&conn, "manifest_versions").unwrap());
+
+        // Second run, directly and then through the ladder.
+        migrate_v58(&conn).expect("re-running v58 on an existing table must not error");
+        run_migrations(&conn).expect("a second full run must not error");
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        // The audit row is recorded exactly once — `INSERT OR IGNORE` rather
+        // than a second row claiming the same version was applied twice.
+        let audit_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE version = 58",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_rows, 1, "v58 must record exactly one migrations row");
     }
 
     #[test]
