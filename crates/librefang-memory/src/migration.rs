@@ -305,7 +305,6 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // rest renumber to 59, 60, … on rebase.
     run_step!(58, migrate_v58);
 
-
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
     // applied DDL without recording its audit row — operator tooling
