@@ -10,7 +10,7 @@ import {
   type ToolDefinition,
 } from "../api";
 import { useQueryClient } from "@tanstack/react-query";
-import { isProviderAvailable } from "../lib/status";
+import { isProviderAvailable, getStatusVariant } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -40,19 +40,10 @@ import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch, ChevronRight, Radio, Route } from "lucide-react";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch, History } from "lucide-react";
-import { buildModelConfigPatch } from "../lib/agentModelPatch";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch } from "lucide-react";
-import {
-  buildModelConfigPatch,
-  emptyModelNumerics,
-  seedModelNumerics,
-  type ModelDraft,
-} from "../lib/agentModelPatch";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch, ChevronRight, Radio, Route, History } from "lucide-react";
+import { buildModelConfigPatch, emptyModelNumerics, seedModelNumerics, type ModelDraft } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
-import { getStatusVariant } from "../lib/status";
 import { useDashboardSnapshot } from "../lib/queries/overview";
 import { useSessionDetails } from "../lib/queries/sessions";
 import { useAgentKvMemory } from "../lib/queries/memory";
@@ -617,8 +608,7 @@ export function AgentsPage() {
   // the PUT — leaving the tab discards the draft (the "change your mind" path).
   const [skillsDraft, setSkillsDraft] = useState<string[] | null>(null);
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "tools" | "routing" | "schedule" | "logs"
-    "conversation" | "memory" | "skills" | "tools" | "schedule" | "logs" | "history"
+    "conversation" | "memory" | "skills" | "tools" | "routing" | "schedule" | "logs" | "history"
   >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without

@@ -99,8 +99,6 @@ export const agentKeys = {
   // very write that added a row. Same shape as `agentTypeKeys.registryDiff`.
   manifestHistory: (agentId: string) =>
     [...agentKeys.detail(agentId), "manifestHistory"] as const,
-  manifestHistory: (agentId: string) =>
-    [...agentKeys.all, "manifestHistory", agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
