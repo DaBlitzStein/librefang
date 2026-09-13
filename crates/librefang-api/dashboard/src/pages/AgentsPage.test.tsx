@@ -1,33 +1,115 @@
-// Tests SystemPromptSection / DescriptionSection / ChannelsSection directly
-// — AgentsPage has no render harness (~20 hooks).
+// Tests SystemPromptSection / DescriptionSection / ChannelsSection directly,
+// plus a full-page harness for the detail panel's tab strip.
+// The page reads ~20 hooks, so the harness mocks each of them at the
+// queries/mutations layer; only the History tab's own data path is left real.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cloneResultNotice, hasTokenFootprintData, SystemPromptSection, DescriptionSection, ChannelsSection } from "./AgentsPage";
+import { AgentsPage, cloneResultNotice, hasTokenFootprintData, SystemPromptSection, DescriptionSection, ChannelsSection } from "./AgentsPage";
 import { usePatchAgent, useSetAgentChannels } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
 import { usePromptVersions, useAgentChannels } from "../lib/queries/agents";
+import { getAgentDetail, getAgentManifestHistory } from "../lib/http/client";
+import { useDashboardSnapshot } from "../lib/queries/overview";
 
-vi.mock("../lib/mutations/agents", () => ({
+// Rendering the whole page (rather than a section) is what the History tab
+// needs: the tab strip, the active-tab state and the `enabled` gate that
+// makes the history request lazy only exist inside `AgentsPage` itself.
+// Everything the page reads is mocked at the hook layer per the dashboard
+// data-layer rule, except `useAgentManifestHistory` / `agentQueries`, which
+// stay real so the laziness assertion runs through the actual query factory
+// and only the HTTP boundary is stubbed.
+const idleQuery = () => ({
+  data: undefined,
+  isLoading: false,
+  isError: false,
+  isFetching: false,
+  isSuccess: false,
+  error: null,
+  refetch: vi.fn(),
+});
+
+vi.mock("../lib/mutations/agents", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/mutations/agents")>()),
   usePatchAgent: vi.fn(),
   useSetAgentChannels: vi.fn(),
 }));
 
-vi.mock("../lib/mutations/prompts", () => ({
+vi.mock("../lib/mutations/prompts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/mutations/prompts")>()),
   useBindPromptVersionToAgent: vi.fn(),
 }));
 
-vi.mock("../lib/queries/agents", () => ({
+vi.mock("../lib/queries/agents", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/queries/agents")>()),
   usePromptVersions: vi.fn(),
   useAgentChannels: vi.fn(),
+  useAgentEvents: vi.fn(() => idleQuery()),
+  useAgentSessions: vi.fn(() => idleQuery()),
+  useAgentStats: vi.fn(() => idleQuery()),
+  useAgentTemplates: vi.fn(() => idleQuery()),
+  useAgentTools: vi.fn(() => idleQuery()),
+  useAgentSkills: vi.fn(() => idleQuery()),
+  useAgentMcpServers: vi.fn(() => idleQuery()),
+  useAgentManifest: vi.fn(() => idleQuery()),
+  useTools: vi.fn(() => idleQuery()),
+}));
+
+vi.mock("../lib/http/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/http/client")>()),
+  getAgentDetail: vi.fn(),
+  getAgentManifestHistory: vi.fn(),
+}));
+
+vi.mock("../lib/queries/overview", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/queries/overview")>()),
+  useDashboardSnapshot: vi.fn(() => idleQuery()),
+}));
+
+vi.mock("../lib/queries/sessions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/queries/sessions")>()),
+  useSessionDetails: vi.fn(() => idleQuery()),
+}));
+
+vi.mock("../lib/queries/memory", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/queries/memory")>()),
+  useAgentKvMemory: vi.fn(() => idleQuery()),
+}));
+
+vi.mock("../lib/queries/providers", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/queries/providers")>()),
+  useProviders: vi.fn(() => idleQuery()),
+}));
+
+vi.mock("../lib/queries/models", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/queries/models")>()),
+  useModels: vi.fn(() => idleQuery()),
+}));
+
+vi.mock("../lib/queries/skills", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/queries/skills")>()),
+  useSkills: vi.fn(() => idleQuery()),
+}));
+
+vi.mock("../lib/queries/mcp", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/queries/mcp")>()),
+  useMcpServers: vi.fn(() => idleQuery()),
+}));
+
+vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => vi.fn(),
 }));
 
 const addToastMock = vi.fn();
 vi.mock("../lib/store", () => ({
-  useUIStore: (selector: (s: { addToast: typeof addToastMock }) => unknown) =>
-    selector({ addToast: addToastMock }),
+  useUIStore: (
+    selector: (s: {
+      addToast: typeof addToastMock;
+      hiddenModelKeys: string[];
+    }) => unknown,
+  ) => selector({ addToast: addToastMock, hiddenModelKeys: [] }),
 }));
 
 vi.mock("react-i18next", () => ({
@@ -393,5 +475,132 @@ describe("ChannelsSection (#7742)", () => {
       agentId: "agent-1",
       channels: ["telegram", "discord"],
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// History tab — agent manifest version history (#8231).
+//
+// The tab shipped on `fork/feat/tui-manifest-history` and the branch is an
+// ancestor of this one, but its `AgentsPage.tsx` hunk was dropped while a
+// merge conflict was resolved: the hook, the query key factory and the route
+// all survived, and only the caller vanished, so nothing failed to compile
+// and the page silently rendered one tab fewer. These tests pin the three
+// properties that regression removed.
+const getAgentDetailMock = getAgentDetail as unknown as ReturnType<typeof vi.fn>;
+const getAgentManifestHistoryMock = getAgentManifestHistory as unknown as ReturnType<typeof vi.fn>;
+const useDashboardSnapshotMock = useDashboardSnapshot as unknown as ReturnType<typeof vi.fn>;
+
+const HISTORY = [
+  {
+    id: 2,
+    agent_id: "agent-1",
+    agent_name: "alpha",
+    timestamp: "2026-09-12 08:30:00",
+    manifest_toml: 'name = "alpha"\nmodel = "claude-opus-4"\n',
+    change_source: "api_patch",
+  },
+  {
+    id: 1,
+    agent_id: "agent-1",
+    agent_name: "alpha",
+    timestamp: "2026-09-11 07:15:00",
+    manifest_toml: 'name = "alpha"\nmodel = "claude-sonnet-4"\n',
+    change_source: "spawn",
+  },
+];
+
+async function renderAgentsPageAndSelectAgent() {
+  const user = userEvent.setup();
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: 0, gcTime: 0 } },
+  });
+  render(
+    <QueryClientProvider client={qc}>
+      <AgentsPage />
+    </QueryClientProvider>,
+  );
+  // The tab strip only exists once an agent is selected, and selection is
+  // what supplies the id the history request is keyed on.
+  await user.click(await screen.findByRole("button", { name: /alpha/ }));
+  await screen.findByRole("button", { name: /Conversation/ });
+  return user;
+}
+
+describe("AgentsPage History tab (#8231)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    usePatchAgentMock.mockReturnValue({ mutate: vi.fn(), isPending: false });
+    useBindMock.mockReturnValue({ mutate: vi.fn(), isPending: false });
+    usePromptVersionsMock.mockReturnValue({ data: [], isLoading: false, isError: false });
+    useAgentChannelsMock.mockReturnValue({ data: undefined, isLoading: false });
+    useSetAgentChannelsMock.mockReturnValue({ mutate: vi.fn(), isPending: false });
+    useDashboardSnapshotMock.mockReturnValue({
+      data: {
+        agents: [
+          { id: "agent-1", name: "alpha", state: "running", is_hand: false },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    });
+    getAgentDetailMock.mockResolvedValue({
+      id: "agent-1",
+      name: "alpha",
+      state: "running",
+    });
+    getAgentManifestHistoryMock.mockResolvedValue(HISTORY);
+  });
+
+  it("offers a History tab in the detail panel", async () => {
+    await renderAgentsPageAndSelectAgent();
+    expect(screen.getByRole("button", { name: /History/ })).toBeInTheDocument();
+  });
+
+  it("does not request the manifest history while the History tab is inactive", async () => {
+    const user = await renderAgentsPageAndSelectAgent();
+
+    // Anchor on the tab existing first. "Never fetched" is also true of a
+    // page that has no History tab at all, so without this the assertions
+    // below would still pass against the very regression they guard.
+    expect(screen.getByRole("button", { name: /History/ })).toBeInTheDocument();
+
+    // Selecting the agent alone must not fetch it…
+    expect(getAgentManifestHistoryMock).not.toHaveBeenCalled();
+
+    // …and neither must visiting a sibling tab. Without the `enabled` gate
+    // every drawer open would pay for a payload almost nobody reads.
+    await user.click(screen.getByRole("button", { name: /Logs/ }));
+    await screen.findByText(/events · tail/);
+    expect(getAgentManifestHistoryMock).not.toHaveBeenCalled();
+  });
+
+  it("fetches the history and renders one entry per manifest version once activated", async () => {
+    const user = await renderAgentsPageAndSelectAgent();
+
+    await user.click(screen.getByRole("button", { name: /History/ }));
+
+    await waitFor(() => expect(getAgentManifestHistoryMock).toHaveBeenCalledTimes(1));
+    expect(getAgentManifestHistoryMock).toHaveBeenCalledWith("agent-1");
+
+    // Header carries the count, and each version is its own expandable row
+    // labelled with the change source and holding the stored TOML.
+    expect(await screen.findByText(/Manifest history/)).toBeInTheDocument();
+    expect(screen.getByText(/· api_patch/)).toBeInTheDocument();
+    expect(screen.getByText(/· spawn/)).toBeInTheDocument();
+    expect(screen.getByText(/claude-opus-4/)).toBeInTheDocument();
+    expect(screen.getByText(/claude-sonnet-4/)).toBeInTheDocument();
+  });
+
+  it("surfaces the empty state when the agent has no recorded versions", async () => {
+    getAgentManifestHistoryMock.mockResolvedValue([]);
+    const user = await renderAgentsPageAndSelectAgent();
+
+    await user.click(screen.getByRole("button", { name: /History/ }));
+
+    expect(
+      await screen.findByText("No config changes recorded yet."),
+    ).toBeInTheDocument();
   });
 });

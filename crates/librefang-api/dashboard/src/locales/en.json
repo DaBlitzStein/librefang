@@ -902,7 +902,10 @@
       "manifest_saved": "Configuration saved",
       "manifest_load_failed": "Failed to load the current configuration.",
       "mcp_hard_disabled_note": "MCP servers are hard-disabled for this agent (tools_disabled or mcp_disabled). Granting one here would change nothing until the hard switch is turned off, so the toggles are inert.",
-      "tools_mcp_inert": "not granted — MCP is hard-disabled"
+      "tools_mcp_inert": "not granted — MCP is hard-disabled",
+      "manifest_history": "Manifest history",
+      "manifest_history_load_err": "Failed to load manifest history.",
+      "no_history": "No config changes recorded yet."
     },
     "tab": {
       "conversation": "Conversation",
@@ -911,7 +914,8 @@
       "tools": "Tools",
       "schedule": "Schedule",
       "logs": "Logs",
-      "routing": "Routing"
+      "routing": "Routing",
+      "history": "History"
     },
     "configure": "Configure",
     "select_an_agent": "Select an agent",

@@ -904,7 +904,10 @@
       "manifest_saved": "Konfiguracja zapisana",
       "manifest_load_failed": "Nie udało się wczytać bieżącej konfiguracji.",
       "mcp_hard_disabled_note": "Serwery MCP są dla tego agenta sztywno wyłączone (tools_disabled lub mcp_disabled). Nadanie tutaj nic nie zmieni, dopóki twardy przełącznik nie zostanie wyłączony — więc przełączniki są nieaktywne.",
-      "tools_mcp_inert": "nie przyznano — MCP jest twardo wyłączone"
+      "tools_mcp_inert": "nie przyznano — MCP jest twardo wyłączone",
+      "manifest_history": "Historia manifestu",
+      "manifest_history_load_err": "Nie udało się wczytać historii manifestu.",
+      "no_history": "Nie zarejestrowano jeszcze żadnych zmian konfiguracji."
     },
     "tab": {
       "conversation": "Rozmowa",
@@ -913,7 +916,8 @@
       "tools": "Narzędzia",
       "schedule": "Harmonogram",
       "logs": "Logi",
-      "routing": "Routing"
+      "routing": "Routing",
+      "history": "Historia"
     },
     "configure": "Konfiguruj",
     "select_an_agent": "Wybierz agenta",

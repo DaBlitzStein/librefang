@@ -902,7 +902,10 @@
       "manifest_saved": "配置已保存",
       "manifest_load_failed": "加载当前配置失败。",
       "mcp_hard_disabled_note": "该代理的 MCP 服务器已被硬禁用（tools_disabled 或 mcp_disabled）。在硬开关关闭之前，在此授权不会有任何效果，因此这些开关是无效的。",
-      "tools_mcp_inert": "未授权 — MCP 已被硬禁用"
+      "tools_mcp_inert": "未授权 — MCP 已被硬禁用",
+      "manifest_history": "清单历史",
+      "manifest_history_load_err": "无法加载清单历史。",
+      "no_history": "尚未记录配置更改。"
     },
     "tab": {
       "conversation": "对话",
@@ -911,7 +914,8 @@
       "tools": "工具",
       "schedule": "计划",
       "logs": "日志",
-      "routing": "路由"
+      "routing": "路由",
+      "history": "历史"
     },
     "configure": "配置",
     "select_an_agent": "选择智能体",
