@@ -190,6 +190,11 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     ) -> bool;
     /// Stop an active goal run. Returns whether a run was stopped.
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
+    /// Stop an active goal run from a caller that has already written the goal
+    /// document, barring the iteration in flight from writing over it.
+    ///
+    /// See [`LibreFangKernel::goal_run_stop_after_goal_write`].
+    fn stop_goal_run_after_goal_write(&self, goal_id: librefang_types::goal::GoalId) -> bool;
     /// Pause an active goal run, checkpointing progress for a later resume.
     fn pause_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
     /// Resume a goal run from its pause checkpoint.
@@ -1042,6 +1047,9 @@ impl KernelApi for LibreFangKernel {
     }
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool {
         self.goal_run_stop(goal_id)
+    }
+    fn stop_goal_run_after_goal_write(&self, goal_id: librefang_types::goal::GoalId) -> bool {
+        self.goal_run_stop_after_goal_write(goal_id)
     }
     fn pause_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool {
         self.goal_run_pause(goal_id)

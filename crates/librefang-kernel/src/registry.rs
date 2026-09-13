@@ -480,44 +480,6 @@ impl AgentRegistry {
     ///
     /// `replace_manifest`'s doc comment explains why a blind manifest swap
     /// leaves tags alone: `entry.tags` and `tag_index` are a snapshot taken
-    /// at spawn time, and there was no runtime API to update either one.
-    /// This is that API — retract the agent from tag buckets it no longer
-    /// belongs to (mirroring `remove()`'s bucket cleanup) and add it to any
-    /// newly-added tag buckets, then update both tag-carrying fields on the
-    /// entry itself.
-    pub fn update_tags(&self, id: AgentId, tags: Vec<String>) -> LibreFangResult<()> {
-        let old_tags = self.with_entry_mut(id, |entry| {
-            let old = entry.tags.clone();
-            entry.tags = tags.clone();
-            entry.manifest.tags = tags.clone();
-            entry.last_active = chrono::Utc::now();
-            old
-        })?;
-        for tag in old_tags.iter().filter(|t| !tags.contains(t)) {
-            if let Entry::Occupied(mut bucket) = self.tag_index.entry(tag.clone()) {
-                bucket.get_mut().retain(|&agent_id| agent_id != id);
-                if bucket.get().is_empty() {
-                    bucket.remove();
-                }
-            }
-        }
-        for tag in tags.iter().filter(|t| !old_tags.contains(t)) {
-            let mut bucket = self.tag_index.entry(tag.clone()).or_default();
-            if !bucket.contains(&id) {
-                bucket.push(id);
-            }
-        }
-
-        self.notify_changed();
-        Ok(())
-    }
-
-    /// Update an agent's tags, keeping `entry.tags` (index-backing),
-    /// `entry.manifest.tags` (what gets persisted to `agent.toml`), and the
-    /// `tag_index` all in sync (#7742).
-    ///
-    /// `replace_manifest`'s doc comment explains why a blind manifest swap
-    /// leaves tags alone: `entry.tags` and `tag_index` are a snapshot taken
     /// at spawn time, and nothing upstream serializes tag writes for a
     /// single agent — and `update_tags` has no callers yet, so the
     /// atomicity a single held guard would buy is unexercised. What the
