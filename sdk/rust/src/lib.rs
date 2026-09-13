@@ -858,6 +858,22 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn list_agent_manifest_history(
+        &self,
+        id: &str,
+        limit: Option<&str>,
+    ) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "manifest-history"],
+            None,
+            &[("limit", limit)],
+        )
+        .await
+    }
+
     pub async fn get_agent_mcp_servers(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -2671,14 +2687,21 @@ impl KnowledgeResource {
         .await
     }
 
-    pub async fn put_document(&self, name: &str, filename: &str, data: Value) -> Result<Value> {
-        do_req(
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn put_document(
+        &self,
+        name: &str,
+        filename: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
             &["api", "knowledge", name, "documents", filename],
-            Some(data),
-            &[],
+            body,
+            content_type.unwrap_or("application/octet-stream"),
         )
         .await
     }
@@ -5380,6 +5403,42 @@ impl SystemResource {
             &["api", "templates", name, "toml"],
             None,
             &[],
+        )
+        .await
+    }
+
+    /// Sends a raw `text/plain` body; `content_type` overrides that default.
+    pub async fn put_agent_template_toml(
+        &self,
+        name: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "templates", name, "toml"],
+            body,
+            content_type.unwrap_or("text/plain"),
+        )
+        .await
+    }
+
+    /// Sends a raw `text/plain` body; `content_type` overrides that default.
+    pub async fn post_agent_template_toml(
+        &self,
+        name: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "templates", name, "toml"],
+            body,
+            content_type.unwrap_or("text/plain"),
         )
         .await
     }

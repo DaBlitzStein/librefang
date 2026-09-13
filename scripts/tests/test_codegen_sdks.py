@@ -99,7 +99,13 @@ def main():
     ]
     expect(
         {o["op_id"]: o["raw_body_ct"] for o in raw_ops}
-        == {"transcribe_audio": "audio/webm", "upload_file": "application/octet-stream"},
+        == {
+            "transcribe_audio": "audio/webm",
+            "upload_file": "application/octet-stream",
+            "put_document": "application/octet-stream",
+            "put_agent_template_toml": "text/plain",
+            "post_agent_template_toml": "text/plain",
+        },
         f"unexpected raw-body operations: {[(o['op_id'], o['raw_body_ct']) for o in raw_ops]}",
     )
     expect(
@@ -188,6 +194,67 @@ def main():
     # SSE line-size cap
     assert_in("MAX_SSE_LINE", rs, "rust-max-sse")
     assert_in("maxSSELine", go, "go-max-sse")
+
+    # The raw-TOML template verbs (#8028) go through the same single mechanism.
+    # `PUT`/`POST /api/templates/{name}/toml` declare a `text/plain` requestBody,
+    # so before this they were emitted through the JSON path and every call
+    # answered 400 no matter what the caller passed. There is deliberately one
+    # raw-body mechanism rather than one per endpoint family: a second helper
+    # would have to duplicate the response parsing, and the Go and Rust
+    # templates would then define `requestRaw` / `do_req_raw` twice and stop
+    # compiling.
+    toml_put = next(
+        o for o in tag_ops.get("system", []) if o["op_id"] == "put_agent_template_toml"
+    )
+    expect(toml_put["raw_body_ct"] == "text/plain", "put_agent_template_toml raw content type")
+    upload = next(o for o in tag_ops.get("agents", []) if o["op_id"] == "upload_file")
+    expect(
+        upload["raw_body_ct"] == "application/octet-stream",
+        "upload_file raw content type",
+    )
+    # A JSON endpoint must not be swept into the raw-body path.
+    expect(tools["raw_body_ct"] == "", "invoke_tool must stay JSON-encoded")
+
+    # The body is bytes in every language, not str: `upload_file` and
+    # `put_document` are `application/octet-stream`, so a text-typed parameter
+    # could not express what they exist to carry.
+    assert_in(
+        'def put_agent_template_toml(self, name: str, body: bytes, content_type: str = "text/plain"):',
+        py,
+        "python-toml-raw-body-sig",
+    )
+    assert_in(
+        'self._c._request("PUT", f"/api/templates/{name}/toml", body, content_type=content_type)',
+        py,
+        "python-toml-raw-body-call",
+    )
+    assert_in(
+        'def upload_file(self, id: str, body: bytes, content_type: str = "application/octet-stream"):',
+        py,
+        "python-upload-raw-body-sig",
+    )
+    assert_not_in("def put_agent_template_toml(self, name: str, **data)", py, "python-toml-no-dict-body")
+
+    assert_in("async putAgentTemplateToml(name, body, contentType) {", js, "js-toml-raw-body-sig")
+    assert_in('body, undefined, contentType || "text/plain"', js, "js-toml-raw-body-call")
+
+    assert_in(
+        "func (r *SystemResource) PutAgentTemplateToml(name string, body []byte, contentType string)",
+        go,
+        "go-toml-raw-body-sig",
+    )
+    assert_in('r.client.requestRaw("PUT"', go, "go-toml-raw-body-call")
+
+    assert_matches(
+        r"pub\s+async\s+fn\s+put_agent_template_toml\(\s*&self,\s*name:\s*&str,\s*body:\s*Vec<u8>,\s*content_type:\s*Option<&str>,?\s*\)",
+        rs,
+        "rust-toml-raw-body-sig",
+    )
+    assert_in("do_req_raw(", rs, "rust-toml-raw-body-call")
+
+    # One raw-body helper per language, not one per PR that needed one.
+    expect(go.count("func (c *Client) requestRaw(") == 1, "exactly one Go raw-body helper")
+    expect(rs.count("async fn do_req_raw(") == 1, "exactly one Rust raw-body helper")
 
     # Reserved-word escape works
     expect(mod._py_safe("class") == "class_", "Python reserved-word escape")

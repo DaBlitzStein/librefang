@@ -3791,7 +3791,7 @@ export function AgentsPage() {
                   skillCatalog={skillCatalogForForm}
                   toolCatalog={toolCatalogForForm}
                   mcpCatalog={mcpCatalogForForm}
-                  nameLocked
+                  nameField="readonly"
                 />
               </div>
             )}

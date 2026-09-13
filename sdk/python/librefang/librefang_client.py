@@ -300,6 +300,9 @@ class _AgentsResource(_Resource):
     def get_agent_manifest_toml(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/manifest")
 
+    def list_agent_manifest_history(self, id: str, limit: Any = None):
+        return self._c._request("GET", f"/api/agents/{id}/manifest-history", None, query={"limit": limit})
+
     def get_agent_mcp_servers(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/mcp_servers")
 
@@ -751,8 +754,8 @@ class _KnowledgeResource(_Resource):
     def list_documents(self, name: str):
         return self._c._request("GET", f"/api/knowledge/{name}/documents")
 
-    def put_document(self, name: str, filename: str, **data):
-        return self._c._request("PUT", f"/api/knowledge/{name}/documents/{filename}", data)
+    def put_document(self, name: str, filename: str, body: bytes, content_type: str = "application/octet-stream"):
+        return self._c._request("PUT", f"/api/knowledge/{name}/documents/{filename}", body, content_type=content_type)
 
     def delete_document(self, name: str, filename: str):
         return self._c._request("DELETE", f"/api/knowledge/{name}/documents/{filename}")
@@ -1417,6 +1420,12 @@ class _SystemResource(_Resource):
 
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")
+
+    def put_agent_template_toml(self, name: str, body: bytes, content_type: str = "text/plain"):
+        return self._c._request("PUT", f"/api/templates/{name}/toml", body, content_type=content_type)
+
+    def post_agent_template_toml(self, name: str, body: bytes, content_type: str = "text/plain"):
+        return self._c._request("POST", f"/api/templates/{name}/toml", body, content_type=content_type)
 
     def version(self):
         return self._c._request("GET", "/api/version")

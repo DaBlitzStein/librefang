@@ -112,15 +112,25 @@ interface AgentManifestFormProps {
    */
   mcpCatalog?: ManifestCatalogEntry[];
   /**
-   * When true, the Name field is rendered disabled with a hint explaining
-   * where to rename instead. Set this when editing an *existing* agent
-   * (#7742): `update_manifest` always keeps `entry.manifest.name` pinned to
-   * `entry.name` (renames go through the dedicated rename API so the
-   * registry's `name_index` stays consistent), so a submitted name change
-   * would otherwise be silently discarded — the same antipattern this
-   * editor exists to eliminate elsewhere. Defaults to false (create flow).
+   * How the "Name" field behaves for this caller (#8028).
+   *
+   * - `"editable"` (default): the field a caller spawning a brand-new agent
+   *   fills in themselves.
+   * - `"readonly"`: identity is decided elsewhere (a URL path segment, a
+   *   sibling field) and this form only displays it. Rendering it editable
+   *   here — as the agent-type editor did — invites an operator to "rename"
+   *   an existing type: the request goes through, a success toast appears,
+   *   and nothing changes, because the server pins the name to the URL
+   *   rather than trusting the body. This is also the mode the *agent* editor
+   *   needs (#7742): `update_manifest` keeps `entry.manifest.name` pinned to
+   *   `entry.name` because renames go through the dedicated rename API, so
+   *   that registry's `name_index` stays consistent.
+   * - `"hidden"`: the caller collects the name through its own field (e.g.
+   *   the agent-type create dialog, which has always had exactly one Name
+   *   input) and would otherwise end up with two fields that disagree about
+   *   which one wins.
    */
-  nameLocked?: boolean;
+  nameField?: "editable" | "readonly" | "hidden";
 }
 
 export function AgentManifestForm({
@@ -133,7 +143,7 @@ export function AgentManifestForm({
   skillCatalog,
   toolCatalog,
   mcpCatalog,
-  nameLocked = false,
+  nameField = "editable",
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -206,22 +216,28 @@ export function AgentManifestForm({
   return (
     <div className="space-y-4">
       <Section title={t("agents.form.basics")}>
-        <Field
-          label={t("agents.form.name")}
-          required
-          invalid={invalidFields.has("name")}
-          hint={nameLocked ? t("agents.form.name_locked_hint") : undefined}
-        >
-          <input
-            type="text"
-            value={value.name}
-            onChange={(e) => update({ name: e.target.value })}
-            placeholder={t("agents.form.name_placeholder")}
-            className={inputClass}
-            autoFocus={!nameLocked}
-            disabled={nameLocked}
-          />
-        </Field>
+        {nameField !== "hidden" && (
+          <Field
+            label={t("agents.form.name")}
+            required
+            invalid={invalidFields.has("name")}
+            hint={nameField === "readonly" ? t("agents.form.name_locked_hint") : undefined}
+          >
+            <input
+              type="text"
+              value={value.name}
+              onChange={(e) => update({ name: e.target.value })}
+              placeholder={t("agents.form.name_placeholder")}
+              className={`${inputClass} disabled:opacity-50 disabled:cursor-not-allowed`}
+              autoFocus={nameField === "editable"}
+              disabled={nameField === "readonly"}
+              // `Field` wraps in a <div> rather than a <label> (#5246), so the
+              // visible label is not associated with the control. Without this
+              // the input has no accessible name.
+              aria-label={t("agents.form.name")}
+            />
+          </Field>
+        )}
         <Field label={t("agents.form.description")}>
           <input
             type="text"

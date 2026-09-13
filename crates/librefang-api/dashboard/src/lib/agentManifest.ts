@@ -545,6 +545,17 @@ const writeStringScalar = (lines: string[], key: string, value: string): void =>
   if (!value) return;
   lines.push(`${key} = ${escapeTomlString(value)}`);
 };
+// `system_prompt` is not tri-state like the sampling knobs above it: a blank
+// value here means "this agent has no system prompt", not "no opinion, fall
+// back to the canned default" — that was the removed flat editor's documented
+// contract (`system_prompt_hint`: "Left blank, the agent type stores a blank
+// prompt — nothing is substituted for you"). Routing it through the
+// skip-if-empty `writeStringScalar` drops the key on an intentionally blank
+// prompt, and `ModelConfig`'s container-level `#[serde(default)]` then fills
+// the missing key with "You are a helpful AI agent." on the very next save.
+const writeSystemPrompt = (lines: string[], value: string): void => {
+  lines.push(`system_prompt = ${escapeTomlString(value)}`);
+};
 const writeNumberScalar = (lines: string[], key: string, value: number | null): void => {
   if (value === null) return;
   lines.push(`${key} = ${value}`);
@@ -697,7 +708,7 @@ export const serializeManifestForm = (
   const modelBody: string[] = [];
   writeStringScalar(modelBody, "provider", form.model.provider.trim());
   writeStringScalar(modelBody, "model", form.model.model.trim());
-  writeStringScalar(modelBody, "system_prompt", form.model.system_prompt);
+  writeSystemPrompt(modelBody, form.model.system_prompt);
   writeNumberScalar(modelBody, "temperature", parseSignedFloat(form.model.temperature));
   writeNumberScalar(modelBody, "max_tokens", parseInteger(form.model.max_tokens));
   writeNumberScalar(modelBody, "top_p", parseSignedFloat(form.model.top_p));

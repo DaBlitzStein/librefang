@@ -282,6 +282,10 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/manifest`);
   }
 
+  async listAgentManifestHistory(id, query) {
+    return this._c._request("GET", `/api/agents/${id}/manifest-history`, undefined, query);
+  }
+
   async getAgentMcpServers(id) {
     return this._c._request("GET", `/api/agents/${id}/mcp_servers`);
   }
@@ -876,8 +880,8 @@ class KnowledgeResource {
     return this._c._request("GET", `/api/knowledge/${name}/documents`);
   }
 
-  async putDocument(name, filename, data) {
-    return this._c._request("PUT", `/api/knowledge/${name}/documents/${filename}`, data, undefined);
+  async putDocument(name, filename, body, contentType) {
+    return this._c._request("PUT", `/api/knowledge/${name}/documents/${filename}`, body, undefined, contentType || "application/octet-stream");
   }
 
   async deleteDocument(name, filename) {
@@ -1756,6 +1760,14 @@ class SystemResource {
 
   async getAgentTemplateToml(name) {
     return this._c._request("GET", `/api/templates/${name}/toml`);
+  }
+
+  async putAgentTemplateToml(name, body, contentType) {
+    return this._c._request("PUT", `/api/templates/${name}/toml`, body, undefined, contentType || "text/plain");
+  }
+
+  async postAgentTemplateToml(name, body, contentType) {
+    return this._c._request("POST", `/api/templates/${name}/toml`, body, undefined, contentType || "text/plain");
   }
 
   async version() {

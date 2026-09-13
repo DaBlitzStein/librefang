@@ -431,6 +431,10 @@ func (r *AgentsResource) GetAgentManifestToml(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest", id), nil, nil)
 }
 
+func (r *AgentsResource) ListAgentManifestHistory(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest-history", id), nil, query)
+}
+
 func (r *AgentsResource) GetAgentMcpServers(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/mcp_servers", id), nil, nil)
 }
@@ -1007,8 +1011,12 @@ func (r *KnowledgeResource) ListDocuments(name string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/knowledge/%s/documents", name), nil, nil)
 }
 
-func (r *KnowledgeResource) PutDocument(name string, filename string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/knowledge/%s/documents/%s", name, filename), data, nil)
+// PutDocument sends a raw application/octet-stream body. An empty contentType defaults to it.
+func (r *KnowledgeResource) PutDocument(name string, filename string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return r.client.requestRaw("PUT", fmt.Sprintf("/api/knowledge/%s/documents/%s", name, filename), body, contentType)
 }
 
 func (r *KnowledgeResource) DeleteDocument(name string, filename string) (interface{}, error) {
@@ -1869,6 +1877,22 @@ func (r *SystemResource) RestoreAgentTypeFromRegistry(name string) (interface{},
 
 func (r *SystemResource) GetAgentTemplateToml(name string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/toml", name), nil, nil)
+}
+
+// PutAgentTemplateToml sends a raw text/plain body. An empty contentType defaults to it.
+func (r *SystemResource) PutAgentTemplateToml(name string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "text/plain"
+	}
+	return r.client.requestRaw("PUT", fmt.Sprintf("/api/templates/%s/toml", name), body, contentType)
+}
+
+// PostAgentTemplateToml sends a raw text/plain body. An empty contentType defaults to it.
+func (r *SystemResource) PostAgentTemplateToml(name string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "text/plain"
+	}
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/templates/%s/toml", name), body, contentType)
 }
 
 func (r *SystemResource) Version() (interface{}, error) {
