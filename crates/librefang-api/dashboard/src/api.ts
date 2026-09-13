@@ -1731,13 +1731,6 @@ export interface AgentChannelsResponse {
   mode: "all" | "allowlist";
 }
 
-/** GET /api/agents/{id}/channels — the agent's channel allowlist plus the
- *  catalog of channels configured on this instance (#7742). Empty
- *  `assigned` means the agent is reachable from every configured channel. */
-export async function getAgentChannels(agentId: string): Promise<AgentChannelsResponse> {
-  return get<AgentChannelsResponse>(`/api/agents/${encodeURIComponent(agentId)}/channels`);
-}
-
 /** PUT /api/agents/{id}/channels — replace the agent's channel allowlist
  *  (`agent.toml: channels`). An empty array clears the allowlist, making
  *  the agent reachable from every configured channel again (#7742). */
