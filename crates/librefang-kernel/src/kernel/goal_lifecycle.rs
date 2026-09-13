@@ -183,13 +183,31 @@ impl LibreFangKernel {
     ///
     /// A `None` `max_iterations` restores the cap the paused run was under; an explicit value re-budgets it.
     /// See [`crate::goal_runner::GoalRunner::start`] for why that precedence is resolved down there rather than here.
+    ///
+    /// The loop-engineering arguments are taken from the caller for the same
+    /// reason [`Self::goal_run_start`] takes them: the configuration lives on
+    /// the goal document, and resolving it at the API boundary keeps one
+    /// definition of where a verifier comes from rather than two.
+    #[allow(clippy::too_many_arguments)]
     pub fn goal_run_resume(
         &self,
         goal_id: GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
     ) -> bool {
-        self.goal_run_start(goal_id, agent_id, max_iterations)
+        self.goal_run_start(
+            goal_id,
+            agent_id,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        )
     }
 
     /// Snapshot the observable state of a goal's run, if one is active.
@@ -405,7 +423,6 @@ fn queue_learnings_as_pending_skill(
         }
     }
 }
-
 
 /// Build the [`SenderContext`] a goal-run tick is dispatched with.
 ///

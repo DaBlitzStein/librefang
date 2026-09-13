@@ -184,11 +184,6 @@ pub async fn get_goal_run(
 /// POST /api/goals/{id}/start — Begin an autonomous long-horizon run that
 /// drives the goal's assigned agent toward completion (#5744).
 ///
-/// A goal that was paused resumes from its checkpoint rather than restarting;
-/// see [`resume_goal_run`] for the variant that requires one to exist. The
-/// loop cadence is read from the goal document's own `tick_interval_secs`
-/// (set via `POST /api/goals` / `PUT /api/goals/{id}`), not from this body.
-///
 /// Optional body: `{ "max_iterations": <u32>, "verify_max_retries": <u32> }`.
 ///
 /// Whether the run is verified at all is a property of the goal
@@ -196,6 +191,11 @@ pub async fn get_goal_run(
 /// request, so every caller — dashboard, CLI, script — gets the verification
 /// the operator configured once. Only the per-run retry budget is a body
 /// field.
+///
+/// A goal that was paused resumes from its checkpoint rather than restarting;
+/// see [`resume_goal_run`] for the variant that requires one to exist. The
+/// loop cadence is read from the goal document's own `tick_interval_secs`
+/// (set via `POST /api/goals` / `PUT /api/goals/{id}`), not from this body.
 pub async fn start_goal_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -614,11 +614,6 @@ pub async fn create_goal(
         }
     };
 
-    let tick_interval_secs = match validate_tick_interval(&req) {
-        Ok(v) => v,
-        Err(resp) => return resp,
-    };
-
     let loop_engineering = req["loop_engineering"].as_bool().unwrap_or(false);
     // Same boundary rule as `agent_id` / `parent_id`: `optional_uuid_field`
     // treats a blank string or `null` as "not set" rather than a malformed
@@ -645,6 +640,10 @@ pub async fn create_goal(
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let tick_interval_secs = match validate_tick_interval(&req) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
     let now = chrono::Utc::now().to_rfc3339();
     let goal_id = uuid::Uuid::new_v4().to_string();
@@ -665,14 +664,14 @@ pub async fn create_goal(
     if let Some(ref aid) = agent_id_str {
         entry["agent_id"] = serde_json::Value::String(aid.clone());
     }
-    if let Some(secs) = tick_interval_secs {
-        entry["tick_interval_secs"] = serde_json::json!(secs);
-    }
     if let Some(ref vid) = verify_agent_id_str {
         entry["verify_agent_id"] = serde_json::Value::String(vid.clone());
     }
     if let Some(ref em) = evaluator_model_str {
         entry["evaluator_model"] = serde_json::Value::String(em.clone());
+    }
+    if let Some(secs) = tick_interval_secs {
+        entry["tick_interval_secs"] = serde_json::json!(secs);
     }
 
     // Atomic read-modify-write under BEGIN IMMEDIATE (#5138). Parent
@@ -884,18 +883,6 @@ pub async fn update_goal_by_id(
                             g.as_object_mut().map(|obj| obj.remove("agent_id"));
                         }
                     }
-                    // A blank string or `null` clears the override back to the
-                    // default cadence, matching `parent_id` / `agent_id`
-                    // above. Range already checked above, before the
-                    // transaction.
-                    if let Some(ti) = req.get("tick_interval_secs") {
-                        if is_clear_signal(ti) {
-                            g.as_object_mut()
-                                .map(|obj| obj.remove("tick_interval_secs"));
-                        } else if let Some(v) = ti.as_u64() {
-                            g["tick_interval_secs"] = serde_json::json!(v);
-                        }
-                    }
                     if let Some(loop_engineering) =
                         req.get("loop_engineering").and_then(|v| v.as_bool())
                     {
@@ -914,6 +901,18 @@ pub async fn update_goal_by_id(
                             g.as_object_mut().map(|obj| obj.remove("evaluator_model"));
                         } else if let Some(em) = evaluator_model.as_str() {
                             g["evaluator_model"] = serde_json::Value::String(em.trim().to_string());
+                        }
+                    }
+                    // A blank string or `null` clears the override back to the
+                    // default cadence, matching `parent_id` / `agent_id`
+                    // above. Range already checked above, before the
+                    // transaction.
+                    if let Some(ti) = req.get("tick_interval_secs") {
+                        if is_clear_signal(ti) {
+                            g.as_object_mut()
+                                .map(|obj| obj.remove("tick_interval_secs"));
+                        } else if let Some(v) = ti.as_u64() {
+                            g["tick_interval_secs"] = serde_json::json!(v);
                         }
                     }
                     g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());

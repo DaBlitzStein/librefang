@@ -104,10 +104,6 @@ pub struct Goal {
     /// Optional agent assigned to this goal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
-    /// Configurable pause between the autonomous runner's loop iterations, in
-    /// seconds. `None` uses [`DEFAULT_GOAL_TICK_INTERVAL_SECS`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tick_interval_secs: Option<u64>,
     /// Enable loop engineering: a verifier gate on the agent's own claim of
     /// completion, an optional independent evaluator model, and capture of
     /// `GOAL_LEARNED:` markers into a skill.
@@ -143,6 +139,10 @@ pub struct Goal {
     /// circuit breaker, because the tick itself succeeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluator_model: Option<String>,
+    /// Configurable pause between the autonomous runner's loop iterations, in
+    /// seconds. `None` uses [`DEFAULT_GOAL_TICK_INTERVAL_SECS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_interval_secs: Option<u64>,
     /// When the goal was created.
     pub created_at: DateTime<Utc>,
     /// When the goal was last updated.
@@ -329,10 +329,10 @@ mod tests {
             status: GoalStatus::Pending,
             progress: 0,
             agent_id: None,
-            tick_interval_secs: None,
             loop_engineering: false,
             verify_agent_id: None,
             evaluator_model: None,
+            tick_interval_secs: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
