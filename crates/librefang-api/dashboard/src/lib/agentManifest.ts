@@ -522,17 +522,6 @@ const parseFloatish = (raw: string): number | null => {
   return n;
 };
 
-// Sampling penalties are signed: parseFloatish rejects negatives because
-// every other float field here is a cost/quota, but frequency/presence
-// penalty are OpenAI-compatible parameters whose valid range is [-2, 2].
-const parseFloatSigned = (raw: string): number | null => {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const n = Number(trimmed);
-  if (!Number.isFinite(n)) return null;
-  return n;
-};
-
 // The number inputs declare min/max, but min/max does not stop pasted or
 // programmatic values on a non-submitted form. `PATCH /api/agents/{id}/model`
 // rejects an out-of-range sampling value with an explicit 400 rather than
