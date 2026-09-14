@@ -118,6 +118,7 @@ const TYPE: AgentTemplate = {
   model: "claude-sonnet-5",
   source: "agent-type",
   editable: true,
+  from_registry: true,
 };
 
 const DETAIL: AgentTypeDetail = {
@@ -154,9 +155,12 @@ function mockQuery<T>(data: T) {
 }
 
 /** The promote mutation is the only one a test ever varies. */
-function renderPage(promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean }) {
+function renderPage(
+  promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean },
+  templates: AgentTemplate[] = [TYPE],
+) {
   vi.mocked(useAgentTypes).mockReturnValue(
-    mockQuery([TYPE]) as unknown as ReturnType<typeof useAgentTypes>,
+    mockQuery(templates) as unknown as ReturnType<typeof useAgentTypes>,
   );
   vi.mocked(useAgentType).mockReturnValue(
     mockQuery(DETAIL) as unknown as ReturnType<typeof useAgentType>,
@@ -279,5 +283,31 @@ describe("AgentTypesPage promotion", () => {
     // A refused promotion has opened no pull request, so the success dialog
     // must stay closed.
     expect(screen.queryByRole("link", { name: /View pull request/ })).toBeNull();
+  });
+});
+
+// An `editable` row still may have no registry original — created through
+// `POST /api/templates` or `agent_type_create` rather than promoted from one.
+// Before `from_registry` existed, the restore control rendered identically
+// either way, and its drawer could only answer "this agent type does not
+// exist in the registry" after the click (#8042 review).
+describe("AgentTypesPage restore control", () => {
+  // The two states change the control's own accessible name — that is the
+  // thing under test — so each test finds it by the name it expects, rather
+  // than through a helper that would have to already know which case it is.
+
+  it("is enabled when the type has a registry original", () => {
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, [{ ...TYPE, from_registry: true }]);
+
+    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+  });
+
+  it("is disabled and explains why when the type has no registry original", () => {
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, [{ ...TYPE, from_registry: false }]);
+
+    expect(
+      screen.getByRole("button", { name: "This agent type does not exist in the registry." }),
+    ).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
   });
 });

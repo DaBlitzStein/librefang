@@ -259,9 +259,35 @@ pub async fn list_agent_templates() -> impl IntoResponse {
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     rows.dedup_by(|a, b| a.0 == b.0);
 
+    // Only an `AgentType` row is ever `editable`, and only an editable row's restore control can
+    // do anything — a workspace agent has no registry counterpart to restore from. So the lookup
+    // only runs where the answer can matter, and every other row gets `false` without touching
+    // disk. `join_all` runs these concurrently rather than one `.await` per row in sequence,
+    // which matters once the catalog holds more than a handful of agent types (#8042 review).
+    let from_registry_flags = futures::future::join_all(rows.iter().map(|(name, source, _)| {
+        let name = name.clone();
+        async move {
+            if !source.is_editable() {
+                return false;
+            }
+            match read_registry_agent_type(&name).await {
+                Ok(found) => found.is_some(),
+                Err(e) => {
+                    // A row that cannot be answered for is not in the registry as far as the
+                    // client can tell — the alternative is failing the whole listing over one
+                    // type's unreadable registry checkout.
+                    tracing::warn!("failed to check registry for agent type '{name}': {e}");
+                    false
+                }
+            }
+        }
+    }))
+    .await;
+
     let templates: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|(name, source, manifest)| {
+        .zip(from_registry_flags)
+        .map(|((name, source, manifest), from_registry)| {
             serde_json::json!({
                 "name": name,
                 "description": manifest.description,
@@ -270,6 +296,10 @@ pub async fn list_agent_templates() -> impl IntoResponse {
                 "model": manifest.model.model,
                 "source": source.as_str(),
                 "editable": source.is_editable(),
+                // Whether a registry original exists to restore from — an `editable` row created
+                // through `POST /api/templates` or `agent_type_create` has none, so its restore
+                // control has nothing to do (#8042 review).
+                "from_registry": from_registry,
             })
         })
         .collect();
