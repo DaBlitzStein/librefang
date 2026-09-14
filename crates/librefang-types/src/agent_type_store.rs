@@ -63,13 +63,24 @@ pub fn workspace_agents_dir() -> PathBuf {
 /// the same `home_dir` the spawn path and the detail routes resolve against, or an
 /// embedder whose `KernelConfig.home_dir` differs from `LIBREFANG_HOME` sees a
 /// listing that disagrees with what those other routes can actually read (#8112).
+/// #8360 arrived at the same two functions independently, needing them for the
+/// shadow check on `save-as-agent-type`; this is that one definition.
 pub fn workspace_agents_dir_in(home_dir: &std::path::Path) -> PathBuf {
     home_dir.join("workspaces").join("agents")
 }
 
 /// The `agent.toml` of a live agent, which the catalog lists but this store never writes.
 pub fn workspace_agent_manifest_path(name: &str) -> PathBuf {
-    workspace_agents_dir().join(name).join("agent.toml")
+    workspace_agent_manifest_path_in(&librefang_home(), name)
+}
+
+/// The `agent.toml` of a live agent under an explicitly supplied home directory.
+///
+/// Added for the same reason [`agent_type_path_in`] exists (#6699): a caller holding a `KernelConfig::home_dir` must be able to ask this question without the answer detouring through `LIBREFANG_HOME`, or the shadow check below would consult a different tree than the write it is guarding.
+pub fn workspace_agent_manifest_path_in(home_dir: &std::path::Path, name: &str) -> PathBuf {
+    workspace_agents_dir_in(home_dir)
+        .join(name)
+        .join("agent.toml")
 }
 
 /// The registry checkout root (`$LIBREFANG_HOME/registry/`), the source side of a registry sync.
@@ -87,17 +98,6 @@ pub fn registry_cache_dir() -> PathBuf {
 /// It survives because it is `pub`, so removing it is a breaking change to this crate's API rather than a cleanup, and because an embedder with no `KernelConfig` in hand still needs an environment-resolved answer.
 pub fn registry_cache_dir_in(home_dir: &std::path::Path) -> PathBuf {
     home_dir.join("registry")
-}
-
-/// The `agent.toml` of a live agent under an explicitly supplied home directory.
-///
-/// The kernel resolves a live agent's manifest against a `home_dir` it was handed rather than against the process environment, so the same explicit-home spelling exists here as for the agent-type store.
-pub fn workspace_agent_manifest_path_in(home_dir: &std::path::Path, name: &str) -> PathBuf {
-    home_dir
-        .join("workspaces")
-        .join("agents")
-        .join(name)
-        .join("agent.toml")
 }
 
 /// Validate an agent-type name before it is joined onto the store directory.
@@ -204,24 +204,29 @@ pub fn create_agent_type_in(
     })
 }
 
-/// Create a new agent type from an already-fully-formed manifest, refusing to overwrite anything.
+/// Create a new agent type from an already-complete manifest, refusing to overwrite anything, resolved against an explicit `home_dir` rather than `LIBREFANG_HOME`.
 ///
-/// The dashboard's raw-TOML editor authors a complete [`AgentManifest`] up front — unlike
-/// [`create_agent_type`], there is no flat [`AgentTypeSpec`] to expand.
-/// Before this existed, creating a type meant two requests: `POST /api/templates` (name +
-/// description over a default manifest) followed by `PUT /api/templates/{name}/toml` (the
-/// manifest the operator actually authored). A failure on the second request left the stub
-/// from the first sitting on disk, and even when both succeeded, one user action produced two
-/// version-history snapshots for a document that only ever existed as its final form (#8028).
-/// This claims the name atomically exactly like `create_agent_type` and writes once, so there is
-/// no intermediate state and nothing to reconcile.
+/// The caller already has a full `AgentManifest` in hand — a live agent's own, snapshotted, or one restored from the registry — rather than a flat [`AgentTypeSpec`] to expand through [`AgentTypeSpec::into_new_manifest`], so it skips straight to the same claim-then-write discipline [`create_agent_type`] uses instead of duplicating it inline in each API handler.
+///
+/// The `_in` spelling matches [`agent_type_path_in`] and [`agent_types_dir_in`]: the API layer already holds `state.kernel.config_ref().home_dir` by the time it calls this, and resolving through `LIBREFANG_HOME` a second time here would let the two diverge for any caller that built its `KernelConfig` with an explicit `home_dir` — an embedder, or a test harness pinning both independently.
+///
+/// `snapshot_of` names the one live agent, if any, that this write is allowed to collide with.
+///
+/// `None` is the strict policy and the right one for a restore from the registry: no name belonging to a live agent may be taken, because nothing about a registry document entitles it to displace a running agent.
+/// `Some(name)` exempts exactly that name, which is what `save-as-agent-type` needs — snapshotting an agent under its own name is the case that feature exists for, and that name necessarily already has a workspace on disk, so a strict check would reject the feature's main path.
+///
+/// Every other live agent's name stays refused under both policies, for the reason [`CreateAgentTypeError::ShadowsLiveAgent`] documents: the type wins subsequent catalog reads and leaves that agent unreachable.
+/// Since `read_agent_type_in` resolves the store ahead of the workspace directory, it wins outright rather than merely usually.
+///
+/// The parameter exists because two callers arrived here independently with different answers (#8042 restoring from the registry, #8360 saving a live agent) and a single unparameterised function would silently have given one of them the other's policy.
 pub fn create_agent_type_from_manifest_in(
     home_dir: &std::path::Path,
     name: &str,
     manifest: &AgentManifest,
+    snapshot_of: Option<&str>,
 ) -> Result<String, CreateAgentTypeError> {
     validate_agent_type_name(name).map_err(|_| CreateAgentTypeError::InvalidName)?;
-    if workspace_agent_manifest_path_in(home_dir, name).exists() {
+    if snapshot_of != Some(name) && workspace_agent_manifest_path_in(home_dir, name).exists() {
         return Err(CreateAgentTypeError::ShadowsLiveAgent);
     }
 

@@ -802,7 +802,7 @@ pub async fn post_agent_template_toml(
         );
     }
 
-    match store_create_from_manifest_in(&home_dir, &name, &manifest) {
+    match store_create_from_manifest_in(&home_dir, &name, &manifest, None) {
         Ok(rendered) => {
             let _ = record_template_version(&state, &name, &rendered, "create");
             let mut detail =
