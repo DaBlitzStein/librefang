@@ -1265,7 +1265,7 @@ skill-bundle-size =   크기: { $size } bytes
 skill-dry-run = 테스트 실행만 수행합니다.
 skill-dry-run-repo =   저장소: { $repo }
 skill-dry-run-tag =   태그: { $tag }
-skill-github-token-required = 게시하려면 GITHUB_TOKEN 또는 GH_TOKEN을 설정하거나 --dry-run으로 다시 실행하십시오.
+skill-github-token-required = GitHub 토큰을 찾을 수 없습니다. GITHUB_TOKEN 또는 GH_TOKEN을 설정하거나 `librefang vault set GITHUB_TOKEN`으로 볼트에 저장하거나 --dry-run으로 다시 실행하십시오.
 skill-publishing-progress = { $name }@{ $tag } 게시 중
 skill-publish-success = { $name }을(를) { $repo }@{ $tag }에 게시했습니다
 skill-publish-release-url = 릴리스: { $url }
@@ -2407,6 +2407,20 @@ agent-set-invalid-integer = { $field }은(는) 양의 정수여야 합니다. �
 agent-set-invalid-decimal = { $field }은(는) 실수여야 합니다. 입력값: '{ $value }'
 agent-set-limit-warning = 경고: { $message }
 
+# Model routing editor (profile-based routing)
+tui-agents-title-model-routing = 모델 라우팅
+tui-agents-label-routing-fixed = 고정 — 항상 이 에이전트의 자체 모델 사용
+tui-agents-label-routing-flexible = 유연 — 작업별로 라우터가 선택
+tui-agents-hint-routing-mode = [Tab] 모드 전환
+tui-agents-label-routing-fixed-explainer = 이 에이전트는 항상 자체 매니페스트의 모델을 사용합니다. Tab을 눌러 작업별로 라우터가 선택하도록 하세요.
+tui-agents-label-no-router-profiles = 사용 가능한 모델 프로필이 없습니다. ~/.librefang/model_profiles.toml에 추가하세요.
+tui-agents-label-routing-any-profile = 전체
+tui-agents-hints-model-routing = [Tab] 모드  [↑↓] 탐색  [Space] 프로필 전환  [+/-] 비용 예산  [Enter] 저장  [Esc] 취소
+tui-agents-model-routing-not-loaded = 이 에이전트의 라우팅 설정을 아직 불러오지 못했습니다 — 잠시 기다리거나, 가져오기에 실패했다면 Esc를 누른 뒤 r 키로 다시 여세요.
+tui-event-model-routing-fetch-failed = 모델 라우팅을 가져오지 못했습니다
+tui-event-model-routing-update-failed = 모델 라우팅을 업데이트하지 못했습니다
+tui-mod-agent-model-routing-updated = 에이전트 { $id }의 모델 라우팅이 업데이트되었습니다.
+
 # --- Goals screen (TUI) ---
 tui-goals-title = ⌖ 목표
 tui-goals-count = 목표 { $count }개
@@ -2502,7 +2516,6 @@ cmd-goal-error = 오류: { $error }
 cmd-goal-unknown-error = 알 수 없는 오류
 cmd-goal-watch-poll-error = 실행 상태를 읽을 수 없습니다({ $count }/{ $max }); 다시 시도하는 중…
 cmd-goal-watch-poll-gave-up = { $count }회 연속 폴링 실패 후 관찰을 중단했습니다 — 결과를 알 수 없으며 실행은 계속 진행 중일 수 있습니다.
-
 
 
 
@@ -2652,3 +2665,23 @@ tui-event-config-failed = 현재 구성을 불러오지 못했습니다
 tui-event-config-unreadable = 데몬이 응답했지만 현재 설정을 읽을 수 없습니다: { $error }
 tui-event-config-set-failed = { $path }을(를) 저장하지 못했습니다
 tui-event-config-need-daemon = 구성 편집에는 실행 중인 데몬이 필요합니다
+
+# Model routing CLI commands
+agent-routing-label-mode = 모드
+agent-routing-label-allowed = 허용된 프로필
+agent-routing-label-budget = 비용 예산
+agent-routing-label-default = 기본 프로필
+agent-routing-any-profile = 전체
+agent-routing-no-cap = 제한 없음
+agent-routing-fixed-explainer = 이 에이전트는 항상 자체 매니페스트의 모델을 사용합니다.
+agent-routing-label-fixed = 라우터 제외
+agent-routing-fixed-opt-out = 고정됨 — 라우터가 이 에이전트를 건드리지 않습니다
+agent-routing-updated = 에이전트 { $id }의 모델 라우팅이 { $mode }(으)로 설정되었습니다.
+agent-routing-failed = 모델 라우팅 업데이트 실패: { $error }
+agent-routing-profiles-header = 모델 라우터 프로필 (라우터: { $enabled }):
+tui-agents-line-routing-mode =   모드: { $mode }
+tui-agents-line-routing-summary =   비용 예산: { $budget }    허용된 프로필: { $allowed }
+tui-agents-label-routing-no-cap = 제한 없음
+tui-agents-label-routing-cheap = 저비용
+tui-agents-label-routing-medium = 중간
+tui-agents-label-routing-expensive = 고비용
