@@ -4480,7 +4480,6 @@
     "view_pr": "View pull request",
     "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "restore_from_registry": "Restore from registry",
-    "restore_from_registry": "Restore from registry",
     "restore_title": "Restore from registry — {{name}}",
     "restore_confirm": "Overwrite the local agent type with the registry version? This cannot be undone.",
     "restore_identical": "This agent type is identical to the registry version.",
