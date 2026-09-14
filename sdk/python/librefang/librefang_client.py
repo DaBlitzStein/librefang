@@ -244,6 +244,15 @@ class _AgentsResource(_Resource):
     def patch_agent(self, id: str, **data):
         return self._c._request("PATCH", f"/api/agents/{id}", data)
 
+    def serve_agent_avatar(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/avatar")
+
+    def upload_agent_avatar(self, id: str, **data):
+        return self._c._request("POST", f"/api/agents/{id}/avatar", data)
+
+    def delete_agent_avatar(self, id: str):
+        return self._c._request("DELETE", f"/api/agents/{id}/avatar")
+
     def get_agent_channels(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/channels")
 
