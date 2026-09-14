@@ -1,7 +1,8 @@
 // The three agent-identity write hooks (#8339). What is under test is which
-// cached reads each one invalidates: an avatar that changes on the server but
-// not in the cache is exactly the bug an `<img>` pointed at a stale object URL
-// produces, and it is invisible until someone re-opens the drawer.
+// cached reads each one invalidates — or, for the avatar delete, drops outright:
+// an avatar that changes on the server but not in the cache is exactly the bug
+// an `<img>` pointed at a stale object URL produces, and it is invisible until
+// someone re-opens the drawer.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook } from "@testing-library/react";
@@ -119,9 +120,25 @@ describe("useDeleteAgentAvatar", () => {
     // context as a second argument. `deleteAgentAvatar` takes one parameter and
     // ignores it, which is the same shape `useResetAgentSession` already has.
     expect(vi.mocked(http.deleteAgentAvatar).mock.calls[0][0]).toBe(AGENT);
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.avatar(AGENT) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.detail(AGENT) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.lists() });
+  });
+
+  it("drops the cached image rather than leaving it for a query that is now disabled", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" });
+    queryClient.setQueryData(agentKeys.avatar(AGENT), blob);
+
+    const { result } = renderHook(() => useDeleteAgentAvatar(), { wrapper });
+    await result.current.mutateAsync(AGENT);
+
+    // `useAgentAvatarUrl` gates on `hasAvatar`, and the `detail` refetch this
+    // same `onSuccess` triggers is what clears `avatar_url` and turns the query
+    // off. A disabled `useQuery` still hands back its cached `data`, and an
+    // invalidation on a disabled query never becomes a refetch — so invalidating
+    // this key would leave the deleted image rendering until the entry happened
+    // to be collected. The URL has to stop existing, not merely go stale.
+    expect(queryClient.getQueryData(agentKeys.avatar(AGENT))).toBeUndefined();
   });
 
   it("scopes the avatar invalidation to the agent it was called for", async () => {
