@@ -955,16 +955,6 @@
               }
             }
           },
-          "403": {
-            "description": "Agent is provisioned by the deployment",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          },
           "404": {
             "description": "No such agent",
             "content": {
@@ -987,6 +977,16 @@
           },
           "415": {
             "description": "Bytes are not a supported image",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
             "content": {
               "application/json": {
                 "schema": {
@@ -1035,8 +1035,8 @@
               }
             }
           },
-          "403": {
-            "description": "Agent is provisioned by the deployment",
+          "404": {
+            "description": "No such agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -1045,8 +1045,8 @@
               }
             }
           },
-          "404": {
-            "description": "No such agent",
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
             "content": {
               "application/json": {
                 "schema": {
