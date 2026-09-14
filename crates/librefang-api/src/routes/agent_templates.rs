@@ -343,11 +343,15 @@ pub async fn list_agent_templates(State(state): State<Arc<AppState>>) -> impl In
     // which matters once the catalog holds more than a handful of agent types (#8042 review).
     let from_registry_flags = futures::future::join_all(rows.iter().map(|(name, source, _)| {
         let name = name.clone();
+        // Cloned per row because the row futures outlive this closure body; the
+        // registry is resolved against the kernel's `home_dir` like every other
+        // path in this handler since #8112, not against `LIBREFANG_HOME`.
+        let home_dir = home_dir.clone();
         async move {
             if !source.is_editable() {
                 return false;
             }
-            match read_registry_agent_type(&name).await {
+            match read_registry_agent_type(&home_dir, &name).await {
                 Ok(found) => found.is_some(),
                 Err(e) => {
                     // A row that cannot be answered for is not in the registry as far as the
