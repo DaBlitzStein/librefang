@@ -155,14 +155,18 @@ describe("emoji editor", () => {
     fireEvent.change(screen.getByLabelText("Emoji"), { target: { value: "🦊" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    // The 403 the daemon returns for an agent the deployment provisions. The
-    // dashboard has no `provisioned` flag to pre-empt it with, so relaying the
-    // message verbatim is the only way the person learns why.
+    // Verbatim from `guard_provisioned_write` — the 423 the daemon returns for
+    // an agent the deployment provisions. The dashboard cannot pre-empt it:
+    // nothing in the agent payload says whether an agent is provisioned, so
+    // relaying the message is the only way the operator learns why.
     updateIdentity.mock.calls[0][1].onError(
-      new Error("Agent is provisioned by the deployment"),
+      new Error("this resource is provisioned by the deployment"),
     );
 
-    expect(addToast).toHaveBeenCalledWith("Agent is provisioned by the deployment", "error");
+    expect(addToast).toHaveBeenCalledWith(
+      "this resource is provisioned by the deployment",
+      "error",
+    );
   });
 });
 
