@@ -8474,7 +8474,7 @@
           "media"
         ],
         "summary": "List available media providers with their capabilities and config status.",
-        "description": "`configured` reports whether the provider's credentials are present, and\n`capabilities` is the set of `MediaCapability` values it advertises — the\nsame values the `[capabilities]` config block routes by.",
+        "description": "The list is derived from the live catalog on every request rather than from\nthe snapshot `kernel::boot` hands `MediaDriverCache`. Nothing re-runs\n`load_providers_from_registry` after boot, so a provider added by a catalog\nupdate was invisible here until a restart — which is the same class of drift\nthis route was changed to fix — and one removed lingered with an empty\ncapability list.\n\n`configured` reports whether the provider's credentials are present, and\n`capabilities` is the set of `MediaCapability` values it advertises — the\nsame values the `[capabilities]` config block routes by.",
         "operationId": "list_media_providers",
         "responses": {
           "200": {
