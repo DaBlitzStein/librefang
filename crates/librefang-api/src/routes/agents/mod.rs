@@ -195,6 +195,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(get_agent_mcp_servers).put(set_agent_mcp_servers),
         )
         .route(
+            "/agents/{id}/model_routing",
+            axum::routing::get(get_agent_model_routing).put(set_agent_model_routing),
+        )
+        .route(
             "/agents/{id}/channels",
             axum::routing::get(get_agent_channels).put(set_agent_channels),
         )
@@ -701,6 +705,13 @@ fn kernel_err_to_status(e: &crate::error::KernelError) -> StatusCode {
     use librefang_types::error::LibreFangError;
     match e {
         KernelError::LibreFang(LibreFangError::AgentNotFound(_)) => StatusCode::NOT_FOUND,
+        // The other two "not found" shapes the kernel can produce. Leaving
+        // them in the `_` arm reported a missing session, or a tool-level
+        // resource a `ToolError::NotFound` had already typed, as a server
+        // fault — and `kernel_err_body` then scrubbed the reason away, so the
+        // caller could not tell a bad id from an outage.
+        KernelError::LibreFang(LibreFangError::SessionNotFound(_)) => StatusCode::NOT_FOUND,
+        KernelError::LibreFang(LibreFangError::ResourceNotFound { .. }) => StatusCode::NOT_FOUND,
         KernelError::LibreFang(LibreFangError::AgentAlreadyExists(_)) => StatusCode::CONFLICT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
