@@ -37,6 +37,10 @@ export {
   getUsageByModelPerformance,
   getBudgetStatus,
   getProviderBudgets,
+  // the agent avatar image — authenticated, so it is fetched as a Blob and
+  // turned into an object URL by the caller rather than given to an `<img src>` (#8339)
+  fetchAuthenticatedImage,
+  agentAvatarPath,
   // channels & comms
   listChannels,
   getChannelQr,
@@ -193,6 +197,8 @@ export type {
   ReloadConfigResult,
   // workflows
   WorkflowRunDetail,
+  // agent avatar upload (#8339)
+  AgentAvatarUploadResult,
   // workflows — HITL operator-step (#4977)
   OperatorPause,
   OperatorActionVerb,
@@ -223,6 +229,10 @@ export {
   clearHandAgentRuntimeConfig,
   resetAgentSession,
   updateAgentTools,
+  // visual identity: emoji / colour, and the avatar image (#8339)
+  updateAgentIdentity,
+  uploadAgentAvatar,
+  deleteAgentAvatar,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
   createAgentSession,
