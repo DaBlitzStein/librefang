@@ -197,12 +197,12 @@ export type {
   ReloadConfigResult,
   // workflows
   WorkflowRunDetail,
-  // agent avatar upload (#8339)
-  AgentAvatarUploadResult,
   // workflows — HITL operator-step (#4977)
   OperatorPause,
   OperatorActionVerb,
   OperatorActionDescriptor,
+  // agent avatar upload (#8339)
+  AgentAvatarUploadResult,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
