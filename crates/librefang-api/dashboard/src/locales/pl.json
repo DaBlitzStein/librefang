@@ -3090,6 +3090,7 @@
     "run_start": "Uruchom autonomicznie",
     "run_needs_agent": "Przypisz agenta, aby uruchomić ten cel autonomicznie",
     "run_phase_running": "Działa",
+    "run_phase_paused": "Wstrzymano",
     "run_phase_finished": "Zakończono",
     "run_phase_stopped": "Zatrzymano",
     "run_phase_rate_limited": "Limit szybkości",
@@ -3111,6 +3112,15 @@
     "tick_interval": "Odstęp między iteracjami",
     "tick_interval_placeholder": "Sekundy między iteracjami pętli (domyślnie {{defaultSecs}})",
     "tick_interval_out_of_range": "Odstęp między iteracjami musi być liczbą całkowitą od {{min}} do {{max}} sekund."
+    "status": "Status",
+    "loop_engineering": "Inżynieria pętli",
+    "loop_engineering_hint": "Agent weryfikujący ocenia każdą iterację, zanim zostanie ona zaliczona, a model oceniający decyduje, kiedy cel jest osiągnięty.",
+    "assigned_agent": "Przypisany agent",
+    "no_agent_selected": "Nie wybrano agenta",
+    "verifier_agent": "Agent weryfikujący",
+    "no_verifier_selected": "Bez weryfikatora (bez kontroli)",
+    "evaluator_model": "Model oceniający",
+    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)"
   },
   "sessions": {
     "title": "Sesje",

@@ -3090,6 +3090,7 @@
     "run_start": "Запустити автономно",
     "run_needs_agent": "Призначте агента для автономного запуску цієї цілі",
     "run_phase_running": "Виконується",
+    "run_phase_paused": "Призупинено",
     "run_phase_finished": "Завершено",
     "run_phase_stopped": "Зупинено",
     "run_phase_rate_limited": "Обмеження швидкості",
@@ -3111,6 +3112,15 @@
     "tick_interval": "Інтервал ітерацій",
     "tick_interval_placeholder": "Секунди між ітераціями циклу (типово {{defaultSecs}})",
     "tick_interval_out_of_range": "Інтервал ітерацій має бути цілим числом від {{min}} до {{max}} секунд."
+    "status": "Статус",
+    "loop_engineering": "Інженерія циклу",
+    "loop_engineering_hint": "Агент-перевіряч оцінює кожну ітерацію, перш ніж вона зарахується, а модель-оцінювач вирішує, коли ціль досягнуто.",
+    "assigned_agent": "Призначений агент",
+    "no_agent_selected": "Агента не вибрано",
+    "verifier_agent": "Агент-перевіряч",
+    "no_verifier_selected": "Без перевіряча (без контролю)",
+    "evaluator_model": "Модель-оцінювач",
+    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)"
   },
   "sessions": {
     "title": "Сесії",

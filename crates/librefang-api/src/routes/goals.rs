@@ -240,6 +240,23 @@ async fn start_or_resume(
         Err(error) => return error,
     };
 
+    // Read once and reuse below: `/start` also auto-resumes from an existing
+    // checkpoint (same as `/resume`), so both routes need the checkpoint's
+    // iteration count to validate an explicit `max_iterations` against it.
+    let run_state = state.kernel.goal_run_state(goal_id);
+    let paused_run = run_state
+        .as_ref()
+        .filter(|run| run.phase == librefang_types::goal::GoalRunPhase::Paused);
+
+    if require_paused && paused_run.is_none() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "This goal has no paused run to resume. Use POST /api/goals/{id}/start to begin a new run."
+            })),
+        );
+    }
+
     // Same swallow as #6654/#6653 on a start rather than a read: the old catch-all `_ => Vec::new()` folded a substrate failure into the empty array, so an unreadable store answered `404 Goal '<id>' not found` for a goal that exists — sending the operator to re-create it instead of to the host.
     // Only a genuinely absent / non-array key is an empty list.
     let arr = match state

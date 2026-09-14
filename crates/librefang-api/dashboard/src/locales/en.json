@@ -3082,6 +3082,7 @@
     "run_start": "Run autonomously",
     "run_needs_agent": "Assign an agent to run this goal autonomously",
     "run_phase_running": "Running",
+    "run_phase_paused": "Paused",
     "run_phase_finished": "Finished",
     "run_phase_stopped": "Stopped",
     "run_phase_rate_limited": "Rate Limited",
@@ -3103,6 +3104,15 @@
     "tick_interval": "Tick interval",
     "tick_interval_placeholder": "Seconds between loop iterations (default {{defaultSecs}})",
     "tick_interval_out_of_range": "Tick interval must be an integer between {{min}} and {{max}} seconds."
+    "status": "Status",
+    "loop_engineering": "Loop engineering",
+    "loop_engineering_hint": "A verifier agent judges each iteration before it counts, and an evaluator model decides when the goal is met.",
+    "assigned_agent": "Assigned agent",
+    "no_agent_selected": "No agent selected",
+    "verifier_agent": "Verifier agent",
+    "no_verifier_selected": "No verifier (run ungated)",
+    "evaluator_model": "Evaluator model",
+    "evaluator_model_placeholder": "Evaluator model (optional)"
   },
   "sessions": {
     "title": "Sessions",
