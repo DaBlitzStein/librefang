@@ -879,7 +879,16 @@ function AgentTypeRow({
                 Disabling with an explanation beats hiding the control outright: hiding
                 would look identical to "this type can never be restored", when the real
                 answer is "not from the registry, but promoting it would change that"
-                (#8042 review). */}
+                (#8042 review).
+
+                `agentTypes.restore_from_registry` is deliberately not just "Restore":
+                the History modal's per-version button below (`agentTypes.restore_btn`,
+                line ~725) already owns that exact accessible name for a different
+                action — restoring one saved edit, not the registry original — and both
+                controls can be on screen at once. Reusing "Restore" here made
+                `getByRole("button", { name: "Restore" })` ambiguous between them,
+                which is what broke two History-modal tests once this branch merged
+                with one that opens the modal in the same render. */}
             <button
               type="button"
               onClick={onRestore}

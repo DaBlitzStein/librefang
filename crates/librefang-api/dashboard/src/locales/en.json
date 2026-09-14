@@ -4398,7 +4398,7 @@
     "promote_failed": "Could not promote the agent type",
     "promote_success": "A pull request has been opened against the registry. Review it and merge when ready.",
     "view_pr": "View pull request",
-    "restore_from_registry": "Restore",
+    "restore_from_registry": "Restore from registry",
     "restore_title": "Restore from registry — {{name}}",
     "restore_confirm": "Overwrite the local agent type with the registry version? This cannot be undone.",
     "restore_identical": "This agent type is identical to the registry version.",

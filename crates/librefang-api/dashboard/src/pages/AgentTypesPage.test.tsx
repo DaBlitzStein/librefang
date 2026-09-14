@@ -384,7 +384,7 @@ describe("AgentTypesPage restore control", () => {
   it("is enabled when the type has a registry original", () => {
     renderPage({ mutateAsync: vi.fn(), isPending: false }, [{ ...TYPE, from_registry: true }]);
 
-    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Restore from registry" })).toBeEnabled();
   });
 
   it("is disabled and explains why when the type has no registry original", () => {
@@ -393,6 +393,6 @@ describe("AgentTypesPage restore control", () => {
     expect(
       screen.getByRole("button", { name: "This agent type does not exist in the registry." }),
     ).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Restore from registry" })).toBeNull();
   });
 });
