@@ -85,6 +85,9 @@ export {
   // models
   listModels,
   getModelOverrides,
+  // model router (profile-based routing)
+  listModelRouterProfiles,
+  getAgentModelRouting,
   // providers
   listProviders,
   // credential pools (#4965)
@@ -192,6 +195,8 @@ export type {
   ListSessionsResult,
   SidecarSaveResult,
   ReloadConfigResult,
+  // workflows
+  WorkflowRunDetail,
   // workflows — HITL operator-step (#4977)
   OperatorPause,
   OperatorActionVerb,
@@ -304,6 +309,8 @@ export {
   removeCustomModel,
   updateModelOverrides,
   deleteModelOverrides,
+  // model router (profile-based routing)
+  updateAgentModelRouting,
   // providers
   testProvider,
   setProviderKey,
@@ -394,6 +401,10 @@ export {
 // Type re-exports used by hooks and pages
 // ---------------------------------------------------------------------------
 export type {
+  AgentModelRouting,
+  ModelProfile,
+  ModelRouterProfiles,
+  CostTier,
   A2AAgentItem,
   A2ATaskStatus,
   AutoDreamAbortOutcome,

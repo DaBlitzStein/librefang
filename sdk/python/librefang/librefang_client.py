@@ -236,6 +236,15 @@ class _AgentsResource(_Resource):
     def patch_agent(self, id: str, **data):
         return self._c._request("PATCH", f"/api/agents/{id}", data)
 
+    def serve_agent_avatar(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/avatar")
+
+    def upload_agent_avatar(self, id: str, **data):
+        return self._c._request("POST", f"/api/agents/{id}/avatar", data)
+
+    def delete_agent_avatar(self, id: str):
+        return self._c._request("DELETE", f"/api/agents/{id}/avatar")
+
     def get_agent_channels(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/channels")
 
@@ -307,6 +316,12 @@ class _AgentsResource(_Resource):
 
     def set_model(self, id: str, **data):
         return self._c._request("PUT", f"/api/agents/{id}/model", data)
+
+    def get_agent_model_routing(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/model_routing")
+
+    def set_agent_model_routing(self, id: str, **data):
+        return self._c._request("PUT", f"/api/agents/{id}/model_routing", data)
 
     def push_message(self, id: str, **data):
         return self._c._request("POST", f"/api/agents/{id}/push", data)
@@ -804,6 +819,9 @@ class _ModelsResource(_Resource):
 
     def list_credential_pools(self):
         return self._c._request("GET", "/api/credential-pools")
+
+    def list_model_router_profiles(self):
+        return self._c._request("GET", "/api/model-router/profiles")
 
     def list_all_models(self):
         return self._c._request("GET", "/api/models")
