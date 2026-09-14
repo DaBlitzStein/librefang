@@ -729,31 +729,25 @@ describe("GoalRunPhaseBadge", () => {
     expect(badge!.querySelector("svg")!.getAttribute("class")).not.toMatch(/\bmr-/);
   });
 
-  // "paused" reached the switch's `default` arm until this PR, so it rendered with the same neutral styling as a phase the dashboard had never heard of.
-  // Asserting the variant is what separates the two: without it the badge passes whether or not `paused` has an arm of its own.
-  it("gives paused its own warning variant and icon rather than the unknown-phase fallback", () => {
-    const { container } = render(<GoalRunPhaseBadge phase="paused" />);
-    const badge = container.querySelector("span.inline-flex")!;
-    expect(badge.className).toContain("bg-warning/10");
-    expect(badge.className).not.toContain("bg-main");
-    // A known phase leads with its icon and drops `Badge`'s dot.
-    expect(badge.querySelectorAll("svg")).toHaveLength(1);
-    expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(0);
-  });
-
+  // `paused` is what #7973 adds, so it is a *known* phase from here on and can
+  // no longer stand in for the unknown one this test is about. The phase named
+  // here has to be one no arm of the switch matches — that is the whole premise —
+  // so it is deliberately not a member of `GoalRunState["phase"]`.
+  // (Coverage for `paused` itself is `"renders the paused phase as a known one,
+  // under warning and led by its icon"` below.)
   it("renders an unknown phase under the neutral variant with its own key, not a confident Stopped", () => {
-    // This used to render "paused", which was unknown to the switch until this PR gave it its own arm.
-    // The case being guarded is a phase the daemon emits before the dashboard has learned it, so the example has to be one the switch still does not know.
-    const { container } = render(<GoalRunPhaseBadge phase="quiescing" />);
+    const { container } = render(<GoalRunPhaseBadge phase="awaiting_review" />);
 
     // The label is asked of i18n by the phase's own key with the raw phase as
-    // the fallback, so a locale that gains `run_phase_paused` starts using it
-    // with no code change. The previous shape gated translation on a hardcoded
-    // `labelKey` per phase, so an unknown phase could never pick one up.
+    // the fallback, so a locale that gains the key starts using it with no code
+    // change. The previous shape gated translation on a hardcoded `labelKey` per
+    // phase, so an unknown phase could never pick one up.
     // (`t` is mocked here as `key:{options}`; in production this renders the
-    // translation when the key exists and "paused" when it does not.)
+    // translation when the key exists and the raw phase when it does not.)
     expect(
-      screen.getByText('goals.run_phase_quiescing:{"defaultValue":"quiescing"}'),
+      screen.getByText(
+        'goals.run_phase_awaiting_review:{"defaultValue":"awaiting review"}',
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/goals\.run_phase_stopped/)).not.toBeInTheDocument();
 
@@ -766,6 +760,22 @@ describe("GoalRunPhaseBadge", () => {
     // The unknown branch is the one that keeps the dot, having no icon.
     expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(1);
     expect(badge.querySelectorAll("svg")).toHaveLength(0);
+  });
+
+  // The phase this PR adds, asserted on the same axes as the unknown one above:
+  // without this nothing pins `paused` to a deliberate appearance, and it would
+  // silently fall back through `default` again if the arm were dropped in a merge.
+  // `warning` and not `error`: a paused run is an operator's own decision, not a
+  // fault, and it shares that reading with `stopped`.
+  it("renders the paused phase as a known one, under warning and led by its icon", () => {
+    const { container } = render(<GoalRunPhaseBadge phase="paused" />);
+    const badge = container.querySelector("span.inline-flex")!;
+
+    expect(badge.className).toContain("bg-warning/10");
+    expect(badge.className).toContain("text-warning");
+    // Known phase: an icon and no dot, the same exclusivity `running` is held to.
+    expect(badge.querySelectorAll("span[aria-hidden='true']")).toHaveLength(0);
+    expect(badge.querySelectorAll("svg")).toHaveLength(1);
   });
 });
 
