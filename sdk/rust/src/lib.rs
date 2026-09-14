@@ -632,6 +632,42 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn serve_agent_avatar(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn upload_agent_avatar(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "agents", id, "avatar"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_agent_avatar(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "agents", id, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_channels(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
