@@ -2490,6 +2490,7 @@ async fn test_max_tokens_pure_markup_overflow_replaced_with_honest_reply() {
     let mut session = librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id,
+        parent_session_id: None,
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,

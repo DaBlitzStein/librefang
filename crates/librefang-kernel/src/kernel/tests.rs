@@ -15260,6 +15260,7 @@ async fn streaming_turn_on_non_canonical_session_survives_in_turn_auto_compactio
         .save_session(&MemSession {
             id: pinned_session_id,
             agent_id,
+            parent_session_id: None,
             messages: (0..SEEDED_MESSAGES)
                 .map(|i| Message::user(format!("seeded message {i}")))
                 .collect(),
