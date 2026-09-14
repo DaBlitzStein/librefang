@@ -3563,6 +3563,62 @@ async fn test_avatar_replacement_removes_the_previous_format() {
     assert_eq!(headers["content-type"], "image/gif");
 }
 
+/// A failure that stops the new avatar being placed must leave the stored one alone.
+///
+/// The slot a PNG upload would be renamed into is occupied by a non-empty directory, so the rename fails after the bytes have been written to their temp file.
+/// That is a stand-in for any failure of the placement step, and it is the one the original ordering could not survive: it cleared the previous avatar before writing the new one, so by the time the failure arrived the picture was already gone and the route answered 500 pointing `avatar_url` at a 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_avatar_a_failed_store_keeps_the_avatar_that_was_already_there() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "avatar-failed-store");
+    let path = format!("/api/agents/{id}/avatar");
+
+    // Stored in one format, so a later PNG upload cannot land in the slot the
+    // GIF already occupies.
+    let (status, _) = send(
+        h.app.clone(),
+        post_bytes(&path, TINY_GIF.to_vec(), "application/octet-stream", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Occupy the PNG slot. `find_avatar` skips it, because `is_file` is false
+    // for a directory, so the GIF is what is served right up to the upload.
+    let dir = avatars_dir(&h);
+    let blocked = librefang_types::media::avatar_path(&dir, &id.to_string(), "png");
+    std::fs::create_dir(&blocked).expect("create the directory that blocks the rename");
+    std::fs::write(
+        blocked.join("occupied"),
+        b"a rename cannot replace a non-empty directory",
+    )
+    .expect("fill it, so the rename fails rather than replacing it");
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_bytes(&path, TINY_PNG.to_vec(), "application/octet-stream", None),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a store that cannot be placed must be reported as a failure: {body:?}"
+    );
+
+    let (status, headers, bytes) = send_raw(h.app.clone(), get(&path)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the avatar that was already stored must survive a store that failed"
+    );
+    assert_eq!(bytes, TINY_GIF);
+    assert_eq!(headers["content-type"], "image/gif");
+
+    assert!(
+        !librefang_types::media::avatar_path(&dir, &id.to_string(), "png.tmp").exists(),
+        "the failure path must not leave its temp file behind"
+    );
+}
+
 /// `DELETE` removes the file and the reference together.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_avatar_delete_removes_file_and_clears_the_reference() {
