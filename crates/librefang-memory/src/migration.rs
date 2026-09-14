@@ -2671,6 +2671,88 @@ mod tests {
         );
     }
 
+    /// The `run_step!` ladder: strictly increasing, contiguous, ending exactly at
+    /// `SCHEMA_VERSION`, each step calling the function named for its own version (#8140).
+    ///
+    /// Read from the source rather than from a migrated database, because the failure this
+    /// guards is invisible at runtime on the only path CI ever takes.
+    /// `run_step!` fires on `current_version < N`, so a second step claiming an already-taken
+    /// `N` never executes on an installation that has passed `N` — and a fresh database, which
+    /// starts at `user_version == 0`, runs every step and shows nothing wrong.
+    /// The feature then 500s on upgraded installs and works perfectly on new ones.
+    ///
+    /// Three separate PRs claimed overlapping numbers on one day, so each clause below exists
+    /// for a shape that actually shipped:
+    ///
+    /// - **Strictly increasing** catches the duplicate directly. Two `run_step!(55, …)` lines
+    ///   compile whenever the two function names differ, and nothing else notices.
+    /// - **Contiguous** catches the other half: a branch that sidesteps a collision by jumping
+    ///   to a free number leaves a hole, which `test_every_migration_records_audit_row` does
+    ///   report — but through a message about audit rows that names neither the gap nor the
+    ///   branch that opened it.
+    /// - **Named for its version** catches renumbering that moved the `run_step!` line and left
+    ///   the function behind, which is how a duplicate survives a rename.
+    ///
+    /// Ending at `SCHEMA_VERSION` is the fourth: bumping the constant without adding the step,
+    /// or adding the step without bumping the constant, are both silent on a fresh install.
+    #[test]
+    fn the_migration_ladder_is_contiguous_and_named_for_its_versions() {
+        let source = include_str!("migration.rs");
+
+        // Only real invocations: `macro_rules! run_step {` and the `$migrate_fn(&tx)?` inside
+        // the macro body do not match, and neither does prose mentioning the macro.
+        let steps: Vec<(u32, &str)> = source
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("run_step!(")?;
+                let (version, callee) = rest.split_once(", ")?;
+                Some((version.parse().ok()?, callee.trim_end_matches(");").trim()))
+            })
+            .collect();
+
+        assert!(
+            !steps.is_empty(),
+            "no `run_step!` invocations parsed — the ladder cannot be empty, so this guard has \
+             stopped matching the source and is no longer checking anything"
+        );
+
+        for pair in steps.windows(2) {
+            let (prev, prev_fn) = pair[0];
+            let (next, next_fn) = pair[1];
+            assert!(
+                next > prev,
+                "the ladder must strictly increase: `run_step!({prev}, {prev_fn})` is followed \
+                 by `run_step!({next}, {next_fn})`. Two steps under one version is the silent \
+                 failure — the second body never runs on an installation already past {prev}"
+            );
+            assert_eq!(
+                next,
+                prev + 1,
+                "the ladder must be contiguous: nothing claims v{} between `run_step!({prev}, \
+                 {prev_fn})` and `run_step!({next}, {next_fn})`. Renumber down to close the gap \
+                 rather than leaving it for a later migration to fill",
+                prev + 1
+            );
+        }
+
+        for (version, callee) in &steps {
+            assert_eq!(
+                *callee,
+                format!("migrate_v{version}"),
+                "`run_step!({version}, {callee})` calls a function not named for its own \
+                 version; after a renumber the two have to move together"
+            );
+        }
+
+        let (last, last_fn) = *steps.last().unwrap();
+        assert_eq!(
+            last, SCHEMA_VERSION,
+            "the ladder ends at `run_step!({last}, {last_fn})` but SCHEMA_VERSION is \
+             {SCHEMA_VERSION}. A constant ahead of the ladder skips a migration on every \
+             upgrade; a ladder ahead of the constant re-runs its last step forever"
+        );
+    }
+
     /// The specific collision from #7924, pinned by description rather than by presence.
     ///
     /// Both rows existing is not enough — that was already true, because the backfill supplied the missing one.
