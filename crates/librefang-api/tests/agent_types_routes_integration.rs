@@ -1562,3 +1562,56 @@ async fn restore_rejects_foreign_versions_and_live_agents() {
     cleanup(other);
     cleanup(live);
 }
+
+/// The templates list must tell an editable row with a registry original apart
+/// from one that has none, so the dashboard's restore control can be disabled
+/// with an explanation instead of opening a drawer that can only ever answer
+/// "this agent type does not exist in the registry" (#8042 review).
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_list_flags_from_registry_per_row() {
+    let _g = lock().lock().await;
+    let synced = "at_list_from_registry_synced";
+    let unsynced = "at_list_from_registry_unsynced";
+    let live = "at_list_from_registry_live";
+    cleanup(synced);
+    cleanup(unsynced);
+    cleanup(live);
+
+    // An agent type with a registry original.
+    let manifest = registry_manifest_body(synced, "synced with the registry", 42);
+    write_agent_type(synced, &manifest);
+    write_registry_agent_type(synced, &manifest);
+
+    // Created locally with no registry counterpart — e.g. through `POST
+    // /api/templates` or the `agent_type_create` tool.
+    write_agent_type(
+        unsynced,
+        &registry_manifest_body(unsynced, "local only", 42),
+    );
+
+    // A live agent's own manifest: never editable, so never eligible to
+    // restore from the registry either — the row must not even attempt the
+    // lookup a registry-backed name might otherwise accidentally satisfy.
+    write_workspace_agent(live, &registry_manifest_body(live, "a live agent", 42));
+
+    let h = boot().await;
+    let (status, body) = get(&h, "/api/templates").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let templates = body["templates"].as_array().expect("templates array");
+
+    let row = |name: &str| {
+        templates
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing from list: {body}"))
+    };
+
+    assert_eq!(row(synced)["from_registry"], true, "{body}");
+    assert_eq!(row(unsynced)["from_registry"], false, "{body}");
+    assert_eq!(row(live)["editable"], false, "{body}");
+    assert_eq!(row(live)["from_registry"], false, "{body}");
+
+    cleanup(synced);
+    cleanup(unsynced);
+    cleanup(live);
+}

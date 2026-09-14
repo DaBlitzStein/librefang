@@ -1876,6 +1876,13 @@ export interface AgentTemplate {
   model: string;
   source: AgentTypeSource;
   editable: boolean;
+  /**
+   * Whether a registry original exists to restore from. Only ever `true` for an
+   * `editable` row — an agent type created through `POST /api/templates` or
+   * `agent_type_create` has no registry counterpart, so its restore control has
+   * nothing to do (#8042).
+   */
+  from_registry: boolean;
 }
 
 /**

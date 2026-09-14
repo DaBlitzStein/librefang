@@ -874,12 +874,27 @@ function AgentTypeRow({
             >
               <Edit2 className="h-3.5 w-3.5" />
             </button>
+            {/* An `editable` row still may have no registry original — created through
+                `POST /api/templates` or `agent_type_create` rather than promoted from one.
+                Disabling with an explanation beats hiding the control outright: hiding
+                would look identical to "this type can never be restored", when the real
+                answer is "not from the registry, but promoting it would change that"
+                (#8042 review). */}
             <button
               type="button"
               onClick={onRestore}
-              className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
-              aria-label={t("agentTypes.restore_from_registry")}
-              title={t("agentTypes.restore_from_registry")}
+              disabled={!type.from_registry}
+              className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-text-dim"
+              aria-label={
+                type.from_registry
+                  ? t("agentTypes.restore_from_registry")
+                  : t("agentTypes.restore_no_registry")
+              }
+              title={
+                type.from_registry
+                  ? t("agentTypes.restore_from_registry")
+                  : t("agentTypes.restore_no_registry")
+              }
             >
               <RotateCcw className="h-3.5 w-3.5" />
             </button>
