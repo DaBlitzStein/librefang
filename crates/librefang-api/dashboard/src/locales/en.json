@@ -4367,8 +4367,6 @@
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}s",
     "timeout_badge_never": "TTL: never reclaimed"
-    "field_description_hint": "The agent reads this verbatim. Include the goal, the constraints, and what \"done\" looks like.",
-    "field_assignee_placeholder": "Agent name or ID"
   },
   "prompts": {
     "title": "Prompts",

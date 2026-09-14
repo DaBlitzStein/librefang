@@ -4366,8 +4366,6 @@
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}秒",
     "timeout_badge_never": "TTL：永不回收"
-    "field_description_hint": "智能体会逐字读取此内容。请写明目标、约束以及完成标准。",
-    "field_assignee_placeholder": "智能体名称或 ID"
   },
   "prompts": {
     "title": "提示词",

@@ -4379,8 +4379,6 @@
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}с",
     "timeout_badge_never": "TTL: ніколи не повертається"
-    "field_description_hint": "Агент читає це дослівно. Вкажіть мету, обмеження та критерій завершення.",
-    "field_assignee_placeholder": "Ім'я або ID агента"
   },
   "prompts": {
     "title": "Промпти",
