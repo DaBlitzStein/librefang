@@ -191,6 +191,8 @@ export type {
   ListSessionsResult,
   SidecarSaveResult,
   ReloadConfigResult,
+  // workflows
+  WorkflowRunDetail,
   // workflows — HITL operator-step (#4977)
   OperatorPause,
   OperatorActionVerb,
