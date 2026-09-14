@@ -1403,5 +1403,73 @@
     "text": "||a\nb||"
    }
   ]
+ },
+ {
+  "source": "`a || b`",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "code",
+     "text": "a || b"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||секрет `код` конец||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": [
+      "секрет ",
+      {
+       "type": "code",
+       "text": "код"
+      },
+      " конец"
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "source": "    ||a||",
+  "blocks": [
+   {
+    "type": "pre",
+    "text": "||a||"
+   }
+  ]
+ },
+ {
+  "source": "```\n==x==\n||y||\n```",
+  "blocks": [
+   {
+    "type": "pre",
+    "text": "==x==\n||y||"
+   }
+  ]
+ },
+ {
+  "source": "`==x==` и ==снаружи==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "code",
+      "text": "==x=="
+     },
+     " и ",
+     {
+      "type": "marked",
+      "text": "снаружи"
+     }
+    ]
+   }
+  ]
  }
 ]

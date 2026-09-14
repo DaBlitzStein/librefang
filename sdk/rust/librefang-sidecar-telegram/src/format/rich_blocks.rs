@@ -1414,7 +1414,7 @@ mod tests {
     /// parse `sendRichMessage` echoes back was written down verbatim. This test is the diff
     /// against it.
     ///
-    /// Of 102 recorded forms, 91 match byte for byte and the other 11 are named in
+    /// Of 107 recorded forms, 96 match byte for byte and the other 11 are named in
     /// `known_divergences_from_telegram` with the reason each one is not a pairing
     /// difference. The distinction matters: the previous version of this test was 23 hand-
     /// picked shapes, "22 of 23 match" went into the architecture docs as a property of the
@@ -1549,6 +1549,62 @@ mod tests {
                 "type": "url", "url": "https://ya.ru",
                 "text": {"type": "marked", "text": "a"},
             }}])
+        );
+    }
+
+    /// Code is never scanned, pinned as a test rather than as a comment: a `||` inside a
+    /// code span turning into a spoiler would not be a formatting bug but a content one,
+    /// silently eating the literal text someone was quoting. Raised as a question on the
+    /// pull request, and a question about an invariant is a missing test.
+    ///
+    /// Two separate mechanisms carry it, so both are checked: an inline span is already a
+    /// `Styled::Code` node before the run is assembled, which makes it opaque to the scan,
+    /// and a fenced or indented block closes its run through `take_inline_literal`, which
+    /// does not scan at all. Telegram agrees on every case here — they are in the recorded
+    /// battery too.
+    #[test]
+    fn code_is_never_scanned() {
+        for (source, expected) in [
+            (
+                "`a || b`",
+                serde_json::json!({"type": "code", "text": "a || b"}),
+            ),
+            (
+                "`||в коде||`",
+                serde_json::json!({"type": "code", "text": "||в коде||"}),
+            ),
+            (
+                "`==x==` и ==снаружи==",
+                serde_json::json!([
+                    {"type": "code", "text": "==x=="},
+                    " и ",
+                    {"type": "marked", "text": "снаружи"},
+                ]),
+            ),
+            // The span is opaque *content*: the pair around it is real, the code inside is
+            // untouched, and the boundary it creates in the run is the one that used to
+            // produce empty spans.
+            (
+                "||секрет `код` конец||",
+                serde_json::json!({"type": "spoiler", "text": [
+                    "секрет ", {"type": "code", "text": "код"}, " конец",
+                ]}),
+            ),
+        ] {
+            assert_eq!(
+                json(source),
+                serde_json::json!([{"type": "paragraph", "text": expected}]),
+                "{source:?}"
+            );
+        }
+        // Blocks of code take the other path — `take_inline_literal`, which never scans.
+        assert_eq!(
+            json("```\n==x==\n||y||\n```"),
+            serde_json::json!([{"type": "pre", "text": "==x==\n||y||"}])
+        );
+        assert_eq!(
+            json("    ||a||"),
+            serde_json::json!([{"type": "pre", "text": "||a||"}])
         );
     }
 
