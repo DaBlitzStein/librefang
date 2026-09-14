@@ -2838,28 +2838,12 @@ export function AgentsPage() {
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   <div className="relative shrink-0">
-                    {/* Three-way, in the order the identity was set: an
-                        uploaded image wins, then the emoji, then the initials
-                        `Avatar` produces on its own.
-
-                        The emoji branch cannot go through `Avatar`: its only
-                        text prop is `fallback`, which is fed to `getInitials`,
-                        and that takes `n[0]` — the first UTF-16 *code unit*.
-                        On an emoji that is a lone surrogate, which renders as
-                        the replacement character rather than the emoji. So the
-                        circle is spelled out here instead, matching `Avatar`'s
-                        own `lg` geometry (h-12 w-12). */}
-                    {!detailAvatarSrc && detailIdentity?.emoji ? (
-                      <div
-                        role="img"
-                        aria-label={detailAgent.name}
-                        className="relative flex shrink-0 items-center justify-center rounded-full bg-brand/10 overflow-hidden h-12 w-12 text-2xl leading-none"
-                      >
-                        {detailIdentity.emoji}
-                      </div>
-                    ) : (
-                      <Avatar fallback={detailAgent.name} size="lg" src={detailAvatarSrc} />
-                    )}
+                    <Avatar
+                      fallback={detailAgent.name}
+                      size="lg"
+                      src={detailAvatarSrc}
+                      emoji={detailIdentity?.emoji}
+                    />
                     <span
                       className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${drawerStatusColor} border-2 border-surface ${!isDetailDrawerSuspended && !isDetailDrawerCrashed ? "animate-pulse" : ""}`}
                       role="img"
