@@ -625,10 +625,19 @@ export interface WorkflowLastRunSummary {
   completed_at: string | null;
 }
 
+export interface WorkflowInputParam {
+  name: string;
+  param_type?: string;
+  required?: boolean;
+  description?: string;
+  default?: unknown;
+}
+
 export interface WorkflowItem {
   id: string;
   name: string;
   description?: string;
+  input_schema?: WorkflowInputParam[];
   steps?: number | WorkflowStep[];
   created_at?: string;
   layout?: unknown;
@@ -1154,6 +1163,12 @@ export interface GoalItem {
   agent_id?: string;
   status?: string;
   progress?: number;
+  /** Opt into the verifier gate, the evaluator and captured lessons. */
+  loop_engineering?: boolean;
+  /** Agent that judges the worker's output; only used with loop_engineering. */
+  verify_agent_id?: string;
+  /** Model that judges goal completion; only used with loop_engineering. */
+  evaluator_model?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -1756,6 +1771,15 @@ export interface AgentChannelInstance {
   agent: string | null;
   /** True when `agent` is the agent this response is about. */
   bound_to_this_agent: boolean;
+  /**
+   * Whether `agent` names an agent that exists.
+   *
+   * A binding to an agent that was never spawned, has been deleted, or is a
+   * typo delivers nowhere — `ChannelRouter` resolves the name and skips the
+   * binding on a miss. Without this an operator cannot tell "this bot belongs
+   * to someone else" from "this bot's messages are being dropped".
+   */
+  resolves: boolean;
 }
 
 export interface AgentChannelsResponse {
@@ -2186,6 +2210,58 @@ export interface ModelItem {
   // live config (codex/claude-code/gemini/qwen) rather than a catalog entry — it
   // is not a user-added custom model, so it must not show a delete control.
   source?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Model router (profile-based routing)
+// ---------------------------------------------------------------------------
+
+export type CostTier = "cheap" | "medium" | "expensive";
+
+export interface ModelProfile {
+  name: string;
+  tags: string[];
+  provider: string;
+  model: string;
+  context_window?: number;
+  cost_tier: CostTier;
+  priority: number;
+  max_complexity: number;
+  description?: string;
+}
+
+export interface ModelRouterProfiles {
+  enabled: boolean;
+  default_profile?: string | null;
+  profiles: ModelProfile[];
+}
+
+/// The resolved profile catalog: the builtin asset with
+/// `~/.librefang/model_profiles.toml` merged over it.
+export async function listModelRouterProfiles(): Promise<ModelRouterProfiles> {
+  return get<ModelRouterProfiles>("/api/model-router/profiles");
+}
+
+export interface AgentModelRouting {
+  mode: "fixed" | "flexible";
+  allowed_profiles: string[];
+  cost_budget?: CostTier | null;
+  default_profile?: string | null;
+  /// Per-agent router opt-out (#7781 review). `true` means the router never
+  /// touches this agent even in `flexible` mode — surfaced so the panel can
+  /// warn an operator their allowlist/budget edits have no effect.
+  fixed?: boolean;
+}
+
+export async function getAgentModelRouting(agentId: string): Promise<AgentModelRouting> {
+  return get<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`);
+}
+
+export async function updateAgentModelRouting(
+  agentId: string,
+  routing: AgentModelRouting,
+): Promise<AgentModelRouting> {
+  return put<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`, routing);
 }
 
 export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {
@@ -2995,6 +3071,7 @@ export interface WorkflowRunDetail {
   started_at: string;
   completed_at?: string | null;
   step_results: WorkflowStepResult[];
+  total_steps?: number;
 }
 
 /** Per-step preview returned by dry-run. */
@@ -4620,6 +4697,9 @@ export async function createGoal(payload: {
   agent_id?: string;
   status?: string;
   progress?: number;
+  loop_engineering?: boolean;
+  verify_agent_id?: string;
+  evaluator_model?: string;
 }): Promise<GoalItem> {
   return post<GoalItem>("/api/goals", payload);
 }
@@ -4633,6 +4713,9 @@ export async function updateGoal(
     progress?: number;
     parent_id?: string | null;
     agent_id?: string | null;
+    loop_engineering?: boolean;
+    verify_agent_id?: string | null;
+    evaluator_model?: string | null;
   }
 ): Promise<GoalItem> {
   // Issue #3832: handler now returns the mutated GoalItem instead of an ack
@@ -4649,11 +4732,14 @@ export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
 export interface GoalRunState {
   goal_id: string;
   agent_id: string;
-  phase: "running" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
+  phase: "running" | "paused" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
   iteration: number;
   max_iterations: number;
   last_progress: number;
   last_error?: string;
+  verify_agent_id?: string;
+  verify_max_retries?: number;
+  evaluator_model?: string;
   started_at: string;
   updated_at: string;
 }
@@ -4661,7 +4747,7 @@ export interface GoalRunState {
 /** Begin an autonomous run that drives the goal's assigned agent. */
 export async function startGoalRun(
   goalId: string,
-  payload?: { max_iterations?: number }
+  payload?: { max_iterations?: number; verify_max_retries?: number }
 ): Promise<{ ok: boolean; run: GoalRunState | null }> {
   return post<{ ok: boolean; run: GoalRunState | null }>(
     `/api/goals/${encodeURIComponent(goalId)}/start`,

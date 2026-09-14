@@ -992,6 +992,8 @@ fn test_spawn_agent_applies_local_default_model_override() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "default".to_string(),
                     model: "default".to_string(),
                     max_tokens: Some(4096),
@@ -1474,6 +1476,8 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "cloudverse".to_string(),
                     model: "anthropic-claude-4-5-sonnet".to_string(),
                     max_tokens: Some(4096),
@@ -1591,6 +1595,225 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
     assert_eq!(inherited.manifest.model.model, "default");
     assert!(inherited.manifest.model.api_key_env.is_none());
     assert!(inherited.manifest.model.base_url.is_none());
+
+    kernel.shutdown();
+}
+
+/// #7781 review: the credential half of a provider switch was already cleared
+/// (`test_set_agent_model_clears_overrides_when_provider_changes`); the
+/// capacity half was not.
+/// `context_window` / `max_output_tokens` describe what the *endpoint* can do,
+/// so an operator moving an agent from a large-window provider to a small-window
+/// one through the dashboard's model picker left the old endpoint's window
+/// attached to the new one — the same gap the model router closed for
+/// `apply_routed_profile` and `apply_tier_routed_model`, in the file next door.
+/// Both paths now share `clear_stale_provider_overrides`.
+#[test]
+fn switching_provider_also_drops_the_old_endpoints_capacity_limits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-provider-switch-limits");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // An agent pinned to a provider whose endpoint accepts a 200k window.
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "switch-provider-limits-agent".to_string(),
+                source_template: None,
+                description: "carries the previous endpoint's limits".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
+                    provider: "cloudverse".to_string(),
+                    model: "anthropic-claude-4-5-sonnet".to_string(),
+                    api_key_env: Some("CLOUDVERSE_API_KEY".to_string()),
+                    base_url: Some("https://cloudverse.freshworkscorp.com/api/v1".to_string()),
+                    context_window: Some(200_000),
+                    max_output_tokens: Some(64_000),
+                    // Flattened verbatim into the request body, so it only
+                    // means anything to the provider it was set for.
+                    extra_params: std::collections::BTreeMap::from([(
+                        "enable_memory".to_string(),
+                        serde_json::json!(true),
+                    )]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let pre = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent registry entry");
+    assert_eq!(pre.manifest.model.context_window, Some(200_000));
+    assert_eq!(pre.manifest.model.max_output_tokens, Some(64_000));
+    assert!(pre
+        .manifest
+        .model
+        .extra_params
+        .contains_key("enable_memory"));
+
+    // The dashboard's model picker, switching to a different provider.
+    kernel
+        .set_agent_model(agent_id, "gpt-4o-mini", Some("openai"))
+        .expect("provider switch should succeed");
+
+    let post = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent registry entry after switch");
+    assert_eq!(post.manifest.model.provider, "openai");
+    assert_eq!(
+        post.manifest.model.context_window, None,
+        "the previous endpoint's context_window must not cap the new provider — \
+         resolution falls back to the registry / probe chain for the new model"
+    );
+    assert_eq!(
+        post.manifest.model.max_output_tokens, None,
+        "the previous endpoint's max_output_tokens must not cap the new provider"
+    );
+    assert!(
+        post.manifest.model.extra_params.is_empty(),
+        "extra_params is flattened verbatim into the request body, so carrying the \
+         previous provider's keys onto the new one sends parameters it does not know: \
+         {:?}",
+        post.manifest.model.extra_params
+    );
+
+    // The same-provider swap keeps them: on one endpoint these are a
+    // deliberate per-agent override, not a leftover.
+    kernel
+        .agents
+        .registry
+        .update_context_window(agent_id, Some(128_000))
+        .expect("seed a deliberate per-agent window");
+    kernel
+        .agents
+        .registry
+        .update_model_max_output_tokens(agent_id, Some(16_000))
+        .expect("seed a deliberate per-agent output cap");
+    kernel
+        .set_agent_model(agent_id, "gpt-4o", Some("openai"))
+        .expect("same-provider model swap should succeed");
+
+    let same_provider = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent after same-provider swap");
+    assert_eq!(
+        same_provider.manifest.model.context_window,
+        Some(128_000),
+        "a same-provider model swap must preserve a deliberate per-agent context_window"
+    );
+    assert_eq!(
+        same_provider.manifest.model.max_output_tokens,
+        Some(16_000),
+        "a same-provider model swap must preserve a deliberate per-agent max_output_tokens"
+    );
+
+    kernel.shutdown();
+}
+
+/// The same five-field clear also runs on the boot restore path, under a branch
+/// whose first disjunct — `is_default_provider && is_default_model` — is true for
+/// a row that is *already* on the `default` sentinel. There the two assignments
+/// above it restate what is there and no endpoint moves, so clearing is not
+/// repointing hygiene: it is data loss on a path that runs on every restart.
+///
+/// Without the gate an operator's hand-set window, output cap and
+/// `[model.extra_params]` on any agent inheriting the global model are nulled by
+/// the next daemon restart and made permanent by the following `save_agent`.
+#[test]
+fn restarting_keeps_the_overrides_of_an_agent_already_on_the_default_sentinel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-boot-restore-overrides");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let agent_id = {
+        let kernel =
+            LibreFangKernel::boot_with_config(config.clone()).expect("first boot should succeed");
+        let id = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "sentinel-overrides-agent".to_string(),
+                    source_template: None,
+                    description: "inherits the global model, with deliberate overrides".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    model: ModelConfig {
+                        mode: librefang_types::agent::ModelMode::Fixed,
+                        router_override: None,
+                        // Already the sentinel: the restore branch restates these.
+                        provider: "default".to_string(),
+                        model: "default".to_string(),
+                        context_window: Some(32_000),
+                        max_output_tokens: Some(8_000),
+                        extra_params: std::collections::BTreeMap::from([(
+                            "enable_memory".to_string(),
+                            serde_json::json!(true),
+                        )]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("agent should spawn");
+        kernel.shutdown();
+        id
+    };
+
+    // Second boot over the same home — the restore the deploy's restart performs.
+    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot should succeed");
+    let restored = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("the agent should be restored");
+
+    assert_eq!(
+        restored.manifest.model.context_window,
+        Some(32_000),
+        "a restart must not null a window the operator set on an agent that never moved endpoints"
+    );
+    assert_eq!(
+        restored.manifest.model.max_output_tokens,
+        Some(8_000),
+        "same for the output cap: nothing repointed, so nothing is stale"
+    );
+    assert!(
+        restored
+            .manifest
+            .model
+            .extra_params
+            .contains_key("enable_memory"),
+        "extra_params is provider-specific, but this agent's provider did not change: {:?}",
+        restored.manifest.model.extra_params
+    );
 
     kernel.shutdown();
 }
@@ -10783,7 +11006,29 @@ fn goal_run_start_reports_unset_self_handle() {
     let goal_id = librefang_types::goal::GoalId::new();
     let agent_id = AgentId::new();
 
-    assert!(!kernel.goal_run_start(goal_id, agent_id, Some(1)));
+    assert!(!kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None));
+    assert!(kernel.goal_run_status(goal_id).is_none());
+}
+
+/// #7785 review: `goal_run_start` used to end with `self.workflows.goal_runner.start(...); true`,
+/// discarding the runner's own refusal — `GoalRunner::start` returns `false`
+/// when the goal is missing from the shared store (the race a deletion wins
+/// against a caller's stale read). The goal here is simply never seeded, the
+/// same "not found when the runner loads it" condition, and self_handle is
+/// set so the run reaches the runner's `start()` rather than bailing out on
+/// the earlier unset-handle check this file already covers above.
+#[test]
+fn goal_run_start_propagates_the_runners_refusal_of_a_missing_goal() {
+    let (kernel, _dir) = minimal_kernel("goal-run-start-missing-goal");
+    let kernel = Arc::new(kernel);
+    LibreFangKernel::set_self_handle(&kernel);
+    let goal_id = librefang_types::goal::GoalId::new();
+    let agent_id = AgentId::new();
+
+    assert!(
+        !kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None),
+        "a goal absent from the store must not be reported as started"
+    );
     assert!(kernel.goal_run_status(goal_id).is_none());
 }
 
@@ -15178,6 +15423,8 @@ fn test_context_report_uses_catalog_context_window_not_200k() {
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
         model: ModelConfig {
+            mode: librefang_types::agent::ModelMode::Fixed,
+            router_override: None,
             provider: "fake-provider".to_string(),
             model: "fake-1m-model".to_string(),
             ..Default::default()
@@ -15226,6 +15473,8 @@ fn test_context_report_honours_manifest_context_window_override() {
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
         model: ModelConfig {
+            mode: librefang_types::agent::ModelMode::Fixed,
+            router_override: None,
             provider: "ollama".to_string(),
             model: "some-local-model".to_string(),
             context_window: Some(262_144),
@@ -15341,6 +15590,8 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "default".to_string(),
                     model: "default".to_string(),
                     max_tokens: Some(4096),
@@ -15367,6 +15618,8 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "anthropic".to_string(),
                     model: "claude-old-default".to_string(),
                     max_tokens: Some(4096),
@@ -15673,6 +15926,8 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "openrouter".to_string(),
                     model: "poolside/laguna-xs.2:free".to_string(),
                     max_tokens: Some(4096),
@@ -15700,6 +15955,8 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "openrouter".to_string(),
                     model: "openai/gpt-4o".to_string(),
                     max_tokens: Some(4096),
@@ -18053,6 +18310,24 @@ fn ephemeral_spawn_wires_every_capability_the_permanent_path_wires() {
         "the ephemeral worker must receive a kernel handle — without it every \
          kernel-backed tool answers `Unavailable`, and a worker could never reach \
          `agent_spawn`, which is what the depth guard exists to bound"
+    );
+
+    // Same shape, same reason (#7789 review): the four `apply_model_override`
+    // unit tests exercise the extracted function, and nothing else asserts the
+    // spawn path still calls it. Whether it is called, and on what, *is* an
+    // argument at a call site — inline the block again, or narrow it back to
+    // `&mut manifest.model`, and every provider- and model-keyed field of the
+    // parent (its endpoint, its key, its window, its output cap, its extension
+    // params, its whole fallback chain) rides into the worker unchanged, with
+    // no test the poorer.
+    assert!(
+        ephemeral.contains("apply_model_override(&mut manifest, over)"),
+        "the ephemeral spawn path must hand the *whole* manifest to \
+         `apply_model_override`. Scoped to `manifest.model` it structurally \
+         cannot clear `fallback_models`, whose entries carry their own \
+         `api_key_env` and `base_url` — so the first fallback promotes the \
+         worker onto the parent's model with the parent's credential, past \
+         `allowed_profiles` and `cost_budget` alike"
     );
 }
 
