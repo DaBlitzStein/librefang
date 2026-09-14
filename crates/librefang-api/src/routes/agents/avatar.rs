@@ -123,10 +123,10 @@ fn store_avatar_url(state: &AppState, agent_id: AgentId, avatar_url: Option<Stri
     responses(
         (status = 200, description = "Stored; the body carries the `avatar_url` to keep", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent id", body = crate::types::JsonObject),
-        (status = 403, description = "Agent is provisioned by the deployment", body = crate::types::JsonObject),
         (status = 404, description = "No such agent", body = crate::types::JsonObject),
         (status = 413, description = "Image larger than the cap", body = crate::types::JsonObject),
-        (status = 415, description = "Bytes are not a supported image", body = crate::types::JsonObject)
+        (status = 415, description = "Bytes are not a supported image", body = crate::types::JsonObject),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 pub async fn upload_agent_avatar(
@@ -303,8 +303,8 @@ pub async fn serve_agent_avatar(
     responses(
         (status = 200, description = "Removed", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent id", body = crate::types::JsonObject),
-        (status = 403, description = "Agent is provisioned by the deployment", body = crate::types::JsonObject),
-        (status = 404, description = "No such agent", body = crate::types::JsonObject)
+        (status = 404, description = "No such agent", body = crate::types::JsonObject),
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 pub async fn delete_agent_avatar(
