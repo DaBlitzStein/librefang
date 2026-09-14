@@ -4789,7 +4789,15 @@ mod tests {
         assert!(!try_column_exists(&conn, "template_versions", "manifest_toml").unwrap());
 
         run_migrations(&conn).expect("a stamped-past-58 database must still open");
-        assert_eq!(get_schema_version(&conn).unwrap(), 60);
+        // `run_migrations` applies every pending step, not just v60, so this
+        // must name the ladder's top rather than the step under test — pinned
+        // to a literal it fails the moment a v61 lands, reporting a migration
+        // defect where there is only a newer migration.
+        assert_eq!(
+            get_schema_version(&conn).unwrap(),
+            SCHEMA_VERSION,
+            "run_migrations must leave the database at the top of the ladder"
+        );
 
         for (table, column) in [
             ("manifest_versions", "agent_name"),
