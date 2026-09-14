@@ -7,6 +7,9 @@ import {
   resumeAgent,
   deleteAgent,
   patchAgent,
+  updateAgentIdentity,
+  uploadAgentAvatar,
+  deleteAgentAvatar,
   patchAgentConfig,
   patchHandAgentRuntimeConfig,
   clearHandAgentRuntimeConfig,
@@ -195,6 +198,82 @@ export function usePatchAgent() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+    },
+  });
+}
+
+/**
+ * PATCH /agents/{id}/identity — the agent's emoji and colour (#8339).
+ *
+ * Partial since #6608: a field left out of the body keeps its stored value, so
+ * setting an emoji cannot silently drop a colour. The corollary is that
+ * *clearing* one means sending it as an empty string — `undefined` is already
+ * spoken for by "not provided" and would leave the old value in place.
+ *
+ * `avatar_url` is not writable through here. It may only hold this agent's own
+ * avatar path, and the two hooks below are what put it there.
+ *
+ * Invalidates `detail(id)` and `lists()`, matching `usePatchAgent`: the same
+ * two reads carry the identity that just changed.
+ */
+export function useUpdateAgentIdentity() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      identity,
+    }: {
+      agentId: string;
+      identity: { emoji?: string; color?: string };
+    }) => updateAgentIdentity(agentId, identity),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+    },
+  });
+}
+
+/**
+ * POST /agents/{id}/avatar — store an image as this agent's avatar (#8339).
+ *
+ * The body is the raw bytes: no multipart, no filename anywhere. The server
+ * decides the format by sniffing them, so a file the browser mislabelled is
+ * still stored correctly and an SVG is still refused.
+ *
+ * Invalidates `avatar(id)` — the cached Blob is now the previous image — as
+ * well as the two reads that carry `avatar_url`. The avatar key is invalidated
+ * in `onSuccess` rather than `onSettled` deliberately: a failed upload changed
+ * nothing on disk, and re-fetching the image after one only spends a request
+ * to arrive back at the bytes already in hand.
+ */
+export function useUploadAgentAvatar() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ agentId, file }: { agentId: string; file: Blob }) =>
+      uploadAgentAvatar(agentId, file),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.avatar(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+    },
+  });
+}
+
+/**
+ * DELETE /agents/{id}/avatar — remove the image and clear `avatar_url` (#8339).
+ *
+ * The reference is cleared whether or not a file was found, which is how an
+ * agent whose `avatar_url` outlived its file — a database restored without the
+ * avatars directory — gets back to rendering its initials.
+ */
+export function useDeleteAgentAvatar() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: deleteAgentAvatar,
+    onSuccess: (_data, agentId) => {
+      qc.invalidateQueries({ queryKey: agentKeys.avatar(agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
     },
   });
 }
