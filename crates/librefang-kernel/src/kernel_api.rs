@@ -413,6 +413,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()>;
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()>;
     fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()>;
+    /// Update an agent's model selection mode and per-agent router override.
+    /// See [`LibreFangKernel::set_agent_model_routing`] for the full contract.
+    fn set_agent_model_routing(
+        &self,
+        agent_id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> KernelResult<()>;
     /// Update an agent's schedule mode and restart its background loop so
     /// the change takes effect immediately, without a daemon restart.
     /// See [`LibreFangKernel::set_agent_schedule`] for the full contract.
@@ -522,7 +530,10 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     async fn disconnect_mcp_server(&self, name: &str) -> bool;
     async fn retry_mcp_connection(self: Arc<Self>, server_name: &str);
     async fn reload_mcp_servers(self: Arc<Self>) -> Result<usize, String>;
-    async fn reconnect_mcp_server(self: Arc<Self>, id: &str) -> Result<usize, String>;
+    async fn reconnect_mcp_server(
+        self: Arc<Self>,
+        id: &str,
+    ) -> Result<usize, crate::McpReconnectError>;
 
     // ====================================================================
     // Triggers / workflows / events
@@ -1301,6 +1312,15 @@ impl KernelApi for LibreFangKernel {
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()> {
         Self::set_agent_mcp_servers(self, agent_id, servers)
     }
+    fn set_agent_model_routing(
+        &self,
+        agent_id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> KernelResult<()> {
+        Self::set_agent_model_routing(self, agent_id, mode, router_override)
+    }
+
     fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
         Self::set_agent_channels(self, agent_id, channels)
     }
@@ -1434,7 +1454,10 @@ impl KernelApi for LibreFangKernel {
     async fn reload_mcp_servers(self: Arc<Self>) -> Result<usize, String> {
         LibreFangKernel::reload_mcp_servers(&self).await
     }
-    async fn reconnect_mcp_server(self: Arc<Self>, id: &str) -> Result<usize, String> {
+    async fn reconnect_mcp_server(
+        self: Arc<Self>,
+        id: &str,
+    ) -> Result<usize, crate::McpReconnectError> {
         LibreFangKernel::reconnect_mcp_server(&self, id).await
     }
 
