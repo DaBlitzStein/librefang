@@ -492,6 +492,20 @@ pub fn find_avatar(avatars_dir: &std::path::Path, agent_id: &str) -> Option<std:
         .find(|path| path.is_file())
 }
 
+/// Remove every stored avatar for `agent_id` except the one under `keep`. Returns how many files were removed.
+///
+/// This is the upload path's version, and the one file it holds back is the point: an upload places the new image first and only then clears the candidates that would shadow it, so that no failure of the placement can take away the picture already stored.
+/// It still has to clear them — [`find_avatar`] probes in a fixed order, so a PNG left beside a new WebP would keep being served and the upload would look like it did nothing.
+/// A missing file is not an error, for the same reason as [`remove_avatars`].
+pub fn remove_avatars_except(avatars_dir: &std::path::Path, agent_id: &str, keep: &str) -> usize {
+    AVATAR_EXTENSIONS
+        .iter()
+        .filter(|ext| **ext != keep)
+        .map(|ext| avatar_path(avatars_dir, agent_id, ext))
+        .filter(|path| std::fs::remove_file(path).is_ok())
+        .count()
+}
+
 /// Remove every stored avatar for `agent_id`. Returns how many files were removed.
 ///
 /// All four candidates are attempted, not just the first: an upload that changed format writes the new extension and removes the old one, and a crash between those two steps would otherwise leave a file that [`find_avatar`] could return for the rest of the agent's life.
