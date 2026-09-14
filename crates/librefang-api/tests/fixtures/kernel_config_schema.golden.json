@@ -888,6 +888,19 @@
         }
       ]
     },
+    "model_router": {
+      "description": "Profile router settings. Complements `default_routing` above: the tier router maps a scored request onto three fixed model slots, while the profile router matches the task against named profiles that also carry a cost tier and a complexity ceiling. Off by default; an agent opts in with `mode = \"flexible\"` in its manifest `[model]` block.",
+      "default": {
+        "enabled": false,
+        "profiles_path": "model_profiles.toml",
+        "complexity_threshold": 0.30000001192092896
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ModelRouterConfig"
+        }
+      ]
+    },
     "network": {
       "description": "Network configuration.",
       "default": {
@@ -1185,6 +1198,7 @@
         "ws_messages_per_minute": 10,
         "ws_terminal_messages_per_minute": 3600,
         "ws_idle_timeout_secs": 1800,
+        "ws_ping_interval_secs": 30,
         "ws_debounce_ms": 100,
         "ws_debounce_chars": 200,
         "auth_rate_limit_per_ip": 10
@@ -5173,6 +5187,35 @@
         "obsidian"
       ]
     },
+    "ModelRouterConfig": {
+      "description": "Router configuration — `config.toml [model_router]`.",
+      "type": "object",
+      "properties": {
+        "complexity_threshold": {
+          "description": "Complexity threshold above which routing is allowed to leave the cheapest tier. Range 0.0–1.0.",
+          "default": 0.30000001192092896,
+          "type": "number",
+          "format": "float"
+        },
+        "default_profile": {
+          "description": "Profile name used when no profile matches the task.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "description": "Master switch. When false the profile router is bypassed entirely and every agent keeps the provider/model in its own manifest.",
+          "default": false,
+          "type": "boolean"
+        },
+        "profiles_path": {
+          "description": "Profile catalog filename, resolved relative to the LibreFang home dir. When the file is absent the builtin profiles are used unchanged.",
+          "default": "model_profiles.toml",
+          "type": "string"
+        }
+      }
+    },
     "ModelRoutingConfig": {
       "description": "Model routing configuration — auto-selects cheap/mid/expensive models by complexity.",
       "type": "object",
@@ -6123,6 +6166,13 @@
           "default": 10,
           "type": "integer",
           "format": "uint32",
+          "minimum": 0.0
+        },
+        "ws_ping_interval_secs": {
+          "description": "WebSocket ping interval in seconds. Default: 30. Set to 0 to disable.\n\nThe server sends a Ping frame after this much silence from the peer and closes the connection if a further interval passes with still nothing received, so a half-open socket is detected in at most twice this value. Without it the only thing that ever discovers a dead peer is a failing write, which means a connection sitting idle between turns — the state a chat socket spends most of its life in — is never probed at all. Detection is deliberately not tied to `ws_idle_timeout_secs`: an answered Ping must not count as activity, or an open browser tab would keep the idle timeout from ever firing.",
+          "default": 30,
+          "type": "integer",
+          "format": "uint64",
           "minimum": 0.0
         },
         "ws_terminal_messages_per_minute": {
