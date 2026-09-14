@@ -4778,6 +4778,7 @@ dependencies = [
  "totp-rs",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "wiremock",
  "zeroize",
@@ -5109,6 +5110,7 @@ dependencies = [
  "tracing",
  "walkdir",
  "webpki-roots",
+ "wiremock",
  "zip 8.6.0",
 ]
 
