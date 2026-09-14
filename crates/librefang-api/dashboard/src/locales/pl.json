@@ -4379,6 +4379,8 @@
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}s",
     "timeout_badge_never": "TTL: nigdy nie odbierany"
+    "field_description_hint": "Agent czyta to dosłownie. Podaj cel, ograniczenia i kryteria ukończenia.",
+    "field_assignee_placeholder": "Nazwa lub ID agenta"
   },
   "prompts": {
     "title": "Prompty",
