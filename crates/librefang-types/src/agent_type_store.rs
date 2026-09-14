@@ -83,7 +83,8 @@ pub fn registry_cache_dir() -> PathBuf {
 /// The registry checkout root under an explicitly supplied home directory.
 ///
 /// Same relationship to [`registry_cache_dir`] as [`agent_types_dir_in`] has to `agent_types_dir`: a caller holding a `KernelConfig` resolves against the home *that kernel* was configured with, which an embedder can point somewhere the process environment knows nothing about (#8112).
-/// Both spellings exist because the boot-time sync still runs before any kernel is available.
+/// This is the spelling every in-tree caller wants, and after #8112 it is the only one any of them uses — `registry_cache_dir` now has no callers in this repository at all.
+/// It survives because it is `pub`, so removing it is a breaking change to this crate's API rather than a cleanup, and because an embedder with no `KernelConfig` in hand still needs an environment-resolved answer.
 pub fn registry_cache_dir_in(home_dir: &std::path::Path) -> PathBuf {
     home_dir.join("registry")
 }

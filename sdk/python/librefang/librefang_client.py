@@ -246,6 +246,15 @@ class _AgentsResource(_Resource):
     def patch_agent(self, id: str, **data):
         return self._c._request("PATCH", f"/api/agents/{id}", data)
 
+    def serve_agent_avatar(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/avatar")
+
+    def upload_agent_avatar(self, id: str, body: bytes, content_type: str = "application/octet-stream"):
+        return self._c._request("POST", f"/api/agents/{id}/avatar", body, content_type=content_type)
+
+    def delete_agent_avatar(self, id: str):
+        return self._c._request("DELETE", f"/api/agents/{id}/avatar")
+
     def get_agent_channels(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/channels")
 
@@ -299,6 +308,9 @@ class _AgentsResource(_Resource):
 
     def get_agent_manifest_toml(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/manifest")
+
+    def list_agent_manifest_history(self, id: str, limit: Any = None):
+        return self._c._request("GET", f"/api/agents/{id}/manifest-history", None, query={"limit": limit})
 
     def get_agent_mcp_servers(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/mcp_servers")
@@ -751,8 +763,8 @@ class _KnowledgeResource(_Resource):
     def list_documents(self, name: str):
         return self._c._request("GET", f"/api/knowledge/{name}/documents")
 
-    def put_document(self, name: str, filename: str, **data):
-        return self._c._request("PUT", f"/api/knowledge/{name}/documents/{filename}", data)
+    def put_document(self, name: str, filename: str, body: bytes, content_type: str = "application/octet-stream"):
+        return self._c._request("PUT", f"/api/knowledge/{name}/documents/{filename}", body, content_type=content_type)
 
     def delete_document(self, name: str, filename: str):
         return self._c._request("DELETE", f"/api/knowledge/{name}/documents/{filename}")

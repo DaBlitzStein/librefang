@@ -210,6 +210,18 @@ class AgentsResource {
     return this._c._request("PATCH", `/api/agents/${id}`, data, undefined);
   }
 
+  async serveAgentAvatar(id) {
+    return this._c._request("GET", `/api/agents/${id}/avatar`);
+  }
+
+  async uploadAgentAvatar(id, body, contentType) {
+    return this._c._request("POST", `/api/agents/${id}/avatar`, body, undefined, contentType || "application/octet-stream");
+  }
+
+  async deleteAgentAvatar(id) {
+    return this._c._request("DELETE", `/api/agents/${id}/avatar`);
+  }
+
   async getAgentChannels(id) {
     return this._c._request("GET", `/api/agents/${id}/channels`);
   }
@@ -280,6 +292,10 @@ class AgentsResource {
 
   async getAgentManifestToml(id) {
     return this._c._request("GET", `/api/agents/${id}/manifest`);
+  }
+
+  async listAgentManifestHistory(id, query) {
+    return this._c._request("GET", `/api/agents/${id}/manifest-history`, undefined, query);
   }
 
   async getAgentMcpServers(id) {
@@ -876,8 +892,8 @@ class KnowledgeResource {
     return this._c._request("GET", `/api/knowledge/${name}/documents`);
   }
 
-  async putDocument(name, filename, data) {
-    return this._c._request("PUT", `/api/knowledge/${name}/documents/${filename}`, data, undefined);
+  async putDocument(name, filename, body, contentType) {
+    return this._c._request("PUT", `/api/knowledge/${name}/documents/${filename}`, body, undefined, contentType || "application/octet-stream");
   }
 
   async deleteDocument(name, filename) {

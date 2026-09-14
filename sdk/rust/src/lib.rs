@@ -636,6 +636,48 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn serve_agent_avatar(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn upload_agent_avatar(
+        &self,
+        id: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "agents", id, "avatar"],
+            body,
+            content_type.unwrap_or("application/octet-stream"),
+        )
+        .await
+    }
+
+    pub async fn delete_agent_avatar(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "agents", id, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_channels(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -854,6 +896,22 @@ impl AgentsResource {
             &["api", "agents", id, "manifest"],
             None,
             &[],
+        )
+        .await
+    }
+
+    pub async fn list_agent_manifest_history(
+        &self,
+        id: &str,
+        limit: Option<&str>,
+    ) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "manifest-history"],
+            None,
+            &[("limit", limit)],
         )
         .await
     }
@@ -2671,14 +2729,21 @@ impl KnowledgeResource {
         .await
     }
 
-    pub async fn put_document(&self, name: &str, filename: &str, data: Value) -> Result<Value> {
-        do_req(
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn put_document(
+        &self,
+        name: &str,
+        filename: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
             &["api", "knowledge", name, "documents", filename],
-            Some(data),
-            &[],
+            body,
+            content_type.unwrap_or("application/octet-stream"),
         )
         .await
     }

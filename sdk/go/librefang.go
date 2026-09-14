@@ -359,6 +359,22 @@ func (r *AgentsResource) PatchAgent(id string, data map[string]interface{}) (int
 	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s", id), data, nil)
 }
 
+func (r *AgentsResource) ServeAgentAvatar(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/avatar", id), nil, nil)
+}
+
+// UploadAgentAvatar sends a raw application/octet-stream body. An empty contentType defaults to it.
+func (r *AgentsResource) UploadAgentAvatar(id string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/avatar", id), body, contentType)
+}
+
+func (r *AgentsResource) DeleteAgentAvatar(id string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/avatar", id), nil, nil)
+}
+
 func (r *AgentsResource) GetAgentChannels(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/channels", id), nil, nil)
 }
@@ -429,6 +445,10 @@ func (r *AgentsResource) AgentLogs(id string, query map[string]string) (interfac
 
 func (r *AgentsResource) GetAgentManifestToml(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest", id), nil, nil)
+}
+
+func (r *AgentsResource) ListAgentManifestHistory(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/manifest-history", id), nil, query)
 }
 
 func (r *AgentsResource) GetAgentMcpServers(id string) (interface{}, error) {
@@ -1007,8 +1027,12 @@ func (r *KnowledgeResource) ListDocuments(name string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/knowledge/%s/documents", name), nil, nil)
 }
 
-func (r *KnowledgeResource) PutDocument(name string, filename string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/knowledge/%s/documents/%s", name, filename), data, nil)
+// PutDocument sends a raw application/octet-stream body. An empty contentType defaults to it.
+func (r *KnowledgeResource) PutDocument(name string, filename string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return r.client.requestRaw("PUT", fmt.Sprintf("/api/knowledge/%s/documents/%s", name, filename), body, contentType)
 }
 
 func (r *KnowledgeResource) DeleteDocument(name string, filename string) (interface{}, error) {
