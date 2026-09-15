@@ -237,7 +237,12 @@ const agentsRoute = createRoute({
   // way from an agent row into the chat.
   validateSearch: (search: Record<string, unknown>): { template?: string } => {
     const out: { template?: string } = {};
-    if (typeof search.template === "string") out.template = search.template;
+    // An empty value is dropped rather than carried: no agent type can be named
+    // "", and admitting it would open the drawer on an empty picker with Create
+    // disabled and no way back.
+    if (typeof search.template === "string" && search.template !== "") {
+      out.template = search.template;
+    }
     return out;
   },
   component: () => <LazyRouteBoundary><AgentsPage /></LazyRouteBoundary>

@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { AgentTypesPage } from "./AgentTypesPage";
 import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
-import { useAgents, useTools } from "../lib/queries/agents";
+import { useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
 import {
   useCreateAgentType,
@@ -30,7 +30,6 @@ vi.mock("../lib/queries/agentTypes", () => ({
 }));
 
 vi.mock("../lib/queries/agents", () => ({
-  useAgents: vi.fn(),
   useTools: vi.fn(),
 }));
 
@@ -168,7 +167,6 @@ function renderPage(promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending:
   vi.mocked(useAgentTypeHistory).mockReturnValue(
     mockQuery({ versions: [] }) as unknown as ReturnType<typeof useAgentTypeHistory>,
   );
-  vi.mocked(useAgents).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useAgents>);
   vi.mocked(useTools).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useTools>);
   vi.mocked(useSkills).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useSkills>);
   // Stub both spellings of the manifest-write hook rather than picking one:
@@ -225,7 +223,9 @@ describe("AgentTypesPage run", () => {
 
   it("opens the create flow with this type already selected", () => {
     renderPage(idle);
-    fireEvent.click(screen.getByRole("button", { name: RUN_LABEL }));
+    // The accessible name carries the row's own type, not just the verb, so
+    // this also pins that the control is distinguishable per row.
+    fireEvent.click(screen.getByRole("button", { name: `${RUN_LABEL}: ${TYPE.name}` }));
     expect(navigateSpy).toHaveBeenCalledWith({
       to: "/agents",
       search: { template: TYPE.name },

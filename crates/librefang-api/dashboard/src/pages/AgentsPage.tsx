@@ -331,6 +331,24 @@ export function SystemPromptSection({
   );
 }
 
+/**
+ * What the create drawer should open on when `/agents` was reached with a
+ * `template` search param, or `null` when it was not.
+ *
+ * Pure and exported on purpose: `AgentsPage` has no render harness (it holds
+ * some twenty hooks), so a rule left inline in the effect below would be
+ * covered by nothing, and the param name is the contract with the sender on
+ * `/agent-types`.
+ */
+export function createDrawerSeed(
+  template: string | undefined,
+): { createMode: "template"; templateName: string } | null {
+  // Falsy covers both "no param" and the empty string `validateSearch` would
+  // otherwise admit.
+  if (!template) return null;
+  return { createMode: "template", templateName: template };
+}
+
 export function AgentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -903,6 +921,11 @@ export function AgentsPage() {
     // would stay shut — the press would look like nothing happened.
     if (routeTemplate) {
       void navigate({ to: "/agents", search: {}, replace: true });
+      // This drawer was opened by a Run press rather than by the Create button,
+      // so hand the tab back to its default. Leaving it on Template would show
+      // an empty picker with Create disabled the next time the drawer is opened
+      // by hand. A tab the operator picked for themselves still persists.
+      setCreateMode("form");
     }
     // Don't reset while a spawn is in flight — reset() flips isPending
     // back to false, and since the fetch isn't actually aborted the user
@@ -920,10 +943,11 @@ export function AgentsPage() {
   // the type already selected. Run used to ask which *existing* agent to fork
   // instead, which answers a different question than the button asks.
   useEffect(() => {
-    if (!routeTemplate) return;
+    const seed = createDrawerSeed(routeTemplate);
+    if (!seed) return;
     setShowCreate(true);
-    setCreateMode("template");
-    setTemplateName(routeTemplate);
+    setCreateMode(seed.createMode);
+    setTemplateName(seed.templateName);
   }, [routeTemplate]);
 
   // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's

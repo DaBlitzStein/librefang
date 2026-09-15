@@ -496,12 +496,16 @@ function AgentTypeRow({
             live agent's manifest this API refuses to edit, but the spawn engine
             resolves it by name just as happily as an operator-authored type
             (#6699). */}
+        {/* The row's own name goes into the accessible name: every row carries
+            this same control, so a bare "Create Agent" repeated N times tells a
+            screen-reader user nothing about which type it would create. Its
+            neighbours name their own object the same way (#8166). */}
         <button
           type="button"
           onClick={onRun}
           className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
-          aria-label={t("agents.create_agent")}
-          title={t("agents.create_agent")}
+          aria-label={`${t("agents.create_agent")}: ${type.name}`}
+          title={`${t("agents.create_agent")}: ${type.name}`}
         >
           <Plus className="h-3.5 w-3.5" />
         </button>
