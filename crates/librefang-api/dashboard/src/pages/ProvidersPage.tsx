@@ -191,7 +191,12 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
   overridesLoading: boolean;
   /** Which `ModelOverrides` field this editor writes. */
   field: "max_tokens" | "context_window";
-  /** The catalog value this field reverts to, or undefined when unknown. */
+  /**
+   * The value this field displays when there is no override, or undefined when unknown.
+   *
+   * For `context_window` that is also what clearing the field reverts to.
+   * For `max_tokens` it is the catalog capacity, which is **not** the revert target — clearing falls through to the daemon's own default — so the hints below say different things about the same prop.
+   */
   catalogValue?: number;
   label: string;
   savedMessage: string;
