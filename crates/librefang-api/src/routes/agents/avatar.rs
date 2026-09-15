@@ -201,14 +201,6 @@ pub async fn upload_agent_avatar(
         );
     }
 
-    let avatar_url = librefang_types::media::agent_avatar_url(&id);
-    if !store_avatar_url(&state, agent_id, Some(avatar_url.clone())) {
-        // Nothing on disk has moved, so the avatar already stored is still the
-        // one being served; only this request's temp file is left to drop.
-        let _ = std::fs::remove_file(&tmp);
-        return json_error(StatusCode::NOT_FOUND, t.t("api-error-agent-not-found"));
-    }
-
     if let Err(error) = std::fs::rename(&tmp, &path) {
         // Nothing has been cleared either, so the refusal costs the caller
         // nothing beyond the request itself.
@@ -217,6 +209,21 @@ pub async fn upload_agent_avatar(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Could not store the avatar: {error}"),
         );
+    }
+
+    // The identity is written only once the image is in place, and the order is
+    // the point rather than the tidiness: recording it first meant a failed
+    // rename left `avatar_url` pointing at a route with nothing behind it, which
+    // is the same 404-on-every-render the ordering above exists to prevent. It
+    // would have moved the damage off the disk and into the manifest, where
+    // `PATCH /identity` does not accept the old value back.
+    let avatar_url = librefang_types::media::agent_avatar_url(&id);
+    if !store_avatar_url(&state, agent_id, Some(avatar_url.clone())) {
+        // The agent went away mid-request. The image just placed belongs to
+        // nobody, so it goes with it — the rename has already replaced whatever
+        // was at this path, so nothing else is lost by dropping it.
+        let _ = std::fs::remove_file(&path);
+        return json_error(StatusCode::NOT_FOUND, t.t("api-error-agent-not-found"));
     }
 
     // Only now, with the new file in place, are the other candidates cleared.
