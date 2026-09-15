@@ -123,6 +123,16 @@ const TYPE: AgentTemplate = {
   editable: true,
 };
 
+/** A second row, only ever rendered when a test needs two of them at once. */
+const OTHER_TYPE: AgentTemplate = {
+  name: "analyst",
+  description: "Sifts numbers",
+  provider: "anthropic",
+  model: "claude-sonnet-5",
+  source: "agent-type",
+  editable: true,
+};
+
 const DETAIL: AgentTypeDetail = {
   name: "researcher",
   source: "agent-type",
@@ -157,9 +167,12 @@ function mockQuery<T>(data: T) {
 }
 
 /** The promote mutation is the only one a test ever varies. */
-function renderPage(promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean }) {
+function renderPage(
+  promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean },
+  types: AgentTemplate[] = [TYPE],
+) {
   vi.mocked(useAgentTypes).mockReturnValue(
-    mockQuery([TYPE]) as unknown as ReturnType<typeof useAgentTypes>,
+    mockQuery(types) as unknown as ReturnType<typeof useAgentTypes>,
   );
   vi.mocked(useAgentType).mockReturnValue(
     mockQuery(DETAIL) as unknown as ReturnType<typeof useAgentType>,
@@ -225,6 +238,19 @@ describe("AgentTypesPage run", () => {
     renderPage(idle);
     // The accessible name carries the row's own type, not just the verb, so
     // this also pins that the control is distinguishable per row.
+    fireEvent.click(screen.getByRole("button", { name: `${RUN_LABEL}: ${TYPE.name}` }));
+    expect(navigateSpy).toHaveBeenCalledWith({
+      to: "/agents",
+      search: { template: TYPE.name },
+    });
+  });
+
+  // With one row on screen the test above cannot tell a name taken from the row
+  // apart from one taken from the list it happens to be the first of. Putting
+  // the wanted row second closes that: a name read off the list, or off the
+  // first row, now sends `analyst` and fails here.
+  it("takes the name from the row it was pressed on", () => {
+    renderPage(idle, [OTHER_TYPE, TYPE]);
     fireEvent.click(screen.getByRole("button", { name: `${RUN_LABEL}: ${TYPE.name}` }));
     expect(navigateSpy).toHaveBeenCalledWith({
       to: "/agents",
