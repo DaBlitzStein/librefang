@@ -1839,9 +1839,16 @@ export function currentUserAvatarPath(): string {
   return "/api/users/me/avatar";
 }
 
+/** What the daemon answers a successful upload with.
+ *
+ *  No `avatar_url`, deliberately, and the agent side's twin carries one — so the
+ *  absence is worth a line rather than looking like an omission. An agent stores
+ *  the path in its manifest and the daemon reads it back from there; a user has
+ *  no such field. Nothing here needs one either: the dashboard draws the
+ *  caller's own picture and takes it from the literal `me` path, which is not a
+ *  URL this response could improve on. */
 export interface UserAvatarUploadResult {
   status: string;
-  avatar_url: string;
   content_type: string;
   bytes: number;
 }
@@ -3577,6 +3584,17 @@ export async function getStatus(): Promise<StatusResponse> {
 
 export interface WhoamiResponse {
   name: string;
+  /** The calling credential's own role — `owner`, `admin`, `user` or `viewer`.
+   *
+   *  The credential's, not the effective one: the daemon also reports the roles
+   *  a caller holds through groups, in `roles`, and the two are different
+   *  answers to different questions. This is the field the daemon's own write
+   *  check compares against (`user_role_allows_request`), which is why it is the
+   *  one a caller may use to decide whether to offer a write.
+   *
+   *  This interface is a partial view of `WhoamiView` — it declares what the
+   *  dashboard reads, not everything the daemon sends. */
+  role: string;
   /** The caller's emoji, absent when they have not set one (#8339).
    *
    *  Carried here rather than fetched from `/api/users/{name}` because every

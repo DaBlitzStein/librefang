@@ -813,9 +813,8 @@ function AppearanceRow({
  * pre-checks.
  *
  * It is drawn for the caller and **nobody else**, which is why `UserFormModal`
- * mounts it only when the row being edited is the caller's own. That is not a
- * limitation of this component but of the reads underneath it, in two
- * independent ways:
+ * mounts it only when the row being edited is the caller's own — and only when that caller's credential is `owner`, since every non-GET under `/api/users` is an Owner action on the daemon side and a lower role would be handed controls that answer 403.
+ * That is not a limitation of this component but of the reads underneath it, in two independent ways:
  *
  *   - `GET /api/users/me/avatar` is the only user-avatar path
  *     `AUTHENTICATED_IMAGE_PATH_RE` admits, because a user name is
@@ -1004,10 +1003,13 @@ export function UserAppearanceSection({
                 // hijack the composition.
                 if (e.key === "Enter" && !e.nativeEvent.isComposing) saveEmoji();
               }}
-              // 32, not 1 or 2: a single emoji is not a single character. A
-              // family with ZWJ joiners (👨‍👩‍👧‍👦) is eleven UTF-16 units, and
-              // the daemon caps the value at `MAX_EMOJI_CHARS` (32 `char`s) —
-              // this mirrors that number rather than picking a rounder one.
+              // 32, matching the daemon's `MAX_EMOJI_CHARS` in value but **not**
+              // in unit: `maxLength` counts UTF-16 code units, the daemon counts
+              // `char`s, so this side is the stricter of the two. A family with
+              // ZWJ joiners (👨‍👩‍👧‍👦) is eleven code units and seven `char`s,
+              // so a long run of astral emoji is refused here that the daemon
+              // would have taken. Strict is the right direction for an input —
+              // but it is not parity, and saying it was parity was wrong.
               maxLength={32}
               placeholder={t("users.identity.emoji_placeholder", { defaultValue: "None" })}
               aria-label={t("users.identity.emoji", { defaultValue: "Emoji" })}
@@ -1099,6 +1101,18 @@ function UserFormModal({
   // caller and no one else.
   const whoami = useWhoami();
   const isSelf = !!editing && editing.name === whoami.data?.name;
+
+  // ...and whether the caller may actually write to it. Every non-GET under
+  // `/api/users` is an Owner action on the daemon side — `is_owner_only_write`
+  // matches the whole prefix, avatar routes included — so a `user` or `viewer`
+  // credential reaching these controls would be shown a button and given a 403.
+  //
+  // `whoami.role` is the credential's own role, which is exactly what that
+  // check compares: `user_role_allows_request` reads the credential, and the
+  // group-derived roles `whoami` also reports live in `roles` without opening
+  // this door. Reading the wrong one of those two fields would show the editor
+  // to somebody the daemon refuses — the direction that produces the 403.
+  const canWriteOwnIdentity = isSelf && whoami.data?.role === "owner";
 
   // Reset form when modal toggles or `editing` changes.
   const lastInit = useRef<{ key: string; editing: UserItem | null }>({
@@ -1242,7 +1256,7 @@ function UserFormModal({
         {error ? (
           <p className="text-xs text-error">{error}</p>
         ) : null}
-        {isSelf && editing ? (
+        {canWriteOwnIdentity && editing ? (
           <UserAppearanceSection
             name={editing.name}
             emoji={whoami.data?.emoji}
