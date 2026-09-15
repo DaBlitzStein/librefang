@@ -1,7 +1,7 @@
 import { formatRelativeTime, formatSqliteDateTime } from "../lib/datetime";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ALLOWED_AGENT_AVATAR_TYPES,
   MAX_AGENT_AVATAR_BYTES,
@@ -769,9 +769,31 @@ export function ChannelsSection({ agentId }: { agentId: string }) {
   );
 }
 
+
+/**
+ * What the create drawer should open on when `/agents` was reached with a
+ * `template` search param, or `null` when it was not.
+ *
+ * Pure and exported on purpose: `AgentsPage` has no render harness (it holds
+ * some twenty hooks), so a rule left inline in the effect below would be
+ * covered by nothing, and the param name is the contract with the sender on
+ * `/agent-types`.
+ */
+export function createDrawerSeed(
+  template: string | undefined,
+): { createMode: "template"; templateName: string } | null {
+  // Falsy covers both "no param" and the empty string `validateSearch` would
+  // otherwise admit.
+  if (!template) return null;
+  return { createMode: "template", templateName: template };
+}
+
 export function AgentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  // The `template` search param, set by the agent-types page's Run button.
+  // Deliberately not named `search`: the local state below is the agent filter.
+  const { template: routeTemplate } = useSearch({ from: "/agents" });
   const [search, setSearch] = useState("");
   const [detailAgent, setDetailAgent] = useState<AgentDetail | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -1405,6 +1427,18 @@ export function AgentsPage() {
     setTomlParseError(null);
     setTemplateName("");
     setTemplateCustomName("");
+    // Drop the incoming `template` param on the way out. Without this, pressing
+    // Run on the same type a second time would navigate to a URL that already
+    // equals the current one, the effect below would not re-run, and the drawer
+    // would stay shut — the press would look like nothing happened.
+    if (routeTemplate) {
+      void navigate({ to: "/agents", search: {}, replace: true });
+      // This drawer was opened by a Run press rather than by the Create button,
+      // so hand the tab back to its default. Leaving it on Template would show
+      // an empty picker with Create disabled the next time the drawer is opened
+      // by hand. A tab the operator picked for themselves still persists.
+      setCreateMode("form");
+    }
     // Don't reset while a spawn is in flight — reset() flips isPending
     // back to false, and since the fetch isn't actually aborted the user
     // could reopen the modal and submit again before the first response
@@ -1415,6 +1449,18 @@ export function AgentsPage() {
       spawnMutation.reset();
     }
   };
+
+  // Arriving from the agent-types page's Run button: the operator asked to
+  // instantiate that type, so the create drawer opens on the template tab with
+  // the type already selected. Run used to ask which *existing* agent to fork
+  // instead, which answers a different question than the button asks.
+  useEffect(() => {
+    const seed = createDrawerSeed(routeTemplate);
+    if (!seed) return;
+    setShowCreate(true);
+    setCreateMode(seed.createMode);
+    setTemplateName(seed.templateName);
+  }, [routeTemplate]);
 
   // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
   // serialized output into the textarea so advanced users can keep editing.
