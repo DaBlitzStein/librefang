@@ -295,37 +295,6 @@ fn validate_api_key_hash(hash: Option<&str>) -> Result<Option<String>, String> {
     Ok(Some(trimmed.to_string()))
 }
 
-/// Longest emoji accepted, in `char`s.
-///
-/// A single glyph is one `char` for the common case and several for the ones built by joining or by a variation selector — `👨‍👩‍👧‍👦` is seven code points, `🏳️‍🌈` is six — so the ceiling is set to clear the widest sequence a picker emits with room to spare, and to stay far below the point where the value stops being a glyph and becomes a string someone is smuggling into `config.toml`.
-const MAX_EMOJI_CHARS: usize = 32;
-
-/// Normalize the requested identity emoji, or say why it was refused (#8339).
-///
-/// `None` and an empty-or-whitespace string both mean "clear the stored emoji", matching how [`validate_api_key_hash`] treats the same shapes on the field next to it.
-///
-/// Nothing here checks that the value *is* an emoji, and that is deliberate: deciding "is this a glyph" needs an emoji table that would go stale against Unicode, and the two properties that actually matter for a value stored in `config.toml` and rendered into a DOM text node are length and the absence of control characters.
-/// A `Z` is therefore accepted as an emoji. It renders as a `Z`.
-fn validate_emoji(emoji: Option<&str>) -> Result<Option<String>, String> {
-    let Some(raw) = emoji else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let len = trimmed.chars().count();
-    if len > MAX_EMOJI_CHARS {
-        return Err(format!(
-            "emoji must be at most {MAX_EMOJI_CHARS} characters; this one is {len}"
-        ));
-    }
-    if trimmed.chars().any(char::is_control) {
-        return Err("emoji must not contain control characters".to_string());
-    }
-    Ok(Some(trimmed.to_string()))
-}
-
 fn err_response(status: StatusCode, msg: impl Into<String>) -> axum::response::Response {
     (
         status,
@@ -660,7 +629,21 @@ pub async fn delete_user(
     })
     .await
     {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            // The stored image is keyed on `UserId::from_name(name)`, which is a
+            // stable derivation — so leaving the file behind means whoever next
+            // takes this name inherits the previous holder's picture, and
+            // `has_avatar` then answers true for somebody who never set one. The
+            // agent side clears the same residue for the same reason
+            // (`agent_purge`), and this is the only place a user row goes away.
+            //
+            // Strictly after the persist, never before: a delete that failed
+            // must not have taken the picture with it.
+            let dir = state.kernel.config_snapshot().effective_user_avatars_dir();
+            let _ =
+                librefang_types::media::remove_avatars(&dir, &UserId::from_name(&name).to_string());
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
@@ -1879,6 +1862,10 @@ pub async fn update_user_policy(
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
+    // Only the tests reach for these now: the identity route calls
+    // `validate_emoji` through its full path from `avatar.rs`, and the const is
+    // here to size the over-length fixture rather than to bound anything.
+    use librefang_types::config::{validate_emoji, MAX_EMOJI_CHARS};
 
     #[tokio::test]
     async fn internal_user_errors_are_scrubbed_from_http_body() {

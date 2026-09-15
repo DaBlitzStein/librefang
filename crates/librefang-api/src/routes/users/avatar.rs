@@ -66,7 +66,10 @@ pub(crate) const USER_AVATAR_BODY_LIMIT_BYTES: usize = MAX_AVATAR_BYTES + BODY_L
 /// Resolve the calling credential to its configured `[[users]]` row, if it has one.
 ///
 /// Mirrors [`crate::routes::authz::whoami`], and for the same reason the two must agree: the name a credential resolves to is the key every `/api/users/{name}` route matches on, so an identity that endpoint reports is an identity this one can find.
-/// The synthetic root credential — master api key, trusted loopback, `allow_no_auth` — names no `[[users]]` entry at all, and `None` is the honest answer for it rather than a lookup under a literal `"root"` that would silently succeed in a deployment that happens to declare one.
+/// The synthetic root credential — master api key, trusted loopback, `allow_no_auth` — carries no `AuthenticatedApiUser`, so it resolves under the literal name `"root"` and **will** match a deployment that declares a `[[users]]` entry by that name.
+/// That is deliberate, not an oversight: `whoami` resolves the same way and for the same reason, and the alternative — treating the synthetic credential as owning nothing while every other route keys on the name — would be the two endpoints disagreeing about who the caller is.
+/// It grants nothing a caller did not already have, because the synthetic credential is Owner-equivalent with or without a row behind it.
+/// A credential whose name matches no row is `None`, which is the honest answer for an identity that owns nothing.
 fn resolve_caller(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> Option<UserConfig> {
     let name = match api_user {
         Some(u) => u.name.as_str(),
@@ -403,7 +406,7 @@ pub async fn update_user_identity(
     caller: Option<Extension<AuthenticatedApiUser>>,
     Json(req): Json<UserIdentityUpdate>,
 ) -> axum::response::Response {
-    let emoji = match super::validate_emoji(req.emoji.as_deref()) {
+    let emoji = match librefang_types::config::validate_emoji(req.emoji.as_deref()) {
         Ok(emoji) => emoji,
         Err(error) => return err_response(StatusCode::BAD_REQUEST, error),
     };
