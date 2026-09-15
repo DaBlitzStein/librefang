@@ -782,6 +782,43 @@ reasoning_mode = "none"
     expect(second.extras.thinking).toEqual({ reasoning_mode: "none" });
   });
 
+  // The same loss, in a section that never got its slot.
+  //
+  // `[autonomous]` is in `FORM_TOP_LEVEL_KEYS`, so its table never reaches
+  // `extras.topLevel`, and `ManifestExtras` has no member for it — so every key
+  // the form has no widget for is consumed on parse and never re-emitted on
+  // save. `block_stall_degrade_after` is one today, and it is the loop-guard
+  // threshold, not a display preference: an agent that had it set comes back
+  // from an unrelated edit with the guard gone.
+  it("round-trips an unknown [autonomous] key such as block_stall_degrade_after", () => {
+    const original = `name = "agent"
+
+[autonomous]
+max_iterations = 50
+block_stall_degrade_after = 2
+`;
+    const result = parseManifestToml(original);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.form.autonomous.max_iterations).toBe("50");
+
+    const out = serializeManifestForm(result.form, result.extras);
+    expect(out).toContain("block_stall_degrade_after");
+
+    // Inside [autonomous], not leaked into whichever section follows: a scalar
+    // emitted after the next `[header]` belongs to that section instead.
+    const after = out.slice(out.indexOf("[autonomous]") + "[autonomous]".length);
+    const nextHeader = after.search(/\n\[/);
+    const block = nextHeader === -1 ? after : after.slice(0, nextHeader);
+    expect(block).toContain("block_stall_degrade_after");
+
+    // Stable across a second pass.
+    const second = parseManifestToml(out);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.extras.autonomous).toEqual({ block_stall_degrade_after: 2 });
+  });
+
   // Unticking "enabled" is the user deleting the whole table, so the preserved
   // keys go with it rather than stranding a [thinking] block nothing owns.
   it("drops preserved [thinking] extras when the section is disabled", () => {
