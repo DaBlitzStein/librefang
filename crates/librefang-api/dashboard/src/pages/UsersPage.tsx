@@ -37,7 +37,7 @@ import {
 
 import type { UserItem, UserUpsertPayload } from "../lib/http/client";
 import { ALLOWED_AVATAR_TYPES, MAX_AVATAR_BYTES } from "../api";
-import { useUsers } from "../lib/queries/users";
+import { useUserAvatarUrl, useUsers } from "../lib/queries/users";
 import { useWhoami } from "../lib/queries/authz";
 import {
   useCreateUser,
@@ -822,7 +822,9 @@ function AppearanceRow({
  *     `encodeURIComponent("Juan Pérez")` carries a `%`, and widening the class
  *     to accept `%XX` would readmit `%2F`, which decodes to the `/` that
  *     allowlist exists to stop.
- *   - `UserItem` carries no emoji, so there is no list-shaped read to seed a
+ *   - `UserItem` is the only user-shaped type the dashboard declares without
+ *     `emoji` and `has_avatar` on it — the daemon's `UserView` carries both, on
+ *     the list and the detail alike. So there is no list-shaped read to seed a
  *     draft from even if an admin wanted to set someone else's glyph.
  *
  * Offering the editor over another user would therefore mean drawing the
@@ -849,8 +851,8 @@ export function UserAppearanceSection({
 }: {
   name: string;
   emoji?: string;
-  /** `whoami.has_avatar`. Read here rather than asked of the avatar query, which
-   *  needs this very answer to decide whether to run. */
+  /** `whoami.has_avatar`. `undefined` means the daemon did not say, which the
+   *  preview reads as "fetch and find out" — see `hasPicture` below. */
   hasAvatar?: boolean;
 }) {
   const { t } = useTranslation();
@@ -861,6 +863,16 @@ export function UserAppearanceSection({
   const storedEmoji = emoji ?? "";
   const [emojiDraft, setEmojiDraft] = useState(storedEmoji);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // The buttons and the preview have to agree about whether a picture exists.
+  // `hasAvatar` is `undefined` on a daemon that predates the field, and the
+  // preview deliberately reads that as "not told, so fetch" — which draws the
+  // image. Driving the buttons off the raw prop instead left them saying
+  // "Upload" with no Remove while that image was on screen, so they read the
+  // same answer the preview does: the prop, or failing it the blob it fetched.
+  // Same query key, so this shares the preview's request rather than adding one.
+  const avatarSrc = useUserAvatarUrl(name, hasAvatar !== false);
+  const hasPicture = Boolean(hasAvatar) || Boolean(avatarSrc);
 
   // Re-seed on the user, not on the stored emoji: the drawer stays mounted
   // while the operator clicks through the list, and keying this on the value
@@ -1044,11 +1056,11 @@ export function UserAppearanceSection({
             >
               {uploadAvatarMutation.isPending
                 ? t("common.saving")
-                : hasAvatar
+                : hasPicture
                   ? t("users.identity.avatar_replace", { defaultValue: "Replace" })
                   : t("users.identity.avatar_upload", { defaultValue: "Upload" })}
             </button>
-            {hasAvatar && (
+            {hasPicture && (
               <button
                 type="button"
                 onClick={removeAvatar}

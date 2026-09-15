@@ -198,6 +198,14 @@ export function useUploadUserAvatar() {
       // changes, every cached copy of that answer is wrong.
       qc.invalidateQueries({ queryKey: userKeys.detail(variables.name) });
       qc.invalidateQueries({ queryKey: userKeys.lists() });
+      // Neither of those can actually carry that answer: `UserItem` declares no
+      // `has_avatar`, so the detail and list responses the two lines above
+      // refresh have nothing to say about it. The read that does report it is
+      // `whoami`, and the appearance section drives its buttons straight off
+      // that. Left stale, it draws the picture the upload just stored and still
+      // offers "Upload" with no Remove — the operator has to close and reopen
+      // the drawer to remove what they can already see.
+      qc.invalidateQueries({ queryKey: authzKeys.whoami() });
     },
   });
 }
@@ -218,6 +226,10 @@ export function useDeleteUserAvatar() {
       qc.removeQueries({ queryKey: userKeys.avatar(name) });
       qc.invalidateQueries({ queryKey: userKeys.detail(name) });
       qc.invalidateQueries({ queryKey: userKeys.lists() });
+      // Same reason as the upload above: `whoami` is the only read that reports
+      // whether a picture exists, and the section's controls read it. Without
+      // this they keep offering Remove for a picture that is no longer there.
+      qc.invalidateQueries({ queryKey: authzKeys.whoami() });
     },
   });
 }
@@ -225,9 +237,9 @@ export function useDeleteUserAvatar() {
 /**
  * PATCH /api/users/{name}/identity — the user's emoji.
  *
- * Partial by contract, like the agent one: a field this body omits keeps its
- * stored value, so clearing the emoji means sending it empty rather than
- * omitting it.
+ * Not partial, unlike the agent twin: the daemon documents `emoji` as "absent is
+ * treated as `null`" and assigns the validated value straight onto the row, so
+ * a body that omits the key clears the glyph rather than leaving it alone.
  *
  * This is the one avatar write that goes through the config file. The daemon
  * rewrites the `[[users]]` table with `toml_edit` — comments and unrelated
@@ -250,7 +262,8 @@ export function useUpdateUserIdentity() {
       // out to be the caller's: this hook is addressed by name and has no way to
       // know whose name it was handed, and the cost of guessing wrong is one
       // small request rather than a bubble that goes on showing the old emoji.
-      // The image above needs none of this — it has its own key.
+      // The two image writes do the same, for the same underlying reason: both
+      // `emoji` and `has_avatar` are answers only this read carries.
       qc.invalidateQueries({ queryKey: authzKeys.whoami() });
     },
   });
