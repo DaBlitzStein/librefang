@@ -975,8 +975,12 @@ describe("ProvidersPage", () => {
   it("keeps an active context-window override from deleting itself (#7774)", async () => {
     // The row's `context_window` is the *effective* value, so it equals the
     // override. Reverting against it instead of `limits_catalog` would make the
-    // seeded field look identical to the catalog default and clear the override
-    // on the next save.
+    // seeded field show a number the override no longer distinguishes.
+    //
+    // What this guards today is the seeding and the hint, not the write: the save
+    // path no longer reads the revert target at all (see `modelOverrideDraft.ts`),
+    // so the class of defect the assertion was written for is no longer
+    // expressible here. Kept because those two halves still discriminate.
     seedDiscoveredModel({ context_window: 16384, limitsCatalogWindow: 131072 });
     useModelOverridesMock.mockReturnValue({
       data: { context_window: 16384 },
