@@ -298,8 +298,13 @@ async fn boot() -> Harness {
 // ---------------------------------------------------------------------------
 
 /// `POST /api/agents/{id}/message` with user A's bearer and `"sender_id": "B"`
-/// in the body must reach tool dispatch with `owner = A`, while `sender_id`
-/// stays `B` for platform-level trust.
+/// in the body must reach tool dispatch carrying A, not B.
+///
+/// Both fields end up as A: `owner` from the bearer, and `sender_id` because
+/// `request_sender_context` pins a non-Admin caller to their own identity when
+/// the body asserts one that does not resolve back to them. The body's "B" is
+/// what must not survive — see the module header for why that is the claim, and
+/// why it is not a test that the two fields can be told apart.
 #[tokio::test(flavor = "multi_thread")]
 async fn authenticated_owner_reaches_tool_dispatch_and_body_sender_id_cannot_forge_it() {
     let capture = install_capture();
