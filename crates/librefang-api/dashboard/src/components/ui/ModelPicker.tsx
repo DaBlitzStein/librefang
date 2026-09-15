@@ -1,8 +1,28 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { ArrowLeft, ArrowRight, ChevronDown, Loader2, Pencil } from "lucide-react";
-import type { ModelItem, ProviderItem } from "../../api";
 import { cn } from "../../lib/cn";
+
+/**
+ * The catalog shapes this control actually reads.
+ *
+ * Declared here rather than imported from `api.ts` so a `ui/` primitive does
+ * not depend on the HTTP layer's types: `ModelItem` and `ProviderItem` both
+ * satisfy these structurally, and so does the narrower catalog the manifest
+ * form is handed by its caller.
+ */
+export interface PickerModel {
+  provider: string;
+  id: string;
+  display_name?: string;
+}
+
+export interface PickerProvider {
+  id: string;
+  reachable?: boolean;
+  auth_status?: string;
+  model_count?: number;
+}
 
 /**
  * Pick a provider and a model out of the live catalog.
@@ -37,12 +57,12 @@ export interface ModelPickerProps {
   value: ModelPickerValue | null;
   onChange: (next: ModelPickerValue) => void;
   /** The catalog to choose from. The caller decides what is filtered out. */
-  models: ModelItem[];
+  models: PickerModel[];
   /**
    * Providers for the first level. When omitted, the level is derived from
    * `models`, so a caller with no provider list still gets a working picker.
    */
-  providers?: ProviderItem[];
+  providers?: PickerProvider[];
   disabled?: boolean;
   /**
    * Offer a "Custom…" row that takes a provider and model typed by hand.
@@ -321,11 +341,17 @@ export function ModelPicker({
               !drilldown &&
               filteredProviders.map((p) => {
                 const isCurrent = p.id === value?.provider;
+                // The provider an agent already runs on stays reachable even
+                // when it is down or its key was rejected. Disabling it strands
+                // the operator: the value is in the manifest either way, and a
+                // controlled control whose own value cannot be re-selected
+                // reads as a bug rather than as a warning.
+                const blocked = !!p.unavailable && !isCurrent;
                 return (
                   <button
                     key={p.id}
                     type="button"
-                    disabled={p.unavailable}
+                    disabled={blocked}
                     // The count is part of the visible text; naming the row
                     // exactly by its provider keeps "openai 12" from being read
                     // out as the provider's name.
@@ -337,7 +363,7 @@ export function ModelPicker({
                     }}
                     className={cn(
                       "flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left transition-colors",
-                      p.unavailable
+                      blocked
                         ? "cursor-not-allowed text-text-dim/40"
                         : isCurrent
                           ? "bg-brand/10 text-brand"
