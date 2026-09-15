@@ -3856,7 +3856,7 @@
       "avatar": "아바타 이미지",
       "avatar_upload": "업로드",
       "avatar_replace": "교체",
-      "avatar_hint": "PNG, JPEG, GIF 또는 WebP, 최대 2MB. SVG는 허용되지 않습니다. 이미지는 데몬에 저장되며 본인에게만 제공됩니다.",
+      "avatar_hint": "PNG, JPEG, GIF 또는 WebP, 최대 2MB. SVG는 허용되지 않습니다. 이미지는 데몬에 파일로 저장되며 인증된 경로로 제공됩니다.",
       "avatar_saved": "아바타를 업데이트했습니다",
       "avatar_failed": "아바타를 업로드하지 못했습니다",
       "avatar_removed": "아바타를 삭제했습니다",

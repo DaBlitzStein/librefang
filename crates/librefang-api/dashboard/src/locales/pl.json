@@ -3870,7 +3870,7 @@
       "avatar": "Obraz awatara",
       "avatar_upload": "Prześlij",
       "avatar_replace": "Zmień",
-      "avatar_hint": "PNG, JPEG, GIF lub WebP, do 2 MB. SVG nie jest akceptowany. Obraz przechowuje demon i udostępnia go tylko Tobie.",
+      "avatar_hint": "PNG, JPEG, GIF lub WebP, do 2 MB. SVG nie jest akceptowany. Demon przechowuje obraz jako plik i udostępnia go przez uwierzytelnioną ścieżkę.",
       "avatar_saved": "Zaktualizowano awatar",
       "avatar_failed": "Nie udało się przesłać awatara",
       "avatar_removed": "Usunięto awatar",

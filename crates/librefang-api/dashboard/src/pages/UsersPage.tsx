@@ -1055,7 +1055,7 @@ export function UserAppearanceSection({
         <p className="text-[11px] text-text-dim leading-relaxed">
           {t("users.identity.avatar_hint", {
             defaultValue:
-              "PNG, JPEG, GIF or WebP, up to 2 MB. SVG is not accepted. The image is stored by the daemon and served only to you.",
+              "PNG, JPEG, GIF or WebP, up to 2 MB. SVG is not accepted. The daemon stores the image as a file and serves it over an authenticated route.",
           })}
         </p>
       </div>
