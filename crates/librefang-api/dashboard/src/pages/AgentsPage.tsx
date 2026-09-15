@@ -32,8 +32,9 @@ import { Card } from "../components/ui/Card";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
-import { Badge } from "../components/ui/Badge";
+import { Badge, dotColors } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
+import { AgentAvatar } from "../components/AgentAvatar";
 import { PromptsExperimentsModal } from "../components/PromptsExperimentsModal";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
@@ -1327,9 +1328,27 @@ export function AgentsPage() {
         } ${stateLower === "suspended" ? "opacity-70" : ""}`}
       >
         <div className="flex items-center gap-2 min-w-0">
-          <Badge variant={getStatusVariant(agent.state)} dot className="shrink-0">
-            <span className="sr-only">{agent.state || "idle"}</span>
-          </Badge>
+          {/* `<div>`, not `<span>`: `AgentAvatar` renders `Avatar`, which is a
+              `<div>`, and a span cannot legally contain one. */}
+          <div className="relative shrink-0">
+            <AgentAvatar
+              agentId={agent.id}
+              avatarUrl={agent.identity?.avatar_url}
+              emoji={agent.identity?.emoji}
+              fallback={agent.name}
+              size="sm"
+            />
+            {/* State pinned to the avatar's corner, the way the detail drawer
+                below places it, instead of the pill this row used to carry —
+                that pill held nothing but the dot. Placement is the same; the
+                colour is not, and was not before either: this row reads
+                `getStatusVariant`, the drawer its own three-way map. */}
+            <span
+              className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ${dotColors[getStatusVariant(agent.state)]} border-2 border-surface`}
+              role="img"
+              aria-label={agent.state || "idle"}
+            />
+          </div>
           <span className="font-mono text-[13px] truncate flex-1 min-w-0 text-text-main">
             {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
           </span>
@@ -1347,7 +1366,7 @@ export function AgentsPage() {
             {agent.last_active ? formatRelativeTime(agent.last_active) : "—"}
           </span>
         </div>
-        <div className="font-mono text-[10.5px] text-text-dim flex items-center gap-2 pl-[22px] mt-1">
+        <div className="font-mono text-[10.5px] text-text-dim flex items-center gap-2 pl-10 mt-1">
           <span className="truncate min-w-0">{agent.model_name || agent.model_provider || "—"}</span>
           <span className="text-text-dim/60">·</span>
           <span className="truncate min-w-0">
