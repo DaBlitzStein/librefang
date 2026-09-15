@@ -1418,6 +1418,9 @@ class _UsersResource(_Resource):
     def import_users(self, **data):
         return self._c._request("POST", "/api/users/import", data)
 
+    def serve_my_avatar(self):
+        return self._c._request("GET", "/api/users/me/avatar")
+
     def get_user(self, name: str):
         return self._c._request("GET", f"/api/users/{name}")
 
@@ -1431,7 +1434,7 @@ class _UsersResource(_Resource):
         return self._c._request("GET", f"/api/users/{name}/avatar")
 
     def upload_user_avatar(self, name: str, **data):
-        return self._c._request("PUT", f"/api/users/{name}/avatar", data)
+        return self._c._request("POST", f"/api/users/{name}/avatar", data)
 
     def delete_user_avatar(self, name: str):
         return self._c._request("DELETE", f"/api/users/{name}/avatar")
