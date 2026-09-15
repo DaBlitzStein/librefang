@@ -1,0 +1,5 @@
+Give a `[[users]]` entry the same identity an agent already has: an avatar image and a glyph.
+`PUT`/`GET`/`DELETE /api/users/{name}/avatar` store and serve the image, and `PATCH /api/users/{name}/identity` sets the emoji, which is the one half that belongs in `config.toml` and therefore goes through the existing comment-preserving, backed-up, reload-validated write path.
+The image deliberately does not: whether a user has an avatar is answered by probing `~/.librefang/avatars/users/`, so no stored copy of the answer can survive a restore that did not bring the file back.
+A user is addressed by a name and that name comes from the request, so it never becomes a path component — the file on disk is named after the UUIDv5 the daemon derives from the *configured* name, which is what keeps a user called `../../etc/passwd` from being a file called anything in particular.
+`GET /api/authz/whoami` now carries the caller's emoji and whether they have an avatar, so the dashboard paints the signed-in identity from the response it already fetches (#8339) (@DaBlitzStein)
