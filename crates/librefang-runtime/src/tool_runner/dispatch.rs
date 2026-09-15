@@ -2007,9 +2007,16 @@ pub async fn execute_tool_with_sender_account(
 
     // #7744: structured identity record so integration tests can assert that the
     // authenticated owner survived all the way to dispatch.
+    //
+    // `debug!` and not `info!`: this fires once per tool call, carries a user id,
+    // and the daemon's own log is not where ownership is answered — that is the
+    // audit log's job. At `info` it puts a line per tool call into every
+    // production log to serve a test, which the test does not need: it installs
+    // a bare `tracing_subscriber::registry()` with no level filter, so it
+    // captures this either way.
     {
         let owner = acting_principal.and_then(|p| p.as_user_id()).map(|u| u.0);
-        tracing::info!(
+        debug!(
             target: "librefang::tool_identity",
             tool = tool_name,
             owner = ?owner,
