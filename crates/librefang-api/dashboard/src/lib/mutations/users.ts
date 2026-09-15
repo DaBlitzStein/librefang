@@ -242,6 +242,16 @@ export function useUpdateUserIdentity() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: userKeys.detail(variables.name) });
       qc.invalidateQueries({ queryKey: userKeys.lists() });
+      // The chat bubble draws the caller's emoji out of `whoami`, which is a
+      // different key from the two above and which no user mutation would
+      // otherwise touch.
+      //
+      // Invalidated unconditionally rather than only when the edited name turns
+      // out to be the caller's: this hook is addressed by name and has no way to
+      // know whose name it was handed, and the cost of guessing wrong is one
+      // small request rather than a bubble that goes on showing the old emoji.
+      // The image above needs none of this — it has its own key.
+      qc.invalidateQueries({ queryKey: authzKeys.whoami() });
     },
   });
 }

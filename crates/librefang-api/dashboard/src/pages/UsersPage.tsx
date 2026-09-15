@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
   Users,
@@ -40,7 +40,6 @@ import type { UserItem, UserUpsertPayload } from "../lib/http/client";
 import { ALLOWED_AVATAR_TYPES, MAX_AVATAR_BYTES } from "../api";
 import { userQueries, useUsers } from "../lib/queries/users";
 import { useWhoami } from "../lib/queries/authz";
-import { authzKeys } from "../lib/queries/keys";
 import {
   useCreateUser,
   useDeleteUser,
@@ -832,20 +831,16 @@ function AppearanceRow({
  * *operator's* picture next to that user's name and seeding the field from the
  * operator's glyph — a confident wrong answer rather than a missing one.
  *
- * `onChanged` fires after a successful write so the caller can re-read what it
- * holds. The image upload and delete are already followed by a query
- * invalidation inside the mutations; the emoji is not, and cannot be, because
- * the mutation is addressed by name and only the caller knows whether that name
- * is their own.
+ * There is no `onChanged`: every write here is followed by the query
+ * invalidations the mutations own, including the `whoami` key the chat bubble
+ * reads its emoji from. Nothing is left for a caller to re-read.
  */
 export function UserAppearanceSection({
   name,
   emoji,
-  onChanged,
 }: {
   name: string;
   emoji?: string;
-  onChanged: () => void;
 }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -883,7 +878,6 @@ export function UserAppearanceSection({
       { name, emoji: next },
       {
         onSuccess: () => {
-          onChanged();
           addToast(
             next
               ? t("users.identity.emoji_saved", { defaultValue: "Emoji updated" })
@@ -942,7 +936,6 @@ export function UserAppearanceSection({
       { name, file },
       {
         onSuccess: () => {
-          onChanged();
           addToast(
             t("users.identity.avatar_saved", { defaultValue: "Avatar updated" }),
             "success",
@@ -962,7 +955,6 @@ export function UserAppearanceSection({
     if (deleteAvatarMutation.isPending) return;
     deleteAvatarMutation.mutate(name, {
       onSuccess: () => {
-        onChanged();
         addToast(
           t("users.identity.avatar_removed", { defaultValue: "Avatar removed" }),
           "success",
@@ -1089,7 +1081,6 @@ function UserFormModal({
   busy: boolean;
 }) {
   const { t } = useTranslation();
-  const qc = useQueryClient();
   const [name, setName] = useState("");
   const [role, setRole] = useState<RoleName>("user");
   const [bindings, setBindings] = useState<Array<[string, string]>>([]);
@@ -1102,16 +1093,6 @@ function UserFormModal({
   // caller and no one else.
   const whoami = useWhoami();
   const isSelf = !!editing && editing.name === whoami.data?.name;
-
-  /** Re-read the caller's identity after a write to it.
-   *
-   *  `useUpdateUserIdentity` invalidates the user detail and list, but the chat
-   *  bubble draws the emoji from `authzKeys.whoami()` and no user mutation
-   *  touches that key — they are addressed by name and cannot know the name is
-   *  the caller's. This is the one place that does know. */
-  const refreshOwnIdentity = () => {
-    qc.invalidateQueries({ queryKey: authzKeys.whoami() });
-  };
 
   // Reset form when modal toggles or `editing` changes.
   const lastInit = useRef<{ key: string; editing: UserItem | null }>({
@@ -1259,7 +1240,6 @@ function UserFormModal({
           <UserAppearanceSection
             name={editing.name}
             emoji={whoami.data?.emoji}
-            onChanged={refreshOwnIdentity}
           />
         ) : null}
         <div className="flex gap-2 justify-end pt-2 border-t border-border-subtle">
