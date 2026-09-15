@@ -359,8 +359,12 @@ func (r *AgentsResource) ServeAgentAvatar(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/avatar", id), nil, nil)
 }
 
-func (r *AgentsResource) UploadAgentAvatar(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/avatar", id), data, nil)
+// UploadAgentAvatar sends a raw application/octet-stream body. An empty contentType defaults to it.
+func (r *AgentsResource) UploadAgentAvatar(id string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/avatar", id), body, contentType)
 }
 
 func (r *AgentsResource) DeleteAgentAvatar(id string) (interface{}, error) {

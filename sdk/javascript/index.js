@@ -212,8 +212,8 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/avatar`);
   }
 
-  async uploadAgentAvatar(id, data) {
-    return this._c._request("POST", `/api/agents/${id}/avatar`, data, undefined);
+  async uploadAgentAvatar(id, body, contentType) {
+    return this._c._request("POST", `/api/agents/${id}/avatar`, body, undefined, contentType || "application/octet-stream");
   }
 
   async deleteAgentAvatar(id) {
