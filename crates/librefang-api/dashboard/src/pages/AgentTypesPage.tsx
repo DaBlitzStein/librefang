@@ -254,7 +254,6 @@ function AgentTypeEditor({
 }
 
 /**
-/**
  * Read-only privacy pass over an agent type, ahead of contributing it to a
  * shared registry (#7771). The backend already sanitizes and scans the
  * manifest; this just shows the operator what would ship.

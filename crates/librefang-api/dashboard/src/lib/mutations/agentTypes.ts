@@ -111,4 +111,7 @@ export function useRestoreTemplateVersion() {
 // forwards to it.
 //
 // `spawnEphemeral` itself stays in `api.ts`, which is the client for the
-// daemon's published endpoints rather than UI glue. It has no caller today.
+// daemon's published endpoints rather than UI glue. It has no caller today,
+// including the re-export in `http/client.ts` — which is the file this
+// paragraph argues it does not belong in, so the function is documented here
+// rather than there.
