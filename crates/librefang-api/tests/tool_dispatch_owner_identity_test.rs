@@ -6,10 +6,13 @@
 //! 2. `sender_id: Option<&str>` — a free-form platform handle that, over HTTP, is read straight out of `MessageRequest.sender_id` in the request **body**.
 //!
 //! `user_role_allows_request` lets any bearer holding the `User` role POST to `/api/agents/{id}/message`, so `sender_id` is attacker-chosen, yet it alone drove per-sender tool authorization, approval routing, and the `peer:{user_id}:KEY` memory namespace.
-//! This test pins the fix: dispatch must see the authenticated `owner` while `sender_id` keeps its (untrusted) platform value, so downstream gates can tell the two apart.
+//!
+//! This test pins the fix: dispatch must carry the bearer-authenticated identity, and a body-supplied `sender_id` that asserts somebody else must not survive to reach it.
+//! `request_sender_context` is what enforces the second half — it pins a non-Admin caller to their own identity — so in this scenario `owner` and `sender_id` are *both* the authenticated caller.
+//! That is the point the two assertions below make together, and it is worth stating plainly because the reverse would be easy to assume: this is not a test that the two fields can be told apart from each other, it is a test that a forged `sender_id` cannot displace either.
 //!
 //! The assertions read the structured `librefang::tool_identity` record that `execute_tool_with_sender_account` emits for every tool call.
-//! Driving the check through log capture rather than through a Rust type means this file compiles unchanged against the pre-fix tree — it fails at *runtime* there, which is what makes it a regression test rather than a compile-time tautology.
+//! Driving the check through log capture rather than through a Rust type means this file compiles against a tree that lacks the instrumentation and fails at *runtime* there with no records captured — which is what makes it a guard for that instrumentation rather than a compile-time tautology.
 //!
 //! A wiremock server speaking the native Ollama protocol (`POST /api/chat`) stands in for the provider so a complete turn — LLM call, tool dispatch, second LLM call with the tool result — runs without credentials or network access.
 
