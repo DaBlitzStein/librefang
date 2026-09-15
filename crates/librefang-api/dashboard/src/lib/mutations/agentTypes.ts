@@ -83,8 +83,8 @@ export function useRestoreTemplateVersion() {
 //
 // The endpoint it wrapped (`POST /api/agents/spawn-ephemeral`) is untouched and
 // still reachable — over HTTP directly, and in-turn through the `agent_spawn`
-// tool with `ephemeral: true`. The CLI is deliberately not on that list: no
-// subcommand forwards to it.
+// tool with `ephemeral: true`. The CLI is not on that list: no subcommand
+// forwards to it.
 //
 // `spawnEphemeral` itself stays in `api.ts`, which is the client for the
 // daemon's published endpoints rather than UI glue. It has no caller today.
