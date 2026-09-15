@@ -184,4 +184,109 @@ describe("ModelPicker", () => {
     expect(screen.queryByRole("button", { name: i18n.t("common.back") })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "openai" })).toBeInTheDocument();
   });
+
+  // The catalog is built from live discovery. When discovery finds nothing for
+  // a provider — or an operator wants a model the daemon has never seen — the
+  // picker has to stay usable, which is the whole reason `allowCustom` exists.
+  describe("hand entry", () => {
+    const customRow = () => screen.queryByRole("button", { name: i18n.t("model_param.custom") });
+
+    it("is absent unless the caller asks for it", () => {
+      render(
+        <ModelPicker
+          label="Agent model"
+          value={null}
+          onChange={() => {}}
+          models={[model("openai", "gpt-4")]}
+          providers={[provider("openai")]}
+        />,
+      );
+      open();
+      expect(customRow()).not.toBeInTheDocument();
+    });
+
+    it("takes both halves of the pair when no provider is drilled into", () => {
+      const onChange = vi.fn();
+      render(
+        <ModelPicker
+          label="Agent model"
+          allowCustom
+          value={null}
+          onChange={onChange}
+          models={[]}
+          providers={[]}
+        />,
+      );
+
+      open();
+      fireEvent.click(customRow()!);
+      fireEvent.change(screen.getByLabelText(i18n.t("agents.form.provider")), {
+        target: { value: "  mycorp  " },
+      });
+      fireEvent.change(screen.getByLabelText(i18n.t("agents.form.model_id")), {
+        target: { value: "my-model-1" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("common.confirm") }));
+
+      // Trimmed: a trailing space from a paste is not part of the id.
+      expect(onChange).toHaveBeenCalledWith({ provider: "mycorp", model: "my-model-1" });
+    });
+
+    it("takes only the model when it is already inside a provider", () => {
+      const onChange = vi.fn();
+      render(
+        <ModelPicker
+          label="Agent model"
+          allowCustom
+          value={null}
+          onChange={onChange}
+          models={[model("openai", "gpt-4")]}
+          providers={[provider("openai")]}
+        />,
+      );
+
+      open();
+      fireEvent.click(screen.getByRole("button", { name: "openai" }));
+      fireEvent.click(customRow()!);
+
+      expect(screen.queryByLabelText(i18n.t("agents.form.provider"))).not.toBeInTheDocument();
+      fireEvent.change(screen.getByLabelText(i18n.t("agents.form.model_id")), {
+        target: { value: "gpt-6-unreleased" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("common.confirm") }));
+
+      expect(onChange).toHaveBeenCalledWith({ provider: "openai", model: "gpt-6-unreleased" });
+    });
+
+    it("will not commit a pair with a missing half", () => {
+      const onChange = vi.fn();
+      render(
+        <ModelPicker
+          label="Agent model"
+          allowCustom
+          value={null}
+          onChange={onChange}
+          models={[]}
+          providers={[]}
+        />,
+      );
+
+      open();
+      fireEvent.click(customRow()!);
+      const confirm = screen.getByRole("button", { name: i18n.t("common.confirm") });
+
+      expect(confirm).toBeDisabled();
+      fireEvent.change(screen.getByLabelText(i18n.t("agents.form.provider")), {
+        target: { value: "mycorp" },
+      });
+      // Provider alone is not a model.
+      expect(screen.getByRole("button", { name: i18n.t("common.confirm") })).toBeDisabled();
+
+      fireEvent.change(screen.getByLabelText(i18n.t("agents.form.model_id")), {
+        target: { value: "m" },
+      });
+      expect(screen.getByRole("button", { name: i18n.t("common.confirm") })).toBeEnabled();
+      expect(onChange).not.toHaveBeenCalled();
+    });
+  });
 });

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { ArrowLeft, ArrowRight, ChevronDown, Loader2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, Loader2, Pencil } from "lucide-react";
 import type { ModelItem, ProviderItem } from "../../api";
 import { cn } from "../../lib/cn";
 
@@ -44,6 +44,17 @@ export interface ModelPickerProps {
    */
   providers?: ProviderItem[];
   disabled?: boolean;
+  /**
+   * Offer a "Custom…" row that takes a provider and model typed by hand.
+   *
+   * Not a nicety. The catalog is built from live discovery, and the manifest
+   * form's own model field already carries a documented free-text fallback for
+   * the case where discovery found nothing for a provider — replacing that with
+   * a list-only control would leave an operator unable to configure a model at
+   * all exactly when discovery is broken. Same reason the sampling ladders keep
+   * a custom rung beside their presets.
+   */
+  allowCustom?: boolean;
   /** A write is in flight: the list is frozen and the active row spins. */
   busy?: boolean;
   /** True while the catalog is still arriving. */
@@ -73,6 +84,7 @@ export function ModelPicker({
   models,
   providers,
   disabled = false,
+  allowCustom = false,
   busy = false,
   isFetching = false,
   error = null,
@@ -86,6 +98,12 @@ export function ModelPicker({
   const [open, setOpen] = useState(false);
   const [drilldown, setDrilldown] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  // Which hand-entry panel is open, if any. "provider" takes both halves of the
+  // pair (a provider that is not in the list has no models to drill into);
+  // "model" takes only the model, against the provider already drilled into.
+  const [custom, setCustom] = useState<null | "provider" | "model">(null);
+  const [customProvider, setCustomProvider] = useState("");
+  const [customModel, setCustomModel] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
 
   // A click anywhere else closes it. Not `onBlur`: the trigger and the list are
@@ -118,6 +136,7 @@ export function ModelPicker({
     if (!open) {
       setDrilldown(null);
       setSearch("");
+      setCustom(null);
     }
   }, [open]);
 
@@ -154,6 +173,16 @@ export function ModelPicker({
   }, [models, drilldown, search]);
 
   const trigger = value?.model ? `${value.provider} / ${value.model}` : (placeholder ?? "");
+
+  const customProviderValue = custom === "provider" ? customProvider.trim() : (drilldown ?? "");
+  const customModelValue = customModel.trim();
+  const canCommitCustom = custom !== null && !!customProviderValue && !!customModelValue;
+
+  const commitCustom = () => {
+    if (!canCommitCustom) return;
+    onChange({ provider: customProviderValue, model: customModelValue });
+    setOpen(false);
+  };
 
   return (
     <div ref={rootRef} className={cn("relative", className)}>
@@ -201,6 +230,7 @@ export function ModelPicker({
             </span>
           </div>
 
+          {!custom && (
           <div className="border-b border-border-subtle/50 p-2">
             <input
               autoFocus
@@ -221,6 +251,7 @@ export function ModelPicker({
             />
             {error && <p className="mt-1.5 px-1 text-[10px] text-error">{error}</p>}
           </div>
+          )}
 
           <div
             className={cn(
@@ -244,12 +275,49 @@ export function ModelPicker({
               </button>
             )}
 
-            {!isFetching && !drilldown && filteredProviders.length === 0 && (
+            {custom && (
+              <div className="space-y-1.5 p-1">
+                {custom === "provider" && (
+                  <input
+                    autoFocus
+                    type="text"
+                    value={customProvider}
+                    onChange={(e) => setCustomProvider(e.target.value)}
+                    aria-label={t("agents.form.provider", { defaultValue: "Provider" })}
+                    placeholder={t("agents.form.provider", { defaultValue: "Provider" })}
+                    className="w-full rounded-lg border border-border-subtle bg-main px-2.5 py-1.5 text-xs focus:border-brand focus:outline-none"
+                  />
+                )}
+                <input
+                  autoFocus={custom === "model"}
+                  type="text"
+                  value={customModel}
+                  onChange={(e) => setCustomModel(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitCustom();
+                  }}
+                  aria-label={t("agents.form.model_id", { defaultValue: "Model" })}
+                  placeholder={t("agents.form.model_id", { defaultValue: "Model" })}
+                  className="w-full rounded-lg border border-border-subtle bg-main px-2.5 py-1.5 text-xs focus:border-brand focus:outline-none"
+                />
+                <button
+                  type="button"
+                  disabled={!canCommitCustom}
+                  onClick={commitCustom}
+                  className="w-full rounded-lg bg-brand/10 px-2.5 py-1.5 text-xs font-medium text-brand transition-colors hover:bg-brand/20 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {t("common.confirm", { defaultValue: "Confirm" })}
+                </button>
+              </div>
+            )}
+
+            {!isFetching && !custom && !drilldown && filteredProviders.length === 0 && (
               <p className="px-2.5 py-2 text-xs text-text-dim">
                 {t("chat.no_models_found", { defaultValue: "No models found" })}
               </p>
             )}
             {!isFetching &&
+              !custom &&
               !drilldown &&
               filteredProviders.map((p) => {
                 const isCurrent = p.id === value?.provider;
@@ -294,12 +362,13 @@ export function ModelPicker({
                 );
               })}
 
-            {!isFetching && drilldown && filteredModels.length === 0 && (
+            {!isFetching && !custom && drilldown && filteredModels.length === 0 && (
               <p className="px-2.5 py-2 text-xs text-text-dim">
                 {t("chat.no_models_found", { defaultValue: "No models found" })}
               </p>
             )}
             {!isFetching &&
+              !custom &&
               drilldown &&
               filteredModels.map((m) => {
                 const isActive = m.id === value?.model && m.provider === value?.provider;
@@ -331,6 +400,25 @@ export function ModelPicker({
                   </button>
                 );
               })}
+            {!isFetching && allowCustom && !custom && (
+              <button
+                type="button"
+                onClick={() => {
+                  // At the provider level this takes both halves of the pair: a
+                  // provider the catalog does not know has no models to drill
+                  // into. Inside a provider it takes only the model.
+                  setCustom(drilldown ? "model" : "provider");
+                  setCustomProvider(value?.provider ?? "");
+                  setCustomModel(value?.model ?? "");
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-text-dim transition-colors hover:bg-surface-hover"
+              >
+                <Pencil className="h-3 w-3 shrink-0 text-text-dim/50" />
+                <span className="text-xs font-medium">
+                  {t("model_param.custom", { defaultValue: "Custom" })}
+                </span>
+              </button>
+            )}
           </div>
 
           {footer && <div className="border-t border-border-subtle/50 p-2">{footer}</div>}
