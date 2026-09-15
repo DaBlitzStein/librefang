@@ -101,16 +101,15 @@ afterEach(() => {
 const NAME = "alice";
 
 function renderSection(props: { emoji?: string } = {}) {
-  const onChanged = vi.fn();
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <UserAppearanceSection name={NAME} emoji={props.emoji} onChanged={onChanged} />
+      <UserAppearanceSection name={NAME} emoji={props.emoji} />
     </QueryClientProvider>,
   );
-  return { ...view, onChanged };
+  return view;
 }
 
 /** Waits for the avatar probe to settle, so a `Replace` assertion is not racing
@@ -177,14 +176,13 @@ describe("emoji editor", () => {
     expect(updateIdentity).toHaveBeenCalledTimes(1);
   });
 
-  it("re-reads the caller's identity and says so once the PATCH lands", () => {
-    const { onChanged } = renderSection({ emoji: "🦊" });
+  it("says so once the PATCH lands", () => {
+    renderSection({ emoji: "🦊" });
     fireEvent.change(screen.getByLabelText("Emoji"), { target: { value: "🦉" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     updateIdentity.mock.calls[0][1].onSuccess();
 
-    expect(onChanged).toHaveBeenCalledTimes(1);
     expect(addToast).toHaveBeenCalledWith("Emoji updated", "success");
   });
 
@@ -304,42 +302,39 @@ describe("avatar upload", () => {
     expect(setValue).toHaveBeenCalledWith("");
   });
 
-  it("re-reads the caller's identity once the upload lands", () => {
-    const { onChanged } = renderSection();
+  it("says so once the upload lands", () => {
+    renderSection();
     fireEvent.change(fileInput(), {
       target: { files: [fileOfSize("me.png", "image/png", 10)] },
     });
 
     uploadAvatar.mock.calls[0][1].onSuccess();
 
-    expect(onChanged).toHaveBeenCalledTimes(1);
     expect(addToast).toHaveBeenCalledWith("Avatar updated", "success");
   });
 });
 
 describe("avatar removal", () => {
-  it("deletes by name and re-reads the caller's identity", () => {
-    const { onChanged } = renderSection();
+  it("does not offer a removal for a user who has no picture", () => {
+    renderSection();
 
     // No Remove button is drawn until a picture exists, so drive the removal
     // through the same path the button uses rather than a hidden one.
     expect(screen.queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
     expect(deleteAvatar).not.toHaveBeenCalled();
-    expect(onChanged).not.toHaveBeenCalled();
   });
 
   it("deletes by name once there is a picture to remove", async () => {
     vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(
       new Blob([new Uint8Array([0x89])], { type: "image/png" }),
     );
-    const { onChanged } = renderSection();
+    renderSection();
     const remove = await screen.findByRole("button", { name: "Remove" });
 
     fireEvent.click(remove);
     expect(deleteAvatar.mock.calls[0][0]).toBe(NAME);
 
     deleteAvatar.mock.calls[0][1].onSuccess();
-    expect(onChanged).toHaveBeenCalledTimes(1);
     expect(addToast).toHaveBeenCalledWith("Avatar removed", "success");
   });
 });
