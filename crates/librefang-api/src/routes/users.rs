@@ -639,9 +639,27 @@ pub async fn delete_user(
             //
             // Strictly after the persist, never before: a delete that failed
             // must not have taken the picture with it.
+            // `remove_avatars` returns a count that cannot answer the question
+            // this warning asks: it swallows every per-file failure itself and
+            // documents "already gone" as its non-error, so a zero means "this
+            // user had no picture" and a failed unlink looks exactly the same.
+            // So ask the probe it already uses instead — a file that was there
+            // before and is still there afterwards is precisely the residue
+            // this branch exists to clear, and the one outcome worth a line,
+            // since the name can be recreated and would inherit the picture.
+            let avatar_key = UserId::from_name(&name).to_string();
             let dir = state.kernel.config_snapshot().effective_user_avatars_dir();
-            let _ =
-                librefang_types::media::remove_avatars(&dir, &UserId::from_name(&name).to_string());
+            let had_avatar = librefang_types::media::find_avatar(&dir, &avatar_key).is_some();
+            let _ = librefang_types::media::remove_avatars(&dir, &avatar_key);
+            if had_avatar {
+                if let Some(survivor) = librefang_types::media::find_avatar(&dir, &avatar_key) {
+                    tracing::warn!(
+                        user = %name,
+                        path = %survivor.display(),
+                        "avatar survived the delete-user sweep; recreating this name would inherit it"
+                    );
+                }
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
