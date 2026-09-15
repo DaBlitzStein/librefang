@@ -1413,6 +1413,9 @@ interface MessageBubbleProps {
    *  Primitives for the reason the agent's are: this component is memoised. */
   userName?: string;
   userEmoji?: string;
+  /** `whoami.has_avatar`, which decides whether the picture is worth fetching.
+   *  Undefined means the daemon did not say, which is not the same as "no". */
+  userHasAvatar?: boolean;
   onCopy?: (messageId: string, content: string) => void;
   copied?: boolean;
   onSpeak?: (messageId: string, content: string) => void;
@@ -1424,7 +1427,7 @@ interface MessageBubbleProps {
 /** Exported for its test, like `AgentAppearanceSection` on the users page:
  *  mounting `ChatPage` to reach it would mean standing up a session, a selected
  *  agent and a streaming transcript to assert two lines of avatar selection. */
-export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarUrl, agentEmoji, userName, userEmoji, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
+export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarUrl, agentEmoji, userName, userEmoji, userHasAvatar, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
@@ -1475,7 +1478,12 @@ export const MessageBubble = memo(function MessageBubble({ message, usageFooter,
               same three-step chain. */}
           {isUser ? (
             userName ? (
-              <UserAvatar name={userName} emoji={userEmoji} size="sm" />
+              <UserAvatar
+                name={userName}
+                emoji={userEmoji}
+                hasAvatar={userHasAvatar}
+                size="sm"
+              />
             ) : (
               <div className="h-8 w-8 shrink-0 grid place-items-center rounded-full bg-brand text-white shadow-sm">
                 <User className="h-3.5 w-3.5" />
@@ -3936,6 +3944,7 @@ export function ChatPage() {
                     agentEmoji={selectedAgent?.identity?.emoji}
                     userName={whoami.data?.name}
                     userEmoji={whoami.data?.emoji}
+                    userHasAvatar={whoami.data?.has_avatar}
                     onCopy={handleCopy}
                     copied={copiedMessageId === msg.id}
                     onSpeak={ttsAvailable ? tts.toggle : undefined}

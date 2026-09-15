@@ -3581,10 +3581,21 @@ export interface WhoamiResponse {
    *
    *  Carried here rather than fetched from `/api/users/{name}` because every
    *  page that draws the caller's identity would otherwise need a second
-   *  request, and that one is admin-only on the daemon side. Whether they have
-   *  an *image* is deliberately not mirrored here: `GET /api/users/me/avatar`
-   *  answers that with a 404, which is one source of truth instead of two. */
+   *  request, and that one is admin-only on the daemon side. */
   emoji?: string;
+  /** Whether an avatar image for this caller is on disk (#8339).
+   *
+   *  Not a URL: the daemon answers *whether* there is something to fetch, and
+   *  `currentUserAvatarPath` is where the client fetches it. The name is what
+   *  the caller would build a path from if it were, which is the thing that
+   *  route exists to avoid.
+   *
+   *  Optional because the two halves can be out of step: the daemon always
+   *  sends it, but an SPA served from `~/.librefang/dashboard/` can be newer
+   *  than the binary behind it (see the deploy notes). A caller must therefore
+   *  read `false` as "there is nothing to fetch" and `undefined` as "not told",
+   *  never conflating them — the second one must still fetch. */
+  has_avatar?: boolean;
 }
 
 /** The calling credential's own resolved identity — `GET /api/authz/whoami`.

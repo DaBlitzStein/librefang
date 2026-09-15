@@ -43,16 +43,17 @@ export const userQueries = {
   // `currentUserAvatarPath` for why a name never becomes a path segment, and
   // `userKeys.avatar` for why the key is still keyed by one.
   //
-  // No `enabled` gate, unlike the agent query: there is exactly one signed-in
-  // user, so there is no list to spare a per-render 404 from. Whether they have
-  // a picture is not known until the daemon answers, and it answers 404 when
-  // there is none — `retry: false` because asking three more times cannot turn
-  // that 404 into a picture.
-  avatar: (name: string) =>
+  // `enabled` is the caller's "the daemon says there is a picture", read out of
+  // `whoami.has_avatar`. The chat already fetches `whoami` for the caller's name
+  // and emoji, so the answer costs nothing extra, and gating on it is what
+  // keeps a caller who has never uploaded one from paying a 404 per mount.
+  // `retry: false` for the same reason it is not worth three attempts to learn
+  // there is nothing.
+  avatar: (name: string, enabled: boolean) =>
     queryOptions({
       queryKey: userKeys.avatar(name),
       queryFn: () => fetchAuthenticatedImage(currentUserAvatarPath()),
-      enabled: !!name,
+      enabled: !!name && enabled,
       staleTime: AVATAR_STALE_MS,
       retry: false,
     }),
@@ -63,16 +64,17 @@ export const userQueries = {
  * (#8339).
  *
  * `name` is the signed-in user's name, and it is used for the cache key and
- * nothing else; the bytes come from the literal `me` path. `useObjectUrl` owns
- * the object URL's lifetime and is shared with the agent avatar, where the
- * effect was first written.
+ * nothing else; the bytes come from the literal `me` path. `hasAvatar` is
+ * `whoami.has_avatar`, and it gates the request. `useObjectUrl` owns the object
+ * URL's lifetime and is shared with the agent avatar, where the effect was
+ * first written.
  *
- * Returns `undefined` while there is nothing to show — no name yet, the request
- * in flight, or a 404 — which is what `Avatar`'s `src` wants: it falls back to
- * the emoji and then to the initials on its own.
+ * Returns `undefined` while there is nothing to show — no name yet, no picture
+ * according to the daemon, or the request in flight — which is what `Avatar`'s
+ * `src` wants: it falls back to the emoji and then to the initials on its own.
  */
-export function useUserAvatarUrl(name: string): string | undefined {
-  const { data: blob } = useQuery(userQueries.avatar(name));
+export function useUserAvatarUrl(name: string, hasAvatar: boolean): string | undefined {
+  const { data: blob } = useQuery(userQueries.avatar(name, hasAvatar));
   return useObjectUrl(blob);
 }
 
