@@ -570,6 +570,22 @@ export function SystemPromptSection({
   );
 }
 
+/**
+ * Whether the signed-in credential may edit an agent's emoji and avatar.
+ *
+ * The daemon's rule for both writes the appearance section performs is
+ * `role >= UserRole::Admin` (middleware.rs), and it reads the *credential's*
+ * role — the group-derived ones `whoami` reports separately do not open this
+ * door, which is the direction that would hand a viewer controls that can only
+ * 403.
+ *
+ * Pure and exported because `AgentsPage` has no render harness, so a predicate
+ * left inline would be covered by nothing.
+ */
+export function canEditAgentIdentity(role: string | undefined): boolean {
+  return role === "admin" || role === "owner";
+}
+
 export function AgentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -675,16 +691,7 @@ export function AgentsPage() {
 
   // --- Visual identity of the agent in the drawer (#8339) ------------------
   const whoami = useWhoami();
-
-  // The daemon's rule for both writes the appearance section performs is
-  // `role >= UserRole::Admin` (middleware.rs), and it reads the *credential's*
-  // role — the group-derived ones `whoami` reports separately do not open this
-  // door. The user side of this feature settled the same question one file over
-  // with `=== "owner"`; the bar here is Admin, so reading that field the wrong
-  // way would either show a viewer controls that 403 or deny an admin ones that
-  // work.
-  const canEditAgentIdentity =
-    whoami.data?.role === "admin" || whoami.data?.role === "owner";
+  const canEditAppearance = canEditAgentIdentity(whoami.data?.role);
 
   const detailIdentity = (detailAgent as AgentView | null)?.identity;
   // Gated on "this agent has one" so an agent without an avatar costs no
@@ -2971,7 +2978,7 @@ export function AgentsPage() {
                   gives for `SystemPromptSection`: `AgentsPage` has ~20 hooks and no
                   render harness, so anything that has to be tested has to be
                   reachable without mounting the page. */}
-              {canEditAgentIdentity && (
+              {canEditAppearance && (
                 <AgentAppearanceSection
                   agentId={detailAgent.id}
                   identity={detailIdentity}
