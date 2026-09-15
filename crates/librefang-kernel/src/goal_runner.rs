@@ -4014,7 +4014,7 @@ mod tests {
         // The agent re-emits the same lesson the run was seeded with, then
         // signals completion so the loop exits after a single tick.
         let send = |_a: AgentId, _p: String| async move {
-            Ok("GOAL_LEARNED: ya conocida\nGOAL_DONE".to_string())
+            Ok("GOAL_LEARNED: already known\nGOAL_DONE".to_string())
         };
         run_loop(
             goal.id,
@@ -4030,7 +4030,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             rx,
             None,
-            vec!["ya conocida".to_string()],
+            vec!["already known".to_string()],
         )
         .await;
 
@@ -4047,7 +4047,7 @@ mod tests {
         assert_eq!(
             learnings
                 .iter()
-                .filter(|l| l.as_str() == "ya conocida")
+                .filter(|l| l.as_str() == "already known")
                 .count(),
             1,
             "a lesson already present in the seeded list must not be duplicated: {learnings:?}"
