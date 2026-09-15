@@ -1306,8 +1306,17 @@ async function get<T>(path: string): Promise<T> {
 // walk out of the segment, and requiring the suffix keeps the allowlist from
 // silently covering some future `/api/agents/{id}/anything` that is not an
 // image at all.
+//
+// The user avatar arm is a literal, and that is the whole point of it. A user
+// name does not fit `[A-Za-z0-9_-]+`: `encodeURIComponent("Juan Pérez")` is
+// `Juan%20P%C3%A9rez`, and `%` is not in the class, so a by-name arm would
+// simply fail to fetch that user's picture. Widening the class to carry `%XX`
+// would readmit `%2F`, which decodes to `/` — the traversal this allowlist
+// exists to stop. `/api/users/me/avatar` has no client-controlled segment at
+// all: `me` is a literal and the daemon resolves it from the credential, which
+// gives this route the same property `media.rs` claims for the agent one.
 const AUTHENTICATED_IMAGE_PATH_RE =
-  /^\/api\/(?:(?:uploads|media\/artifacts)\/[A-Za-z0-9_-]+|agents\/[A-Za-z0-9_-]+\/avatar)$/;
+  /^\/api\/(?:(?:uploads|media\/artifacts)\/[A-Za-z0-9_-]+|agents\/[A-Za-z0-9_-]+\/avatar|users\/me\/avatar)$/;
 
 export function isAuthenticatedImagePath(path: string): boolean {
   return AUTHENTICATED_IMAGE_PATH_RE.test(path);
@@ -1709,25 +1718,29 @@ export async function patchAgent(agentId: string, body: { name?: string; descrip
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
 }
 
-// --- Agent visual identity: emoji, colour, avatar image (#8339) ------------
+// --- Visual identity: emoji, colour and avatar image, agents and users (#8339) --
 
 /** Largest avatar the daemon stores, mirroring `MAX_AVATAR_BYTES` in
  *  `crates/librefang-api/src/routes/agents/avatar.rs`.
  *
+ *  Not named after agents although that route is where the number lives: the
+ *  daemon has one cap for both, and this is the single client mirror of it.
+ *
  *  Duplicated here to fail before spending the upload, not to decide: a stale
  *  copy of this number can only be wrong in the direction of sending bytes the
  *  server then rejects with a 413 that names the real cap. */
-export const MAX_AGENT_AVATAR_BYTES = 2 * 1024 * 1024;
+export const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 
 /** Image types the daemon accepts as an avatar, mirroring
- *  `librefang_types::media::ALLOWED_IMAGE_TYPES`.
+ *  `librefang_types::media::ALLOWED_IMAGE_TYPES`. Shared by both surfaces, for
+ *  the same reason the cap above is.
  *
  *  SVG is absent on purpose and its absence is load-bearing: an SVG is XML that
  *  can carry script, and the daemon serves avatars back to a browser. Note the
  *  server decides by sniffing the bytes and ignores both the `Content-Type` we
  *  send and the name of the file, so this list is a courtesy to the person
  *  picking the file — never the check that matters. */
-export const ALLOWED_AGENT_AVATAR_TYPES = [
+export const ALLOWED_AVATAR_TYPES = [
   "image/png",
   "image/jpeg",
   "image/gif",
@@ -1805,6 +1818,73 @@ export async function updateAgentIdentity(
   identity: { emoji?: string; color?: string },
 ): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/identity`, identity);
+}
+
+// --- User visual identity (#8339) -------------------------------------------
+
+/** The signed-in user's own avatar.
+ *
+ *  A literal path rather than `/api/users/{name}/avatar`, and that is the point
+ *  of it: a name is a client-controlled segment, and a path built from one
+ *  could only be admitted by `AUTHENTICATED_IMAGE_PATH_RE` loosening the
+ *  character class that stops a segment escaping — see the note on that regex.
+ *  `me` is resolved from the bearer credential on the daemon side, so nothing
+ *  in this path was chosen by a caller.
+ *
+ *  There is deliberately no `userAvatarPath(name)`. The dashboard draws the
+ *  signed-in user's picture and nobody else's; an admin surface for other
+ *  users' avatars would need one, and would need that regex question answered
+ *  first rather than answered by widening a security allowlist. */
+export function currentUserAvatarPath(): string {
+  return "/api/users/me/avatar";
+}
+
+export interface UserAvatarUploadResult {
+  status: string;
+  avatar_url: string;
+  content_type: string;
+  bytes: number;
+}
+
+/** POST /api/users/{name}/avatar — store an image as this user's avatar.
+ *
+ *  Raw bytes with no multipart and no filename, exactly like the agent route,
+ *  and for the same reason: the daemon sniffs the bytes rather than trusting
+ *  anything the browser said about them.
+ *
+ *  The name here is an addressing key, not a filename. The daemon keys the
+ *  stored file on `UserId::from_name`, a UUID it derives itself, so no part of
+ *  this path reaches the filesystem. */
+export async function uploadUserAvatar(name: string, file: Blob): Promise<UserAvatarUploadResult> {
+  const response = await fetchWithTimeout(`/api/users/${encodeURIComponent(name)}/avatar`, {
+    method: "POST",
+    headers: buildHeaders({ "Content-Type": "application/octet-stream" }),
+    body: file,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as UserAvatarUploadResult;
+}
+
+/** DELETE /api/users/{name}/avatar — drop the image. */
+export async function deleteUserAvatar(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/users/${encodeURIComponent(name)}/avatar`);
+}
+
+/** PATCH /api/users/{name}/identity — the user's emoji.
+ *
+ *  Partial like the agent one: a field this body omits keeps its stored value
+ *  rather than being cleared, so clearing means sending it empty.
+ *
+ *  `avatar_url` is absent from the accepted payload for the same reason it is
+ *  absent on the agent side, and one more: a user has no manifest to write it
+ *  into. The image is a file and its existence is read off the disk. */
+export async function updateUserIdentity(
+  name: string,
+  identity: { emoji?: string },
+): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(`/api/users/${encodeURIComponent(name)}/identity`, identity);
 }
 
 export interface AgentToolsResponse {
@@ -3497,6 +3577,14 @@ export async function getStatus(): Promise<StatusResponse> {
 
 export interface WhoamiResponse {
   name: string;
+  /** The caller's emoji, absent when they have not set one (#8339).
+   *
+   *  Carried here rather than fetched from `/api/users/{name}` because every
+   *  page that draws the caller's identity would otherwise need a second
+   *  request, and that one is admin-only on the daemon side. Whether they have
+   *  an *image* is deliberately not mirrored here: `GET /api/users/me/avatar`
+   *  answers that with a 404, which is one source of truth instead of two. */
+  emoji?: string;
 }
 
 /** The calling credential's own resolved identity — `GET /api/authz/whoami`.

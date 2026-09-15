@@ -3,8 +3,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
-  ALLOWED_AGENT_AVATAR_TYPES,
-  MAX_AGENT_AVATAR_BYTES,
+  ALLOWED_AVATAR_TYPES,
+  MAX_AVATAR_BYTES,
   type AgentDetail,
   type AgentIdentity,
   type AgentItem,
@@ -281,7 +281,7 @@ export function AgentAppearanceSection({
     input.value = "";
     if (!file) return;
 
-    if (!(ALLOWED_AGENT_AVATAR_TYPES as readonly string[]).includes(file.type)) {
+    if (!(ALLOWED_AVATAR_TYPES as readonly string[]).includes(file.type)) {
       addToast(
         t("agents.identity.avatar_type_rejected", {
           defaultValue: "An avatar must be a PNG, JPEG, GIF or WebP image. SVG is not accepted.",
@@ -290,12 +290,12 @@ export function AgentAppearanceSection({
       );
       return;
     }
-    if (file.size > MAX_AGENT_AVATAR_BYTES) {
+    if (file.size > MAX_AVATAR_BYTES) {
       addToast(
         t("agents.identity.avatar_too_large", {
           defaultValue: "That image is {{size}} MB; the limit is {{limit}} MB.",
           size: (file.size / (1024 * 1024)).toFixed(1),
-          limit: (MAX_AGENT_AVATAR_BYTES / (1024 * 1024)).toFixed(0),
+          limit: (MAX_AVATAR_BYTES / (1024 * 1024)).toFixed(0),
         }),
         "error",
       );
@@ -376,7 +376,7 @@ export function AgentAppearanceSection({
             <input
               type="file"
               ref={fileInputRef}
-              accept={ALLOWED_AGENT_AVATAR_TYPES.join(",")}
+              accept={ALLOWED_AVATAR_TYPES.join(",")}
               onChange={handleFileChange}
               className="hidden"
               data-testid="agent-avatar-file-input"
