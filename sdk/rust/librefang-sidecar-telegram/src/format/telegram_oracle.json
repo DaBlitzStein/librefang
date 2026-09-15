@@ -2425,5 +2425,140 @@
     ]
    }
   ]
+ },
+ {
+  "source": "таблица: &#124;&#124;значение&#124;&#124; конец",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "таблица: ||значение|| конец"
+   }
+  ]
+ },
+ {
+  "source": "||a&#124;&#124;b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a||b"
+    }
+   }
+  ]
+ },
+ {
+  "source": "&#61;&#61;a&#61;&#61;",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "==a=="
+   }
+  ]
+ },
+ {
+  "source": "&#124;&#124;секрет&#124;&#124;",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "||секрет||"
+   }
+  ]
+ },
+ {
+  "source": "&vert;&vert;a&vert;&vert;",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "&vert;&vert;a&vert;&vert;"
+   }
+  ]
+ },
+ {
+  "source": "a&#124;&#124;b||c||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "a||b",
+     {
+      "type": "spoiler",
+      "text": "c"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "&#61;&#61;a== b",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "==a== b"
+   }
+  ]
+ },
+ {
+  "source": "||a|| &#124;&#124;b&#124;&#124;",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     " ||b||"
+    ]
+   }
+  ]
+ },
+ {
+  "source": "\\\\&#124;|a||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "\\||a||"
+   }
+  ]
+ },
+ {
+  "source": "\\\\&#61;=a==",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "\\==a=="
+   }
+  ]
+ },
+ {
+  "source": "&amp;#124;&#124;a||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "&#124;|a||"
+   }
+  ]
+ },
+ {
+  "source": "||a&nbsp;||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a "
+    }
+   }
+  ]
+ },
+ {
+  "source": "&#42;&#42;жирный&#42;&#42;",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "**жирный**"
+   }
+  ]
  }
 ]

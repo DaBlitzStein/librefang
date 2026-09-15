@@ -177,7 +177,7 @@ impl RichText {
 /// x||a||y      -> spoiler      ||a ||     -> literal (closer preceded by a space)
 /// ||a\u{a0}||  -> spoiler      ||a\t||    -> literal (only ASCII counts as space)
 /// ||a\nb||     -> literal      ||||       -> literal (the content may not be empty)
-/// =====        -> marked "="   \|\|a\|\|  -> literal (an escaped delimiter is text)
+/// =====        -> marked "="   \|\|a\|\|  -> literal (nobody wrote a delimiter)
 /// ```
 ///
 /// Four of these cost a round of review each, so they are worth stating plainly:
@@ -192,10 +192,11 @@ impl RichText {
 ///   single `=`, and a rule line of twenty `=` is four of them. A version that stepped by a
 ///   whole delimiter mangled every long run differently and pinned the result in a test as
 ///   a known divergence, which is how a bug gets to look like a decision.
-/// * **An escaped delimiter is text.** `\|\|a\|\|` is literal for Telegram. `pulldown-cmark`
-///   reports an escape by *splitting the text event* at it, so the two halves of `\|\|`
-///   arrive as separate `Plain` nodes; a delimiter is therefore required to come from one
-///   node, which is what `Flat::seams` records.
+/// * **A delimiter that was not written as one is text.** `\|\|a\|\|` and
+///   `&#124;&#124;a&#124;&#124;` are both literal for Telegram. `pulldown-cmark` hands over a
+///   decoded `|` either way, so the builder compares each text event with the source it came
+///   from and records the characters nobody typed; `Flat::seams` holds them, and a delimiter
+///   touching one is not a delimiter.
 ///
 /// # What is deliberately not modelled
 ///
@@ -278,7 +279,8 @@ fn soft_break_marker() -> RichText {
     RichText::Seq(Vec::new())
 }
 
-/// Stands immediately before a text node that begins with an escaped character.
+/// Stands immediately before a text node whose first character was not written as itself —
+/// an escape or a character reference.
 fn escape_marker() -> RichText {
     RichText::Seq(vec![RichText::Plain(String::new())])
 }
@@ -289,12 +291,12 @@ struct Flat<'a> {
     text: String,
     /// `(offset of the placeholder, the node it stands for)`, in order.
     opaque: Vec<(usize, &'a RichText)>,
-    /// Where an escaped character sits. `pulldown-cmark` reports an escape by ending the text
-    /// event at it and starting another, so two text events in a row mean the second begins
-    /// with an escaped character — which is what makes `\|\|a\|\|` and `\==a\==` literal.
-    /// The builder marks those boundaries as it reads the events, because adjacency in the
-    /// finished run does not mean the same thing: a link whose scheme was rejected also
-    /// leaves two `Plain` nodes side by side, and `||[a](/d)||` is a spoiler.
+    /// Where a character sits that was not written as itself — an escape (`\|`) or a
+    /// character reference (`&#124;`). A delimiter touching one of these is text, because
+    /// nobody wrote a delimiter; the builder marks them from the source offsets as it reads
+    /// the events. Adjacency in the finished run says nothing about this: a link whose scheme
+    /// was rejected also leaves two `Plain` nodes side by side, and `||[a](/d)||` is a
+    /// spoiler.
     seams: Vec<usize>,
     /// Offsets of soft line breaks, which are barriers here and spaces on the screen.
     soft: Vec<usize>,
@@ -600,29 +602,42 @@ pub fn markdown_to_blocks(markdown: &str) -> Vec<Block> {
         frames: vec![Frame::Blocks(Vec::new())],
         ..Builder::default()
     };
-    // The offsets matter: an escaped delimiter is text, and the only way to tell one is to
-    // look at the source the event came from. Reading it off the shape of the event stream —
-    // two text events in a row — was wrong in both directions: an entity or an unresolved `[`
-    // splits the stream with no escape in sight, and an escape at the start of a run does not
-    // split it at all, so `a&amp;||секрет||` lost its spoiler while `\||секрет||` grew one.
+    // A delimiter is markup only if it was *written* as one. Two ways of putting the
+    // character on the screen without writing it are an escape (`\|`) and a character
+    // reference (`&#124;`), and Telegram honours both: `\||секрет||` and
+    // `&#124;&#124;секрет&#124;&#124;` are text there. Neither is visible in the event —
+    // `pulldown-cmark` hands over a bare `|` in all three cases — so the source range is
+    // compared with the text it produced, which separates them without guessing.
     for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
-        let escaped_start =
-            matches!(event, Event::Text(_)) && starts_escaped(markdown, range.start);
-        state.push(event, escaped_start);
+        let written_literally = match &event {
+            Event::Text(text) => {
+                markdown.get(range.clone()) == Some(text.as_ref())
+                    && !starts_escaped(markdown, range.start)
+            }
+            _ => true,
+        };
+        state.push(event, !written_literally);
     }
     state.finish()
 }
 
-/// Whether the character at `at` was written with a backslash in front of it.
+/// Whether the character at `at` was escaped by the backslash in front of it.
 ///
-/// Counting the run of backslashes — an even one escapes the backslashes and leaves the next
-/// character alone — is not needed, and that is a property of `pulldown-cmark` rather than of
-/// the syntax: it starts the text event *at* the escaped character, so `\\||a||` reaches here
-/// as one event beginning at the second backslash and another beginning at `|`, with the run
-/// already resolved. A parity count was written here first and no input could tell it from
-/// this, on the live parser or in the exhaustive sweep.
+/// The run is counted because that is what escaping means: an even one escapes the
+/// backslashes and leaves the next character alone. It is redundancy rather than a rule that
+/// carries weight — with the reference check beside it, a sweep of 21 864 inputs over
+/// backslashes, delimiters and numeric references finds none that tells this apart from
+/// looking at a single byte. It stays because the version that dropped it justified the drop
+/// by saying no input could tell the difference, a reviewer found one (`\\&#124;|a||`, back
+/// when references went unchecked), and one line is a cheap way not to owe that claim again.
 fn starts_escaped(markdown: &str, at: usize) -> bool {
-    markdown.as_bytes()[..at].last() == Some(&b'\\')
+    markdown.as_bytes()[..at]
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\\')
+        .count()
+        % 2
+        == 1
 }
 
 /// A container being filled. Blocks nest (a list item holds blocks, a quote holds blocks),
@@ -781,8 +796,8 @@ impl Builder {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
             Event::Text(text) => {
-                // The character arrives unescaped and looks like any other, so where it was
-                // written with a backslash is recorded here for the scan.
+                // The character arrives decoded and looks like any other, so the fact that it
+                // was written as an escape or a reference is recorded here for the scan.
                 if escaped_start {
                     self.push_inline(escape_marker());
                 }
@@ -1517,7 +1532,7 @@ mod tests {
     /// `telegram_oracle.json` was sent to a live bot as `rich_message.markdown` and the parse
     /// `sendRichMessage` echoes back was written down verbatim. This test is the diff.
     ///
-    /// Of 165 recorded forms, 128 match byte for byte. The other 37 are named in
+    /// Of 178 recorded forms, 140 match byte for byte. The other 38 are named in
     /// `DIVERGENCES`, and for the 29 that are not content-level the difference is *checked*
     /// rather than described: same characters, same multiset of styles, written down
     /// differently. That check is the point. An earlier version of this test listed 23
@@ -1627,10 +1642,17 @@ mod tests {
             .collect()
     }
 
-    /// An escaped delimiter is text. `pulldown-cmark` reports an escape by starting a new text
-    /// event at the escaped character, which is the only signal there is — the character
-    /// itself arrives unescaped and indistinguishable. Telegram agrees on all four forms;
-    /// they are in the recording too.
+    /// A delimiter nobody wrote is text, and there are two ways to put the character on the
+    /// screen without writing it: an escape (`\|`) and a character reference (`&#124;`).
+    /// Telegram honours both, and `pulldown-cmark` hands over a decoded `|` for all three
+    /// spellings, so the builder tells them apart by comparing each text event with the
+    /// source range it came from.
+    ///
+    /// The rule before it — "two text events in a row mean an escape" — was false in both
+    /// directions and, by accident, covered references: a reference always makes its own
+    /// event. Replacing it with a rule about escapes alone therefore *removed* protection
+    /// nobody had noticed was there, and `&#124;&#124;значение&#124;&#124;` became a spoiler
+    /// hiding the text. Both classes are in the recording now.
     #[test]
     fn an_escaped_delimiter_is_text() {
         for source in [
@@ -1643,6 +1665,10 @@ mod tests {
             // here and made a spoiler where Telegram shows text.
             r"\||секрет||",
             r"\==важно==",
+            // Character references, the class the escape-only rule dropped.
+            "&#124;&#124;секрет&#124;&#124;",
+            "&#61;&#61;важно&#61;&#61;",
+            "таблица: &#124;&#124;значение&#124;&#124; конец",
         ] {
             let rendered = json(source);
             assert!(
@@ -1931,14 +1957,23 @@ mod tests {
                 "быстрый скан разошёлся с эталоном на {input:?}"
             );
         }
+        // Splitting a run into two `Plain` nodes proves nothing: `Flat` concatenates them and
+        // comes out byte-identical, so the loop that did that compared a thing with itself.
+        // A seam is what an escape or a character reference leaves behind, and it is put here
+        // the same way the builder puts it — with a marker between the parts.
         for input in all.iter().filter(|s| s.len() <= 6) {
             for cut in 1..input.len() {
                 let parts = vec![
                     RichText::Plain(input[..cut].to_string()),
+                    escape_marker(),
                     RichText::Plain(input[cut..].to_string()),
                 ];
                 let flat = Flat::new(&parts);
                 let end = flat.text.len();
+                assert!(
+                    !flat.seams.is_empty(),
+                    "шов не записан, тест сравнивает сам с собой"
+                );
                 assert_eq!(
                     RichText::from_parts(flat.pair(0, end)),
                     RichText::from_parts(naive_pair(&flat, 0, end)),
@@ -2061,6 +2096,11 @@ mod tests {
             "|| a|| ".repeat(100_000),
             format!("{}==a", "||a|| ".repeat(200_000)),
             format!("{}||a", "==a== ".repeat(200_000)),
+            // The same shapes with the tail delimiter *paired*. Without the closer the pair
+            // is never returned, so nothing exercises the pointer that holds the opener in
+            // place — and two mutations of it survived the whole suite while costing 26 s.
+            format!("{}==a==", "||a|| ".repeat(200_000)),
+            format!("{}||a||", "==a== ".repeat(200_000)),
             format!("||a{}", " ||".repeat(300_000)),
             format!("==a{}", " ==".repeat(300_000)),
             "||a ==b|| ".repeat(100_000),
@@ -2088,6 +2128,7 @@ mod tests {
     /// unnoticed, and every one outside `CONTENT_DIVERGENCES` is additionally checked to
     /// carry Telegram's own text and Telegram's own set of styles.
     const DIVERGENCES: &[(&str, &str)] = &[
+        ("&vert;&vert;a&vert;&vert;", "Telegram decodes numeric character references and leaves named ones alone, so it shows `&vert;` as written; CommonMark decodes both. Neither side makes markup of it — the difference is the text, and it is `pulldown-cmark`'s, not the scan's"),
         ("a==[==](/d)b", "a relative link: Telegram keeps the raw text and finds a bot command in `/d`, while this converter drops the link and keeps its text (the policy on `close_style`). Before the scan was rewritten this input produced an empty `marked` span with the link text destroyed, so it is the regression case too"),
         ("| a | b |\n| --- | --- |\n| ||c|| | d |", "GFM reads the pipes of `||c||` as cell separators, and a row with more cells than the header is truncated per the spec; Telegram is not a GFM parser and keeps the text"),
         ("||\tсекрет||", "same"),
@@ -2131,6 +2172,7 @@ mod tests {
     /// written down. Everything not in here is checked to carry the same characters and the
     /// same set of styles as Telegram's own parse.
     const CONTENT_DIVERGENCES: &[&str] = &[
+        "&vert;&vert;a&vert;&vert;",
         "a==[==](/d)b",
         "| a | b |\n| --- | --- |\n| ||c|| | d |",
         "||\tсекрет||",
