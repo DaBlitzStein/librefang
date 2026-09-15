@@ -133,6 +133,7 @@ impl AgentTypeSpec {
                 shell: capability_defaults.shell,
                 ofp_discover: capability_defaults.ofp_discover,
                 ofp_connect: capability_defaults.ofp_connect,
+                routing: Default::default(),
             },
 
             // Identity and provenance the flat shape does not carry.
