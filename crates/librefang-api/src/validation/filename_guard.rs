@@ -47,7 +47,7 @@ use librefang_kernel::injection_guard;
 ///
 /// * `CONIN$` and `CONOUT$`, which [`RtlIsDosDeviceName_U`] lists among its valid DOS device names and which have resolved in *every* directory since Windows 8 moved the console onto a real device — so `CONIN$.png` opens the console, not a file.
 /// * The ISO/IEC 8859-1 superscripts `¹`, `²` and `³`, which Windows reads as digits in the `COM#` and `LPT#` series; Microsoft's own note is that `echo test > COM¹` fails to create a file.
-/// * `COM0` and `LPT0` are deliberately absent: neither the naming documentation nor that function reserves them, and a refusal list that invents entries teaches its readers to stop trusting it.
+/// * `COM0` and `LPT0` are deliberately absent, and this one is a judgement call rather than a fact: Microsoft's naming documentation enumerates `COM1`–`COM9`, while the `RtlIsDosDeviceName_U` page describes the series as "`LPTn`, `COMn` … when `n` is a digit", and zero is a digit. The two sources do not settle it, and the behaviour cannot be checked from a non-Windows host, so they stay out rather than being refused on a guess — a refusal list carrying entries nobody can justify teaches its readers to stop trusting it. If someone confirms on Windows that `COM0` resolves as a device, this is the line to change.
 ///
 /// [`RtlIsDosDeviceName_U`]: https://learn.microsoft.com/en-us/windows/win32/devnotes/rtlisdosdevicename_u
 pub const WINDOWS_RESERVED_STEMS: [&str; 30] = [
