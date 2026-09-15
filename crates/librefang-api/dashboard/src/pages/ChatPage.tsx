@@ -1421,7 +1421,10 @@ interface MessageBubbleProps {
   ttsAvailable?: boolean;
 }
 
-const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarUrl, agentEmoji, userName, userEmoji, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
+/** Exported for its test, like `AgentAppearanceSection` on the users page:
+ *  mounting `ChatPage` to reach it would mean standing up a session, a selected
+ *  agent and a streaming transcript to assert two lines of avatar selection. */
+export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarUrl, agentEmoji, userName, userEmoji, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
