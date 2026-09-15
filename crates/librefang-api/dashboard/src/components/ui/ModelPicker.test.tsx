@@ -185,6 +185,29 @@ describe("ModelPicker", () => {
     expect(screen.getByRole("button", { name: "openai" })).toBeInTheDocument();
   });
 
+  it("keeps an unavailable provider reachable while it is the current one", () => {
+    // The manifest form lists a provider the agent already uses even when it
+    // is down or its key was rejected. Disabling that row would strand the
+    // value that is in the manifest.
+    render(
+      <ModelPicker
+        label="Agent model"
+        value={{ provider: "groq", model: "llama-3" }}
+        onChange={() => {}}
+        models={[model("groq", "llama-3"), model("openai", "gpt-4")]}
+        providers={[provider("openai"), provider("groq", { reachable: false })]}
+      />,
+    );
+
+    open();
+    const groq = screen.getByRole("button", { name: "groq" });
+    expect(groq).toBeEnabled();
+    expect(groq).toHaveAttribute("aria-current", "true");
+
+    // The same provider stays blocked for a value that is not the current one.
+    expect(screen.getByRole("button", { name: "openai" })).toBeEnabled();
+  });
+
   // The catalog is built from live discovery. When discovery finds nothing for
   // a provider — or an operator wants a model the daemon has never seen — the
   // picker has to stay usable, which is the whole reason `allowCustom` exists.
