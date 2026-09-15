@@ -16,6 +16,14 @@ interface UserAvatarProps extends HTMLAttributes<HTMLDivElement> {
   name: string;
   /** The user's emoji, shown when there is no image. */
   emoji?: string;
+  /**
+   * `whoami.has_avatar` — whether the daemon has a picture on disk for them.
+   *
+   * Optional, and `undefined` means "the daemon did not say" rather than "no":
+   * only `false` skips the request. See `WhoamiResponse.has_avatar` for why the
+   * two must not be conflated.
+   */
+  hasAvatar?: boolean;
   size?: AvatarSize;
 }
 
@@ -26,18 +34,17 @@ interface UserAvatarProps extends HTMLAttributes<HTMLDivElement> {
  * fetched with the bearer credential and handed to an `img` as an object URL,
  * which is a hook, so it needs a component to live in.
  *
- * There is no "does this user have a picture" prop, unlike the agent one. An
- * agent list has twenty-two rows to spare a per-render 404 from, so the agent
- * hook is gated on `identity.avatar_url`; there is exactly one signed-in user,
- * and whether they have a picture is not known until the daemon answers — which
- * it does with a 404 the query reads as "no picture".
+ * `hasAvatar` gates the fetch exactly as `agentAvatarUrl` does on the agent
+ * side, and it is free here: the chat fetches `whoami` anyway for the caller's
+ * name and emoji.
  */
 export const UserAvatar = memo(function UserAvatar({
   name,
   emoji,
+  hasAvatar,
   size = "md",
   ...props
 }: UserAvatarProps) {
-  const src = useUserAvatarUrl(name);
+  const src = useUserAvatarUrl(name, hasAvatar !== false);
   return <Avatar fallback={name} size={size} src={src} emoji={emoji} {...props} />;
 });

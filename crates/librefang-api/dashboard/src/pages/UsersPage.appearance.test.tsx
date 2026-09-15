@@ -7,7 +7,7 @@
 // never calls the mutation passes the negative half alone.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { UserAppearanceSection } from "./UsersPage";
 import * as http from "../lib/http/client";
@@ -100,23 +100,22 @@ afterEach(() => {
 
 const NAME = "alice";
 
-function renderSection(props: { emoji?: string } = {}) {
+function renderSection(props: { emoji?: string; hasAvatar?: boolean } = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <UserAppearanceSection name={NAME} emoji={props.emoji} />
+      <UserAppearanceSection
+        name={NAME}
+        emoji={props.emoji}
+        hasAvatar={props.hasAvatar}
+      />
     </QueryClientProvider>,
   );
   return view;
 }
 
-/** Waits for the avatar probe to settle, so a `Replace` assertion is not racing
- *  the 404 that decides it. */
-async function avatarProbeSettled() {
-  await waitFor(() => expect(http.fetchAuthenticatedImage).toHaveBeenCalled());
-}
 
 function fileInput(): HTMLInputElement {
   return screen.getByTestId("user-avatar-file-input") as HTMLInputElement;
@@ -211,21 +210,17 @@ describe("emoji editor", () => {
 });
 
 describe("avatar upload", () => {
-  it("offers Upload with no avatar, and Replace plus Remove once there is one", async () => {
+  it("offers Upload with no avatar, and Replace plus Remove once there is one", () => {
     const { unmount } = renderSection();
-    await avatarProbeSettled();
     expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
     unmount();
 
-    // The same section with the probe answering with bytes.
-    vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(
-      new Blob([new Uint8Array([0x89])], { type: "image/png" }),
-    );
-    renderSection();
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Replace" })).toBeInTheDocument(),
-    );
+    // The same section, with `whoami` having said there is a picture. The
+    // section no longer asks the daemon this itself — it cannot, because the
+    // answer is what decides whether asking is worth a request.
+    renderSection({ hasAvatar: true });
+    expect(screen.getByRole("button", { name: "Replace" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
   });
 
@@ -324,12 +319,9 @@ describe("avatar removal", () => {
     expect(deleteAvatar).not.toHaveBeenCalled();
   });
 
-  it("deletes by name once there is a picture to remove", async () => {
-    vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(
-      new Blob([new Uint8Array([0x89])], { type: "image/png" }),
-    );
-    renderSection();
-    const remove = await screen.findByRole("button", { name: "Remove" });
+  it("deletes by name once there is a picture to remove", () => {
+    renderSection({ hasAvatar: true });
+    const remove = screen.getByRole("button", { name: "Remove" });
 
     fireEvent.click(remove);
     expect(deleteAvatar.mock.calls[0][0]).toBe(NAME);

@@ -11,6 +11,11 @@
 // character class, so a by-name arm would not just be riskier — it would fail
 // to fetch this user's picture at all, and widening the class to carry `%XX`
 // would readmit `%2F`, which decodes to the `/` that allowlist exists to stop.
+//
+// The third thing guarded here is the gate: `hasAvatar` comes from `whoami` and
+// decides whether the request is worth making at all, so `false` must mean "do
+// not ask" and `undefined` must mean "not told, ask anyway". Collapsing those two
+// is how a caller who has a picture ends up never fetching it.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
@@ -58,7 +63,7 @@ describe("useUserAvatarUrl", () => {
     vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(pngBlob());
     const { wrapper } = createQueryClientWrapper();
 
-    renderHook(() => useUserAvatarUrl(NAME), { wrapper });
+    renderHook(() => useUserAvatarUrl(NAME, true), { wrapper });
 
     await waitFor(() => expect(http.fetchAuthenticatedImage).toHaveBeenCalled());
     const path = vi.mocked(http.fetchAuthenticatedImage).mock.calls[0][0];
@@ -75,14 +80,14 @@ describe("useUserAvatarUrl", () => {
     vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(pngBlob());
     const { queryClient, wrapper } = createQueryClientWrapper();
 
-    const first = renderHook(() => useUserAvatarUrl("alice"), { wrapper });
+    const first = renderHook(() => useUserAvatarUrl("alice", true), { wrapper });
     await waitFor(() => expect(first.result.current).toBe("blob:test/1"));
 
     // A second name on the same client. If the key ignored the name these two
     // would share one entry — and `AVATAR_STALE_MS` (5 minutes) would leave the
     // cached blob in place, so the second request would never happen and
     // `alice`'s picture would be served for `bob`.
-    const second = renderHook(() => useUserAvatarUrl("bob"), { wrapper });
+    const second = renderHook(() => useUserAvatarUrl("bob", true), { wrapper });
     await waitFor(() =>
       expect(http.fetchAuthenticatedImage).toHaveBeenCalledTimes(2),
     );
@@ -100,20 +105,21 @@ describe("useUserAvatarUrl", () => {
   it("does not request anything without a name", () => {
     const { wrapper } = createQueryClientWrapper();
 
-    const { result } = renderHook(() => useUserAvatarUrl(""), { wrapper });
+    const { result } = renderHook(() => useUserAvatarUrl("", true), { wrapper });
 
     expect(result.current).toBeUndefined();
     expect(http.fetchAuthenticatedImage).not.toHaveBeenCalled();
   });
 
   it("stays undefined on the 404 that means there is no picture", async () => {
-    // The daemon answers 404 rather than a placeholder when a user has never
-    // uploaded one. `retry: false` is what keeps that from being three more
+    // `whoami` said there was a picture and by the time the bytes were asked
+    // for there was not — a delete in another tab, or a file removed under a
+    // restored database. `retry: false` is what keeps that from being three more
     // round trips that cannot turn it into a picture.
     vi.mocked(http.fetchAuthenticatedImage).mockRejectedValue(new Error("404"));
     const { wrapper } = createQueryClientWrapper();
 
-    const { result } = renderHook(() => useUserAvatarUrl(NAME), { wrapper });
+    const { result } = renderHook(() => useUserAvatarUrl(NAME, true), { wrapper });
 
     await waitFor(() => expect(http.fetchAuthenticatedImage).toHaveBeenCalledTimes(1));
     expect(result.current).toBeUndefined();
@@ -122,5 +128,30 @@ describe("useUserAvatarUrl", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(http.fetchAuthenticatedImage).toHaveBeenCalledTimes(1);
     expect(revoked).toEqual([]);
+  });
+
+  it("does not ask when the daemon says there is no picture", () => {
+    const { wrapper } = createQueryClientWrapper();
+
+    const { result } = renderHook(() => useUserAvatarUrl(NAME, false), { wrapper });
+
+    // The pair with the test below is the point: if `false` and `undefined` were
+    // treated alike, one of them would be wrong, and the wrong direction is a
+    // caller who has a picture and never fetches it.
+    expect(result.current).toBeUndefined();
+    expect(http.fetchAuthenticatedImage).not.toHaveBeenCalled();
+  });
+
+  it("asks anyway when the daemon did not say", async () => {
+    vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(pngBlob());
+    const { wrapper } = createQueryClientWrapper();
+
+    const { result } = renderHook(
+      () => useUserAvatarUrl(NAME, undefined as unknown as boolean),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(http.fetchAuthenticatedImage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current).toBe("blob:test/1"));
   });
 });

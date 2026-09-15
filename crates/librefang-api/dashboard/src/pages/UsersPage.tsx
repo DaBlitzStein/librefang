@@ -13,7 +13,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
   Users,
@@ -38,7 +37,7 @@ import {
 
 import type { UserItem, UserUpsertPayload } from "../lib/http/client";
 import { ALLOWED_AVATAR_TYPES, MAX_AVATAR_BYTES } from "../api";
-import { userQueries, useUsers } from "../lib/queries/users";
+import { useUsers } from "../lib/queries/users";
 import { useWhoami } from "../lib/queries/authz";
 import {
   useCreateUser,
@@ -847,21 +846,19 @@ function AppearanceRow({
 export function UserAppearanceSection({
   name,
   emoji,
+  hasAvatar,
 }: {
   name: string;
   emoji?: string;
+  /** `whoami.has_avatar`. Read here rather than asked of the avatar query, which
+   *  needs this very answer to decide whether to run. */
+  hasAvatar?: boolean;
 }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const updateIdentityMutation = useUpdateUserIdentity();
   const uploadAvatarMutation = useUploadUserAvatar();
   const deleteAvatarMutation = useDeleteUserAvatar();
-  // The only read that answers "is there a picture". `UserItem` cannot: the
-  // list carries no `has_avatar`, and the file's existence is the one honest
-  // source for the question anyway. This is the same cache entry `UserAvatar`
-  // paints from below, so it is a second subscription and not a second request.
-  const { data: avatarBlob } = useQuery(userQueries.avatar(name));
-  const hasAvatar = !!avatarBlob;
   const storedEmoji = emoji ?? "";
   const [emojiDraft, setEmojiDraft] = useState(storedEmoji);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -992,7 +989,7 @@ export function UserAppearanceSection({
             from `UserAvatar`, which is the signed-in caller's own — correct
             here precisely because this section only ever edits the caller. */}
         <div className="flex items-center gap-3 pb-2 border-b border-border-subtle">
-          <UserAvatar name={name} emoji={emojiDraft} size="lg" />
+          <UserAvatar name={name} emoji={emojiDraft} hasAvatar={hasAvatar} size="lg" />
           <p className="text-sm font-semibold truncate">{name}</p>
         </div>
         <AppearanceRow label={t("users.identity.emoji", { defaultValue: "Emoji" })}>
@@ -1249,6 +1246,7 @@ function UserFormModal({
           <UserAppearanceSection
             name={editing.name}
             emoji={whoami.data?.emoji}
+            hasAvatar={whoami.data?.has_avatar}
           />
         ) : null}
         <div className="flex gap-2 justify-end pt-2 border-t border-border-subtle">
