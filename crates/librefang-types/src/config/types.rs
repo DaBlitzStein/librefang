@@ -443,6 +443,40 @@ pub struct UserConfig {
     pub emoji: Option<String>,
 }
 
+/// Longest emoji accepted, in `char`s.
+///
+/// A single glyph is one `char` for the common case and several for the ones built by joining or by a variation selector — `👨‍👩‍👧‍👦` is seven code points, `🏳️‍🌈` is six — so the ceiling is set to clear the widest sequence a picker emits with room to spare, and to stay far below the point where the value stops being a glyph and becomes a string someone is smuggling into `config.toml`.
+pub const MAX_EMOJI_CHARS: usize = 32;
+
+/// Normalize a user's identity emoji, or say why it was refused (#8339).
+///
+/// Lives beside the field it constrains rather than in the API crate, because a value reaches [`UserConfig::emoji`] two ways — `PATCH /api/users/{name}/identity`, and an operator editing `config.toml` — and only the first had a check.
+/// `validate_config_for_reload` in the kernel calls this for every row, so the bound holds for a hand-edited file as well, and the two paths cannot drift apart because there is one implementation.
+///
+/// `None` and an empty-or-whitespace string both mean "clear the stored emoji".
+///
+/// Nothing here checks that the value *is* an emoji, and that is deliberate: deciding "is this a glyph" needs an emoji table that would go stale against Unicode, and the two properties that actually matter for a value stored in `config.toml` and rendered into a DOM text node are length and the absence of control characters.
+/// A `Z` is therefore accepted as an emoji. It renders as a `Z`.
+pub fn validate_emoji(emoji: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = emoji else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let len = trimmed.chars().count();
+    if len > MAX_EMOJI_CHARS {
+        return Err(format!(
+            "emoji must be at most {MAX_EMOJI_CHARS} characters; this one is {len}"
+        ));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("emoji must not contain control characters".to_string());
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 fn default_role() -> String {
     "user".to_string()
 }

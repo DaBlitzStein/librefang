@@ -1079,3 +1079,59 @@ async fn deleting_an_avatar_makes_it_404_and_clears_has_avatar() {
     // The emoji is a separate resource and must not be collateral damage.
     assert!(users_avatar_dir(&h).exists(), "the directory stays");
 }
+
+/// Deleting a user takes the stored picture with it.
+///
+/// The file is keyed on `UserId::from_name(name)`, a stable derivation, so
+/// leaving it behind means whoever next takes this name inherits the previous
+/// holder's picture and `has_avatar` answers true for somebody who never set
+/// one. The agent side clears the same residue in `agent_purge`.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_user_takes_its_avatar_with_it() {
+    let h = boot(vec![]).await;
+
+    let (status, _) = upload_png(&h, "Alice", TINY_PNG).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        file_names(&users_avatar_dir(&h)),
+        vec![format!("{}.png", expected_stem("Alice"))],
+        "the fixture must actually have a picture for the absence below to mean anything"
+    );
+
+    let (status, _) = send(
+        h.app.clone(),
+        raw(
+            Method::DELETE,
+            "/api/users/Alice",
+            TEST_TOKEN,
+            Vec::new(),
+            "application/json",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    assert!(
+        file_names(&users_avatar_dir(&h)).is_empty(),
+        "a deleted user's picture must not be left for the next holder of the name"
+    );
+
+    // And the name, taken again, starts with no picture — which is the thing an
+    // operator would have seen: a brand-new teammate wearing the last one's
+    // face.
+    let (status, _) = send(
+        h.app.clone(),
+        json_req(
+            Method::POST,
+            "/api/users",
+            TEST_TOKEN,
+            serde_json::json!({ "name": "Alice", "role": "user" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = send(h.app.clone(), get("/api/users/Alice", TEST_TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["has_avatar"], serde_json::json!(false));
+}
