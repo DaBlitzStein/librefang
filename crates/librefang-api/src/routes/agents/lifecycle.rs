@@ -1666,16 +1666,14 @@ pub async fn save_agent_as_agent_type(
         ),
         Err(librefang_types::agent_type_store::CreateAgentTypeError::NameTaken) => (
             StatusCode::CONFLICT,
-            Json(
-                serde_json::json!({"error": format!("Agent type '{}' already exists", template_name)}),
-            ),
+            Json(serde_json::json!({
+                "error": t.t_args("api-error-agent-type-exists", &[("name", &template_name)])
+            })),
         ),
         Err(librefang_types::agent_type_store::CreateAgentTypeError::ShadowsLiveAgent) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
-                "error": format!(
-                    "'{template_name}' is a live agent, which is managed through /api/agents rather than the agent-type catalog"
-                )
+                "error": t.t_args("api-error-agent-type-name-taken", &[("name", &template_name)])
             })),
         ),
         Err(librefang_types::agent_type_store::CreateAgentTypeError::Io(e)) => {
