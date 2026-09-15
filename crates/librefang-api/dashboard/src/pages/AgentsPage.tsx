@@ -1,7 +1,7 @@
 import { formatRelativeTime } from "../lib/datetime";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   type AgentDetail,
   type AgentItem,
@@ -334,6 +334,9 @@ export function SystemPromptSection({
 export function AgentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  // The `template` search param, set by the agent-types page's Run button.
+  // Deliberately not named `search`: the local state below is the agent filter.
+  const { template: routeTemplate } = useSearch({ from: "/agents" });
   const [search, setSearch] = useState("");
   const [detailAgent, setDetailAgent] = useState<AgentDetail | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -894,6 +897,13 @@ export function AgentsPage() {
     setTomlParseError(null);
     setTemplateName("");
     setTemplateCustomName("");
+    // Drop the incoming `template` param on the way out. Without this, pressing
+    // Run on the same type a second time would navigate to a URL that already
+    // equals the current one, the effect below would not re-run, and the drawer
+    // would stay shut — the press would look like nothing happened.
+    if (routeTemplate) {
+      void navigate({ to: "/agents", search: {}, replace: true });
+    }
     // Don't reset while a spawn is in flight — reset() flips isPending
     // back to false, and since the fetch isn't actually aborted the user
     // could reopen the modal and submit again before the first response
@@ -904,6 +914,17 @@ export function AgentsPage() {
       spawnMutation.reset();
     }
   };
+
+  // Arriving from the agent-types page's Run button: the operator asked to
+  // instantiate that type, so the create drawer opens on the template tab with
+  // the type already selected. Run used to ask which *existing* agent to fork
+  // instead, which answers a different question than the button asks.
+  useEffect(() => {
+    if (!routeTemplate) return;
+    setShowCreate(true);
+    setCreateMode("template");
+    setTemplateName(routeTemplate);
+  }, [routeTemplate]);
 
   // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
   // serialized output into the textarea so advanced users can keep editing.

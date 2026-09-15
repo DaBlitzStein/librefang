@@ -11,7 +11,6 @@ import {
   useDeleteAgentType,
   usePromoteAgentType,
   useRestoreTemplateVersion,
-  useSpawnEphemeral,
 } from "../lib/mutations/agentTypes";
 import * as agentTypeMutations from "../lib/mutations/agentTypes";
 import { ApiError } from "../lib/http/errors";
@@ -48,15 +47,20 @@ vi.mock("../lib/mutations/agentTypes", () => ({
   useDeleteAgentType: vi.fn(),
   usePromoteAgentType: vi.fn(),
   useRestoreTemplateVersion: vi.fn(),
-  useSpawnEphemeral: vi.fn(),
   useUpdateAgentType: vi.fn(),
   useUpdateAgentTypeToml: vi.fn(),
 }));
+
+// `useNavigate` is hoisted out of the factory because `vi.mock` is hoisted
+// above the imports: the component calls it on every row press, so the stub has
+// to exist before the factory runs.
+const { navigateSpy } = vi.hoisted(() => ({ navigateSpy: vi.fn() }));
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: React.ReactNode } & Record<string, unknown>) => (
     <a {...(rest as Record<string, unknown>)}>{children}</a>
   ),
+  useNavigate: () => navigateSpy,
 }));
 
 // motion/react drives Modal and ConfirmDialog through async animation hooks
@@ -175,7 +179,6 @@ function renderPage(promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending:
     useCreateAgentType,
     useDeleteAgentType,
     useRestoreTemplateVersion,
-    useSpawnEphemeral,
     mutations.useUpdateAgentType,
     mutations.useUpdateAgentTypeToml,
   ]) {
@@ -206,6 +209,29 @@ function previewButton() {
 function promoteButton() {
   return screen.getByRole("button", { name: PROMOTE_LABEL });
 }
+
+const RUN_LABEL = "Create Agent";
+
+// Run on a type instantiates it. It used to open a modal asking which existing
+// agent to fork (#6699), which answers a different question than the button
+// asks: the operator pressed play on a *type*, and the flow that turns a type
+// into an agent is the create drawer. Landing anywhere else makes them pick the
+// same type a second time, from a dropdown, on the next page.
+describe("AgentTypesPage run", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useUIStore.setState({ toasts: [] });
+  });
+
+  it("opens the create flow with this type already selected", () => {
+    renderPage(idle);
+    fireEvent.click(screen.getByRole("button", { name: RUN_LABEL }));
+    expect(navigateSpy).toHaveBeenCalledWith({
+      to: "/agents",
+      search: { template: TYPE.name },
+    });
+  });
+});
 
 describe("AgentTypesPage promotion", () => {
   beforeEach(() => {

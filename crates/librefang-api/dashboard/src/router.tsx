@@ -230,6 +230,16 @@ const canvasRoute = createRoute({
 const agentsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/agents",
+  // `template` carries an agent-type name in from the agent-types page: its Run
+  // button instantiates the type, so the operator lands here with the type
+  // already chosen instead of picking it a second time from the drawer's
+  // dropdown. Modelled on `chatRoute` below, which carries `agentId` the same
+  // way from an agent row into the chat.
+  validateSearch: (search: Record<string, unknown>): { template?: string } => {
+    const out: { template?: string } = {};
+    if (typeof search.template === "string") out.template = search.template;
+    return out;
+  },
   component: () => <LazyRouteBoundary><AgentsPage /></LazyRouteBoundary>
 });
 
