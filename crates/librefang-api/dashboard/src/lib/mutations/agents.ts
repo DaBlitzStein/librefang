@@ -235,7 +235,14 @@ export function useUpdateAgentIdentity() {
       // `AgentsPage` renders them from the dashboard snapshot, whose key is a
       // sibling of `agentKeys.all` rather than a child of it. Without this the
       // row goes on showing the previous emoji until the snapshot's own 5 s
-      // poll comes round. Same line in the two avatar hooks below.
+      // poll comes round.
+      //
+      // Every other mutation in this file that changes what the list shows
+      // already does this — spawn, clone, suspend, resume, delete and
+      // reset-session all invalidate the snapshot. The three identity hooks
+      // were the ones that got missed, which is why an uploaded avatar used to
+      // take five seconds to appear in the row. Same line in the two avatar
+      // hooks below.
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });

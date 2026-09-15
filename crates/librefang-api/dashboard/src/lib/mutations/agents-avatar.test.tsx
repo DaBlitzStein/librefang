@@ -12,7 +12,7 @@ import {
   useUpdateAgentIdentity,
   useUploadAgentAvatar,
 } from "./agents";
-import { agentKeys } from "../queries/keys";
+import { agentKeys, overviewKeys } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
@@ -37,7 +37,7 @@ describe("useUpdateAgentIdentity", () => {
     expect(http.updateAgentIdentity).toHaveBeenCalledWith(AGENT, { emoji: "🤖" });
   });
 
-  it("invalidates the two reads that carry the identity", async () => {
+  it("invalidates every read that carries the identity, the snapshot included", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(() => useUpdateAgentIdentity(), { wrapper });
@@ -46,6 +46,10 @@ describe("useUpdateAgentIdentity", () => {
 
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.detail(AGENT) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.lists() });
+    // The list rows render the emoji out of the dashboard snapshot, and its key
+    // is a sibling of `agentKeys.all` rather than a child of it — so the two
+    // agent keys above leave the row on the previous emoji.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
 
   it("leaves the cached avatar image alone — an emoji change is not a new image", async () => {
@@ -86,6 +90,7 @@ describe("useUploadAgentAvatar", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.avatar(AGENT) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.detail(AGENT) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.lists() });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
 
   it("invalidates nothing when the upload fails", async () => {
@@ -108,7 +113,7 @@ describe("useUploadAgentAvatar", () => {
 });
 
 describe("useDeleteAgentAvatar", () => {
-  it("takes the agent id directly and invalidates the image and both reads", async () => {
+  it("takes the agent id directly and invalidates the image and the reads", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(() => useDeleteAgentAvatar(), { wrapper });
@@ -122,6 +127,7 @@ describe("useDeleteAgentAvatar", () => {
     expect(vi.mocked(http.deleteAgentAvatar).mock.calls[0][0]).toBe(AGENT);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.detail(AGENT) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.lists() });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
 
   it("drops the cached image rather than leaving it for a query that is now disabled", async () => {
