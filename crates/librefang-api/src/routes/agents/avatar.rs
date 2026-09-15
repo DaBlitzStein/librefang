@@ -219,10 +219,20 @@ pub async fn upload_agent_avatar(
     // `PATCH /identity` does not accept the old value back.
     let avatar_url = librefang_types::media::agent_avatar_url(&id);
     if !store_avatar_url(&state, agent_id, Some(avatar_url.clone())) {
-        // The agent went away mid-request. The image just placed belongs to
-        // nobody, so it goes with it — the rename has already replaced whatever
-        // was at this path, so nothing else is lost by dropping it.
-        let _ = std::fs::remove_file(&path);
+        // The image stays on disk, and that is the deliberate half.
+        //
+        // `store_avatar_url` fails on either of two things — the agent is gone,
+        // or the registry refused the identity write — and it does not say
+        // which. By this point the rename has already replaced whatever was at
+        // this path, so deleting the new file would leave an agent that *had* an
+        // avatar with none, which is the state this whole ordering exists to
+        // avoid; it would just have arrived through the registry instead of the
+        // disk.
+        //
+        // Keeping it costs less than it looks. When the agent already had one,
+        // its `avatar_url` still marks the standard route and that route now
+        // serves the new image — the upload effectively landed. When it did not,
+        // the file sits unmarked until the next upload sets the marker.
         return json_error(StatusCode::NOT_FOUND, t.t("api-error-agent-not-found"));
     }
 
