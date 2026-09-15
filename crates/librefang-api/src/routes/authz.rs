@@ -330,7 +330,9 @@ pub struct WhoamiView {
     pub emoji: Option<String>,
     /// True when an avatar image for this caller is on disk (#8339), derived the same way and for the same reason as [`crate::routes::users::UserView::has_avatar`].
     ///
-    /// The route that serves it is `GET /api/users/{name}/avatar`, built by the client from `name` exactly as it builds `GET /api/users/{name}` — this field answers *whether* there is something to fetch, not *where*.
+    /// The route that serves it is `GET /api/users/me/avatar` — a literal, resolved from the same credential this response describes, so the client fetches it with no name-building and therefore no encoding question. This field answers *whether* there is something to fetch, not *where*.
+    ///
+    /// It is what lets the dashboard gate that fetch instead of issuing it for every identity and reading the 404: a credential that names no `[[users]]` row has no image, and now says so before anything is requested.
     pub has_avatar: bool,
 }
 

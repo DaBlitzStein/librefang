@@ -1758,6 +1758,10 @@ class UsersResource {
     return this._c._request("POST", "/api/users/import", data, undefined);
   }
 
+  async serveMyAvatar() {
+    return this._c._request("GET", "/api/users/me/avatar");
+  }
+
   async getUser(name) {
     return this._c._request("GET", `/api/users/${name}`);
   }
@@ -1775,7 +1779,7 @@ class UsersResource {
   }
 
   async uploadUserAvatar(name, data) {
-    return this._c._request("PUT", `/api/users/${name}/avatar`, data, undefined);
+    return this._c._request("POST", `/api/users/${name}/avatar`, data, undefined);
   }
 
   async deleteUserAvatar(name) {

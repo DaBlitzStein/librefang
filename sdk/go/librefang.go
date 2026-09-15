@@ -1867,6 +1867,10 @@ func (r *UsersResource) ImportUsers(data map[string]interface{}) (interface{}, e
 	return r.client.request("POST", "/api/users/import", data, nil)
 }
 
+func (r *UsersResource) ServeMyAvatar() (interface{}, error) {
+	return r.client.request("GET", "/api/users/me/avatar", nil, nil)
+}
+
 func (r *UsersResource) GetUser(name string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/users/%s", name), nil, nil)
 }
@@ -1884,7 +1888,7 @@ func (r *UsersResource) ServeUserAvatar(name string) (interface{}, error) {
 }
 
 func (r *UsersResource) UploadUserAvatar(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/users/%s/avatar", name), data, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/users/%s/avatar", name), data, nil)
 }
 
 func (r *UsersResource) DeleteUserAvatar(name string) (interface{}, error) {

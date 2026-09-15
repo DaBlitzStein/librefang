@@ -5387,6 +5387,18 @@ impl UsersResource {
         .await
     }
 
+    pub async fn serve_my_avatar(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "users", "me", "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_user(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -5439,7 +5451,7 @@ impl UsersResource {
         do_req(
             &self.client,
             &self.base_url,
-            reqwest::Method::PUT,
+            reqwest::Method::POST,
             &["api", "users", name, "avatar"],
             Some(data),
             &[],
