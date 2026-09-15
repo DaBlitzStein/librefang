@@ -639,6 +639,15 @@ pub async fn delete_user(
             //
             // Strictly after the persist, never before: a delete that failed
             // must not have taken the picture with it.
+            // The count is dropped rather than logged, and that is a known
+            // limitation rather than an oversight: `remove_avatars` swallows
+            // every per-file failure itself, and "already gone" is its
+            // documented non-error, so a zero here means "this user had no
+            // picture" and a failed unlink is indistinguishable from it.
+            // Warning on the zero would fire on the common case and stay silent
+            // on the one worth knowing about; making the residue observable
+            // means changing that helper's return type, which the agent purge
+            // path shares, so it is left alone on purpose.
             let dir = state.kernel.config_snapshot().effective_user_avatars_dir();
             let _ =
                 librefang_types::media::remove_avatars(&dir, &UserId::from_name(&name).to_string());

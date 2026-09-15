@@ -451,7 +451,10 @@ pub const MAX_EMOJI_CHARS: usize = 32;
 /// Normalize a user's identity emoji, or say why it was refused (#8339).
 ///
 /// Lives beside the field it constrains rather than in the API crate, because a value reaches [`UserConfig::emoji`] two ways — `PATCH /api/users/{name}/identity`, and an operator editing `config.toml` — and only the first had a check.
-/// `validate_config_for_reload` in the kernel calls this for every row, so the bound holds for a hand-edited file as well, and the two paths cannot drift apart because there is one implementation.
+/// `validate_config_for_reload` in the kernel calls this for every row, so a hand-edited file is bounded as soon as anything reloads it or writes it back through the API, and the two paths cannot drift apart because there is one implementation.
+///
+/// One door is deliberately left unwatched: a hand-edit that is only ever *loaded*, by `load_config` at boot, is not checked.
+/// Bounding it there would mean refusing to start the daemon over a long glyph, and an instance that will not boot is a worse outcome than one rendering a value the next write will bound.
 ///
 /// `None` and an empty-or-whitespace string both mean "clear the stored emoji".
 ///
