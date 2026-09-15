@@ -24,6 +24,13 @@
 //!
 //! Serving re-sniffs rather than mapping the stored extension back to a MIME.
 //! The two agree today by construction, but only one of them is evidence: a file renamed on disk by anything else must not be able to change what the daemon claims it is.
+//!
+//! # The filesystem calls are synchronous on purpose
+//!
+//! `create_dir_all`, `fs::write` and `fs::read` all run on a Tokio worker thread, and the change that suggests itself — `tokio::fs` — is the wrong one here.
+//! Awaiting any of them means holding a value across an `.await` while [`ErrorTranslator`] is alive, and it is `!Send`; that is the trait-bound trap this crate has walked into before, where the compiler's complaint names `Handler<_, _>` instead of the type actually at fault, and the distance between the two is most of the debugging session.
+//! `spawn_blocking` after `drop(t)` would work and is the alternative if these ever grow, at the cost of a `JoinError` arm on each call that adds nothing to the error the caller already gets.
+//! The bodies are bounded by [`MAX_AVATAR_BYTES`], so the window being blocked on is a few milliseconds.
 
 use std::sync::Arc;
 
@@ -172,22 +179,52 @@ pub async fn upload_agent_avatar(
             format!("Could not create the avatar directory: {error}"),
         );
     }
-    // Clear first, then write. Replacing a PNG with a WebP otherwise leaves the
-    // PNG behind, and `find_avatar` probes in a fixed order — so the stale file
-    // would keep being served and the new one would never be reachable.
-    librefang_types::media::remove_avatars(&avatars_dir, &agent_id.to_string());
-    let path = librefang_types::media::avatar_path(&avatars_dir, &agent_id.to_string(), ext);
-    if let Err(error) = std::fs::write(&path, &body) {
+    // Write the bytes to a temp file beside the target, update the identity,
+    // rename the temp file into place, and only then clear the candidates that
+    // would shadow it. Every failure the filesystem can report therefore
+    // arrives before anything is taken away.
+    //
+    // That ordering is the fix, not the tidiness. Clearing the slot first —
+    // which is what this did — means disk full, `EPERM` or a read-only mount
+    // deletes the picture the operator had and then answers 500 with nothing
+    // written, so `avatar_url` points at a route that 404s and the picture is
+    // simply gone. The temp file sits in the same directory, so the rename
+    // stays within one filesystem and is atomic on POSIX: a reader sees the old
+    // image or the new one, never a half-written file.
+    let id = agent_id.to_string();
+    let path = librefang_types::media::avatar_path(&avatars_dir, &id, ext);
+    let tmp = path.with_extension(format!("{ext}.tmp"));
+    if let Err(error) = std::fs::write(&tmp, &body) {
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Could not write the avatar: {error}"),
         );
     }
 
-    let avatar_url = librefang_types::media::agent_avatar_url(&agent_id.to_string());
+    let avatar_url = librefang_types::media::agent_avatar_url(&id);
     if !store_avatar_url(&state, agent_id, Some(avatar_url.clone())) {
+        // Nothing on disk has moved, so the avatar already stored is still the
+        // one being served; only this request's temp file is left to drop.
+        let _ = std::fs::remove_file(&tmp);
         return json_error(StatusCode::NOT_FOUND, t.t("api-error-agent-not-found"));
     }
+
+    if let Err(error) = std::fs::rename(&tmp, &path) {
+        // Nothing has been cleared either, so the refusal costs the caller
+        // nothing beyond the request itself.
+        let _ = std::fs::remove_file(&tmp);
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not store the avatar: {error}"),
+        );
+    }
+
+    // Only now, with the new file in place, are the other candidates cleared.
+    // `find_avatar` probes in a fixed order, so a PNG left beside a new WebP
+    // would keep being served and the upload would look like it had done
+    // nothing; the file just written is held back, which is why this is not
+    // `remove_avatars`.
+    librefang_types::media::remove_avatars_except(&avatars_dir, &id, ext);
 
     (
         StatusCode::OK,
