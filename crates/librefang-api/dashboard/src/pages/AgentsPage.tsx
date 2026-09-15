@@ -3,8 +3,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
-  ALLOWED_AGENT_AVATAR_TYPES,
-  MAX_AGENT_AVATAR_BYTES,
+  ALLOWED_AVATAR_TYPES,
+  MAX_AVATAR_BYTES,
   type AgentDetail,
   type AgentIdentity,
   type AgentItem,
@@ -55,6 +55,7 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
+import { useWhoami } from "../lib/queries/authz";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
 import { AgentModelRoutingPanel } from "../components/AgentModelRoutingPanel";
@@ -274,7 +275,7 @@ export function AgentAppearanceSection({
     input.value = "";
     if (!file) return;
 
-    if (!(ALLOWED_AGENT_AVATAR_TYPES as readonly string[]).includes(file.type)) {
+    if (!(ALLOWED_AVATAR_TYPES as readonly string[]).includes(file.type)) {
       addToast(
         t("agents.identity.avatar_type_rejected", {
           defaultValue: "An avatar must be a PNG, JPEG, GIF or WebP image. SVG is not accepted.",
@@ -283,12 +284,12 @@ export function AgentAppearanceSection({
       );
       return;
     }
-    if (file.size > MAX_AGENT_AVATAR_BYTES) {
+    if (file.size > MAX_AVATAR_BYTES) {
       addToast(
         t("agents.identity.avatar_too_large", {
           defaultValue: "That image is {{size}} MB; the limit is {{limit}} MB.",
           size: (file.size / (1024 * 1024)).toFixed(1),
-          limit: (MAX_AGENT_AVATAR_BYTES / (1024 * 1024)).toFixed(0),
+          limit: (MAX_AVATAR_BYTES / (1024 * 1024)).toFixed(0),
         }),
         "error",
       );
@@ -369,7 +370,7 @@ export function AgentAppearanceSection({
             <input
               type="file"
               ref={fileInputRef}
-              accept={ALLOWED_AGENT_AVATAR_TYPES.join(",")}
+              accept={ALLOWED_AVATAR_TYPES.join(",")}
               onChange={handleFileChange}
               className="hidden"
               data-testid="agent-avatar-file-input"
@@ -562,6 +563,22 @@ export function SystemPromptSection({
   );
 }
 
+/**
+ * Whether the signed-in credential may edit an agent's emoji and avatar.
+ *
+ * The daemon's rule for both writes the appearance section performs is
+ * `role >= UserRole::Admin` (middleware.rs), and it reads the *credential's*
+ * role — the group-derived ones `whoami` reports separately do not open this
+ * door, which is the direction that would hand a viewer controls that can only
+ * 403.
+ *
+ * Pure and exported because `AgentsPage` has no render harness, so a predicate
+ * left inline would be covered by nothing.
+ */
+export function canEditAgentIdentity(role: string | undefined): boolean {
+  return role === "admin" || role === "owner";
+}
+
 export function AgentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -662,6 +679,9 @@ export function AgentsPage() {
   const qc = useQueryClient();
 
   // --- Visual identity of the agent in the drawer (#8339) ------------------
+  const whoami = useWhoami();
+  const canEditAppearance = canEditAgentIdentity(whoami.data?.role);
+
   const detailIdentity = (detailAgent as AgentView | null)?.identity;
   // Gated on "this agent has one" so an agent without an avatar costs no
   // request at all; `undefined` while loading or absent, which is what `Avatar`
@@ -2942,11 +2962,13 @@ export function AgentsPage() {
                   gives for `SystemPromptSection`: `AgentsPage` has ~20 hooks and no
                   render harness, so anything that has to be tested has to be
                   reachable without mounting the page. */}
-              <AgentAppearanceSection
-                agentId={detailAgent.id}
-                identity={detailIdentity}
-                onChanged={() => { void refreshDetailAgent(detailAgent.id); }}
-              />
+              {canEditAppearance && (
+                <AgentAppearanceSection
+                  agentId={detailAgent.id}
+                  identity={detailIdentity}
+                  onChanged={() => { void refreshDetailAgent(detailAgent.id); }}
+                />
+              )}
 
               {/* Model */}
               {detailAgent.model && (

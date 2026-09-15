@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useObjectUrl } from "../useObjectUrl";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   agentAvatarPath,
@@ -22,13 +22,13 @@ import {
 } from "../http/client";
 import { agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
+import { AVATAR_STALE_MS } from "./avatar";
 
 const STALE_MS = 30_000;
 const REFRESH_MS = 30_000;
 const LIVE_STALE_MS = 10_000;
 const STATS_STALE_MS = 15_000;
 const LIVE_REFRESH_MS = 15_000;
-const AVATAR_STALE_MS = 300_000;
 
 export const agentQueries = {
   list: (opts: { includeHands?: boolean } = {}) =>
@@ -241,41 +241,22 @@ export function useAgentChannels(agentId: string, options: QueryOverrides = {}) 
 /**
  * An agent's avatar as an object URL, ready for an `<img src>` (#8339).
  *
- * Two things are being kept apart here. The query caches the *Blob*, which is
- * shared and lives as long as the cache entry does; this hook owns the *object
- * URL*, which is a document-scoped handle that leaks until revoked. So the URL
- * is minted in an effect keyed on the Blob and revoked in that effect's
- * cleanup — on unmount, and on every switch to another agent, which is the
- * case a drawer that stays mounted while the selection changes would otherwise
- * leak on.
+ * The query caches the *Blob*, which is shared and lives as long as the cache
+ * entry does; the object URL is a document-scoped handle whose lifetime is the
+ * component currently painting it. `useObjectUrl` is what keeps those two
+ * apart, and it is shared with the user avatar rather than copied — the agent
+ * case is where the effect was written, not what makes it specific.
  *
  * `hasAvatar` is the caller's answer to "is `identity.avatar_url` set", and it
  * gates the request: an agent without one would otherwise cost a 404 on every
  * render of the row that shows its initials.
  *
  * Returns `undefined` while loading and when there is nothing to show, which is
- * exactly what `Avatar`'s `src` wants — it falls back to the initials on its
- * own, so there is no separate loading state to thread through the UI.
+ * exactly what `Avatar`'s `src` wants — it falls back to the emoji and then the
+ * initials on its own, so there is no separate loading state to thread through
+ * the UI.
  */
 export function useAgentAvatarUrl(agentId: string, hasAvatar: boolean): string | undefined {
   const { data: blob } = useQuery(agentQueries.avatar(agentId, hasAvatar));
-  const [objectUrl, setObjectUrl] = useState<string | undefined>(undefined);
-
-  useEffect(() => {
-    if (!blob) {
-      setObjectUrl(undefined);
-      return;
-    }
-    const url = URL.createObjectURL(blob);
-    setObjectUrl(url);
-    return () => {
-      URL.revokeObjectURL(url);
-      // Without this the next paint still points an `<img>` at a URL that has
-      // just been revoked, which renders as a broken image rather than as the
-      // initials the fallback is there to give.
-      setObjectUrl(undefined);
-    };
-  }, [blob]);
-
-  return objectUrl;
+  return useObjectUrl(blob);
 }
