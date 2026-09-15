@@ -456,6 +456,18 @@ pub fn build_reload_plan_with_caps(
         );
     }
 
+    if field_changed(&old.capabilities, &new.capabilities) {
+        // The global `[capabilities]` block is folded into `MediaConfig` and
+        // into `MediaDriverCache`'s preference table at boot, both of which
+        // are captured by value — same restart contract as `[media]` itself.
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "capabilities config changed (capability routing is folded into the \
+             boot-captured MediaEngine / media driver cache; restart required)"
+                .to_string(),
+        );
+    }
+
     if field_changed(&old.approval, &new.approval) {
         plan.hot_actions.push(HotAction::UpdateApprovalPolicy);
     }
@@ -1021,6 +1033,16 @@ pub fn build_reload_plan_with_caps(
             field_changed(&old.default_routing, &new.default_routing),
             "default_routing",
         );
+        // Same read-live shape as `default_routing` directly above: the
+        // profile router reads `[model_router]` out of `config_snapshot()` at
+        // the top of every routed turn, so an ArcSwap swap is effective on the
+        // next turn. The profile catalog itself lives in a separate file and
+        // is re-read on mtime change (`ProfileCatalog::load_cached`), so
+        // editing `model_profiles.toml` needs no reload at all.
+        noop_if_changed(
+            field_changed(&old.model_router, &new.model_router),
+            "model_router",
+        );
         // #6459 — the org-wide provider allowlist is read live from
         // `self.config.load()` by `resolve_driver` on every agent turn, and
         // the aux client is rebuilt from the swapped config on reload
@@ -1223,6 +1245,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
         // The `tts.enabled` / `tts.output_format` carve-outs stay noop and are documented as their own rows, which this table does not carry — the doc parser only reads top-level names.
         ("tts", "R"),
         ("media", "R"),
+        ("capabilities", "R"),
         ("hands", "N"),
         ("links", "N"),
         ("privacy", "N"),
@@ -1231,6 +1254,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
         ("tool_results", "N"),
         ("tool_invoke", "N"),
         ("default_routing", "N"),
+        ("model_router", "N"),
         ("prompt_caching", "N"),
         ("prompt_cache", "N"),
         ("compaction", "N"),
