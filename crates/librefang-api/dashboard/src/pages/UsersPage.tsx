@@ -810,8 +810,8 @@ function AppearanceRow({
 /**
  * The caller's own visual identity, editable: an emoji, and an avatar image
  * (#8339). The mirror of `AgentAppearanceSection`, and it keeps that section's
- * shape deliberately — the same two controls, the same client-side pre-checks,
- * and the same "the write landed, re-read what you were showing" callback.
+ * shape deliberately — the same two controls and the same client-side
+ * pre-checks.
  *
  * It is drawn for the caller and **nobody else**, which is why `UserFormModal`
  * mounts it only when the row being edited is the caller's own. That is not a
@@ -830,6 +830,15 @@ function AppearanceRow({
  * Offering the editor over another user would therefore mean drawing the
  * *operator's* picture next to that user's name and seeding the field from the
  * operator's glyph — a confident wrong answer rather than a missing one.
+ *
+ * None of that says anything about who may *read* an avatar, and it is worth
+ * being explicit because the two are easy to conflate. `GET
+ * /api/users/{name}/avatar` sits on the generic authenticated-GET rule, so any
+ * authenticated role — `Viewer` included — reads any user's picture; the daemon
+ * pins that in `non_owner_write_roles_are_refused_and_reads_are_not`. `me` is a
+ * path-shape convenience, not a visibility boundary. The dashboard's allowlist
+ * being limited to it is a guard against handing this origin's bearer token to
+ * a path somebody else chose, not a privacy property this surface may claim.
  *
  * There is no `onChanged`: every write here is followed by the query
  * invalidations the mutations own, including the `whoami` key the chat bubble
