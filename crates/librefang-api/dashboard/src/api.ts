@@ -1881,8 +1881,12 @@ export async function deleteUserAvatar(name: string): Promise<ApiActionResponse>
 
 /** PATCH /api/users/{name}/identity — the user's emoji.
  *
- *  Partial like the agent one: a field this body omits keeps its stored value
- *  rather than being cleared, so clearing means sending it empty.
+ *  Not partial, unlike the agent twin: the daemon documents `emoji` as "absent
+ *  is treated as `null`" and assigns the validated value straight onto the row,
+ *  so a body that omits the key clears the glyph rather than leaving it alone.
+ *  Sending an empty string and omitting the key therefore mean the same thing
+ *  here, which is the opposite of the agent route's contract — do not carry that
+ *  route's "omit to leave it unchanged" habit across.
  *
  *  `avatar_url` is absent from the accepted payload for the same reason it is
  *  absent on the agent side, and one more: a user has no manifest to write it

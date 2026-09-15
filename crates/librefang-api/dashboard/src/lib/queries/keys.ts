@@ -526,9 +526,11 @@ export const authzKeys = {
   // than a member of it: every `effective` key is one per named subject, and
   // "who am I" takes no subject argument.
   //
-  // Nothing invalidates this one. It is `gcTime: 0` — see `authzQueries.whoami`
-  // — because the credential changes by unmounting the pages that read it, not
-  // by invalidating them.
+  // The user mutations invalidate this one — the emoji patch, both image
+  // writes, and the bulk import through `authzKeys.all` — because `emoji` and
+  // `has_avatar` are answers only this read carries. It is also `gcTime: 0` (see
+  // `authzQueries.whoami`), which keeps a stale copy from outliving the page
+  // that read it.
   whoami: () => [...authzKeys.all, "whoami"] as const,
 };
 

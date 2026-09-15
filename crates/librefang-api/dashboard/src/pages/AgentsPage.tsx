@@ -60,6 +60,7 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
+import { useWhoami } from "../lib/queries/authz";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import { AgentModelParamFields } from "../components/AgentModelParamFields";
 import { selectModelLimits } from "../lib/modelLimits";
@@ -673,6 +674,18 @@ export function AgentsPage() {
   const qc = useQueryClient();
 
   // --- Visual identity of the agent in the drawer (#8339) ------------------
+  const whoami = useWhoami();
+
+  // The daemon's rule for both writes the appearance section performs is
+  // `role >= UserRole::Admin` (middleware.rs), and it reads the *credential's*
+  // role — the group-derived ones `whoami` reports separately do not open this
+  // door. The user side of this feature settled the same question one file over
+  // with `=== "owner"`; the bar here is Admin, so reading that field the wrong
+  // way would either show a viewer controls that 403 or deny an admin ones that
+  // work.
+  const canEditAgentIdentity =
+    whoami.data?.role === "admin" || whoami.data?.role === "owner";
+
   const detailIdentity = (detailAgent as AgentView | null)?.identity;
   // Gated on "this agent has one" so an agent without an avatar costs no
   // request at all; `undefined` while loading or absent, which is what `Avatar`
@@ -2958,11 +2971,13 @@ export function AgentsPage() {
                   gives for `SystemPromptSection`: `AgentsPage` has ~20 hooks and no
                   render harness, so anything that has to be tested has to be
                   reachable without mounting the page. */}
-              <AgentAppearanceSection
-                agentId={detailAgent.id}
-                identity={detailIdentity}
-                onChanged={() => { void refreshDetailAgent(detailAgent.id); }}
-              />
+              {canEditAgentIdentity && (
+                <AgentAppearanceSection
+                  agentId={detailAgent.id}
+                  identity={detailIdentity}
+                  onChanged={() => { void refreshDetailAgent(detailAgent.id); }}
+                />
+              )}
 
               {/* Model */}
               {detailAgent.model && (
