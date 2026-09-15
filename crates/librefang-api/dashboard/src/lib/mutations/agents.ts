@@ -213,8 +213,10 @@ export function usePatchAgent() {
  * `avatar_url` is not writable through here. It may only hold this agent's own
  * avatar path, and the two hooks below are what put it there.
  *
- * Invalidates `detail(id)` and `lists()`, matching `usePatchAgent`: the same
- * two reads carry the identity that just changed.
+ * Invalidates `detail(id)`, `lists()` and the dashboard snapshot: those are the
+ * three reads that carry the identity that just changed. The snapshot is the
+ * one that is easy to miss — `AgentsPage`'s rows render the emoji and the
+ * avatar out of it, not out of `agentKeys`.
  */
 export function useUpdateAgentIdentity() {
   const qc = useQueryClient();
@@ -229,6 +231,12 @@ export function useUpdateAgentIdentity() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      // The list rows do not read the identity out of `agentKeys` at all —
+      // `AgentsPage` renders them from the dashboard snapshot, whose key is a
+      // sibling of `agentKeys.all` rather than a child of it. Without this the
+      // row goes on showing the previous emoji until the snapshot's own 5 s
+      // poll comes round. Same line in the two avatar hooks below.
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
 }
@@ -241,7 +249,8 @@ export function useUpdateAgentIdentity() {
  * still stored correctly and an SVG is still refused.
  *
  * Invalidates `avatar(id)` — the cached Blob is now the previous image — as
- * well as the two reads that carry `avatar_url`. The avatar key is invalidated
+ * well as the reads that carry `avatar_url`: `lists()`, `detail(id)` and the
+ * dashboard snapshot the list rows render from. The avatar key is invalidated
  * in `onSuccess` rather than `onSettled` deliberately: the handler writes the
  * bytes to a temp file and renames it into place, so an upload that fails leaves
  * the previous avatar exactly as it was, and re-fetching the image after one
@@ -260,6 +269,7 @@ export function useUploadAgentAvatar() {
       qc.invalidateQueries({ queryKey: agentKeys.avatar(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
 }
@@ -288,6 +298,7 @@ export function useDeleteAgentAvatar() {
       qc.removeQueries({ queryKey: agentKeys.avatar(agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
 }
