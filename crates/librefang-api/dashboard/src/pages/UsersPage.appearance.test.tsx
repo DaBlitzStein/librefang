@@ -128,6 +128,33 @@ function fileOfSize(name: string, type: string, size: number): File {
   return file;
 }
 
+// The buttons and the preview have to reach the same conclusion about whether a
+// picture exists. They did not before: the preview reads `hasAvatar === undefined`
+// as "not told, so fetch", while the buttons read it as "no picture", so on a
+// daemon that predates the field one drew the image and the other offered to
+// upload one.
+describe("hasPicture", () => {
+  it("offers Replace and Remove from the fetched blob when whoami did not say", async () => {
+    vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(
+      new Blob(["x"], { type: "image/png" }),
+    );
+    renderSection({ hasAvatar: undefined });
+
+    expect(await screen.findByRole("button", { name: "Replace" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Upload" })).toBeNull();
+  });
+
+  // The other polarity, pinned so it cannot drift back: `false` is a daemon
+  // saying "nothing to fetch", which is a different statement from silence.
+  it("offers Upload and no Remove when whoami says there is no picture", () => {
+    renderSection({ hasAvatar: false });
+
+    expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
+  });
+});
+
 describe("emoji editor", () => {
   it("seeds the field from the stored emoji", () => {
     renderSection({ emoji: "🦊" });
