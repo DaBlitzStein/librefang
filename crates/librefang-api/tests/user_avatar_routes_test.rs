@@ -5,9 +5,11 @@
 //! are all in play. No LLM calls — the provider is `ollama` with a fake model.
 //!
 //! Routes covered:
-//!   PUT    /api/users/{name}/avatar    (round trip, format swap, cap, non-image
+//!   POST   /api/users/{name}/avatar    (round trip, format swap, cap, non-image
 //!                                       bytes, the name that must never reach
 //!                                       the filesystem)
+//!   GET    /api/users/me/avatar        (the literal route; static-vs-{name}
+//!                                       precedence)
 //!   GET    /api/users/{name}/avatar     (bytes, headers, ETag/304, absent, 404)
 //!   DELETE /api/users/{name}/avatar     (remove → GET 404)
 //!   PATCH  /api/users/{name}/identity   (emoji set/clear, survives a PUT of the
@@ -31,6 +33,13 @@ const TEST_TOKEN: &str = "user-avatar-master-key";
 const VIEWER_KEY: &str = "user-avatar-viewer-key";
 const USER_KEY: &str = "user-avatar-user-key";
 const ADMIN_KEY: &str = "user-avatar-admin-key";
+
+/// A user whose *name* collides with the literal segment of
+/// `GET /api/users/me/avatar`. Seeded in every harness on purpose: the whole
+/// point of that route is that the collision is survivable, and a suite that
+/// only ever ran without it would be proving the easy case.
+const ME_KEY: &str = "user-avatar-me-key";
+const ME_NAME: &str = "me";
 
 // A name that is a legal `[[users]]` entry under `validate_name` and would be a
 // catastrophe if it were ever joined onto a directory. Percent-encoded in the
@@ -87,6 +96,7 @@ async fn boot(extra_users: Vec<UserConfig>) -> Harness {
             user("Alice", "user", Some(USER_KEY)),
             user("Watcher", "viewer", Some(VIEWER_KEY)),
             user("Bosswoman", "admin", Some(ADMIN_KEY)),
+            user(ME_NAME, "user", Some(ME_KEY)),
         ],
         extra_users,
     )
@@ -236,7 +246,7 @@ async fn upload_png(h: &Harness, name: &str, bytes: &[u8]) -> (StatusCode, serde
     send(
         h.app.clone(),
         raw(
-            Method::PUT,
+            Method::POST,
             &format!("/api/users/{name}/avatar"),
             TEST_TOKEN,
             bytes.to_vec(),
@@ -356,7 +366,7 @@ async fn avatar_ignores_the_content_type_the_client_claims() {
     let (status, body) = send(
         h.app.clone(),
         raw(
-            Method::PUT,
+            Method::POST,
             "/api/users/Alice/avatar",
             TEST_TOKEN,
             TINY_PNG.to_vec(),
@@ -371,6 +381,176 @@ async fn avatar_ignores_the_content_type_the_client_claims() {
         "the bytes are a valid PNG, so the claimed type must not matter: {body:?}"
     );
     assert_eq!(body["content_type"], "image/png");
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/users/me/avatar — the literal read route
+// ---------------------------------------------------------------------------
+
+/// The static `me` segment outranks the `{name}` parameter, and both routes
+/// answer.
+///
+/// Made decisive rather than decorative by seeding a real user named `me` with
+/// a *different* image: if `{name}` had won the match, reading as Alice would
+/// have returned that user's picture instead of her own. The test therefore
+/// fails on a router that resolves the parameter first, which is the only thing
+/// it is here to rule out.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_me_segment_is_literal_and_does_not_fall_through_to_a_user_named_me() {
+    let h = boot(vec![]).await;
+    upload_png(&h, "Alice", TINY_PNG).await;
+    // The row named `me` is given an image by writing it straight to disk,
+    // because the route that would upload one is shadowed — see
+    // `the_row_named_me_cannot_be_written_to` for that half.
+    let dir = users_avatar_dir(&h);
+    std::fs::create_dir_all(&dir).expect("create avatars dir");
+    std::fs::write(
+        media::avatar_path(&dir, &expected_stem(ME_NAME), "gif"),
+        TINY_GIF,
+    )
+    .expect("place the image for the row named `me`");
+
+    // The literal route, read by Alice: her own image, not the other one.
+    let (status, _, bytes) = send_raw(h.app.clone(), get("/api/users/me/avatar", USER_KEY)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        bytes, TINY_PNG,
+        "`me` must resolve from the credential; the user named `me` must not shadow it"
+    );
+
+    // The literal route, read by the person actually named `me` — still their
+    // own. This is the half that keeps the collision from locking anyone out
+    // of seeing their picture.
+    let (status, _, bytes) = send_raw(h.app.clone(), get("/api/users/me/avatar", ME_KEY)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, TINY_GIF);
+
+    // The parameterised route is still served, and still reaches Alice.
+    let (status, _, bytes) =
+        send_raw(h.app.clone(), get("/api/users/Alice/avatar", TEST_TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, TINY_PNG);
+
+    // An Admin asking for the row called `me` by name gets the literal route
+    // instead, which answers for the *credential* — so the master key, naming
+    // no row, gets a 404 and not that row's picture.
+    let (status, body) = send(h.app.clone(), get("/api/users/me/avatar", TEST_TOKEN)).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the master key names no row, and the literal route answers for the \
+         credential rather than for the row named `me`: {body:?}"
+    );
+}
+
+/// The other half of the `me` corner, recorded rather than discovered later: on
+/// `/api/users/me/avatar` the static segment owns the path, so the write verbs
+/// registered on `{name}` are unreachable there and a row named `me` cannot be
+/// given an avatar through the API at all.
+///
+/// This is a consequence of the literal read route, not a defect in it, and it
+/// is the price of the read path having no client-controlled segment. It is
+/// asserted so that it is a known, changeable decision rather than a surprise.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_row_named_me_cannot_be_written_to() {
+    let h = boot(vec![]).await;
+
+    for (method, label) in [(Method::POST, "upload"), (Method::DELETE, "delete")] {
+        let (status, _) = send(
+            h.app.clone(),
+            raw(
+                method,
+                "/api/users/me/avatar",
+                TEST_TOKEN,
+                TINY_PNG.to_vec(),
+                "application/octet-stream",
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "the {label} verb on the literal path must not silently reach the \
+             row named `me`; the literal route is GET-only"
+        );
+    }
+
+    // The same row is still administrable through every other route: only the
+    // avatar path shape collides.
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(
+            Method::PATCH,
+            "/api/users/me/identity",
+            TEST_TOKEN,
+            serde_json::json!({ "emoji": "🦀" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/users/me/identity has no literal sibling, so it still reaches the row: {body:?}"
+    );
+    assert_eq!(body["name"], ME_NAME, "{body:?}");
+    assert_eq!(body["emoji"], "🦀", "{body:?}");
+}
+
+/// A credential that names no `[[users]]` row answers 404 rather than being
+/// looked up under a literal `"root"`.
+#[tokio::test(flavor = "multi_thread")]
+async fn me_avatar_404s_for_a_credential_that_names_no_user() {
+    let h = boot(vec![]).await;
+
+    let (status, body) = send(h.app.clone(), get("/api/users/me/avatar", TEST_TOKEN)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("credential"),
+        "the message must say the credential is what has no avatar, not that \
+         the user is missing: {message:?}"
+    );
+}
+
+/// The upload verb is `POST` — the same one the agent route uses — and `PUT`
+/// is not registered alongside it.
+///
+/// Asserted because the two were `PUT` and `POST` in earlier drafts of this
+/// feature, and a stale client silently keeping the old verb would be a 405
+/// nobody reads rather than a wrong result anyone notices.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_upload_verb_is_post_and_put_is_not_registered() {
+    let h = boot(vec![]).await;
+
+    let (status, _) = send(
+        h.app.clone(),
+        raw(
+            Method::POST,
+            "/api/users/Alice/avatar",
+            TEST_TOKEN,
+            TINY_PNG.to_vec(),
+            "application/octet-stream",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send(
+        h.app.clone(),
+        raw(
+            Method::PUT,
+            "/api/users/Alice/avatar",
+            TEST_TOKEN,
+            TINY_PNG.to_vec(),
+            "application/octet-stream",
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "the route moved from PUT to POST; it was not added alongside"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +741,7 @@ async fn an_unknown_user_is_404_on_every_route() {
 
     for req in [
         raw(
-            Method::PUT,
+            Method::POST,
             &format!("{path}/avatar"),
             TEST_TOKEN,
             TINY_PNG.to_vec(),
@@ -624,7 +804,7 @@ async fn non_owner_write_roles_are_refused_and_reads_are_not() {
         let (status, body) = send(
             h.app.clone(),
             raw(
-                Method::PUT,
+                Method::POST,
                 "/api/users/Alice/avatar",
                 token,
                 TINY_PNG.to_vec(),
@@ -723,6 +903,8 @@ async fn the_emoji_round_trips_and_survives_an_edit_of_the_user_row() {
     let (status, body) = send(
         h.app.clone(),
         json_req(
+            // Still `PUT` — this is the user-row replacement, not the avatar
+            // upload, and the two share a prefix rather than a verb.
             Method::PUT,
             "/api/users/Alice",
             TEST_TOKEN,

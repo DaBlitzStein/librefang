@@ -16,6 +16,12 @@
 //!
 //! [`LIBREFANG_USER_NAMESPACE`]: librefang_types::agent::LIBREFANG_USER_NAMESPACE
 //!
+//! # Reads come in two spellings, and the literal one is the default
+//!
+//! `GET /api/users/me/avatar` resolves the subject from the credential and has no client-controlled segment in its path at all; `GET /api/users/{name}/avatar` names someone else and exists for an Admin reading another person's picture.
+//! A name with a space, an accent or a `.` survives the filesystem here but not the dashboard's token-attaching allowlist, which admits only `[A-Za-z0-9_-]+` per segment — so the picture the signed-in user sees is fetched from the literal route, and the by-name one is what a management screen uses.
+//! [`serve_my_avatar`] documents why the allowlist must not be widened instead, and the corner the literal creates for a user actually named `me`.
+//!
 //! # The files live under `~/.librefang/avatars/users/`
 //!
 //! A subdirectory rather than the avatars root, because an agent avatar and a user avatar are both named `{uuid}.{ext}` for a uuid drawn from a different namespace, so a shared directory would make "which of these is a person" answerable only by running the uuid backwards.
@@ -57,6 +63,24 @@ const BODY_LIMIT_HEADROOM_BYTES: usize = 64 * 1024;
 /// Without it the real ceiling is axum's own 2 MiB `Bytes` default, which sits *below* [`MAX_AVATAR_BYTES`] plus the headroom and would cut first.
 pub(crate) const USER_AVATAR_BODY_LIMIT_BYTES: usize = MAX_AVATAR_BYTES + BODY_LIMIT_HEADROOM_BYTES;
 
+/// Resolve the calling credential to its configured `[[users]]` row, if it has one.
+///
+/// Mirrors [`crate::routes::authz::whoami`], and for the same reason the two must agree: the name a credential resolves to is the key every `/api/users/{name}` route matches on, so an identity that endpoint reports is an identity this one can find.
+/// The synthetic root credential — master api key, trusted loopback, `allow_no_auth` — names no `[[users]]` entry at all, and `None` is the honest answer for it rather than a lookup under a literal `"root"` that would silently succeed in a deployment that happens to declare one.
+fn resolve_caller(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> Option<UserConfig> {
+    let name = match api_user {
+        Some(u) => u.name.as_str(),
+        None => "root",
+    };
+    state
+        .kernel
+        .config_ref()
+        .users
+        .iter()
+        .find(|u| u.name == name)
+        .cloned()
+}
+
 /// Resolve `{name}` to a user that exists, or the response to return instead.
 ///
 /// Names are matched exactly and case-sensitively, the same comparison [`super::get_user`] and every other `/api/users/{name}` route performs, so a caller cannot reach a user's avatar through a spelling that would 404 everywhere else.
@@ -96,9 +120,13 @@ pub struct UserIdentityUpdate {
     pub emoji: Option<String>,
 }
 
-/// PUT /api/users/{name}/avatar — store an image as this user's avatar.
+/// POST /api/users/{name}/avatar — store an image as this user's avatar.
+///
+/// `POST` rather than `PUT`, matching `POST /api/agents/{id}/avatar`: the two are one feature on two resources, and a caller reading one route should not have to discover that the other spells the same operation differently.
+///
+/// Not reachable for a `[[users]]` entry named `me`, whose path is shadowed by the literal read route — see [`serve_my_avatar`].
 #[utoipa::path(
-    put,
+    post,
     path = "/api/users/{name}/avatar",
     tag = "users",
     params(("name" = String, Path, description = "User name (case-sensitive)")),
@@ -272,6 +300,57 @@ pub async fn serve_user_avatar(
         bytes,
     )
         .into_response()
+}
+
+/// GET /api/users/me/avatar — the calling credential's own stored image.
+///
+/// # Why this route exists at all
+///
+/// The dashboard attaches the bearer token by allowlist (`AUTHENTICATED_IMAGE_PATH_RE` in `dashboard/src/api.ts`), and that allowlist admits only `[A-Za-z0-9_-]+` per path segment — deliberately, so that `/` and `.` cannot appear where an id is expected.
+/// A **user name** is not such a segment: `encodeURIComponent("Juan Pérez")` is `Juan%20P%C3%A9rez`, and `%` is not in the class, so the image would simply never load.
+/// Widening the class to admit `%XX` would readmit `%2F`, which decodes to `/` — the traversal the allowlist exists to prevent — so the fix belongs here rather than in the regex.
+///
+/// `me` is a literal, so this path has **no client-controlled segment at all**: the subject comes from the credential, exactly as it does for [`crate::routes::authz::whoami`].
+/// That is the same property [`librefang_types::media::avatar_path`] documents for the agent route — no part of the path comes from the request — restored for the one caller that cannot express it by name.
+///
+/// The `{name}` sibling stays, because an Admin legitimately reads someone else's picture.
+///
+/// # A user literally named `me`
+///
+/// `matchit` resolves the static segment first, so `/api/users/me/avatar` never reaches the `{name}` route — and because this node is `GET`-only it owns the whole path, which means the `POST` and `DELETE` registered on the sibling do not answer under it either.
+/// A `[[users]]` entry named `me` therefore cannot be fetched by an Admin, and cannot be *given* an avatar through the API at all.
+///
+/// They are not locked out of their own: this route resolves the credential and then calls the same handler, so a person named `me` still sees their own picture, and every non-avatar route on that name (`PATCH /api/users/me/identity`, `PUT /api/users/me`, the policy and provider-key siblings) is unaffected because none of them has a literal namesake.
+///
+/// The corner is the price of the read path having no client-controlled segment, and it is recorded here rather than papered over.
+/// Widening the literal node to carry the write verbs would remove it, at the cost of giving `/users/me/avatar` a second meaning — "the caller's avatar" for writes while `{name}` keeps it for everyone else — which is a larger change than this route needs.
+#[utoipa::path(
+    get,
+    path = "/api/users/me/avatar",
+    tag = "users",
+    responses(
+        (status = 200, description = "The image", content_type = "image/png"),
+        (status = 304, description = "Unchanged since the caller's `If-None-Match`"),
+        (status = 404, description = "The credential names no user, or that user has no avatar set", body = crate::types::JsonObject)
+    )
+)]
+pub async fn serve_my_avatar(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<Extension<AuthenticatedApiUser>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(user) = resolve_caller(&state, api_user.as_ref().map(|e| &e.0)) else {
+        return err_response(
+            StatusCode::NOT_FOUND,
+            "This credential names no user, so it has no avatar.",
+        );
+    };
+    // Delegates rather than re-implementing: the two routes differ only in how
+    // the subject is found, and a second copy of the read/sniff/ETag body is a
+    // second place for the re-sniffing rule to be lost.
+    // Going through the handler instead of the router also means a user named
+    // `me` still gets their own picture — see the note above.
+    serve_user_avatar(State(state), Path(user.name), headers).await
 }
 
 /// DELETE /api/users/{name}/avatar — remove the stored image.

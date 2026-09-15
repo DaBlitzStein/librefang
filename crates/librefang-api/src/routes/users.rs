@@ -79,9 +79,21 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/users/{name}/identity",
             axum::routing::patch(update_user_identity),
         )
+        // Registered before the `{name}` sibling below, and deliberately not
+        // because order matters: `matchit` ranks a static segment above a
+        // parameter at the same position, so `me` wins wherever it is written.
+        // The ordering here is for the reader, who should meet the literal
+        // first.
+        //
+        // The flip side is that this GET-only node owns the whole path, so the
+        // `POST` and `DELETE` on the sibling below do not answer under it and a
+        // row literally named `me` cannot be given an avatar through the API.
+        // `avatar::serve_my_avatar` carries the reasoning and
+        // `tests/user_avatar_routes_test.rs` asserts the 405.
+        .route("/users/me/avatar", axum::routing::get(serve_my_avatar))
         .route(
             "/users/{name}/avatar",
-            axum::routing::put(upload_user_avatar)
+            axum::routing::post(upload_user_avatar)
                 .get(serve_user_avatar)
                 .delete(delete_user_avatar)
                 // Without this the `Bytes` extractor cuts at axum's own 2 MiB

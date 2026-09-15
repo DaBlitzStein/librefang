@@ -358,6 +358,7 @@ use crate::types;
         routes::users::update_user_identity,
         routes::users::upload_user_avatar,
         routes::users::serve_user_avatar,
+        routes::users::serve_my_avatar,
         routes::users::delete_user_avatar,
 
         // ── Authorization (RBAC checks) ──
