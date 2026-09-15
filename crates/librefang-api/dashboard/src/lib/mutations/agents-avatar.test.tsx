@@ -141,14 +141,19 @@ describe("useDeleteAgentAvatar", () => {
     expect(queryClient.getQueryData(agentKeys.avatar(AGENT))).toBeUndefined();
   });
 
-  it("scopes the avatar invalidation to the agent it was called for", async () => {
+  it("scopes the avatar removal to the agent it was called for", async () => {
+    // Asserted on `removeQueries`, which is the call that carries the removal.
+    // Spying on `invalidateQueries` here would pass whatever the scoping did,
+    // because the delete path stopped calling it for this key — the assertion
+    // would hold on a mutation that removed every agent's avatar.
     const { queryClient, wrapper } = createQueryClientWrapper();
-    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const remove = vi.spyOn(queryClient, "removeQueries");
     const { result } = renderHook(() => useDeleteAgentAvatar(), { wrapper });
 
     await result.current.mutateAsync(AGENT);
 
-    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: agentKeys.avatar("agent-2") });
-    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: agentKeys.all });
+    expect(remove).toHaveBeenCalledWith({ queryKey: agentKeys.avatar(AGENT) });
+    expect(remove).not.toHaveBeenCalledWith({ queryKey: agentKeys.avatar("agent-2") });
+    expect(remove).not.toHaveBeenCalledWith({ queryKey: agentKeys.all });
   });
 });
