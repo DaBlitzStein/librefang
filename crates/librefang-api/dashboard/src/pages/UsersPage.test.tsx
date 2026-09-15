@@ -340,7 +340,7 @@ describe("UsersPage", () => {
   // beside that user's name and seed the field from the operator's glyph.
   it("offers the appearance editor when the edited row is the caller's own", async () => {
     setUsers([makeUser({ name: "alice" })]);
-    useWhoamiMock.mockReturnValue({ data: { name: "alice", emoji: "🦊" } });
+    useWhoamiMock.mockReturnValue({ data: { name: "alice", emoji: "🦊", role: "owner" } });
     renderPage();
 
     await userEvent.click(screen.getByRole("button", { name: "Edit" }));
@@ -355,7 +355,7 @@ describe("UsersPage", () => {
 
   it("does not offer it over another user's row", async () => {
     setUsers([makeUser({ name: "alice" })]);
-    useWhoamiMock.mockReturnValue({ data: { name: "bob", emoji: "🦊" } });
+    useWhoamiMock.mockReturnValue({ data: { name: "bob", emoji: "🦊", role: "owner" } });
     renderPage();
 
     await userEvent.click(screen.getByRole("button", { name: "Edit" }));
@@ -364,5 +364,22 @@ describe("UsersPage", () => {
     // — otherwise an "Edit" button that did nothing would pass this test.
     expect(await screen.findByText("Channel bindings")).toBeInTheDocument();
     expect(screen.queryByTestId("user-avatar-file-input")).not.toBeInTheDocument();
+  });
+
+  it("withholds it from a caller the daemon would refuse", async () => {
+    setUsers([makeUser({ name: "alice" })]);
+    // Own row, owner-not: every non-GET under `/api/users` is an Owner action
+    // on the daemon side, so an `admin` or `viewer` credential reaching these
+    // controls would be shown a button and given a 403.
+    useWhoamiMock.mockReturnValue({ data: { name: "alice", emoji: "🦊", role: "admin" } });
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    expect(await screen.findByText("Channel bindings")).toBeInTheDocument();
+    expect(screen.queryByTestId("user-avatar-file-input")).not.toBeInTheDocument();
+    // The pair matters: the test above shows this same fixture DOES render the
+    // editor, so the absence here is the role and not a drawer that never opened.
+    expect(screen.getByDisplayValue("alice")).toBeInTheDocument();
   });
 });
