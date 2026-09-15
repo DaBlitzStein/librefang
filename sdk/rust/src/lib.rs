@@ -5423,6 +5423,54 @@ impl UsersResource {
         .await
     }
 
+    pub async fn serve_user_avatar(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "users", name, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn upload_user_avatar(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "users", name, "avatar"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_user_avatar(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "users", name, "avatar"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn update_user_identity(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PATCH,
+            &["api", "users", name, "identity"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_user_policy(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,

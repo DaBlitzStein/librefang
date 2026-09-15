@@ -1770,6 +1770,22 @@ class UsersResource {
     return this._c._request("DELETE", `/api/users/${name}`);
   }
 
+  async serveUserAvatar(name) {
+    return this._c._request("GET", `/api/users/${name}/avatar`);
+  }
+
+  async uploadUserAvatar(name, data) {
+    return this._c._request("PUT", `/api/users/${name}/avatar`, data, undefined);
+  }
+
+  async deleteUserAvatar(name) {
+    return this._c._request("DELETE", `/api/users/${name}/avatar`);
+  }
+
+  async updateUserIdentity(name, data) {
+    return this._c._request("PATCH", `/api/users/${name}/identity`, data, undefined);
+  }
+
   async getUserPolicy(name) {
     return this._c._request("GET", `/api/users/${name}/policy`);
   }

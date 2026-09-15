@@ -1427,6 +1427,18 @@ class _UsersResource(_Resource):
     def delete_user(self, name: str):
         return self._c._request("DELETE", f"/api/users/{name}")
 
+    def serve_user_avatar(self, name: str):
+        return self._c._request("GET", f"/api/users/{name}/avatar")
+
+    def upload_user_avatar(self, name: str, **data):
+        return self._c._request("PUT", f"/api/users/{name}/avatar", data)
+
+    def delete_user_avatar(self, name: str):
+        return self._c._request("DELETE", f"/api/users/{name}/avatar")
+
+    def update_user_identity(self, name: str, **data):
+        return self._c._request("PATCH", f"/api/users/{name}/identity", data)
+
     def get_user_policy(self, name: str):
         return self._c._request("GET", f"/api/users/{name}/policy")
 

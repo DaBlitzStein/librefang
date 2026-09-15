@@ -14571,6 +14571,159 @@
         }
       }
     },
+    "/api/users/{name}/avatar": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "GET /api/users/{name}/avatar — the stored image.",
+        "description": "Authenticated like every other `/api/` route, which is the point: the alternative placement under `~/.librefang/dashboard/` would have been an unauthenticated GET.",
+        "operationId": "serve_user_avatar",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The image",
+            "content": {
+              "image/png": {}
+            }
+          },
+          "304": {
+            "description": "Unchanged since the caller's `If-None-Match`"
+          },
+          "404": {
+            "description": "No such user, or no avatar set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "users"
+        ],
+        "summary": "PUT /api/users/{name}/avatar — store an image as this user's avatar.",
+        "operationId": "upload_user_avatar",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The image, raw. PNG, JPEG, GIF or WebP, decided by the bytes — the request's `Content-Type` and any filename it carries are ignored.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Image larger than the cap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Bytes are not a supported image",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "summary": "DELETE /api/users/{name}/avatar — remove the stored image.",
+        "operationId": "delete_user_avatar",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/users/{name}/groups": {
       "get": {
         "tags": [
@@ -14595,6 +14748,78 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UserGroupsView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/{name}/identity": {
+      "patch": {
+        "tags": [
+          "users"
+        ],
+        "summary": "PATCH /api/users/{name}/identity — store or clear this user's emoji.",
+        "operationId": "update_user_identity",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserIdentityUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Identity updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The config file is deployment-managed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
@@ -17691,6 +17916,20 @@
           }
         }
       },
+      "UserIdentityUpdate": {
+        "type": "object",
+        "description": "`PATCH /api/users/{name}/identity` — the emoji that stands for this user.",
+        "properties": {
+          "emoji": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The glyph to store, or `null` to clear the one already stored. Absent is treated as `null`."
+          }
+        },
+        "additionalProperties": false
+      },
       "UserUpsert": {
         "type": "object",
         "description": "Payload for creating or replacing a user. `api_key_hash` is accepted\npre-hashed (Argon2 phc string) — the dashboard hashes locally before\nsending. `None` clears any existing hash on update; absent on create.",
@@ -17732,7 +17971,8 @@
           "has_api_key",
           "has_policy",
           "has_memory_access",
-          "has_budget"
+          "has_budget",
+          "has_avatar"
         ],
         "properties": {
           "channel_bindings": {
@@ -17744,8 +17984,19 @@
               "type": "string"
             }
           },
+          "emoji": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The glyph the operator chose to stand for this user, or `null` when none was chosen (#8339).\nStored on the `[[users]]` row, so it survives a rename and travels with the config file."
+          },
           "has_api_key": {
             "type": "boolean"
+          },
+          "has_avatar": {
+            "type": "boolean",
+            "description": "True when an avatar image for this user is on disk (#8339).\n\nDerived by probing the avatar directory rather than read from a stored flag, because the file is the only thing that can answer the question honestly: a copy on the `[[users]]` row would be a second answer, free to survive a restore that did not bring the image back."
           },
           "has_budget": {
             "type": "boolean",
@@ -17789,15 +18040,27 @@
           "role",
           "groups",
           "idp_groups",
-          "roles"
+          "roles",
+          "has_avatar"
         ],
         "properties": {
+          "emoji": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The glyph chosen for this caller's `[[users]]` row, or `null` when none was chosen or the credential names no row (#8339).\n\nCarried here so the WebUI can paint the signed-in identity — avatar, glyph, role — from the one response it already has to fetch before it can render anything.\nA second `GET /api/users/{name}` would be a round trip on every page load for a field the client already has the name for."
+          },
           "groups": {
             "type": "array",
             "items": {
               "type": "string"
             },
             "description": "Every `[[groups]]` entry the caller effectively belongs to: declared members unioned with the identity provider's mapped claims."
+          },
+          "has_avatar": {
+            "type": "boolean",
+            "description": "True when an avatar image for this caller is on disk (#8339), derived the same way and for the same reason as [`crate::routes::users::UserView::has_avatar`].\n\nThe route that serves it is `GET /api/users/{name}/avatar`, built by the client from `name` exactly as it builds `GET /api/users/{name}` — this field answers *whether* there is something to fetch, not *where*."
           },
           "idp_groups": {
             "type": "array",
