@@ -1771,6 +1771,15 @@ export interface AgentChannelInstance {
   agent: string | null;
   /** True when `agent` is the agent this response is about. */
   bound_to_this_agent: boolean;
+  /**
+   * Whether `agent` names an agent that exists.
+   *
+   * A binding to an agent that was never spawned, has been deleted, or is a
+   * typo delivers nowhere — `ChannelRouter` resolves the name and skips the
+   * binding on a miss. Without this an operator cannot tell "this bot belongs
+   * to someone else" from "this bot's messages are being dropped".
+   */
+  resolves: boolean;
 }
 
 export interface AgentChannelsResponse {
@@ -4713,7 +4722,7 @@ export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
 export interface GoalRunState {
   goal_id: string;
   agent_id: string;
-  phase: "running" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
+  phase: "running" | "paused" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
   iteration: number;
   max_iterations: number;
   last_progress: number;
