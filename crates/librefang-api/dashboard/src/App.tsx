@@ -3,6 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { fadeInScale, pageTransition } from "./lib/motion";
+import { useQueryClient } from "@tanstack/react-query";
+import { UserAvatar } from "./components/UserAvatar";
+import { useWhoami } from "./lib/queries/authz";
+import { authzKeys } from "./lib/queries/keys";
 import {
   Globe,
   Sun,
@@ -588,6 +592,15 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
 //   └────────────────────────────────┘
 type UserMenuPanelProps = {
   username: string;
+  /**
+   * The caller's emoji and whether the daemon holds a picture for them
+   * (#8339). Both come from `whoami`, which the shell already reads for the
+   * name — the menu drew initials from that name and nothing else, so an
+   * emoji set from the Users page never reached the one place the operator
+   * actually looks at it.
+   */
+  emoji?: string;
+  hasAvatar?: boolean;
   authMode: AuthMode;
   hostname: string;
   theme: "dark" | "light";
@@ -603,6 +616,8 @@ type UserMenuPanelProps = {
 
 function UserMenuPanel({
   username,
+  emoji,
+  hasAvatar,
   authMode,
   hostname,
   theme,
@@ -615,7 +630,6 @@ function UserMenuPanel({
   onClose,
   t,
 }: UserMenuPanelProps) {
-  const initials = (username || "U").slice(0, 2).toUpperCase();
   const roleLine = [authMode !== "none" ? authMode : null, hostname]
     .filter(Boolean)
     .join(" · ");
@@ -624,12 +638,15 @@ function UserMenuPanel({
     <div className="rounded-xl border border-border-subtle bg-surface shadow-2xl backdrop-blur-md p-1.5 w-[260px]">
       {/* Header row — avatar + name + meta */}
       <div className="flex items-center gap-2.5 px-2.5 pt-2 pb-2.5">
-        <div
-          className="h-8 w-8 rounded-full grid place-items-center text-white text-[12px] font-semibold shrink-0"
+        <UserAvatar
+          name={username}
+          fallback={username || "U"}
+          emoji={emoji}
+          hasAvatar={hasAvatar}
+          size="sm"
           style={USER_AVATAR_STYLE}
-        >
-          {initials}
-        </div>
+          className="text-[12px] font-semibold text-white"
+        />
         <div className="flex-1 min-w-0">
           <div className="text-[13px] font-semibold text-text-main truncate">
             {username || t("common.user", { defaultValue: "User" })}
@@ -766,6 +783,9 @@ type SidebarUserBlockProps = {
   authMode: AuthMode;
   hostname: string;
   username: string;
+  /** See `UserMenuPanelProps.emoji` — the row draws the same identity. */
+  emoji?: string;
+  hasAvatar?: boolean;
   onOpenChangePassword: () => void;
   onOpenShortcuts: () => void;
   onLogout: () => void | Promise<void>;
@@ -781,6 +801,8 @@ function SidebarUserBlock({
   authMode,
   hostname,
   username,
+  emoji,
+  hasAvatar,
   onOpenChangePassword,
   onOpenShortcuts,
   onLogout,
@@ -791,7 +813,6 @@ function SidebarUserBlock({
   t,
 }: SidebarUserBlockProps) {
   const [open, setOpen] = useState(false);
-  const initials = (username || "U").slice(0, 2).toUpperCase();
   const subline = [authMode !== "none" ? authMode : null, hostname]
     .filter(Boolean)
     .join(" · ");
@@ -804,12 +825,14 @@ function SidebarUserBlock({
         aria-haspopup="menu"
         className={`flex w-full items-center gap-2.5 ${collapsed ? "lg:justify-center px-2" : "px-3"} py-2.5 text-left transition-colors ${open ? "bg-brand/5" : "hover:bg-surface-hover"}`}
       >
-        <div
-          className="h-[26px] w-[26px] rounded-full grid place-items-center text-white text-[11px] font-semibold shrink-0"
+        <UserAvatar
+          name={username}
+          fallback={username || "U"}
+          emoji={emoji}
+          hasAvatar={hasAvatar}
           style={USER_AVATAR_STYLE}
-        >
-          {initials}
-        </div>
+          className="h-[26px] w-[26px] text-[11px] font-semibold text-white"
+        />
         {!collapsed && (
           <>
             <div className="flex-1 min-w-0">
@@ -830,6 +853,8 @@ function SidebarUserBlock({
           <div className={`absolute z-[100] ${collapsed ? "left-full bottom-1 ml-2" : "left-2 right-2 bottom-full mb-1.5"}`}>
             <UserMenuPanel
               username={username}
+              emoji={emoji}
+              hasAvatar={hasAvatar}
               authMode={authMode}
               hostname={hostname}
               theme={theme}
@@ -906,6 +931,7 @@ const NO_AUTH_ROUTES = new Set(["/connect"]);
 function DashboardApp() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const theme = useUIStore((s) => s.theme);
   const toggleTheme = useUIStore((s) => s.toggleTheme);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -938,6 +964,30 @@ function DashboardApp() {
   const [showShortcuts, setShowShortcuts] = useState(false);
   const terminalEnabled = useUIStore((s) => s.terminalEnabled);
   const setTerminalEnabled = useUIStore((s) => s.setTerminalEnabled);
+
+  // The caller's own identity, for the shell's avatar spots below. Read here
+  // rather than inside each of them so a menu opened later reads what the
+  // shell already has instead of refetching on every open (`whoami` is
+  // deliberately `staleTime: 0`).
+  //
+  // Gated on the same three pre-shell states the returns below describe, and
+  // that is not optional: `whoami` sits behind the auth gate, so asking before
+  // the operator has logged in earns a 401, and `parseError` treats any 401 as
+  // an expired session — it clears the credential and bounces straight back to
+  // the login dialog. The answer is also what has to land *after* a login, and
+  // `authNeeded` going false is what fires it.
+  //
+  // `!isNoAuthRoute` because `/connect` forces both of those flags itself —
+  // `authChecked` true and `authNeeded` false — and it is reached *before* any
+  // credential exists, so without this the pairing wizard fires one guaranteed
+  // 401 per load. Harmless today only by accident: that branch returns before
+  // `setOnUnauthorized` is registered, so `parseError` stops at its outer `if`
+  // and clears nothing. Not a property worth depending on.
+  const whoami = useWhoami({
+    enabled: authChecked && !authNeeded && !isNoAuthRoute,
+  });
+  const userEmoji = whoami.data?.emoji;
+  const userHasAvatar = whoami.data?.has_avatar;
 
   useKeyboardShortcuts({ onShowHelp: () => setShowShortcuts(true) });
 
@@ -1204,6 +1254,18 @@ function DashboardApp() {
         <AuthDialog
           mode={authMode}
           onAuthenticated={() => {
+            // Drop the previous session's identity before the query re-enables.
+            // `gcTime: 0` used to be what cleared it, and it worked by the shell
+            // unmounting — but the shell stays mounted behind this dialog, so
+            // the entry would outlive the login and the next operator would be
+            // served the last one's name and emoji until a refetch landed.
+            queryClient.removeQueries({ queryKey: authzKeys.whoami() });
+            // And drop the name the shell was holding, because the *avatar* is
+            // keyed on it and that entry is not removed above. Until the new
+            // identity lands, the shell would draw the previous operator's
+            // picture under the new one's session. An empty name disables the
+            // avatar query outright, and the placeholder covers the gap.
+            setUsername("");
             setAuthNeeded(false);
             setAuthEpoch((epoch) => epoch + 1);
             void navigate({ to: "/overview", replace: true });
@@ -1340,6 +1402,8 @@ function DashboardApp() {
           authMode={authMode}
           hostname={hostname}
           username={username}
+          emoji={userEmoji}
+          hasAvatar={userHasAvatar}
           onOpenChangePassword={() => setShowChangePassword(true)}
           onOpenShortcuts={() => setShowShortcuts(true)}
           onLogout={handleLogout}
@@ -1435,9 +1499,15 @@ function DashboardApp() {
                 aria-haspopup="menu"
               >
                 {username ? (
-                  <span className="text-white text-[10px] font-semibold">
-                    {username.slice(0, 2).toUpperCase()}
-                  </span>
+                  <UserAvatar
+                    name={username}
+                    emoji={userEmoji}
+                    hasAvatar={userHasAvatar}
+                    // The button already carries the purple disc, so the
+                    // avatar inside it stays transparent and only draws the
+                    // emoji or the image.
+                    className="h-full w-full bg-transparent text-[10px] font-semibold text-white"
+                  />
                 ) : (
                   <UserCircle className="h-4 w-4 text-white" />
                 )}
@@ -1451,6 +1521,8 @@ function DashboardApp() {
                   <div className="fixed top-[54px] right-3 sm:right-4 z-[100]">
                     <UserMenuPanel
                       username={username}
+                      emoji={userEmoji}
+                      hasAvatar={userHasAvatar}
                       authMode={authMode}
                       hostname={hostname}
                       theme={theme}
