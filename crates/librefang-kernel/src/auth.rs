@@ -307,13 +307,19 @@ impl AuthManager {
 
             users.insert(user_id, identity);
 
-            // Index channel bindings. Only the explicit (channel_type,
-            // platform_id) tuple is registered — there is **no** bare
+            // Index channel bindings. The key is always the explicit
+            // (channel_type, platform_id) tuple — there is **no** bare
             // `platform_id` fallback. RBAC M3 (#3054) closes the cross-
             // channel attribution leak where two users sharing the same
             // platform-id on different channels would alias to whichever
             // was registered first, with the worst case granting Owner
             // rights to an unrelated inbound on a third channel.
+            //
+            // `*` is not special here, and does not need to be: writing it
+            // stores the literal key `telegram:*` or `*:*`, and `identify`
+            // looks for exactly those on a miss. The wildcard is therefore an
+            // explicit operator statement, never an inferred one — which is
+            // the property #3054 depends on.
             for (channel_type, platform_id) in &config.channel_bindings {
                 let key = format!("{channel_type}:{platform_id}");
                 channel_index.insert(key, user_id);
@@ -358,8 +364,11 @@ impl AuthManager {
     /// Returns the LibreFang UserId if a matching channel binding exists,
     /// or None for unrecognized users.
     pub fn identify(&self, channel_type: &str, platform_id: &str) -> Option<UserId> {
-        let key = format!("{channel_type}:{platform_id}");
-        self.snapshot.load().channel_index.get(&key).copied()
+        resolve_channel_principal(
+            &self.snapshot.load().channel_index,
+            channel_type,
+            platform_id,
+        )
     }
 
     /// Get a user's identity by their UserId.
@@ -562,8 +571,9 @@ impl AuthManager {
         let (Some(ch), Some(sid)) = (channel, sender_id) else {
             return None;
         };
-        let key = format!("{ch}:{sid}");
-        self.snapshot.load().channel_index.get(&key).copied()
+        // Through the same resolver as `identify`, deliberately: a sender this
+        // deployment admitted as a principal must be policed as that principal.
+        resolve_channel_principal(&self.snapshot.load().channel_index, ch, sid)
     }
 
     /// Cheap snapshot of the kernel's tool groups (used for per-user category evaluation).
@@ -709,8 +719,8 @@ impl AuthManager {
         let (Some(channel), Some(sender_id)) = (channel, sender_id) else {
             return guest_gate(tool_name);
         };
-        let binding_key = format!("{channel}:{sender_id}");
-        let Some(user_id) = snapshot.channel_index.get(&binding_key).copied() else {
+        let Some(user_id) = resolve_channel_principal(&snapshot.channel_index, channel, sender_id)
+        else {
             // RBAC is enabled but the sender isn't recognised. Default-deny
             // for tools that don't appear on the read-only safe list, route
             // everything else through an admin approval. We no longer
@@ -1157,6 +1167,51 @@ pub fn validate_channel_role_mapping(mapping: &ChannelRoleMapping) -> usize {
 
 /// Default memory ACL for a role when the user did not declare one
 /// explicitly. Conservative — viewers get nothing, owners get everything.
+/// The single place `channel_index` is read for a `(channel, platform id)` pair.
+///
+/// Admission (`identify`) and policy (`resolve_user`, and the lookup inside
+/// `resolve_user_tool_decision`) must resolve the *same* principal, because a
+/// sender admitted as somebody has to be policed as that somebody. When only
+/// `identify` understood the wildcards, a `*` binding admitted everyone and
+/// then resolved to nobody — and both consumers read "unresolved" as *less*
+/// restricted rather than more: `memory_acl_for_sender` collapses it to
+/// `unrestricted_acl`, and the tool gate falls back to `guest_gate`, which
+/// grants the read-only list without consulting the user's policy.
+fn resolve_channel_principal(
+    index: &HashMap<String, UserId>,
+    channel_type: &str,
+    platform_id: &str,
+) -> Option<UserId> {
+    // An explicit binding always wins over a wildcard: an operator who names
+    // one person's platform id means that person, even when a broader rule
+    // also covers them.
+    if let Some(user_id) = index.get(&format!("{channel_type}:{platform_id}")) {
+        return Some(*user_id);
+    }
+
+    // Wildcards, most specific first. `*` is written by the operator in
+    // `channel_bindings` and lands in the index as a literal key, so
+    // `{ telegram = "*" }` is `telegram:*` and `{ "*" = "*" }` is `*:*` — no
+    // separate table, and nothing matches unless someone wrote it.
+    //
+    // That distinction is what keeps #3054 intact. Its rule is that there is
+    // no *implicit* bare-`platform_id` fallback, because two users sharing an
+    // id across channels would alias to whoever registered first. These are
+    // explicit, channel-scoped statements by the operator, not a guess made on
+    // their behalf.
+    for candidate in [
+        format!("{channel_type}:*"),
+        format!("*:{platform_id}"),
+        "*:*".to_string(),
+    ] {
+        if let Some(user_id) = index.get(&candidate) {
+            return Some(*user_id);
+        }
+    }
+
+    None
+}
+
 fn default_memory_acl(role: UserRole) -> UserMemoryAccess {
     match role {
         UserRole::Owner | UserRole::Admin => UserMemoryAccess {
@@ -1317,6 +1372,107 @@ mod tests {
         assert!(manager.authorize(guest_id, &Action::SpawnAgent).is_err());
         assert!(manager.authorize(guest_id, &Action::KillAgent).is_err());
         assert!(manager.authorize(guest_id, &Action::ManageUsers).is_err());
+    }
+
+    /// A user carrying nothing but the field a channel binding needs.
+    fn bound_user(name: &str, role: &str, bindings: &[(&str, &str)]) -> UserConfig {
+        UserConfig {
+            name: name.to_string(),
+            role: role.to_string(),
+            channel_bindings: bindings
+                .iter()
+                .map(|(channel, id)| (channel.to_string(), id.to_string()))
+                .collect(),
+            api_key_hash: None,
+            budget: None,
+            tool_policy: None,
+            tool_categories: None,
+            memory_access: None,
+            channel_tool_rules: HashMap::new(),
+            emoji: None,
+        }
+    }
+
+    /// `*` in `channel_bindings` is an operator's explicit statement, not a
+    /// fallback inferred on their behalf. It lands in the index as the literal
+    /// key `telegram:*`, and `identify` reaches for it only after an exact
+    /// match has missed — which is what leaves #3054's "no bare platform_id
+    /// fallback" rule intact.
+    #[test]
+    fn test_identify_honours_a_channel_wildcard() {
+        let manager = AuthManager::with_tool_groups(
+            &[bound_user("Anyone", "user", &[("telegram", "*")])],
+            &[],
+        );
+
+        let anyone = UserId::from_name("Anyone");
+        // Anyone on Telegram is that principal...
+        assert_eq!(manager.identify("telegram", "123"), Some(anyone));
+        assert_eq!(manager.identify("telegram", "999"), Some(anyone));
+        // ...and nobody arriving on another channel is.
+        assert!(manager.identify("discord", "123").is_none());
+    }
+
+    #[test]
+    fn test_identify_honours_a_global_wildcard() {
+        let manager =
+            AuthManager::with_tool_groups(&[bound_user("Anyone", "user", &[("*", "*")])], &[]);
+
+        let anyone = UserId::from_name("Anyone");
+        assert_eq!(manager.identify("telegram", "123"), Some(anyone));
+        assert_eq!(manager.identify("discord", "456"), Some(anyone));
+        // Not even the global wildcard react-identifies a channel that was
+        // never bound to anybody: it is one statement about everyone, not a
+        // licence to invent principals.
+        assert_eq!(manager.user_count(), 1);
+    }
+
+    /// Admission and policy must resolve the *same* principal.
+    ///
+    /// When only `identify` understood the wildcards, a `*` binding admitted
+    /// everyone and `resolve_user` then returned `None` for that same sender.
+    /// Both of its consumers read "unresolved" as *less* restricted rather
+    /// than more: `memory_acl_for_sender` collapses it to `unrestricted_acl`
+    /// and the tool gate falls back to `guest_gate`.
+    #[test]
+    fn test_resolve_user_agrees_with_identify_on_a_wildcard() {
+        let manager = AuthManager::with_tool_groups(
+            &[bound_user("Anyone", "user", &[("telegram", "*")])],
+            &[],
+        );
+
+        let identified = manager.identify("telegram", "999");
+        assert!(identified.is_some(), "the wildcard admits this sender");
+        assert_eq!(
+            manager.resolve_user(Some("999"), Some("telegram")),
+            identified,
+            "and the policy path must resolve it to the same principal"
+        );
+        // The channel is still required: a bare sender id resolves to nobody,
+        // wildcard or not (#3054).
+        assert_eq!(manager.resolve_user(Some("999"), None), None);
+    }
+
+    /// Naming one person's platform id means that person, even when a broader
+    /// rule also covers them.
+    #[test]
+    fn test_an_exact_binding_beats_a_wildcard() {
+        let manager = AuthManager::with_tool_groups(
+            &[
+                bound_user("Anyone", "user", &[("telegram", "*")]),
+                bound_user("Alice", "owner", &[("telegram", "123456")]),
+            ],
+            &[],
+        );
+
+        assert_eq!(
+            manager.identify("telegram", "123456"),
+            Some(UserId::from_name("Alice"))
+        );
+        assert_eq!(
+            manager.identify("telegram", "000000"),
+            Some(UserId::from_name("Anyone"))
+        );
     }
 
     #[test]
