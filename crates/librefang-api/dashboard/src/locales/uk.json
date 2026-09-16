@@ -3133,9 +3133,6 @@
     "tick_interval": "Інтервал ітерацій",
     "tick_interval_placeholder": "Секунди між ітераціями циклу (типово {{defaultSecs}})",
     "tick_interval_out_of_range": "Інтервал ітерацій має бути цілим числом від {{min}} до {{max}} секунд."
-    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)",
-    "run_pause": "Призупинити автономний запуск",
-    "run_resume": "Відновити автономний запуск"
   },
   "sessions": {
     "title": "Сесії",
@@ -4404,8 +4401,6 @@
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}с",
     "timeout_badge_never": "TTL: ніколи не повертається"
-    "field_description_hint": "Агент читає це дослівно. Вкажіть мету, обмеження та критерій завершення.",
-    "field_assignee_placeholder": "Ім'я або ID агента"
   },
   "prompts": {
     "title": "Промпти",

@@ -3125,9 +3125,6 @@
     "tick_interval": "Tick interval",
     "tick_interval_placeholder": "Seconds between loop iterations (default {{defaultSecs}})",
     "tick_interval_out_of_range": "Tick interval must be an integer between {{min}} and {{max}} seconds."
-    "evaluator_model_placeholder": "Evaluator model (optional)",
-    "run_pause": "Pause autonomous run",
-    "run_resume": "Resume autonomous run"
   },
   "sessions": {
     "title": "Sessions",
@@ -4392,8 +4389,6 @@
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}s",
     "timeout_badge_never": "TTL: never reclaimed"
-    "field_description_hint": "The agent reads this verbatim. Include the goal, the constraints, and what \"done\" looks like.",
-    "field_assignee_placeholder": "Agent name or ID"
   },
   "prompts": {
     "title": "Prompts",

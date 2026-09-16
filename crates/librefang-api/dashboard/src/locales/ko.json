@@ -3123,9 +3123,6 @@
     "tick_interval": "반복 간격",
     "tick_interval_placeholder": "루프 반복 사이의 초 (기본값 {{defaultSecs}})",
     "tick_interval_out_of_range": "반복 간격은 {{min}}초에서 {{max}}초 사이의 정수여야 합니다."
-    "evaluator_model_placeholder": "평가 모델(선택)",
-    "run_pause": "자율 실행 일시 중지",
-    "run_resume": "자율 실행 재개"
   },
   "sessions": {
     "title": "세션",
@@ -4390,8 +4387,6 @@
     "priority_badge": "P{{priority}}",
     "timeout_badge": "TTL {{secs}}초",
     "timeout_badge_never": "TTL: 회수 안 함"
-    "field_description_hint": "에이전트가 이 내용을 그대로 읽습니다. 목표, 제약 조건, 완료 기준을 포함하세요.",
-    "field_assignee_placeholder": "에이전트 이름 또는 ID"
   },
   "prompts": {
     "title": "프롬프트",
