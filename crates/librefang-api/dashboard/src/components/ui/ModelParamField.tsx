@@ -73,7 +73,11 @@ export const MODEL_PARAM_RANGES: Record<
 > = {
   context_window: { min: 1, integer: true },
   max_output_tokens: { min: 1, integer: true },
-  max_tokens: { min: 1, integer: true },
+  // The route types this one `Option<Option<u32>>`, so its ceiling is real and
+  // reachable: a twelve-digit number used to pass this table, survive the patch
+  // and come back as a serde 400. The other two token counts are `u64`, which
+  // no typo reaches.
+  max_tokens: { min: 1, max: 4294967295, integer: true },
   temperature: { min: 0, max: 2, integer: false },
   top_p: { min: 0, max: 1, integer: false },
   frequency_penalty: { min: -2, max: 2, integer: false },

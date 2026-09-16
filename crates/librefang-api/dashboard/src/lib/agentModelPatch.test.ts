@@ -283,6 +283,11 @@ describe("buildModelConfigPatch", () => {
       ["context_window", "0"],
       ["max_output_tokens", "0"],
       ["max_tokens", "0"],
+      // Above the route's own bound. `max_tokens` is `Option<Option<u32>>`
+      // (routes/agents/config.rs), so this passed the client, survived the
+      // patch, and came back as a serde 400 — the "failed request" this
+      // validation exists to prevent.
+      ["max_tokens", "5000000000"],
     ] as const) {
       const { patch } = buildModelConfigPatch(draftOf({ [field]: bad }), undefined);
       expect(patch, `${field}=${bad} must invalidate the draft`).toBeNull();

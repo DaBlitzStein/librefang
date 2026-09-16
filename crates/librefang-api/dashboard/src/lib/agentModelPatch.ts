@@ -30,8 +30,9 @@ import {
  *
  * The shared bounds are what `patch_agent_config` validates on `PatchAgentConfigRequest`
  * (`routes/agents/config.rs`): a range table covers the four float fields, and the three integer
- * ones are rejected only at zero. Sending a value outside them is a 400, so catching it here is the
- * difference between a disabled Save and a failed request.
+ * ones are rejected only at zero — except `max_tokens`, which the route types `u32` and which
+ * therefore also answers 400 above that ceiling. Sending a value outside them is a 400, so catching
+ * it here is the difference between a disabled Save and a failed request.
  */
 export type ModelNumericField = ModelParamName;
 
