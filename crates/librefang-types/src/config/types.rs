@@ -1018,6 +1018,13 @@ pub struct RateLimitConfig {
     /// WebSocket idle timeout in seconds (close after inactivity). Default: 1800.
     #[serde(default = "default_ws_idle_timeout_secs")]
     pub ws_idle_timeout_secs: u64,
+    /// WebSocket ping interval in seconds. Default: 30. Set to 0 to disable.
+    ///
+    /// The server sends a Ping frame after this much silence from the peer and closes the connection if a further interval passes with still nothing received, so a half-open socket is detected in at most twice this value.
+    /// Without it the only thing that ever discovers a dead peer is a failing write, which means a connection sitting idle between turns — the state a chat socket spends most of its life in — is never probed at all.
+    /// Detection is deliberately not tied to `ws_idle_timeout_secs`: an answered Ping must not count as activity, or an open browser tab would keep the idle timeout from ever firing.
+    #[serde(default = "default_ws_ping_interval_secs")]
+    pub ws_ping_interval_secs: u64,
     /// Text delta debounce interval in milliseconds. Default: 100.
     #[serde(default = "default_ws_debounce_ms")]
     pub ws_debounce_ms: u64,
@@ -1049,6 +1056,11 @@ fn default_ws_terminal_messages_per_minute() -> u32 {
 fn default_ws_idle_timeout_secs() -> u64 {
     1800
 }
+/// 30 s keeps detection (two intervals, 60 s) under the dashboard's 180 s duplicate-resend watchdog, so a dead socket is closed and the client's own recovery runs before that watchdog re-sends the message over HTTP.
+/// It is also under the 60 s `proxy_read_timeout` most reverse proxies default to, so the same frame doubles as the keep-alive those deployments need.
+fn default_ws_ping_interval_secs() -> u64 {
+    30
+}
 fn default_ws_debounce_ms() -> u64 {
     100
 }
@@ -1068,6 +1080,7 @@ impl Default for RateLimitConfig {
             ws_messages_per_minute: default_ws_messages_per_minute(),
             ws_terminal_messages_per_minute: default_ws_terminal_messages_per_minute(),
             ws_idle_timeout_secs: default_ws_idle_timeout_secs(),
+            ws_ping_interval_secs: default_ws_ping_interval_secs(),
             ws_debounce_ms: default_ws_debounce_ms(),
             ws_debounce_chars: default_ws_debounce_chars(),
             auth_rate_limit_per_ip: default_auth_rate_limit_per_ip(),
@@ -1740,6 +1753,92 @@ pub struct SkillsConfig {
     /// upstream.
     #[serde(default)]
     pub registry_repo: Option<String>,
+    /// GitHub-side settings for the promotion flow that `registry_repo`
+    /// names its target for.
+    /// Every field defaults to the behaviour the flow had before the section
+    /// existed, so an installation that omits `[skills.promotion]` entirely is
+    /// unaffected.
+    #[serde(default)]
+    pub promotion: RegistryPromotionConfig,
+}
+
+/// How the promotion flow gets a branch onto the registry repository.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryPromotionMode {
+    /// Fork the upstream registry under the promoting account, push the
+    /// branch to that fork, and open a cross-repository pull request.
+    /// This is what the flow has always done.
+    #[default]
+    Fork,
+    /// Push the branch straight to the upstream registry and open a
+    /// same-repository pull request.
+    /// Requires the token to carry write access to the registry, and is the
+    /// mode to pick when the registry is an internal repository nobody is
+    /// meant to fork.
+    DirectPush,
+}
+
+/// GitHub-side settings for promoting a skill or an agent type to the
+/// registry repository named by `skills.registry_repo`.
+///
+/// The engine lives in `librefang-skills::registry_pr` and is shared by
+/// `POST /api/skills/{name}/propose` and `POST /api/templates/{name}/promote`.
+/// Each field is optional and, when unset, reproduces exactly what the flow
+/// did before this section existed: `api.github.com`, a fork under whoever
+/// owns the token, the fork's own default branch as the PR base, a
+/// path-derived head-branch prefix, and no explicit commit author.
+///
+/// The GitHub token is deliberately *not* configured here.
+/// It continues to resolve from the `GITHUB_TOKEN` environment variable and
+/// then the vault, so no credential is readable back out of `GET /api/config`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RegistryPromotionConfig {
+    /// Base URL of the GitHub REST API, without a trailing slash.
+    /// Defaults to `https://api.github.com`.
+    /// Set it to something like `https://github.example.com/api/v3` to promote
+    /// against a GitHub Enterprise Server installation, which the flow could
+    /// not reach at all while the host was a compiled-in constant.
+    /// Must be `https://` — plain `http` is accepted only for loopback hosts —
+    /// and it is not writable through `POST /api/config/set`: the promotion
+    /// flow attaches the repo-scoped GitHub token to every request built from
+    /// it, so the value is an edit-on-disk destination field (#8179 review).
+    #[serde(default)]
+    pub api_base_url: Option<String>,
+    /// Account or organisation the fork is created under.
+    /// Defaults to the login `GET /user` reports for the token, which is the
+    /// right answer whenever the fork belongs to the token's owner and the
+    /// wrong one whenever an organisation owns it.
+    /// Ignored in `direct_push` mode, where there is no fork.
+    #[serde(default)]
+    pub fork_owner: Option<String>,
+    /// Branch the pull request targets on the upstream registry, and the
+    /// branch the head branch is cut from.
+    /// Defaults to the default branch of the repository being pushed to.
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    /// First path component of the generated head branch name, which is
+    /// otherwise `<prefix>/<name>-<timestamp>`.
+    /// Defaults to `skill` for skill promotions and to the registry directory
+    /// (`agent-types`, …) for everything else.
+    #[serde(default)]
+    pub head_branch_prefix: Option<String>,
+    /// Name recorded as the commit author and committer.
+    /// Takes effect only together with `commit_author_email`; with either half
+    /// missing, no author is sent and GitHub attributes the commit to the
+    /// account that owns the token.
+    #[serde(default)]
+    pub commit_author_name: Option<String>,
+    /// Email recorded as the commit author and committer.
+    /// See `commit_author_name` — both are required for either to apply.
+    #[serde(default)]
+    pub commit_author_email: Option<String>,
+    /// Whether to fork the registry or push to it directly.
+    #[serde(default)]
+    pub mode: RegistryPromotionMode,
 }
 
 /// Operator-side gate over skill `env_passthrough` requests.
@@ -1811,6 +1910,7 @@ impl Default for SkillsConfig {
             env_passthrough_denied_patterns: default_env_passthrough_denied_patterns(),
             env_passthrough_per_skill: std::collections::HashMap::new(),
             registry_repo: None,
+            promotion: RegistryPromotionConfig::default(),
         }
     }
 }
@@ -2358,6 +2458,10 @@ impl std::fmt::Debug for AuthProfile {
 // ---------------------------------------------------------------------------
 
 /// Docker sandbox activation mode.
+///
+/// **Not wired into tool dispatch.** Nothing in the daemon matches on this value: `shell_exec` and `process_start` run as subprocesses on the daemon host whatever it is set to, and the only way into a container remains the separate `docker_exec` tool the model chooses for itself (#8220).
+/// The rest of `[docker]` — `enabled`, `scope`, `reuse_cool_secs`, `idle_timeout_secs`, `max_age_secs`, and the image / limits — is live and governs `docker_exec`'s containers.
+/// [`Self::is_wired_into_dispatch`] is the single source of truth for that, and the kernel warns at boot when a mode that does nothing is configured.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -2370,6 +2474,31 @@ pub enum DockerSandboxMode {
     NonMain,
     /// Use Docker for all agents.
     All,
+}
+
+impl DockerSandboxMode {
+    /// The mode's wire name, as it is written in `config.toml`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DockerSandboxMode::Off => "off",
+            DockerSandboxMode::NonMain => "non_main",
+            DockerSandboxMode::All => "all",
+        }
+    }
+
+    /// Whether selecting this mode actually changes where a tool call runs.
+    ///
+    /// Only `Off` does today, in the degenerate sense that it asks for nothing: no execution path matches on `[docker] mode`, so `non_main` and `all` are configuration an operator can set, read back from `GET /api/config`, and get nothing from (#8220).
+    /// Callers use this to warn an operator whose configuration is being silently ignored — the boot warning in `librefang-kernel`'s `boot.rs`.
+    ///
+    /// Written as an exhaustive match rather than a comparison against `Off` so that adding a variant, or wiring an existing one into dispatch, forces this answer to be revisited instead of inheriting a default.
+    /// This mirrors [`crate::tool_exec::BackendKind::is_wired_into_dispatch`], which carries the same shape for the same reason (#8221) — the two gaps are adjacent and an operator reaching for OS-level isolation can land on either.
+    pub fn is_wired_into_dispatch(self) -> bool {
+        match self {
+            DockerSandboxMode::Off => true,
+            DockerSandboxMode::NonMain | DockerSandboxMode::All => false,
+        }
+    }
 }
 
 /// Docker container lifecycle scope.
@@ -3623,6 +3752,13 @@ pub struct KernelConfig {
     /// `routing` always wins when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_routing: Option<crate::agent::ModelRoutingConfig>,
+    /// Profile router settings. Complements `default_routing` above: the tier
+    /// router maps a scored request onto three fixed model slots, while the
+    /// profile router matches the task against named profiles that also carry
+    /// a cost tier and a complexity ceiling. Off by default; an agent opts in
+    /// with `mode = "flexible"` in its manifest `[model]` block.
+    #[serde(default)]
+    pub model_router: crate::model_profile::ModelRouterConfig,
     /// Default LLM provider configuration.
     pub default_model: DefaultModelConfig,
     /// Memory substrate configuration.
@@ -3896,6 +4032,21 @@ pub struct KernelConfig {
     /// Media understanding configuration.
     #[serde(default)]
     pub media: crate::media::MediaConfig,
+    /// Kernel-global media capability routing — which provider and model
+    /// services each modality the agent's own model cannot handle.
+    ///
+    /// ```toml
+    /// [capabilities]
+    /// image_understanding = "openai/gpt-4o"
+    /// speech_to_text = { provider = "groq", model = "whisper-large-v3" }
+    /// ```
+    ///
+    /// Every agent inherits this block; `agent.toml`'s own `[capabilities]`
+    /// overrides it key by key. Resolution is agent > global > the historical
+    /// `[media] image_provider` / `audio_provider` selectors > env-var
+    /// auto-detection.
+    #[serde(default)]
+    pub capabilities: crate::media::CapabilityRouting,
     /// Link understanding configuration.
     #[serde(default)]
     pub links: crate::media::LinkConfig,
@@ -6909,6 +7060,7 @@ impl Default for KernelConfig {
             memory_fact_budget_percent: None,
             max_history_messages: None,
             default_routing: None,
+            model_router: crate::model_profile::ModelRouterConfig::default(),
             default_model: DefaultModelConfig::default(),
             memory: MemoryConfig::default(),
             memory_wiki: MemoryWikiConfig::default(),
@@ -6949,6 +7101,7 @@ impl Default for KernelConfig {
             workspaces_dir: None,
             log_dir: None,
             media: crate::media::MediaConfig::default(),
+            capabilities: crate::media::CapabilityRouting::default(),
             links: crate::media::LinkConfig::default(),
             reload: ReloadConfig::default(),
             webhook_triggers: None,
@@ -9371,5 +9524,38 @@ rule_sets = ["browser_handles", "pii_baseline"]
         assert!(!rule.matches("matrix", Some("acct"), "!other:server", None, &[]));
         // account_id mismatch alone fails.
         assert!(!rule.matches("matrix", Some("other"), "!room:server", None, &[]));
+    }
+
+    /// Pins the set of `[docker] mode` values that actually change where a tool call runs (#8220).
+    ///
+    /// The boot warning in `librefang-kernel`'s `boot.rs` fires on exactly the complement of this set, so an entry silently flipping to `true` would take the warning away from a mode that still does nothing.
+    /// Whoever wires the mode into dispatch updates this test in the same change — and the row in `docs/src/app/configuration/features/page.mdx`, which currently says the field is not implemented.
+    #[test]
+    fn no_docker_sandbox_mode_is_wired_into_dispatch_8220() {
+        assert!(
+            DockerSandboxMode::Off.is_wired_into_dispatch(),
+            "`off` asks for nothing, so it is trivially honoured"
+        );
+        for mode in [DockerSandboxMode::NonMain, DockerSandboxMode::All] {
+            assert!(
+                !mode.is_wired_into_dispatch(),
+                "`{}` is selectable but reaches no execution path; if that changed, drop it from this list and from the warning in boot.rs",
+                mode.as_str()
+            );
+        }
+    }
+
+    /// `as_str` must render the wire name serde accepts, because the boot warning quotes it back at the operator who typed it.
+    #[test]
+    fn docker_sandbox_mode_as_str_round_trips_through_serde() {
+        for mode in [
+            DockerSandboxMode::Off,
+            DockerSandboxMode::NonMain,
+            DockerSandboxMode::All,
+        ] {
+            let parsed: DockerSandboxMode =
+                serde_json::from_str(&format!("\"{}\"", mode.as_str())).expect("wire name");
+            assert_eq!(parsed, mode);
+        }
     }
 }
