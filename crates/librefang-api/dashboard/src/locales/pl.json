@@ -3040,9 +3040,6 @@
     "tick_interval": "Odstęp między iteracjami",
     "tick_interval_placeholder": "Sekundy między iteracjami pętli (domyślnie {{defaultSecs}})",
     "tick_interval_out_of_range": "Odstęp między iteracjami musi być liczbą całkowitą od {{min}} do {{max}} sekund."
-    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)",
-    "run_pause": "Wstrzymaj autonomiczne uruchomienie",
-    "run_resume": "Wznów autonomiczne uruchomienie"
   },
   "sessions": {
     "title": "Sesje",

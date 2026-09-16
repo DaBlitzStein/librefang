@@ -3040,9 +3040,6 @@
     "tick_interval": "Інтервал ітерацій",
     "tick_interval_placeholder": "Секунди між ітераціями циклу (типово {{defaultSecs}})",
     "tick_interval_out_of_range": "Інтервал ітерацій має бути цілим числом від {{min}} до {{max}} секунд."
-    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)",
-    "run_pause": "Призупинити автономний запуск",
-    "run_resume": "Відновити автономний запуск"
   },
   "sessions": {
     "title": "Сесії",
