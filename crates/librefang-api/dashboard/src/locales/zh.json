@@ -2830,6 +2830,10 @@
     "select_agent_desc": "从列表中选择一个智能体以建立通信链路。",
     "transmit_command": "输入消息...",
     "send": "发送",
+    "scale_current": "文字大小：{{percent}}%",
+    "scale_decrease": "缩小文字",
+    "scale_increase": "放大文字",
+    "scale_reset": "重置文字大小",
     "secure_link": "安全连接",
     "standby": "待机中",
     "end_history": "历史记录末尾",
@@ -2987,7 +2991,9 @@
     "verifier_agent": "验证代理",
     "no_verifier_selected": "无验证代理（不设关卡）",
     "evaluator_model": "评估模型",
-    "evaluator_model_placeholder": "评估模型（可选）"
+    "evaluator_model_placeholder": "评估模型（可选）",
+    "run_pause": "暂停自主执行",
+    "run_resume": "恢复自主执行"
   },
   "sessions": {
     "title": "会话",
@@ -4266,7 +4272,8 @@
     "status_failed": "失败",
     "assignee_none": "未分配 — 任何智能体都可认领",
     "no_agents_hint": "尚未注册任何智能体。请先创建智能体再分配任务。",
-    "field_description_hint": "智能体会逐字读取此内容。请写明目标、约束以及完成标准。"
+    "field_description_hint": "智能体会逐字读取此内容。请写明目标、约束以及完成标准。",
+    "field_assignee_placeholder": "智能体名称或 ID"
   },
   "prompts": {
     "title": "提示词",
@@ -4320,6 +4327,7 @@
   },
   "agentTypes": {
     "confirm_delete": "删除智能体类型 '{{name}}'？已据此创建的智能体不受影响。",
+    "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "新建智能体类型",
     "created": "已创建智能体类型",
     "delete": "删除",

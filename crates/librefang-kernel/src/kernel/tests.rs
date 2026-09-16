@@ -3549,6 +3549,7 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
             None,
             0,
             None,
+            librefang_memory::TaskQueueCaps::UNLIMITED,
         )
         .await
         .expect("post");
@@ -3588,6 +3589,120 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0]["id"], task_id);
     assert_eq!(pending[0]["assigned_to"], "");
+
+    kernel.shutdown();
+}
+
+/// `[queue] max_depth_global` reaches the kernel's enqueue, and reaching it answers `QuotaExceeded` rather than `Internal`.
+///
+/// The distinction is the whole point of wiring it: `Internal` reaches an HTTP client as a scrubbed 500, which says "the daemon broke" and invites an immediate retry of the request the cap just declined. `QuotaExceeded` maps to 429 (#8219).
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_depth_cap_reaches_task_post_and_answers_as_a_quota() {
+    use librefang_runtime::kernel_handle::TaskQueue;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.queue.max_depth_global = 1;
+    // The shipped 3600s default spawns a sweep at boot; off so it cannot race the assertions.
+    config.queue.task_ttl_secs = 0;
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+    kernel.clone().set_self_handle();
+
+    kernel
+        .task_post(
+            "first",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
+        .await
+        .expect("the first post fits the cap");
+
+    let err = kernel
+        .task_post(
+            "second",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
+        .await
+        .expect_err("the second post exceeds max_depth_global = 1");
+    assert!(
+        matches!(
+            err,
+            librefang_runtime::kernel_handle::KernelOpError::QuotaExceeded(_)
+        ),
+        "a full queue must not be flattened into Internal: {err:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// The cap is read from the live config on every post, so `POST /api/config/reload` moves it without a restart.
+///
+/// Capturing it at boot would have made a knob in a section whose other fields hot-reload quietly restart-required, which is the class of bug `docs/operations/config-reload.md` exists to prevent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reloaded_queue_depth_cap_takes_effect_without_a_restart() {
+    use librefang_runtime::kernel_handle::TaskQueue;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.queue.max_depth_global = 1;
+    config.queue.task_ttl_secs = 0;
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+    kernel.clone().set_self_handle();
+
+    kernel
+        .task_post(
+            "first",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
+        .await
+        .unwrap();
+    kernel
+        .task_post(
+            "second",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
+        .await
+        .expect_err("at the cap");
+
+    let mut raised = (*kernel.config.load_full()).clone();
+    raised.queue.max_depth_global = 10;
+    kernel.config.store(Arc::new(raised));
+
+    kernel
+        .task_post(
+            "second",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
+        .await
+        .expect("the raised cap is in force on the next post");
 
     kernel.shutdown();
 }
@@ -18956,6 +19071,80 @@ fn boot_warns_that_a_non_local_tool_exec_backend_does_not_route_tool_calls_8221(
     assert!(
         captured.contains("not a sandbox"),
         "warning must deny the security property an operator most plausibly assumed; captured: {captured:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// #8220: booting with `[docker] mode = "all"` must say out loud that agent tool calls still run on the daemon host.
+///
+/// Nothing in the daemon matches on `[docker] mode`, so an operator who set it believing they had moved every agent into a container moved nothing — `shell_exec` and `process_start` kept running as subprocesses, and the only path into a container stayed the `docker_exec` tool the model chooses for itself.
+/// The rest of `[docker]` is live and governs those containers, which is what made the gap so easy to miss: the section visibly works.
+///
+/// `enabled` is left `false` deliberately. The mode is meaningless either way, and warning only when Docker is enabled would have hidden it from exactly the operator most likely to be wrong — the one who set `mode` and expected it to be the switch.
+#[test]
+fn boot_warns_that_a_docker_sandbox_mode_does_not_route_tool_calls_8220() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-docker-mode-warning-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.docker.mode = librefang_types::config::DockerSandboxMode::All;
+
+    let logs = CapturedLogs::new();
+    let kernel = {
+        let _g = logs.install();
+        LibreFangKernel::boot_with_config(config).expect(
+            "an unimplemented mode is a missing feature, not a broken config; boot must succeed",
+        )
+    };
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("#8220"),
+        "warning must cite the tracking issue so the operator can find the status; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("all"),
+        "warning must name the mode that was configured and ignored; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("not a sandbox"),
+        "warning must deny the security property an operator most plausibly assumed; captured: {captured:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// The default config must boot silent: a warning that fires for everyone is one nobody reads.
+#[test]
+fn boot_does_not_warn_about_docker_mode_when_it_is_off_8220() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-docker-mode-quiet-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    assert_eq!(
+        config.docker.mode,
+        librefang_types::config::DockerSandboxMode::Off,
+        "the shipped default is what this test is about"
+    );
+
+    let logs = CapturedLogs::new();
+    let kernel = {
+        let _g = logs.install();
+        LibreFangKernel::boot_with_config(config).expect("boot")
+    };
+    assert!(
+        !logs.text().contains("#8220"),
+        "the default configuration must not produce the warning; captured: {:?}",
+        logs.text()
     );
 
     kernel.shutdown();
