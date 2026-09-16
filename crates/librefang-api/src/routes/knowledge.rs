@@ -408,9 +408,7 @@ fn read_documents(dir: &FsPath) -> Vec<KnowledgeDocument> {
             // API cannot reproduce byte for byte is one it cannot address, so
             // it is dropped here exactly as the dotfile check below drops what
             // the API does not serve.
-            let Some(filename) = entry.file_name().to_str().map(str::to_owned) else {
-                return None;
-            };
+            let filename = entry.file_name().to_str().map(str::to_owned)?;
             if filename.starts_with('.') {
                 return None;
             }
