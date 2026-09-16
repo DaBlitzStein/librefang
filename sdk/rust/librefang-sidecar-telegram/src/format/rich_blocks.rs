@@ -276,7 +276,13 @@ const OPAQUE: char = '\u{1}';
 /// |---|---|---|
 /// | `soft_break_marker` | a line break the scan may not pair across | `Event::SoftBreak` |
 /// | `escape_marker` | the *first* character of the next node was not written as itself | an escape, a character reference |
-/// | `verbatim_marker` | the *whole* next node is not prose the author wrote | inline HTML, an autolink's display text |
+///
+/// A third marker stood here, meaning "the whole next node is not prose", and its removal is
+/// why this list is short again. Marking part of a run opaque put three meanings into
+/// `Flat::seams` — an escape, a character reference, a stretch of non-prose — and the three
+/// rules that read it were wired one at a time: a newline inside an HTML tag stopped being a
+/// line break, and a spoiler swallowed the paragraph after it. Non-prose is now handled where
+/// it cannot interact with anything: a run holding any of it is not scanned at all.
 ///
 /// Both are sequences, which is a variant `from_parts` never builds — it collapses an empty
 /// run to `Plain("")` and a single part to that part — and which no text can spell. The
@@ -291,17 +297,6 @@ fn soft_break_marker() -> RichText {
 /// an escape or a character reference.
 fn escape_marker() -> RichText {
     RichText::Seq(vec![RichText::Plain(String::new())])
-}
-
-/// Stands immediately before a text node that is not prose: raw inline HTML, or the display
-/// text of an autolink. Telegram pairs nothing inside either — it drops the tag outright and
-/// shows the URL whole — and this converter keeps the characters but must not read markup
-/// into them. Two `Plain` parts is a shape `from_parts` cannot build: it merges them.
-fn verbatim_marker() -> RichText {
-    RichText::Seq(vec![
-        RichText::Plain(String::new()),
-        RichText::Plain(String::new()),
-    ])
 }
 
 /// A run flattened into bytes, with everything the scan needs to know about where the bytes
@@ -319,13 +314,6 @@ struct Flat<'a> {
     seams: Vec<usize>,
     /// Offsets of soft line breaks, which are barriers here and spaces on the screen.
     soft: Vec<usize>,
-}
-
-/// What a marker said about the text node that follows it.
-enum Pending {
-    Nothing,
-    FirstCharacter,
-    WholeNode,
 }
 
 /// A matched delimiter pair, as offsets into `Flat::text`.
@@ -370,20 +358,17 @@ impl<'a> Flat<'a> {
         let mut opaque = Vec::new();
         let mut seams = Vec::new();
         let mut soft = Vec::new();
-        let mut pending = Pending::Nothing;
+        let mut unwritten_next = false;
         for part in parts {
             match part {
                 _ if part == &soft_break_marker() => {
                     soft.push(text.len());
                     text.push('\n');
                 }
-                _ if part == &escape_marker() => pending = Pending::FirstCharacter,
-                _ if part == &verbatim_marker() => pending = Pending::WholeNode,
+                _ if part == &escape_marker() => unwritten_next = true,
                 RichText::Plain(s) => {
-                    match std::mem::replace(&mut pending, Pending::Nothing) {
-                        Pending::Nothing => {}
-                        Pending::FirstCharacter => seams.push(text.len()),
-                        Pending::WholeNode => seams.extend(text.len()..text.len() + s.len()),
+                    if std::mem::take(&mut unwritten_next) {
+                        seams.push(text.len());
                     }
                     text.push_str(s);
                 }
@@ -728,8 +713,16 @@ struct Builder {
     /// True while the open inline run was started by loose text rather than by a
     /// `Tag::Paragraph`, so it has to be closed by hand at the next block boundary.
     implicit_run: bool,
-    /// Depth of open autolinks, whose text is their own URL rather than anything written.
-    verbatim_text: usize,
+    /// One flag per open inline run: true once the run has collected something that is not
+    /// prose — raw inline HTML, or an autolink whose text is its own URL. Such a run is not
+    /// scanned for delimiters at all.
+    ///
+    /// Standing the whole run down is deliberately blunt. `<b>||a||</b>` loses a spoiler
+    /// Telegram would make, which is a formatting loss and is recorded as a divergence; the
+    /// version that tried to be precise about it — marking just the non-prose bytes — hid a
+    /// paragraph behind a spoiler instead, because the marks were also read by the whitespace
+    /// and line-break rules. A loss of formatting is not in the same class as a loss of text.
+    no_scan: Vec<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -769,21 +762,65 @@ impl Builder {
 
     fn start_inline(&mut self) {
         self.inlines.push(Vec::new());
+        self.no_scan.push(false);
+    }
+
+    /// Mark the open run as holding something that is not prose, so nothing in it is paired.
+    fn stop_scanning(&mut self) {
+        if self.inlines.is_empty() {
+            self.start_inline();
+            self.implicit_run = true;
+        }
+        if let Some(flag) = self.no_scan.last_mut() {
+            *flag = true;
+        }
+    }
+
+    /// Whether the run being closed may be scanned at all.
+    fn scannable(&mut self) -> bool {
+        !self.no_scan.pop().unwrap_or(false)
+    }
+
+    /// Scan a run, or — when it holds something that is not prose — resolve the markers by
+    /// hand and hand it back unpaired.
+    ///
+    /// Dropping the markers is not enough: a soft break is a marker standing in for the space
+    /// it renders as, so filtering it out glued the words either side of a wrapped line
+    /// together. `scan_delimiters` puts that space back on the scanned path; this one has to
+    /// do the same.
+    fn scan_if_prose(parts: Vec<RichText>, scannable: bool) -> Vec<RichText> {
+        if scannable {
+            return scan_delimiters(parts);
+        }
+        parts
+            .into_iter()
+            .filter_map(|part| {
+                if part == soft_break_marker() {
+                    Some(RichText::Plain(" ".to_string()))
+                } else if part == escape_marker() {
+                    None
+                } else {
+                    Some(part)
+                }
+            })
+            .collect()
     }
 
     /// Close the open inline run, applying the delimiter scans.
     fn take_inline(&mut self) -> RichText {
-        RichText::from_parts(scan_delimiters(self.inlines.pop().unwrap_or_default()))
+        let scannable = self.scannable();
+        let parts = self.inlines.pop().unwrap_or_default();
+        RichText::from_parts(Self::scan_if_prose(parts, scannable))
     }
 
     /// Close the run without scanning. A fenced block's content is literal — `||` inside a
     /// code sample is two pipes, not a spoiler — and it is the one caller that reaches here
     /// with text the author did not intend as markup.
     fn take_inline_literal(&mut self) -> RichText {
+        let _ = self.scannable();
         // No markers can be here: an escape is not processed inside code, so the builder
         // never marks one, and a soft break inside a fence is a newline in the text rather
-        // than an event. A `retain` stood here while markers were inferred from the event
-        // stream, where a fence's lines did produce them.
+        // than an event.
         RichText::from_parts(self.inlines.pop().unwrap_or_default())
     }
 
@@ -796,7 +833,7 @@ impl Builder {
     /// in source order, instead of being concatenated into one.
     fn push_inline(&mut self, text: RichText) {
         if self.inlines.is_empty() {
-            self.inlines.push(Vec::new());
+            self.start_inline();
             self.implicit_run = true;
         }
         if let Some(run) = self.inlines.last_mut() {
@@ -825,7 +862,9 @@ impl Builder {
         // `take_inline`, and missing that meant `- ||секрет||` kept its pipes while the same
         // text in a loose list became a spoiler — one construct rendering two ways depending
         // on a blank line, in the form agents write most.
-        let text = RichText::from_parts(scan_delimiters(self.inlines.pop().unwrap_or_default()));
+        let scannable = self.scannable();
+        let parts = self.inlines.pop().unwrap_or_default();
+        let text = RichText::from_parts(Self::scan_if_prose(parts, scannable));
         if !text.is_empty() {
             let block = Block::Paragraph { text };
             self.blocks_mut().push(block);
@@ -841,13 +880,9 @@ impl Builder {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
             Event::Text(text) => {
-                // An autolink shows its own URL, which nobody wrote as prose: Telegram leaves
-                // `<https://ya.ru/||a||>` whole rather than hiding half of it in a spoiler.
-                if self.verbatim_text > 0 {
-                    self.push_inline(verbatim_marker());
-                } else if escaped_start {
-                    // The character arrives decoded and looks like any other, so the fact
-                    // that it was written as an escape or a reference is recorded here.
+                // The character arrives decoded and looks like any other, so the fact that it
+                // was written as an escape or a reference is recorded here for the scan.
+                if escaped_start {
                     self.push_inline(escape_marker());
                 }
                 self.push_inline(RichText::Plain(text.into_string()));
@@ -866,7 +901,9 @@ impl Builder {
             Event::InlineHtml(html) => {
                 // Kept as text — that is the point of this path — but not as prose: Telegram
                 // drops the tag outright, so an attribute holding `||` is nobody's spoiler.
-                self.push_inline(verbatim_marker());
+                // The whole run stands down rather than the tag being made opaque inside it;
+                // see `no_scan`.
+                self.stop_scanning();
                 self.push_inline(RichText::Plain(html.into_string()));
             }
             // `Event::Html` is the *block-level* variant and arrives with no surrounding
@@ -944,8 +981,10 @@ impl Builder {
             } => {
                 // An autolink's text is its own URL; everything inside it is the address, not
                 // prose, so the scan is kept out of it.
+                // An autolink's text is its own URL. Half an address disappearing behind a
+                // spoiler is worse than a spoiler not appearing, so the run stands down.
                 if matches!(link_type, LinkType::Autolink | LinkType::Email) {
-                    self.verbatim_text += 1;
+                    self.stop_scanning();
                 }
                 self.open_style(StyleKind::Url(dest_url.into_string()));
             }
@@ -1061,13 +1100,11 @@ impl Builder {
                     });
                 }
             }
-            TagEnd::Link => {
-                self.verbatim_text = self.verbatim_text.saturating_sub(1);
-                self.close_style();
-            }
-            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Image => {
-                self.close_style()
-            }
+            TagEnd::Emphasis
+            | TagEnd::Strong
+            | TagEnd::Strikethrough
+            | TagEnd::Link
+            | TagEnd::Image => self.close_style(),
             _ => {}
         }
     }
@@ -1093,7 +1130,13 @@ impl Builder {
             return;
         };
         let start = start.min(run.len());
-        let inner = RichText::from_parts(scan_delimiters(run.split_off(start)));
+        // The flag belongs to the run, not to the span: a paragraph holding raw HTML stands
+        // down everywhere in it, including inside a link that came before the tag.
+        let scannable = !self.no_scan.last().copied().unwrap_or(false);
+        let Some(run) = self.inlines.last_mut() else {
+            return;
+        };
+        let inner = RichText::from_parts(Self::scan_if_prose(run.split_off(start), scannable));
         let text = Box::new(inner);
         run.push(RichText::Styled(match kind {
             StyleKind::Bold => Styled::Bold { text },
@@ -1599,7 +1642,7 @@ mod tests {
     /// `telegram_oracle.json` was sent to a live bot as `rich_message.markdown` and the parse
     /// `sendRichMessage` echoes back was written down verbatim. This test is the diff.
     ///
-    /// Of 196 recorded forms, 148 match byte for byte. The other 48 are named in
+    /// Of 196 recorded forms, 146 match byte for byte. The other 50 are named in
     /// `DIVERGENCES`, and for the 30 that are not content-level the difference is *checked*
     /// rather than described: same characters, same multiset of styles, written down
     /// differently. That check is the point. An earlier version of this test listed 23
@@ -1819,29 +1862,57 @@ mod tests {
         }
     }
 
-    /// Only text the author wrote as text is scanned. Three ways to put a delimiter on the
-    /// screen without writing prose, all of which the scan used to read as markup:
+    /// A run holding something that is not prose is not scanned at all.
     ///
-    /// * inside an HTML attribute — `<input value="a||b">` invented a spoiler that began in
-    ///   the attribute and swallowed the prose after it, including the real spoiler;
-    /// * inside an autolink, whose text is its own URL — half the address disappeared behind
-    ///   a spoiler;
-    /// * a space that arrived as `&#32;`, which broke a pair Telegram makes, because the
-    ///   literality rule had been wired to the delimiter test and not to the whitespace one.
+    /// Three ways a delimiter can appear without anybody writing one, all of which the scan
+    /// used to read as markup: inside an HTML attribute, inside an autolink whose text is its
+    /// own URL, and — separately — a space or newline that arrived as `&#32;` / `&#10;`.
     ///
-    /// Telegram agrees on all three, and on the fourth here: `&#10;` is content rather than a
-    /// line break, so a pair survives it.
+    /// The first two are handled by standing the whole run down, which is blunter than
+    /// Telegram: it pairs the authored delimiters and drops the tag. That costs a spoiler in
+    /// `<b>||a||</b>` and is recorded as a divergence. The version that tried to be precise —
+    /// marking only the non-prose bytes — put a third meaning into the same `seams` vector
+    /// that the whitespace and line-break rules read, and a newline inside `<b\nid=x>` stopped
+    /// being a line break: `||a <b\nid=x> c||` hid the paragraph behind a spoiler while
+    /// Telegram left it literal. Losing formatting and losing text are not the same failure.
     #[test]
-    fn only_written_text_is_scanned() {
-        let rendered = json(r#"Тег <input value="a||b"> и ||секрет||"#).to_string();
-        assert!(
-            rendered.contains(r#"{"text":"секрет","type":"spoiler"}"#),
-            "спойлер не тот: {rendered}"
+    fn a_run_that_is_not_all_prose_is_not_scanned() {
+        for source in [
+            r#"Тег <input value="a||b"> и ||секрет||"#,
+            "||a <b\nid=x> c||",
+            "<a||b@ya.ru> и ||секрет||",
+            r#"[<input value="a||b">](/rel) и ||секрет||"#,
+            "<b>||a||</b>",
+        ] {
+            let rendered = json(source).to_string();
+            assert!(
+                !rendered.contains(r#""type":"spoiler""#),
+                "{source:?} спарил в непрозаическом прогоне: {rendered}"
+            );
+            assert!(
+                rendered.contains("||"),
+                "{source:?} потерял символы: {rendered}"
+            );
+        }
+        // The markers are the scan's private notation. A run that stands down still has to
+        // resolve them: a soft break is the space a wrapped line renders as, and filtering it
+        // out glued the words either side of it together.
+        assert_eq!(
+            json("<b>x</b> и\nпродолжение"),
+            serde_json::json!([{"type": "paragraph", "text": "<b>x</b> и продолжение"}])
         );
-        assert!(
-            rendered.contains(r#"<input value=\"a||b\">"#),
-            "тег потерян: {rendered}"
-        );
+        for source in [
+            r"<b>x</b> и \|\|a\|\|",
+            "<b>x</b> и\nпродолжение",
+            r"<https://ya.ru> и \|a",
+        ] {
+            let rendered = json(source).to_string();
+            assert!(
+                !rendered.contains("[]") && !rendered.contains(r#"[""]"#),
+                "{source:?} протёк маркером: {rendered}"
+            );
+        }
+        // The autolink keeps its address whole, and the prose after it is a separate run.
         assert_eq!(
             json("<https://ya.ru/||a||>"),
             serde_json::json!([{"type": "paragraph", "text": {
@@ -1850,6 +1921,8 @@ mod tests {
                 "text": "https://ya.ru/||a||",
             }}])
         );
+        // A character reference is a different question and still answered precisely: the
+        // space was never written, so it does not break the pair.
         assert_eq!(
             json("||a&#32;||"),
             serde_json::json!([{"type": "paragraph", "text": {"type": "spoiler", "text": "a "}}])
@@ -1858,14 +1931,6 @@ mod tests {
             json("||&#32;a||"),
             serde_json::json!([{"type": "paragraph", "text": {"type": "spoiler", "text": " a"}}])
         );
-        // Text after an autolink is prose again: the counter that keeps the scan out of the
-        // link has to come back down.
-        let rendered = json("<https://ya.ru/||a||> и ||секрет||").to_string();
-        assert!(
-            rendered.contains(r#"{"text":"секрет","type":"spoiler"}"#),
-            "спойлер после автоссылки потерян: {rendered}"
-        );
-        // A newline nobody typed is not a line break, so the pair crosses it.
         assert_eq!(
             json("||a&#10;b||"),
             serde_json::json!([{"type": "paragraph", "text": {"type": "spoiler", "text": "a\nb"}}])
@@ -2251,23 +2316,25 @@ mod tests {
     /// carry Telegram's own text and Telegram's own set of styles.
     const DIVERGENCES: &[(&str, &str)] = &[
         ("&#32;||a||", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("&vert;&vert;a&vert;&vert;", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("<b>||a||</b>", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("<mailto:a||b@ya.ru>", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("<span data=\"||\">||секрет||</span>", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("a==[==](/d)b", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("| a | b |\n| --- | --- |\n| ||c|| | d |", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("&vert;&vert;a&vert;&vert;", "Telegram decodes numeric character references and leaves named ones alone, so it shows `&vert;` as written; CommonMark decodes both. Neither side makes markup of it â the difference is the text, and it is `pulldown-cmark`'s, not the scan's"),
+        ("<b>||a||</b>", "a run holding raw HTML or an autolink is not scanned at all, so the pairs elsewhere in it are lost. Telegram makes them; the alternative — being precise about which characters are not prose — is what hid a paragraph behind a spoiler, and losing a spoiler is not in the same class as losing text"),
+        ("<https://ya.ru/||a||> и ||секрет||", "a run holding raw HTML or an autolink is not scanned at all, so the pairs elsewhere in it are lost. Telegram makes them; the alternative — being precise about which characters are not prose — is what hid a paragraph behind a spoiler, and losing a spoiler is not in the same class as losing text"),
+        ("<mailto:a||b@ya.ru>", "a run holding raw HTML or an autolink is not scanned at all, so the pairs elsewhere in it are lost. Telegram makes them; the alternative — being precise about which characters are not prose — is what hid a paragraph behind a spoiler, and losing a spoiler is not in the same class as losing text"),
+        ("<span data=\"||\">||секрет||</span>", "a run holding raw HTML or an autolink is not scanned at all, so the pairs elsewhere in it are lost. Telegram makes them; the alternative — being precise about which characters are not prose — is what hid a paragraph behind a spoiler, and losing a spoiler is not in the same class as losing text"),
+        ("a==[==](/d)b", "a relative link: Telegram keeps the raw text and finds a bot command in `/d`, while this converter drops the link and keeps its text (the policy on `close_style`). Before the scan was rewritten this input produced an empty `marked` span with the link text destroyed, so it is the regression case too"),
+        ("| a | b |\n| --- | --- |\n| ||c|| | d |", "GFM reads the pipes of `||c||` as cell separators, and a row with more cells than the header is truncated per the spec; Telegram is not a GFM parser and keeps the text"),
         ("||\tсекрет||", "equal-range styles, serialised in Telegram's order rather than the source's"),
         ("||#хэштег||", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("||<b>a</b>||", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("||@durov||", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("||<b>a</b>||", "a run holding raw HTML or an autolink is not scanned at all, so the pairs elsewhere in it are lost. Telegram makes them; the alternative — being precise about which characters are not prose — is what hid a paragraph behind a spoiler, and losing a spoiler is not in the same class as losing text"),
+        ("||@durov||", "Telegram detects a mention inside the spoiler; this converter detects no entities at all"),
         ("||a&#10;b||", "equal-range styles, serialised in Telegram's order rather than the source's"),
         ("||a&#9;b||", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("||a|| <br> ||b||", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("||https://ya.ru||", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("||a|| <br> ||b||", "a run holding raw HTML or an autolink is not scanned at all, so the pairs elsewhere in it are lost. Telegram makes them; the alternative — being precise about which characters are not prose — is what hid a paragraph behind a spoiler, and losing a spoiler is not in the same class as losing text"),
+        ("||https://ya.ru||", "same, for a bare URL"),
+        ("||до|| <https://ya.ru/b> ||после||", "a run holding raw HTML or an autolink is not scanned at all, so the pairs elsewhere in it are lost. Telegram makes them; the alternative — being precise about which characters are not prose — is what hid a paragraph behind a spoiler, and losing a spoiler is not in the same class as losing text"),
         ("||секрет\t||", "equal-range styles, serialised in Telegram's order rather than the source's"),
         ("||секрет\\||b||", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("Тег <input value=\"a||b\"> и ||секрет||", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("Тег <input value=\"a||b\"> и ||секрет||", "a run holding raw HTML or an autolink is not scanned at all, so the pairs elsewhere in it are lost. Telegram makes them; the alternative — being precise about which characters are not prose — is what hid a paragraph behind a spoiler, and losing a spoiler is not in the same class as losing text"),
         ("**==a==**", "equal-range styles, serialised in Telegram's order rather than the source's"),
         ("**==||a||==**", "equal-range styles, serialised in Telegram's order rather than the source's"),
         ("**==важно==**", "equal-range styles, serialised in Telegram's order rather than the source's"),
@@ -2277,7 +2344,7 @@ mod tests {
         ("*==a==*", "equal-range styles, serialised in Telegram's order rather than the source's"),
         ("*`c`*", "equal-range styles, serialised in Telegram's order rather than the source's"),
         ("*||a||*", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("- ||a\n- b||", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("- ||a\n- b||", "Telegram labels list items with a bullet; `Block::List` carries no label"),
         ("- ||a|| и ==b==", "equal-range styles, serialised in Telegram's order rather than the source's"),
         ("==**a**==", "equal-range styles, serialised in Telegram's order rather than the source's"),
         ("==`c`==", "equal-range styles, serialised in Telegram's order rather than the source's"),
@@ -2289,8 +2356,8 @@ mod tests {
         ("[спойлер ||тут||](https://ya.ru)", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
         ("[ссылка](https://ya.ru) и ||секрет||", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
         ("a==[b](https://ya.ru)==c", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
-        ("| a | b |\n| --- | --- |\n| ==c== | d |", "equal-range styles, serialised in Telegram's order rather than the source's"),
-        ("| a | b |\n| --- | --- |\n| c\\|d | e |", "equal-range styles, serialised in Telegram's order rather than the source's"),
+        ("| a | b |\n| --- | --- |\n| ==c== | d |", "Telegram fills in table chrome this converter leaves out (alignment, borders, stripes)"),
+        ("| a | b |\n| --- | --- |\n| c\\|d | e |", "Telegram fills in table chrome this converter leaves out (alignment, borders, stripes)"),
         ("||==`c`==||", "equal-range styles, serialised in Telegram's order rather than the source's"),
         ("||[a](https://ya.ru)||", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
         ("||[ссылка](https://ya.ru)||", "Telegram normalises the host with a trailing slash, and orders equal-range styles its own way"),
@@ -2307,6 +2374,7 @@ mod tests {
         "&#32;||a||",
         "&vert;&vert;a&vert;&vert;",
         "<b>||a||</b>",
+        "<https://ya.ru/||a||> и ||секрет||",
         "<mailto:a||b@ya.ru>",
         "<span data=\"||\">||секрет||</span>",
         "a==[==](/d)b",
@@ -2319,6 +2387,7 @@ mod tests {
         "||a&#9;b||",
         "||a|| <br> ||b||",
         "||https://ya.ru||",
+        "||до|| <https://ya.ru/b> ||после||",
         "||секрет\t||",
         "||секрет\\||b||",
         "Тег <input value=\"a||b\"> и ||секрет||",
