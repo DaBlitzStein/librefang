@@ -32,6 +32,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
 import { PromptsExperimentsModal } from "../components/PromptsExperimentsModal";
+import { QuickRunModal } from "../components/QuickRunModal";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
@@ -368,6 +369,9 @@ export function AgentsPage() {
   const [formErrors, setFormErrors] = useState<Set<string>>(new Set());
   const [tomlParseError, setTomlParseError] = useState<string | null>(null);
   const [showPrompts, setShowPrompts] = useState(false);
+  // Parent whose ledger pays for the Quick Run (#6699). Held as an id rather
+  // than a flag so the dialog knows which agent to preselect; `null` is closed.
+  const [quickRunParent, setQuickRunParent] = useState<string | null>(null);
   const [editingModel, setEditingModel] = useState(false);
   const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
   // Inline-rename state for the detail/edit modal header. The agent name is
@@ -1331,6 +1335,23 @@ export function AgentsPage() {
                   }}
                 >
                   <span className="hidden sm:inline">{t("agents.suspend", { defaultValue: "Pause" })}</span>
+                </Button>
+              )}
+              {/* Quick Run (#6699) — a one-off ephemeral worker on this
+                  agent's budget. Anchored here rather than on the agent-types
+                  row because the parent that is billed, and whose
+                  `[resources]` quota is the ceiling, is the agent, not a type.
+                  Hidden for hands, which cannot be a parent. */}
+              {!agent.is_hand && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leftIcon={<Zap className="w-3.5 h-3.5" />}
+                  aria-label={t("agents.quick_run")}
+                  title={t("agents.quick_run")}
+                  onClick={() => setQuickRunParent(agent.id)}
+                >
+                  <span className="hidden sm:inline">{t("agents.quick_run")}</span>
                 </Button>
               )}
               <Button
@@ -3686,6 +3707,13 @@ export function AgentsPage() {
           agentId={detailAgent.id}
           agentName={t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}
           onClose={() => setShowPrompts(false)}
+        />
+      )}
+      {/* Quick Run Modal (#6699) — one ephemeral worker, gone when it ends. */}
+      {quickRunParent !== null && (
+        <QuickRunModal
+          initialParent={quickRunParent}
+          onClose={() => setQuickRunParent(null)}
         />
       )}
       <ConfirmDialog
