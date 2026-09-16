@@ -4,7 +4,8 @@
 //! Two categories live here and they follow opposite rules.
 //!
 //! **Preferences** — `temperature`, `top_p`, `max_tokens`, `frequency_penalty`, `presence_penalty`, `top_k`, `min_p`, `repeat_penalty` — are what the operator wants this agent to sound like.
-//! The specific setting beats the general one: agent manifest, then per-model override, then system default.
+//! The specific setting beats the general one: agent manifest, then per-model override, then — for `max_tokens` alone — the model's own registry maximum, and only then the system default.
+//! An unspecified output budget asks the endpoint for as much as it will give, and the registry is the only thing here that knows how much that is.
 //! That ordering is the whole point of the module: two instances of one agent type must be able to run the same model at different temperatures, and before this the per-model override overwrote both of them with one value.
 //!
 //! **Endpoint facts** — `reasoning_effort` and the `use_max_completion_tokens` / `force_max_tokens` / `no_system_role` transport flags — are not preferences.
@@ -190,17 +191,24 @@ pub struct ResolvedInferenceParams {
 /// per-model override that matches the final (post-routing) model.
 ///
 /// Preferences take the agent's value first; endpoint facts take the model's.
-/// Pure — call it with the override already looked up so it stays testable
-/// without a catalog.
+/// Pure — call it with the override and the registry limit already looked up so
+/// it stays testable without a catalog.
+///
+/// `known_max_output` is the matched registry entry's own `max_output_tokens`
+/// as a [`KnownLimit`], or `None` when the entry carries none that is vouched
+/// for. It decides `max_tokens` only when neither the agent nor the override
+/// named one — an agent type that pins its own budget still wins, which is what
+/// keeps two instances of one type free to differ.
 pub fn resolve_inference_params(
     agent: &ModelConfig,
     model: Option<&ModelOverrides>,
+    known_max_output: Option<KnownLimit>,
 ) -> ResolvedInferenceParams {
     ResolvedInferenceParams {
         max_tokens: agent
             .max_tokens
             .or_else(|| model.and_then(|m| m.max_tokens))
-            .unwrap_or(DEFAULT_MODEL_MAX_TOKENS),
+            .unwrap_or_else(|| default_max_tokens(known_max_output)),
         temperature: agent
             .temperature
             .or_else(|| model.and_then(|m| m.temperature))
@@ -224,6 +232,30 @@ pub fn resolve_inference_params(
             .unwrap_or(false),
         force_max_tokens: model.and_then(|m| m.force_max_tokens).unwrap_or(false),
     }
+}
+
+/// The output budget to send when neither the agent nor the per-model override
+/// named one.
+///
+/// An unspecified `max_tokens` asks the endpoint for as much as it will give,
+/// and the registry is the only thing here that knows how much that is: its
+/// `max_output_tokens` is what the provider documents as the model's ceiling,
+/// so requesting it cannot overshoot by construction.
+/// The fixed 4096 it replaces sat below the documented maximum of most entries,
+/// which handicapped precisely the models with room to spare.
+/// It is not a merely conservative default either: a reasoning model has to fit
+/// its thinking *and* its reply inside the budget, so one that runs out before
+/// emitting any text produces no answer at all rather than a shorter one, and
+/// the loop then surfaces that absence as a placeholder reply.
+///
+/// A [`KnownLimit`] is used as-is. An entry whose limits are placeholders yields
+/// `None` here by construction — that is what `limits_known` is for — and the
+/// fallback is [`DEFAULT_MODEL_MAX_TOKENS`] rather than a number nobody vouched
+/// for.
+fn default_max_tokens(known: Option<KnownLimit>) -> u32 {
+    known
+        .and_then(|limit| u32::try_from(limit.tokens).ok())
+        .unwrap_or(DEFAULT_MODEL_MAX_TOKENS)
 }
 
 impl ResolvedInferenceParams {
@@ -297,6 +329,7 @@ fn set_or_clear(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_catalog::ModelCatalogEntry;
 
     fn agent_with(temperature: Option<f32>, max_tokens: Option<u32>) -> ModelConfig {
         ModelConfig {
@@ -316,7 +349,7 @@ mod tests {
             max_tokens: Some(1024),
             ..Default::default()
         };
-        let r = resolve_inference_params(&agent, Some(&model));
+        let r = resolve_inference_params(&agent, Some(&model), None);
         assert!((r.temperature - 0.2).abs() < f32::EPSILON);
         assert_eq!(r.max_tokens, 8192);
     }
@@ -329,8 +362,8 @@ mod tests {
             temperature: Some(0.7),
             ..Default::default()
         };
-        let creative = resolve_inference_params(&agent_with(Some(1.2), None), Some(&model));
-        let academic = resolve_inference_params(&agent_with(Some(0.1), None), Some(&model));
+        let creative = resolve_inference_params(&agent_with(Some(1.2), None), Some(&model), None);
+        let academic = resolve_inference_params(&agent_with(Some(0.1), None), Some(&model), None);
         assert!((creative.temperature - 1.2).abs() < f32::EPSILON);
         assert!((academic.temperature - 0.1).abs() < f32::EPSILON);
     }
@@ -345,7 +378,7 @@ mod tests {
             presence_penalty: Some(-0.5),
             ..Default::default()
         };
-        let r = resolve_inference_params(&agent_with(None, None), Some(&model));
+        let r = resolve_inference_params(&agent_with(None, None), Some(&model), None);
         assert!((r.temperature - 1.4).abs() < f32::EPSILON);
         assert_eq!(r.max_tokens, 1024);
         assert_eq!(r.top_p, Some(0.5));
@@ -355,10 +388,110 @@ mod tests {
 
     #[test]
     fn nothing_set_anywhere_falls_back_to_system_defaults() {
-        let r = resolve_inference_params(&agent_with(None, None), None);
+        let r = resolve_inference_params(&agent_with(None, None), None, None);
         assert_eq!(r.max_tokens, DEFAULT_MODEL_MAX_TOKENS);
         assert!((r.temperature - DEFAULT_MODEL_TEMPERATURE).abs() < f32::EPSILON);
         assert_eq!(r.top_p, None);
+    }
+
+    /// An unset output budget asks the endpoint for as much as the endpoint says
+    /// it can give, which is the rung this module gained.
+    ///
+    /// 4096 was smaller than the documented maximum of most registry entries, so
+    /// the old default handicapped exactly the models with room to spare — and for
+    /// a reasoning model, which must fit its thinking *and* its reply inside the
+    /// budget, running out before any text is emitted yields no answer at all
+    /// rather than a shorter one.
+    #[test]
+    fn unset_max_tokens_takes_the_registry_ceiling() {
+        let limit = KnownLimit::new(65_536, LimitSource::Registry);
+        let r = resolve_inference_params(&agent_with(None, None), None, limit);
+        assert_eq!(r.max_tokens, 65_536);
+    }
+
+    /// The rung this module gained, walked from the catalog entry that asserts
+    /// the ceiling rather than from a hand-built `KnownLimit`: with no override
+    /// anywhere, a registry-declared `max_output_tokens` is the budget.
+    ///
+    /// Both halves are exercised together because they meet at
+    /// [`crate::model_catalog::ModelCatalogEntry::known_max_output_tokens`] —
+    /// the entry supplies the number, `limits_known` is what keeps a discovery
+    /// placeholder from supplying one — so this fails if either side of that
+    /// hand-off drifts.
+    #[test]
+    fn catalog_declared_ceiling_answers_an_unset_budget() {
+        let entry = ModelCatalogEntry {
+            id: "known-model".into(),
+            provider: "ollama".into(),
+            context_window: 200_000,
+            max_output_tokens: 65_536,
+            limits_known: true,
+            ..Default::default()
+        };
+        let r = resolve_inference_params(
+            &agent_with(None, None),
+            None,
+            entry.known_max_output_tokens(),
+        );
+        assert_eq!(r.max_tokens, 65_536);
+
+        // The same entry as a gateway discovery leaves it: the placeholders are
+        // not a measurement, so the system default stands in rather than a
+        // number nobody vouched for.
+        let placeholder = ModelCatalogEntry {
+            limits_known: false,
+            ..entry
+        };
+        let r = resolve_inference_params(
+            &agent_with(None, None),
+            None,
+            placeholder.known_max_output_tokens(),
+        );
+        assert_eq!(r.max_tokens, DEFAULT_MODEL_MAX_TOKENS);
+    }
+
+    /// An agent type that pinned its own budget is making a decision, not
+    /// forgetting one, so it keeps it — the ceiling only fills a silence.
+    #[test]
+    fn agent_pinned_budget_beats_the_registry_ceiling() {
+        let limit = KnownLimit::new(65_536, LimitSource::Registry);
+        let r = resolve_inference_params(&agent_with(None, Some(4_096)), None, limit);
+        assert_eq!(r.max_tokens, 4_096);
+    }
+
+    /// Same for the per-model override: it is a decision the operator made about
+    /// this endpoint, which is more specific than the registry's figure.
+    #[test]
+    fn model_override_budget_beats_the_registry_ceiling() {
+        let limit = KnownLimit::new(65_536, LimitSource::Registry);
+        let model = ModelOverrides {
+            max_tokens: Some(1_024),
+            ..Default::default()
+        };
+        let r = resolve_inference_params(&agent_with(None, None), Some(&model), limit);
+        assert_eq!(r.max_tokens, 1_024);
+    }
+
+    /// A ceiling nobody vouched for is not a ceiling.
+    /// A discovered entry carries placeholder limits and reports `None` here, so
+    /// it must land on the system default rather than adopt the placeholder as
+    /// its own budget.
+    #[test]
+    fn unvouched_registry_limit_falls_back_to_the_system_default() {
+        let r = resolve_inference_params(&agent_with(None, None), None, None);
+        assert_eq!(r.max_tokens, DEFAULT_MODEL_MAX_TOKENS);
+    }
+
+    /// Pins the figure itself, because the value is the fix: a reasoning model
+    /// needs room for its thinking before it writes anything, and dropping this
+    /// back under 32K would reintroduce the empty reply this guards.
+    #[test]
+    fn system_default_leaves_room_for_a_reasoning_model() {
+        assert!(
+            DEFAULT_MODEL_MAX_TOKENS >= 32_768,
+            "system default must not fall below 32K; it is the budget a reasoning model \
+             has to fit its thinking and its reply inside, got {DEFAULT_MODEL_MAX_TOKENS}"
+        );
     }
 
     /// The counterexample (#7770): a gateway that rejects `reasoning_effort`
@@ -375,7 +508,7 @@ mod tests {
             reasoning_effort: Some("low".into()),
             ..Default::default()
         };
-        let r = resolve_inference_params(&agent, Some(&model));
+        let r = resolve_inference_params(&agent, Some(&model), None);
         assert_eq!(r.reasoning_effort.as_deref(), Some("low"));
         let mut applied = agent.clone();
         r.apply_to(&mut applied);
@@ -386,7 +519,7 @@ mod tests {
 
         // Model leaves it unset → the parameter is dropped, not inherited from
         // the agent. An endpoint that rejects it never sees it.
-        let r = resolve_inference_params(&agent, Some(&ModelOverrides::default()));
+        let r = resolve_inference_params(&agent, Some(&ModelOverrides::default()), None);
         assert_eq!(r.reasoning_effort, None);
         let mut applied = agent.clone();
         r.apply_to(&mut applied);
@@ -401,7 +534,7 @@ mod tests {
             ..Default::default()
         };
         let mut applied = agent.clone();
-        resolve_inference_params(&agent, None).apply_to(&mut applied);
+        resolve_inference_params(&agent, None, None).apply_to(&mut applied);
         assert_eq!(applied.temperature, Some(0.2));
         assert_eq!(applied.max_tokens, Some(DEFAULT_MODEL_MAX_TOKENS));
         assert_eq!(applied.top_p, Some(0.8));
@@ -429,7 +562,7 @@ mod tests {
         applied
             .extra_params
             .insert("enable_memory".into(), serde_json::json!(true));
-        resolve_inference_params(&agent, Some(&model)).apply_to(&mut applied);
+        resolve_inference_params(&agent, Some(&model), None).apply_to(&mut applied);
 
         assert_eq!(applied.top_p, Some(0.8));
         assert_eq!(applied.frequency_penalty, Some(0.25));
@@ -460,7 +593,7 @@ mod tests {
             repeat_penalty: Some(1.1),
             ..Default::default()
         };
-        let r = resolve_inference_params(&agent, Some(&model));
+        let r = resolve_inference_params(&agent, Some(&model), None);
         assert_eq!(r.top_k, Some(40), "the agent's own value wins");
         assert_eq!(r.min_p, Some(0.05), "inherited from the model override");
         assert_eq!(r.repeat_penalty, Some(1.1));
@@ -483,7 +616,7 @@ mod tests {
         );
 
         // Nothing set anywhere: nothing is sent.
-        let r = resolve_inference_params(&ModelConfig::default(), None);
+        let r = resolve_inference_params(&ModelConfig::default(), None, None);
         assert_eq!((r.top_k, r.min_p, r.repeat_penalty), (None, None, None));
     }
 

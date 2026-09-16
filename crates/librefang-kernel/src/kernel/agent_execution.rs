@@ -1323,9 +1323,19 @@ impl LibreFangKernel {
         {
             let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
             let catalog = self.llm.model_catalog.load();
+            // The matched entry's own ceiling, carried as a vouched-for limit.
+            // It decides `max_tokens` when neither the manifest nor the override
+            // named one, and it is the only rung of the chain that can answer
+            // "how much will this endpoint actually give me" — an entry whose
+            // limits are placeholders reports `None` and the system default
+            // stands in, which is the right way round (see `KnownLimit`).
+            let known_max_output = catalog
+                .find_model_for_manifest(&manifest.model.provider, &manifest.model.model)
+                .and_then(|entry| entry.known_max_output_tokens());
             let resolved = librefang_types::inference_params::resolve_inference_params(
                 &manifest.model,
                 catalog.get_overrides(&override_key),
+                known_max_output,
             );
             resolved.apply_to(&mut manifest.model);
         }
