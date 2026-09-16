@@ -2560,5 +2560,269 @@
     "text": "**жирный**"
    }
   ]
+ },
+ {
+  "source": "||a&#32;||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a "
+    }
+   }
+  ]
+ },
+ {
+  "source": "&#32;||a||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||&#32;a||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": " a"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||a&#9;b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a b"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||a&#10;b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "a b"
+    }
+   }
+  ]
+ },
+ {
+  "source": "a&#32;&#124;&#124;b||c||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "a ||b",
+     {
+      "type": "spoiler",
+      "text": "c"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "Тег <input value=\"a||b\"> и ||секрет||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     "Тег  и ",
+     {
+      "type": "spoiler",
+      "text": "секрет"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "<b>||a||</b>",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": {
+      "type": "bold",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "||<b>a</b>||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": {
+      "type": "bold",
+      "text": "a"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "source": "<span data=\"||\">||секрет||</span>",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "spoiler",
+     "text": "секрет"
+    }
+   }
+  ]
+ },
+ {
+  "source": "<https://ya.ru/||a||>",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "url",
+     "text": "https://ya.ru/||a||",
+     "url": "https://ya.ru/||a||"
+    }
+   }
+  ]
+ },
+ {
+  "source": "<https://ya.ru/a||b>",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "url",
+     "text": "https://ya.ru/a||b",
+     "url": "https://ya.ru/a||b"
+    }
+   }
+  ]
+ },
+ {
+  "source": "<mailto:a||b@ya.ru>",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": "mailto:a||b@ya.ru"
+   }
+  ]
+ },
+ {
+  "source": "[текст](https://ya.ru/||a||)",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": {
+     "type": "url",
+     "text": "текст",
+     "url": "https://ya.ru/||a||"
+    }
+   }
+  ]
+ },
+ {
+  "source": "||a|| <br> ||b||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "a"
+     },
+     "\n",
+     {
+      "type": "spoiler",
+      "text": "b"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "<https://ya.ru/||a||> и ||секрет||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "url",
+      "text": "https://ya.ru/||a||",
+      "url": "https://ya.ru/||a||"
+     },
+     " и ",
+     {
+      "type": "spoiler",
+      "text": "секрет"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "||до|| <https://ya.ru/b> ||после||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "spoiler",
+      "text": "до"
+     },
+     " ",
+     {
+      "type": "url",
+      "text": "https://ya.ru/b",
+      "url": "https://ya.ru/b"
+     },
+     " ",
+     {
+      "type": "spoiler",
+      "text": "после"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "source": "[ссылка](https://ya.ru) и ||секрет||",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "text": [
+     {
+      "type": "url",
+      "text": "ссылка",
+      "url": "https://ya.ru/"
+     },
+     " и ",
+     {
+      "type": "spoiler",
+      "text": "секрет"
+     }
+    ]
+   }
+  ]
  }
 ]
