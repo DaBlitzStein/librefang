@@ -21,8 +21,16 @@ import { AgentsPage } from "./AgentsPage";
 
 // `vi.mock` factories are hoisted above the module body, so the fixtures they
 // close over have to be hoisted too.
-const { AGENT, spawnEphemeralAsync } = vi.hoisted(() => ({
-  AGENT: { id: "agent-a", name: "Alpha", is_hand: false, state: "running" },
+//
+// Two agents, and the second is the one the tests select: with a single agent
+// the dialog's "fall back to the first candidate" path answers the same id as
+// "preselect the agent that was clicked", so the wiring could be severed
+// (`initialParent={undefined}`) and every assertion below would still pass.
+const { AGENTS, spawnEphemeralAsync } = vi.hoisted(() => ({
+  AGENTS: [
+    { id: "agent-a", name: "Alpha", is_hand: false, state: "running" },
+    { id: "agent-b", name: "Bravo", is_hand: false, state: "running" },
+  ],
   spawnEphemeralAsync: vi.fn(),
 }));
 
@@ -52,7 +60,7 @@ vi.mock("@tanstack/react-router", () => ({
 // The Agents list is projected from the overview snapshot, not from
 // `useAgents` — the page calls `useDashboardSnapshot()` for it.
 vi.mock("../lib/queries/overview", () => ({
-  useDashboardSnapshot: () => ({ data: { agents: [AGENT] }, isLoading: false }),
+  useDashboardSnapshot: () => ({ data: { agents: AGENTS }, isLoading: false }),
 }));
 vi.mock("../lib/queries/sessions", () => ({
   useSessionDetails: () => ({ data: undefined, isLoading: false }),
@@ -79,10 +87,11 @@ vi.mock("../lib/queries/agents", () => ({
   agentQueries: {
     detail: (id: string) => ({
       queryKey: ["agents", "detail", id],
-      queryFn: () => Promise.resolve({ ...AGENT, id }),
+      queryFn: () => Promise.resolve(AGENTS.find((a) => a.id === id) ?? AGENTS[0]),
     }),
   },
-  useAgents: () => ({ data: [AGENT], isLoading: false, isError: false }),
+  // The dialog's own candidate list — an array, as `listAgents` returns.
+  useAgents: () => ({ data: AGENTS, isLoading: false, isError: false }),
   useAgentEvents: () => ({ data: [], isLoading: false }),
   useAgentSessions: () => ({ data: [], isLoading: false }),
   useAgentStats: () => ({ data: undefined, isLoading: false }),
@@ -158,8 +167,14 @@ describe("AgentsPage Quick Run entry point (#6699)", () => {
     expect(await runControl()).toBeTruthy();
   });
 
-  it("opens the ephemeral dialog on that agent, and runs it there", async () => {
+  it("opens the ephemeral dialog on the agent whose row was selected, and runs it there", async () => {
     renderPage();
+
+    // The page auto-selects the first agent (Alpha) on a wide viewport, so
+    // picking Bravo is what makes this discriminating: the dialog's fallback
+    // for "no viable parent given" answers Alpha, and only the agent that was
+    // actually clicked answers Bravo.
+    fireEvent.click(await screen.findByRole("button", { name: /Bravo/ }));
 
     fireEvent.click(await runControl());
 
@@ -167,7 +182,7 @@ describe("AgentsPage Quick Run entry point (#6699)", () => {
     // create flow, and this capability must not have been folded into it.
     const task = await screen.findByRole("textbox", { name: "agents.quick_run_task" });
     expect(screen.getByRole("combobox", { name: "agents.quick_run_parent" })).toHaveValue(
-      "agent-a",
+      "agent-b",
     );
 
     fireEvent.change(task, { target: { value: "Say hello" } });
@@ -175,7 +190,7 @@ describe("AgentsPage Quick Run entry point (#6699)", () => {
 
     await waitFor(() => expect(spawnEphemeralAsync).toHaveBeenCalledTimes(1));
     expect(spawnEphemeralAsync).toHaveBeenCalledWith({
-      parent: "agent-a",
+      parent: "agent-b",
       message: "Say hello",
     });
     expect(await screen.findByText("All done.")).toBeTruthy();

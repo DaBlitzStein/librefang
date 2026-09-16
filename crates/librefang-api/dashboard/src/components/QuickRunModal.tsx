@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Play } from "lucide-react";
 import type { SpawnEphemeralResult } from "../api";
-import { useAgents } from "../lib/queries/agents";
+import { useAgents, useAgentTemplates } from "../lib/queries/agents";
 import { useSpawnEphemeral } from "../lib/mutations/agents";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
@@ -50,6 +50,13 @@ function Field({
  * the picker stays live, and an id that is not a viable parent (a hand, or one
  * deleted since the page loaded) falls back to the first candidate rather than
  * leaving the select blank.
+ *
+ * The type picker is what makes the run *a type* rather than *a copy of the
+ * parent*: naming one sends `agent_type`, and the kernel loads that template's
+ * manifest for the worker's system prompt, model and declared tools. Leaving it
+ * unset is the documented server behaviour — the worker manifest becomes
+ * `parent.manifest.clone()` — so "run as the parent" stays available and is
+ * labelled as such rather than being an implicit default nobody can see.
  */
 export function QuickRunModal({
   initialParent,
@@ -61,11 +68,20 @@ export function QuickRunModal({
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const agents = useAgents();
+  const templates = useAgentTemplates();
   const spawn = useSpawnEphemeral();
 
   const [parent, setParent] = useState("");
+  const [typeName, setTypeName] = useState("");
   const [task, setTask] = useState("");
   const [result, setResult] = useState<SpawnEphemeralResult | null>(null);
+
+  // Sorted so the list is stable across renders; `useAgentTemplates` is backed
+  // by the same `/api/templates` listing the Agent Types page renders.
+  const typeOptions = useMemo(
+    () => (templates.data ?? []).map((template) => template.name).sort(),
+    [templates.data],
+  );
 
   // A hand cannot be a parent: the parent supplies the budget, the resource
   // quota and the tool ceiling, and a hand owns none of its own.
@@ -88,6 +104,10 @@ export function QuickRunModal({
       const res = await spawn.mutateAsync({
         parent,
         message: task,
+        // Both or neither: `agent_type` picks the template manifest, and the
+        // server defaults `label` to it so the worker and its mission
+        // workspace carry the type's name.
+        ...(typeName === "" ? {} : { agent_type: typeName, label: typeName }),
       });
       setResult(res);
     } catch (err) {
@@ -95,13 +115,21 @@ export function QuickRunModal({
     }
   }
 
+  // Name what is about to run: the type when one is picked, otherwise the
+  // agent standing in for it.
+  const subject = typeName || candidates.find((a) => a.id === parent)?.name || "";
+
   return (
     <Modal
       isOpen
       onClose={onClose}
       variant="panel-right"
       size="lg"
-      title={t("agents.quick_run")}
+      title={
+        subject === ""
+          ? t("agents.quick_run")
+          : t("agents.quick_run_title", { name: subject })
+      }
     >
       <div className="space-y-4">
         <Field label={t("agents.quick_run_parent")} hint={t("agents.quick_run_parent_hint")}>
@@ -119,6 +147,26 @@ export function QuickRunModal({
               {candidates.map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+
+        <Field label={t("agents.quick_run_type")} hint={t("agents.quick_run_type_hint")}>
+          {templates.isLoading ? (
+            <ListSkeleton rows={1} />
+          ) : (
+            <select
+              value={typeName}
+              onChange={(e) => setTypeName(e.target.value)}
+              aria-label={t("agents.quick_run_type")}
+              className={inputClass}
+            >
+              <option value="">{t("agents.quick_run_type_none")}</option>
+              {typeOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
                 </option>
               ))}
             </select>
