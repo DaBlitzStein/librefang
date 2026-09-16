@@ -192,9 +192,14 @@ const MAX_FILENAME_CHARS: usize = 128;
 
 /// Windows reserved device names, which cannot be used as a filename there even
 /// with an extension. Checked against the stem, case-insensitively.
-const WINDOWS_RESERVED_STEMS: [&str; 22] = [
+///
+/// `conin$` and `conout$` are the console input and output devices and are
+/// reserved in their own right from Windows 11 on; the `$` is part of the
+/// name, not an extension, so the stem check above still reaches them.
+const WINDOWS_RESERVED_STEMS: [&str; 24] = [
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "conin$",
+    "conout$",
 ];
 
 /// A document filename: a file the operator already has, under the name they
@@ -390,7 +395,22 @@ fn read_documents(dir: &FsPath) -> Vec<KnowledgeDocument> {
             if !metadata.is_file() {
                 return None;
             }
-            let filename = entry.file_name().to_string_lossy().into_owned();
+            // Not `to_string_lossy`: a name that is not valid UTF-8 comes back
+            // with U+FFFD substituted for the offending bytes, and that string
+            // passes `is_valid_document_name` — U+FFFD is not a control
+            // character, not a separator and not in the invisible set — so
+            // GET and DELETE accept it, join it to a path that does not exist
+            // and answer 404. The operator gets a document in the listing that
+            // they can neither open nor remove.
+            //
+            // Reachable by design rather than by accident: the directory is
+            // shared, so an operator can drop files onto the host. A name the
+            // API cannot reproduce byte for byte is one it cannot address, so
+            // it is dropped here exactly as the dotfile check below drops what
+            // the API does not serve.
+            let Some(filename) = entry.file_name().to_str().map(str::to_owned) else {
+                return None;
+            };
             if filename.starts_with('.') {
                 return None;
             }
@@ -465,7 +485,7 @@ pub struct CreateBaseRequest {
     responses(
         (status = 201, description = "Created", body = crate::types::JsonObject),
         (status = 400, description = "Invalid name", body = crate::types::JsonObject),
-        (status = 409, description = "A base of that name already exists", body = crate::types::JsonObject)
+        (status = 409, description = "A base of that name already exists, or one that differs from it only by case", body = crate::types::JsonObject)
     )
 )]
 pub async fn create_base(
@@ -481,9 +501,16 @@ pub async fn create_base(
         return refusal;
     }
     if dir.exists() {
+        // On a case-insensitive filesystem this fires for a name that differs
+        // from an existing base only in case, and "that name already exists" is
+        // then untrue as the operator reads it. Refusing is right — it is what
+        // keeps two bases from sharing a directory — so the message says which
+        // of the two it can be.
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": "A knowledge base of that name already exists." })),
+            Json(serde_json::json!({
+                "error": "A knowledge base of that name already exists, or one that differs from it only by case."
+            })),
         );
     }
     if let Err(error) = std::fs::create_dir_all(&dir) {
@@ -938,6 +965,52 @@ mod tests {
             "CON.md",
             "lpt9",
         ] {
+            assert!(!is_valid_segment(hostile), "accepted {hostile:?}");
+        }
+    }
+
+    /// A name the API cannot reproduce is a name it cannot address.
+    ///
+    /// Listing such a file under `to_string_lossy` substitutes U+FFFD for the
+    /// bytes that are not valid UTF-8, and that string passes
+    /// `is_valid_document_name` — U+FFFD is not a control character, not a
+    /// separator and not in the invisible set — so GET and DELETE accepted it,
+    /// joined it to a path that does not exist and answered 404. The operator
+    /// got a document in the listing that they could neither open nor remove.
+    ///
+    /// Reachable because the directory is shared: an operator drops files onto
+    /// the host, and an `rw` agent writes into it.
+    #[cfg(unix)]
+    #[test]
+    fn a_document_whose_name_is_not_utf8_is_not_listed() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.md"), b"x").unwrap();
+        std::fs::write(
+            dir.path()
+                .join(std::ffi::OsStr::from_bytes(b"bad\xffname.md")),
+            b"x",
+        )
+        .unwrap();
+
+        let names: Vec<String> = read_documents(dir.path())
+            .into_iter()
+            .map(|document| document.filename)
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["notes.md".to_string()],
+            "the unaddressable name must not be offered"
+        );
+    }
+
+    /// `conin$` and `conout$` are reserved from Windows 11 on, and the array's
+    /// own comment claims completeness.
+    #[test]
+    fn the_console_devices_are_reserved_too() {
+        for hostile in ["conin$", "CONOUT$.md", "ConIn$"] {
             assert!(!is_valid_segment(hostile), "accepted {hostile:?}");
         }
     }
