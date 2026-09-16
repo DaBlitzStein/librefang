@@ -1100,6 +1100,7 @@ impl MemorySubstrate {
     /// alone: `None` inherits the global, `Some(0)` means "never reclaim",
     /// and `Some(n)` reclaims after `n` seconds held `in_progress`
     /// (see [`Self::task_reset_stuck`]).
+    #[allow(clippy::too_many_arguments)]
     pub async fn task_post(
         &self,
         title: &str,
