@@ -1137,6 +1137,7 @@ impl MemorySubstrate {
     ///
     /// The counts and the INSERT run in one `IMMEDIATE` transaction.
     /// Counting outside it would let two concurrent posts against a cap of N both read N-1 and both insert, which is the failure a depth cap exists to prevent and the one a loop reaches first.
+    #[allow(clippy::too_many_arguments)]
     pub async fn task_post(
         &self,
         title: &str,
