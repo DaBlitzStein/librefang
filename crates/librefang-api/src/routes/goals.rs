@@ -20,6 +20,8 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/goals/{id}/run", axum::routing::get(get_goal_run))
         .route("/goals/{id}/start", axum::routing::post(start_goal_run))
         .route("/goals/{id}/stop", axum::routing::post(stop_goal_run))
+        .route("/goals/{id}/pause", axum::routing::post(pause_goal_run))
+        .route("/goals/{id}/resume", axum::routing::post(resume_goal_run))
 }
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -182,11 +184,56 @@ pub async fn get_goal_run(
 /// POST /api/goals/{id}/start — Begin an autonomous long-horizon run that
 /// drives the goal's assigned agent toward completion (#5744).
 ///
-/// Optional body: `{ "max_iterations": <u32> }`.
+/// Optional body: `{ "max_iterations": <u32>, "verify_max_retries": <u32> }` — each `>= 1`, validated like `max_iterations` (400 otherwise).
+///
+/// Whether the run is verified at all is a property of the goal
+/// (`loop_engineering`, `verify_agent_id`, `evaluator_model`), not of the
+/// request, so every caller — dashboard, CLI, script — gets the verification
+/// the operator configured once. Only the per-run retry budget is a body
+/// field.
+///
+/// A goal that was paused resumes from its checkpoint rather than restarting;
+/// see [`resume_goal_run`] for the variant that requires one to exist. The
+/// loop cadence is read from the goal document's own `tick_interval_secs`
+/// (set via `POST /api/goals` / `PUT /api/goals/{id}`), not from this body.
 pub async fn start_goal_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     body: Option<Json<serde_json::Value>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    start_or_resume(state, id, body, false).await
+}
+
+/// POST /api/goals/{id}/resume — Continue a paused run from its checkpoint.
+///
+/// Differs from [`start_goal_run`] only in refusing when there is nothing to
+/// resume: without that guard "resume" on a goal with no checkpoint would
+/// silently restart it from iteration 0.
+///
+/// Optional body: `{ "max_iterations": <u32> }`, which **re-budgets** the resumed run — an operator extending a run that is about to hit its cap has no other way to say so.
+/// Omitting it restores the cap the paused run was already under rather than substituting the default, which is what this route did before: with the iteration count restored from the same checkpoint, a smaller default ends the resumed run at the top of its first loop, and that exit clears the checkpoint, so the progress the resume was asked to continue is gone.
+/// It is a total ceiling compared against the restored iteration count, not additional headroom on top of it — a value at or below that count is rejected with a 400 rather than silently destroying the checkpoint the same way.
+pub async fn resume_goal_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<serde_json::Value>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    start_or_resume(state, id, body, true).await
+}
+
+/// Shared body of [`start_goal_run`] and [`resume_goal_run`].
+///
+/// `require_paused` is the only difference between the two: the kernel
+/// resumes from a persisted checkpoint automatically when one exists, so
+/// `/resume` is `/start` plus a precondition.
+///
+/// `max_iterations` is passed down as the `Option` it arrived as.
+/// Resolving it here would erase the distinction between "the operator asked for 25" and "the operator said nothing", and only the runner — which holds the checkpoint — can tell what the second one should mean.
+async fn start_or_resume(
+    state: Arc<AppState>,
+    id: String,
+    body: Option<Json<serde_json::Value>>,
+    require_paused: bool,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let (goal_id, id) = match parse_goal_id(&id) {
         Ok(parsed) => parsed,
@@ -213,6 +260,37 @@ pub async fn start_goal_run(
             return ApiErrorResponse::not_found(format!("Goal '{id}' not found")).into_json_tuple();
         }
     };
+
+    // Read once and reuse below: `/start` also auto-resumes from an existing
+    // checkpoint (same as `/resume`), so both routes need the checkpoint's
+    // iteration count to validate an explicit `max_iterations` against it.
+    //
+    // Deliberately after the goal lookup, not before it. `require_paused` is a
+    // precondition on a goal that exists; running it first answered a
+    // well-formed but unknown id with 409 and the advice "use POST
+    // /api/goals/{id}/start instead" — a start that would itself 404, since
+    // `/start` is this same function with `require_paused: false` and reaches
+    // the lookup above.
+    //
+    // `/stop`, `/pause` and `/run` are not the comparison here: none of them
+    // looks the goal up, and all three deliberately answer 200 with `stopped` /
+    // `paused` / `running: false` for an id that does not exist. `/start` is,
+    // because it shares this body — the two must not disagree about whether a
+    // goal exists.
+    let run_state = state.kernel.goal_run_state(goal_id);
+    let paused_run = run_state
+        .as_ref()
+        .filter(|run| run.phase == librefang_types::goal::GoalRunPhase::Paused);
+
+    if require_paused && paused_run.is_none() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "This goal has no paused run to resume. Use POST /api/goals/{id}/start to begin a new run."
+            })),
+        );
+    }
+
     // Distinguish "never assigned" from "assigned, but the stored id is not a
     // UUID" (#6562).
     // Create and update now reject a non-UUID `agent_id` at the boundary, but goals written before that fix still carry `""` or other junk, and reporting them as unassigned sends the operator to a field that already looks filled in.
@@ -245,12 +323,101 @@ pub async fn start_goal_run(
             Some(value) => Some(value),
         },
     };
+    // An explicit cap is a total budget, not a top-up on top of the
+    // checkpoint's already-spent iterations (`GoalRunner::start` compares
+    // it against the RESTORED iteration count, not against 0) — so a cap at
+    // or below that count would resume, immediately trip the iteration-cap
+    // check on the very first pass with no turn run, and clear the
+    // checkpoint on the way out. Refusing it up front keeps the checkpoint
+    // (and the learnings it carries) intact instead of destroying it for a
+    // request that could never have advanced the run.
+    if let (Some(cap), Some(run)) = (max_iterations, paused_run) {
+        if cap <= run.iteration {
+            return ApiErrorResponse::bad_request(format!(
+                "max_iterations ({cap}) must exceed the paused run's already-completed \
+                 iteration count ({}); the run would resume only to hit the cap immediately \
+                 and discard its checkpoint",
+                run.iteration
+            ))
+            .into_json_tuple();
+        }
+    }
 
-    let started = state
-        .kernel
-        .start_goal_run(goal_id, agent_id, max_iterations);
+    // Loop-engineering configuration lives on the goal, not on the request, so
+    // a run started from the dashboard, the CLI or a script all get the same
+    // verification the operator configured once.
+    let loop_engineering = goal["loop_engineering"].as_bool().unwrap_or(false);
+    let stored_verifier = goal["verify_agent_id"]
+        .as_str()
+        .map(str::trim)
+        .unwrap_or("");
+    let verify_agent_id = if !loop_engineering || stored_verifier.is_empty() {
+        None
+    } else {
+        match stored_verifier.parse::<uuid::Uuid>() {
+            Ok(u) => Some(AgentId(u)),
+            Err(_) => {
+                return ApiErrorResponse::bad_request(format!(
+                    "This goal's verify_agent_id ('{stored_verifier}') is not a valid agent UUID — reassign the verifier to repair it"
+                ))
+                .into_json_tuple();
+            }
+        }
+    };
+    let evaluator_model = goal["evaluator_model"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    // #7785 review: mirror `max_iterations`'s validation — a body field that
+    // reaches a u32 must not silently truncate (`as` on a bigger number
+    // wraps), a negative or fractional value must not silently parse as
+    // `None` (its `as_u64` failure was indistinguishable from an absent
+    // field), and 0 is rejected rather than clamped, same boundary as
+    // `max_iterations`.
+    let verify_max_retries = match body.as_ref().and_then(|b| b.0.get("verify_max_retries")) {
+        None => None,
+        Some(value) => match value.as_u64().and_then(|n| u32::try_from(n).ok()) {
+            Some(0) | None => {
+                return ApiErrorResponse::bad_request(
+                    "verify_max_retries must be an integer between 1 and 4294967295",
+                )
+                .into_json_tuple();
+            }
+            Some(value) => Some(value),
+        },
+    };
+
+    let started = if require_paused {
+        state.kernel.resume_goal_run(
+            goal_id,
+            agent_id,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        )
+    } else {
+        state.kernel.start_goal_run(
+            goal_id,
+            agent_id,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        )
+    };
     if !started {
-        return ApiErrorResponse::internal("Failed to start goal run").into_json_tuple();
+        // #7785 review: the only way `start_goal_run` refuses is the goal
+        // vanishing between the read above and the runner's own reload —
+        // a delete racing this request. That is "the goal is gone", a 404,
+        // not the 500 an internal-fault response implies.
+        return ApiErrorResponse::not_found(format!(
+            "Goal '{id}' was deleted before its run could start"
+        ))
+        .into_json_tuple();
     }
 
     // Flip the goal to in_progress so the dashboard reflects the active run.
@@ -287,16 +454,53 @@ pub async fn start_goal_run(
         );
     }
 
-    match state.kernel.goal_run_state(goal_id) {
+    // `started` above already answered "did the run start". This read only describes
+    // it, and an empty answer does not mean the start failed — `GoalRunner::state()`
+    // reads the live run under `try_lock`, so it reports `None` whenever the run loop
+    // happens to hold that mutex, for a run that is very much alive.
+    //
+    // That is why this retries rather than reporting immediately. The loop's own
+    // contract is that it never holds the state lock across I/O (see the comment on
+    // `state()`), so contention is always brief and a yield is enough to clear it;
+    // what makes it reachable at all is machine load, which is how it reached `main`
+    // twice — `Test / macOS` runs the whole suite in one process and lost a race the
+    // four-way Linux shards kept winning, reporting `Failed to start goal run` for a
+    // run that had started (#8388, #8391).
+    //
+    // A run that has genuinely ended by the time we look is the other empty case: it
+    // reaches a terminal phase, the loop drops its own registry entry, and a resume
+    // has already cleared the pause checkpoint `state()` would otherwise fall back
+    // to. That is still not a failed start, so it answers 200 with a null run — the
+    // same thing `GET /api/goals/{id}/run` says for the same state.
+    const RUN_READ_ATTEMPTS: usize = 8;
+    let mut run_state = None;
+    for attempt in 0..RUN_READ_ATTEMPTS {
+        run_state = state.kernel.goal_run_state(goal_id);
+        if run_state.is_some() {
+            break;
+        }
+        if attempt + 1 < RUN_READ_ATTEMPTS {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    match run_state {
         Some(run) => (
             StatusCode::OK,
             Json(serde_json::json!({ "ok": true, "run": run })),
         ),
-        None => ApiErrorResponse::internal("Failed to start goal run").into_json_tuple(),
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "run": serde_json::Value::Null })),
+        ),
     }
 }
 
-/// POST /api/goals/{id}/stop — Stop an active autonomous run for a goal.
+/// POST /api/goals/{id}/stop — Cancel an active autonomous run for a goal.
+///
+/// Terminal: the run's resume checkpoint is discarded, so starting the goal
+/// again begins from iteration 0. Use `POST /api/goals/{id}/pause` to suspend
+/// a run that should later continue where it left off.
 pub async fn stop_goal_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -309,6 +513,31 @@ pub async fn stop_goal_run(
     (
         StatusCode::OK,
         Json(serde_json::json!({ "ok": true, "stopped": stopped })),
+    )
+}
+
+/// POST /api/goals/{id}/pause — Suspend an active run, keeping its checkpoint.
+///
+/// The loop finishes the turn it is on, then checkpoints its iteration count
+/// and progress and exits in the `paused` phase. Because the in-flight agent
+/// turn is allowed to complete rather than being aborted, a `200` here means
+/// "pause requested and will be honoured", not "already stopped" — poll
+/// `GET /api/goals/{id}/run` for the phase to reach `paused`.
+///
+/// Mirrors [`stop_goal_run`]'s response shape: `paused` reports whether a live
+/// run was there to signal.
+pub async fn pause_goal_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let (goal_id, _) = match parse_goal_id(&id) {
+        Ok(parsed) => parsed,
+        Err(error) => return error,
+    };
+    let paused = state.kernel.pause_goal_run(goal_id);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "paused": paused })),
     )
 }
 
@@ -340,6 +569,39 @@ fn optional_u64_field(req: &serde_json::Value, key: &str) -> Result<Option<u64>,
         None => Ok(None),
         Some(value) => value.as_u64().map(Some).ok_or(()),
     }
+}
+
+/// Validate an optional `tick_interval_secs` on a create/update payload.
+///
+/// Returns the parsed value on success, or the 400 response to hand straight
+/// back. Rejecting rather than clamping here is deliberate: the runner clamps
+/// so a bad stored value can never wedge a run, but an operator typing a
+/// cadence into the dashboard should be told their number was refused rather
+/// than discover later that the loop ticks at a rate they never chose.
+///
+/// A blank string or `null` is a clear signal, not a malformed number —
+/// matching `parent_id` / `agent_id` (#6562).
+fn validate_tick_interval(req: &serde_json::Value) -> Result<Option<u64>, JsonResponse> {
+    let Some(raw) = req.get("tick_interval_secs") else {
+        return Ok(None);
+    };
+    if is_clear_signal(raw) {
+        return Ok(None);
+    }
+    let Some(secs) = raw.as_u64() else {
+        return Err(ApiErrorResponse::bad_request(
+            "tick_interval_secs must be a non-negative integer number of seconds",
+        )
+        .into_json_tuple());
+    };
+    use librefang_types::goal::{MAX_GOAL_TICK_INTERVAL_SECS, MIN_GOAL_TICK_INTERVAL_SECS};
+    if !(MIN_GOAL_TICK_INTERVAL_SECS..=MAX_GOAL_TICK_INTERVAL_SECS).contains(&secs) {
+        return Err(ApiErrorResponse::bad_request(format!(
+            "tick_interval_secs must be {MIN_GOAL_TICK_INTERVAL_SECS}-{MAX_GOAL_TICK_INTERVAL_SECS} seconds, got {secs}"
+        ))
+        .into_json_tuple());
+    }
+    Ok(Some(secs))
 }
 
 /// POST /api/goals — Create a new goal.
@@ -398,6 +660,50 @@ pub async fn create_goal(
         }
     };
 
+    let loop_engineering = req["loop_engineering"].as_bool().unwrap_or(false);
+    // Same boundary rule as `agent_id`, through the same helper: blank or
+    // null clears (nothing to store on a create), a non-empty value must be
+    // a UUID, and a non-string value is a 400 rather than a silently
+    // dropped field (#7785 review).
+    let verify_agent_id_str = match optional_uuid_field(&req, "verify_agent_id") {
+        Ok(value) => value.flatten(),
+        Err(()) => {
+            return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
+        }
+    };
+    // The one rule the whole pattern exists for: an agent does not grade its
+    // own work. With both ids equal the verdict prompt goes to the same
+    // persistent session that produced the output one turn earlier, so
+    // `VERDICT: PASS` is the expected reply and the gate passes everything —
+    // while the run API and the dashboard's `loop_engineering` badge both
+    // report a verifier that is not verifying (#7785 re-review).
+    if verify_agent_id_str.is_some() && verify_agent_id_str == agent_id_str {
+        return ApiErrorResponse::bad_request(
+            "verify_agent_id must differ from agent_id: an agent cannot verify its own work",
+        )
+        .into_json_tuple();
+    }
+    // Deliberately NOT validated the way the verifier id is: a model id has no
+    // checkable shape, and whether it resolves depends on the provider config
+    // at call time, not at save time. An unresolvable id degrades — the runner
+    // warns per iteration and falls back to the agent's own marker. See the
+    // field doc on `librefang_types::goal::Goal::evaluator_model`.
+    // A blank one is dropped rather than stored, so a created goal round-trips
+    // the way an updated one does — `update_goal_by_id` treats `""` as the
+    // clear signal and removes the key, and `start_goal_run` filters it on
+    // read. Storing `""` here left `GET /api/goals` handing the dashboard an
+    // `evaluator_model` no route would ever have written through an update
+    // (#7785 re-review).
+    let evaluator_model_str: Option<String> = req
+        .get("evaluator_model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let tick_interval_secs = match validate_tick_interval(&req) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
     let now = chrono::Utc::now().to_rfc3339();
     let goal_id = uuid::Uuid::new_v4().to_string();
     let mut entry = serde_json::json!({
@@ -406,6 +712,7 @@ pub async fn create_goal(
         "description": description,
         "status": status,
         "progress": progress,
+        "loop_engineering": loop_engineering,
         "created_at": now,
         "updated_at": now,
     });
@@ -415,6 +722,15 @@ pub async fn create_goal(
     }
     if let Some(ref aid) = agent_id_str {
         entry["agent_id"] = serde_json::Value::String(aid.clone());
+    }
+    if let Some(ref vid) = verify_agent_id_str {
+        entry["verify_agent_id"] = serde_json::Value::String(vid.clone());
+    }
+    if let Some(ref em) = evaluator_model_str {
+        entry["evaluator_model"] = serde_json::Value::String(em.clone());
+    }
+    if let Some(secs) = tick_interval_secs {
+        entry["tick_interval_secs"] = serde_json::json!(secs);
     }
 
     // Atomic read-modify-write under BEGIN IMMEDIATE (#5138). Parent
@@ -497,6 +813,10 @@ pub async fn update_goal_by_id(
         }
     }
 
+    if let Err(resp) = validate_tick_interval(&req) {
+        return resp;
+    }
+
     let progress = match optional_u64_field(&req, "progress") {
         Ok(progress) => progress,
         Err(()) => {
@@ -520,6 +840,13 @@ pub async fn update_goal_by_id(
         return ApiErrorResponse::bad_request("A goal cannot be its own parent").into_json_tuple();
     }
 
+    let verifier_update = match optional_uuid_field(&req, "verify_agent_id") {
+        Ok(value) => value,
+        Err(()) => {
+            return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
+        }
+    };
+
     let agent_update = match optional_uuid_field(&req, "agent_id") {
         Ok(value) => value,
         Err(()) => {
@@ -538,6 +865,7 @@ pub async fn update_goal_by_id(
     const PARENT_MISSING: &str = "__goal_parent_missing__";
     const CIRCULAR: &str = "__goal_circular__";
     const NOT_FOUND: &str = "__goal_not_found__";
+    const SELF_VERIFY: &str = "__goal_self_verify__";
     use librefang_types::error::LibreFangError;
 
     let modify_result: Result<serde_json::Value, LibreFangError> = state
@@ -609,6 +937,49 @@ pub async fn update_goal_by_id(
                             g.as_object_mut().map(|obj| obj.remove("agent_id"));
                         }
                     }
+                    if let Some(loop_engineering) =
+                        req.get("loop_engineering").and_then(|v| v.as_bool())
+                    {
+                        g["loop_engineering"] = serde_json::json!(loop_engineering);
+                    }
+                    if let Some(verifier_update) = verifier_update.as_ref() {
+                        if let Some(vid) = verifier_update {
+                            g["verify_agent_id"] = serde_json::Value::String(vid.clone());
+                        } else {
+                            g.as_object_mut().map(|obj| obj.remove("verify_agent_id"));
+                        }
+                    }
+                    if let Some(evaluator_model) = req.get("evaluator_model") {
+                        if is_clear_signal(evaluator_model) {
+                            g.as_object_mut().map(|obj| obj.remove("evaluator_model"));
+                        } else if let Some(em) = evaluator_model.as_str() {
+                            g["evaluator_model"] = serde_json::Value::String(em.trim().to_string());
+                        }
+                    }
+                    // A blank string or `null` clears the override back to the
+                    // default cadence, matching `parent_id` / `agent_id`
+                    // above. Range already checked above, before the
+                    // transaction.
+                    if let Some(ti) = req.get("tick_interval_secs") {
+                        if is_clear_signal(ti) {
+                            g.as_object_mut()
+                                .map(|obj| obj.remove("tick_interval_secs"));
+                        } else if let Some(v) = ti.as_u64() {
+                            g["tick_interval_secs"] = serde_json::json!(v);
+                        }
+                    }
+                    // Same rule as `create_goal`, checked on the EFFECTIVE
+                    // post-update pair rather than on the payload: either id
+                    // can be absent from a partial update, so the pair that
+                    // has to differ is the one this write leaves on the
+                    // document — assigning a verifier that happens to equal
+                    // the goal's existing agent is the same self-grading
+                    // configuration as sending both at once (#7785 re-review).
+                    let effective_verifier = g["verify_agent_id"].as_str();
+                    if effective_verifier.is_some() && effective_verifier == g["agent_id"].as_str()
+                    {
+                        return Err(LibreFangError::InvalidInput(SELF_VERIFY.to_string()));
+                    }
                     g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
                     updated = Some(g.clone());
                     break;
@@ -636,10 +1007,54 @@ pub async fn update_goal_by_id(
             return ApiErrorResponse::not_found(format!("Parent goal '{}' not found", pid))
                 .into_json_tuple();
         }
+        Err(LibreFangError::InvalidInput(ref msg)) if msg == SELF_VERIFY => {
+            return ApiErrorResponse::bad_request(
+                "verify_agent_id must differ from agent_id: an agent cannot verify its own work",
+            )
+            .into_json_tuple();
+        }
         Err(e) => {
             return ApiErrorResponse::internal_scrub(e).into_json_tuple();
         }
     };
+
+    // Marking a goal terminal is a lifecycle boundary, the same way deleting
+    // it is (`delete_goal`, which has called `stop_goal_run` all along). Until
+    // this call the only thing that noticed an operator's `completed` was the
+    // runner's own top-of-loop read of the goal document — which a configured
+    // verifier now correctly declines to treat as a completion signal, since
+    // it cannot tell that write apart from the `goal_update` tool's. Routing
+    // the operator through the run's actual control channel keeps the two
+    // separable: an out-of-band stop order stops the run, an agent asserting
+    // completion in a document still has to get past the gate.
+    //
+    // The runner skips its own end-of-iteration write once stopped THIS way,
+    // so the status — and the progress — the operator chose survives instead
+    // of being reverted by the iteration already in flight. A plain
+    // `POST /stop` writes nothing and therefore does not bar that write; the
+    // two are separate entry points for exactly that reason (#7785 re-review).
+    // Keyed on what this request asked for, not on the goal's resulting
+    // status: re-saving a description on an already-completed goal is not an
+    // operator stopping anything.
+    let stops_the_run = req
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "completed" || s == "cancelled");
+    if stops_the_run {
+        if let Ok(goal_id) = id.parse::<GoalId>() {
+            // Known race, deliberately not locked: a runner that read the flag
+            // before this call and reaches `patch_goal` after the write above
+            // still overwrites the operator's choice. The window is the few
+            // microseconds between those two runner statements, and reordering
+            // the handler does not close it — the write has to land before the
+            // stop (a stop that preceded it would leave the run gone and the
+            // document unwritten if the modify then failed), so the only real
+            // fix is a lock shared between the route and the run loop. Not
+            // worth it for a lost status the operator can re-apply, on a run
+            // that is stopping either way (#7785 review, m1).
+            state.kernel.stop_goal_run_after_goal_write(goal_id);
+        }
+    }
 
     // Issue #3832: return the mutated entity so the dashboard can `setQueryData`
     // without an extra round-trip GET. Aligns with `create_goal`'s response shape.
