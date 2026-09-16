@@ -334,6 +334,22 @@ impl LibreFangKernel {
             );
         }
 
+        // `[docker] mode` is the same defect one section over (#8220): declared, documented with a table of values, exposed in the JSON schema, and matched on by nothing.
+        // An operator who set `mode = "all"` believing they had moved every agent into a container moved nothing, and `shell_exec` / `process_start` kept running on the daemon host.
+        //
+        // The rest of `[docker]` is live and governs the `docker_exec` tool's containers, which is exactly what makes this one dangerous to leave quiet: the section visibly works, so the one field in it that does nothing looks like it works too.
+        //
+        // A `warn!` rather than a boot failure, for the same reason as the `[tool_exec]` warning above: this is a missing feature, not a broken config, and refusing to start would break deployments carrying the setting in anticipation.
+        if !config.docker.mode.is_wired_into_dispatch() {
+            warn!(
+                configured_mode = config.docker.mode.as_str(),
+                "[docker] mode is set, but agent tool calls still execute on the daemon host — \
+                 the mode is not wired into tool dispatch yet (#8220). shell_exec and process_start \
+                 ignore this setting; it is not a sandbox. The `docker_exec` tool, which the model \
+                 chooses for itself, is the only path into a container today."
+            );
+        }
+
         // Check TOTP configuration consistency
         if config.approval.second_factor == librefang_types::approval::SecondFactor::Totp {
             let vault_path = config.home_dir.join("vault.enc");
@@ -1101,6 +1117,7 @@ impl LibreFangKernel {
         let goal_runner = crate::goal_runner::GoalRunner::new_with_store(
             supervisor.subscribe(),
             librefang_memory::GoalRunStore::new(memory.pool()),
+            memory.clone(),
         );
 
         // Initialize WASM sandbox engine (shared across all WASM agents)
@@ -1641,14 +1658,25 @@ impl LibreFangKernel {
 
         let browser_ctx = librefang_runtime::browser::BrowserManager::new(config.browser.clone());
 
-        // Initialize media understanding engine
-        let media_engine =
-            librefang_runtime::media_understanding::MediaEngine::new(config.media.clone());
+        // Initialize media understanding engine. The kernel-global
+        // `[capabilities]` block is folded in here so understanding requests
+        // route to the operator-nominated provider/model instead of the
+        // env-var cascade; per-agent `[capabilities]` is layered on top of
+        // this at turn time by the agent loop.
+        let media_engine = librefang_runtime::media_understanding::MediaEngine::new(
+            config
+                .media
+                .clone()
+                .with_capability_routing(&config.capabilities),
+        );
         let tts_engine = librefang_runtime::tts::TtsEngine::new(config.tts.clone());
         let media_drivers =
             librefang_runtime::media::MediaDriverCache::new_with_urls(config.provider_urls.clone());
         // Load media provider order from registry
         media_drivers.load_providers_from_registry(model_catalog.list_providers());
+        // Generation-side routing: a nominated provider is tried before the
+        // registry preference order for that capability.
+        media_drivers.set_capability_routing(&config.capabilities);
         let mut pairing = crate::pairing::PairingManager::new(config.pairing.clone());
 
         // Load paired devices from database and set up persistence callback
@@ -2730,14 +2758,34 @@ impl LibreFangKernel {
                                 })
                                 .unwrap_or(false);
 
-                        if (is_default_provider && is_default_model)
+                        // True when the row is already on the sentinel, so the two assignments
+                        // below restate what is there and no endpoint moves.
+                        let already_on_sentinel = is_default_provider && is_default_model;
+
+                        if already_on_sentinel
                             || toml_says_default
                             || is_legacy_auto_spawned_assistant
                         {
                             restored_entry.manifest.model.provider = "default".to_string();
                             restored_entry.manifest.model.model = "default".to_string();
-                            restored_entry.manifest.model.api_key_env = None;
-                            restored_entry.manifest.model.base_url = None;
+                            // Same repointing as the model picker and the router, so the same
+                            // field list: this restated only the credentials, which left the
+                            // pinned model's context window and output cap attached to whatever
+                            // `default` resolves to (#7781 review).
+                            //
+                            // Gated on an actual repoint, like both sibling sites
+                            // (`agent_execution.rs` on the no-change case, `ephemeral_spawn.rs`
+                            // on `provider_changed || model_changed`). An agent already on the
+                            // sentinel has not moved endpoints, and this branch runs on every
+                            // boot: clearing there would wipe an operator's hand-set
+                            // `context_window`, `max_output_tokens` and `[model.extra_params]`
+                            // on each daemon restart, then persist the loss at the next
+                            // `save_agent`.
+                            if !already_on_sentinel {
+                                crate::registry::clear_stale_provider_overrides(
+                                    &mut restored_entry.manifest.model,
+                                );
+                            }
                         }
                     }
 
