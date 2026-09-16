@@ -7906,7 +7906,7 @@
             }
           },
           "409": {
-            "description": "A base of that name already exists",
+            "description": "A base of that name already exists, or one that differs from it only by case",
             "content": {
               "application/json": {
                 "schema": {
