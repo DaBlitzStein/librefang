@@ -461,6 +461,11 @@ impl GoalsState {
                     return Self::toggle_pause(g);
                 }
             }
+            KeyCode::Char('p') => {
+                if let Some(g) = self.selected_in_list() {
+                    return Self::toggle_pause(g);
+                }
+            }
             KeyCode::Char('/') => {
                 self.search_mode = true;
                 self.search_buf.clear();
@@ -492,6 +497,13 @@ impl GoalsState {
                     -1
                 };
                 self.adjust_verify_max_retries(delta);
+            }
+            KeyCode::Char('p') => {
+                if let Some(idx) = self.selected_goal {
+                    if let Some(g) = self.goals.get(idx) {
+                        return Self::toggle_pause(g);
+                    }
+                }
             }
             KeyCode::Char('p') => {
                 if let Some(idx) = self.selected_goal {

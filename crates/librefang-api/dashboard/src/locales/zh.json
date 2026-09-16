@@ -2830,6 +2830,10 @@
     "select_agent_desc": "从列表中选择一个智能体以建立通信链路。",
     "transmit_command": "输入消息...",
     "send": "发送",
+    "scale_current": "文字大小：{{percent}}%",
+    "scale_decrease": "缩小文字",
+    "scale_increase": "放大文字",
+    "scale_reset": "重置文字大小",
     "secure_link": "安全连接",
     "standby": "待机中",
     "end_history": "历史记录末尾",
@@ -2993,6 +2997,9 @@
     "tick_interval": "循环间隔",
     "tick_interval_placeholder": "两次循环迭代之间的秒数（默认 {{defaultSecs}}）",
     "tick_interval_out_of_range": "循环间隔必须是介于 {{min}} 和 {{max}} 秒之间的整数。"
+    "evaluator_model_placeholder": "评估模型（可选）",
+    "run_pause": "暂停自主执行",
+    "run_resume": "恢复自主执行"
   },
   "sessions": {
     "title": "会话",
@@ -4319,6 +4326,7 @@
   },
   "agentTypes": {
     "confirm_delete": "删除智能体类型 '{{name}}'？已据此创建的智能体不受影响。",
+    "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "新建智能体类型",
     "created": "已创建智能体类型",
     "delete": "删除",

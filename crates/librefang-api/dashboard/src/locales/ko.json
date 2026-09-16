@@ -2863,6 +2863,10 @@
     "select_agent_desc": "목록에서 에이전트를 선택하여 통신 링크를 설정하세요.",
     "transmit_command": "신경 펄스를 전달합니다...",
     "send": "전송",
+    "scale_current": "텍스트 크기: {{percent}}%",
+    "scale_decrease": "텍스트 작게",
+    "scale_increase": "텍스트 크게",
+    "scale_reset": "텍스트 크기 초기화",
     "secure_link": "보안 링크",
     "standby": "대기",
     "end_history": "기록의 끝",
@@ -3026,6 +3030,9 @@
     "tick_interval": "반복 간격",
     "tick_interval_placeholder": "루프 반복 사이의 초 (기본값 {{defaultSecs}})",
     "tick_interval_out_of_range": "반복 간격은 {{min}}초에서 {{max}}초 사이의 정수여야 합니다."
+    "evaluator_model_placeholder": "평가 모델(선택)",
+    "run_pause": "자율 실행 일시 중지",
+    "run_resume": "자율 실행 재개"
   },
   "sessions": {
     "title": "세션",
@@ -4318,6 +4325,7 @@
   },
   "agentTypes": {
     "confirm_delete": "에이전트 타입 '{{name}}'을(를) 삭제할까요? 이미 스폰된 에이전트에는 영향이 없습니다.",
+    "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "새 에이전트 타입",
     "created": "에이전트 타입을 만들었습니다",
     "delete": "삭제",

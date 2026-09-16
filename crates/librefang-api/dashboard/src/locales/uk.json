@@ -2873,6 +2873,10 @@
     "select_agent_desc": "Оберіть агента зі списку, щоб встановити зв'язок.",
     "transmit_command": "Надіслати нейроімпульс...",
     "send": "Надіслати",
+    "scale_current": "Розмір тексту: {{percent}}%",
+    "scale_decrease": "Менший текст",
+    "scale_increase": "Більший текст",
+    "scale_reset": "Скинути розмір тексту",
     "secure_link": "Захищене з'єднання",
     "standby": "Очікування",
     "end_history": "Кінець історії",
@@ -3036,6 +3040,9 @@
     "tick_interval": "Інтервал ітерацій",
     "tick_interval_placeholder": "Секунди між ітераціями циклу (типово {{defaultSecs}})",
     "tick_interval_out_of_range": "Інтервал ітерацій має бути цілим числом від {{min}} до {{max}} секунд."
+    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)",
+    "run_pause": "Призупинити автономний запуск",
+    "run_resume": "Відновити автономний запуск"
   },
   "sessions": {
     "title": "Сесії",
@@ -4334,6 +4341,7 @@
   },
   "agentTypes": {
     "confirm_delete": "Видалити тип агента '{{name}}'? Уже створених із нього агентів це не торкнеться.",
+    "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "Новий тип агента",
     "created": "Тип агента створено",
     "delete": "Видалити",
