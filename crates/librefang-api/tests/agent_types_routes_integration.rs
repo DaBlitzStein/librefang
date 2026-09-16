@@ -528,13 +528,13 @@ async fn create_refuses_a_name_that_belongs_to_a_live_agent() {
 /// A dedup that kept the workspace row instead would still show one entry and would still be wrong, offering a control that cannot work (#7731).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_name_held_by_both_sources_lists_once_as_the_writable_copy() {
-    let _g = lock().lock().await;
     let name = "at_collision";
-    cleanup(name);
+    let h = boot().await;
 
     // Both sources hold the name.
     // The descriptions differ so the assertion can tell which row survived, rather than only that one did.
     write_agent_type(
+        &h,
         name,
         &manifest_with_non_form_fields(name).replace(
             r#"description = "seeded""#,
@@ -542,14 +542,13 @@ async fn a_name_held_by_both_sources_lists_once_as_the_writable_copy() {
         ),
     );
     write_workspace_agent(
+        &h,
         name,
         &manifest_with_non_form_fields(name).replace(
             r#"description = "seeded""#,
             r#"description = "a live agent's own manifest""#,
         ),
     );
-
-    let h = boot().await;
     let (status, list) = get(&h, "/api/templates").await;
     assert_eq!(status, StatusCode::OK, "{list}");
 
@@ -582,8 +581,6 @@ async fn a_name_held_by_both_sources_lists_once_as_the_writable_copy() {
         list["templates"].as_array().expect("templates array").len(),
         "total must count the rows actually served: {list}"
     );
-
-    cleanup(name);
 }
 
 // ---------------------------------------------------------------------------
