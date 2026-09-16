@@ -4706,7 +4706,7 @@ mod tests {
         assert!(!try_column_exists(&conn, "template_versions", "manifest_toml").unwrap());
 
         run_migrations(&conn).expect("a stamped-past-58 database must still open");
-        assert_eq!(get_schema_version(&conn).unwrap(), 60);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
 
         for (table, column) in [
             ("manifest_versions", "agent_name"),
