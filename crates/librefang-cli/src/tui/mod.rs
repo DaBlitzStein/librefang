@@ -555,6 +555,17 @@ impl App {
             AppEvent::FetchError(err) => {
                 // Route to the active tab's status message
                 match self.active_tab {
+                    // Covers every failure the shared-folders editor can hit
+                    // (fetch, unreadable manifest, duplicate name on save) —
+                    // without this arm they fell into `_ => {}` and vanished
+                    // (#7835). The manifest-history pane's failures land here
+                    // too (#8231), which is why this is one arm and not two.
+                    //
+                    // It deliberately writes nothing but `status_msg`. The
+                    // manifest-history pane keeps its own `loading` flag, and
+                    // clearing it here would end an outstanding history fetch on
+                    // an error that belongs to some other pane of the same tab
+                    // — see `an_unrelated_agent_tab_fetch_error_leaves_the_history_fetch_alone`.
                     Tab::Agents => {
                         self.agents.status_msg = err;
                     }
