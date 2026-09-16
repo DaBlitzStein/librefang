@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -98,6 +99,23 @@ async function logIn() {
   await user.click(screen.getByRole("button", { name: "auth.submit" }));
 }
 
+// The shell reads the caller's own emoji and avatar through `whoami`, so it
+// needs query context the same way every page does. It did not before #8339 —
+// the shell had no react-query hook at all.
+function renderApp({ strict = false }: { strict?: boolean } = {}) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: 0 } },
+  });
+  const app = strict ? (
+    <StrictMode>
+      <App />
+    </StrictMode>
+  ) : (
+    <App />
+  );
+  render(<QueryClientProvider client={queryClient}>{app}</QueryClientProvider>);
+}
+
 describe("DashboardApp authed bootstrap", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -121,15 +139,55 @@ describe("DashboardApp authed bootstrap", () => {
     vi.mocked(getWhoami).mockResolvedValue({ name: "daemon-user", role: "owner" });
   });
 
+  // The assertion this file exists for is the *absence* here. `whoami` sits
+  // behind the auth gate, and `parseError` reads any 401 as an expired session
+  // — it clears the credential and fires `setOnUnauthorized`, which is the
+  // dialog the operator is already looking at. Asking before they log in
+  // therefore logs them out of a session they never had.
+  it("does not ask who the caller is before they have logged in", async () => {
+    renderApp();
+
+    await screen.findByPlaceholderText("auth.username_placeholder");
+
+    expect(vi.mocked(getWhoami)).not.toHaveBeenCalled();
+  });
+
   it("shows the daemon's username in the avatar after logging in", async () => {
-    render(<App />);
+    renderApp();
 
     await logIn();
 
-    // "DA" from the daemon's `daemon-user`, not "OP" from the form input and
-    // not the "U" placeholder the empty state renders.
-    await waitFor(() => expect(screen.getAllByText("DA").length).toBeGreaterThan(0));
-    expect(screen.queryByText("OP")).not.toBeInTheDocument();
+    // Asserted by accessible name rather than by the glyphs drawn inside it.
+    // The avatar is labelled with the daemon's `daemon-user`, which is what
+    // separates it from the "operator" typed into the form — the distinction
+    // this test exists for, and one that survives whichever glyph the fallback
+    // draws. The shell used to take the first two characters (`daemon-user` →
+    // "DA") while `getInitials` drew one; the same account therefore showed
+    // "RO" beside the menu and "R" inside the Users drawer (#8339). Both now
+    // go through `getInitials`.
+    await waitFor(() =>
+      expect(screen.getAllByRole("img", { name: "daemon-user" }).length).toBeGreaterThan(0),
+    );
+    expect(screen.queryByRole("img", { name: "operator" })).not.toBeInTheDocument();
+  });
+
+  // The test above passes whether or not the emoji ever reaches the shell:
+  // `UserAvatar` carries `role="img"` and the name as its label in every
+  // state, the initials fallback included. This is the one that fails when the
+  // emoji is dropped — which is the whole bug: the daemon stored it, the Users
+  // drawer drew it, and the shell the operator was looking at did not.
+  it("draws the caller's emoji in the shell, not only their initials", async () => {
+    vi.mocked(getWhoami).mockResolvedValue({
+      name: "daemon-user",
+      role: "owner",
+      emoji: "🐙",
+    });
+
+    renderApp();
+
+    await logIn();
+
+    await waitFor(() => expect(screen.getAllByText("🐙").length).toBeGreaterThan(0));
   });
 
   // The hostname is the third of the three values this fix is about, and the
@@ -137,7 +195,7 @@ describe("DashboardApp authed bootstrap", () => {
   // opened the menu that renders it, so moving it back onto `/api/version` —
   // which never sends it — would not have failed anything.
   it("shows the daemon's hostname in the user menu after logging in", async () => {
-    render(<App />);
+    renderApp();
 
     await logIn();
 
@@ -151,11 +209,13 @@ describe("DashboardApp authed bootstrap", () => {
   });
 
   it("does not re-run the auth probe after a login succeeds", async () => {
-    render(<App />);
+    renderApp();
 
     await logIn();
 
-    await waitFor(() => expect(screen.getAllByText("DA").length).toBeGreaterThan(0));
+    await waitFor(() =>
+      expect(screen.getAllByRole("img", { name: "daemon-user" }).length).toBeGreaterThan(0),
+    );
 
     // The probe ran once, on mount, to decide the login dialog needed to
     // show at all. Re-running it on every login (the bootstrap effect used
@@ -170,7 +230,7 @@ describe("DashboardApp authed bootstrap", () => {
   });
 
   it("applies the daemon's terminal policy after logging in", async () => {
-    render(<App />);
+    renderApp();
 
     await logIn();
 
@@ -188,14 +248,12 @@ describe("DashboardApp authed bootstrap", () => {
   // their placeholders: exactly the symptom this PR fixes, reappearing under
   // `vite dev` while production (a single mount) looks fine.
   it("still fills the avatar under StrictMode's double mount", async () => {
-    render(
-      <StrictMode>
-        <App />
-      </StrictMode>,
-    );
+    renderApp({ strict: true });
 
     await logIn();
 
-    await waitFor(() => expect(screen.getAllByText("DA").length).toBeGreaterThan(0));
+    await waitFor(() =>
+      expect(screen.getAllByRole("img", { name: "daemon-user" }).length).toBeGreaterThan(0),
+    );
   });
 });

@@ -14,6 +14,18 @@ interface UserAvatarProps extends HTMLAttributes<HTMLDivElement> {
    * authenticated-image allowlist by loosening it.
    */
   name: string;
+  /**
+   * What the initials fall back to when `name` is empty — a placeholder the
+   * caller wants drawn, not an identity.
+   *
+   * Kept separate from `name` because `name` is the cache key: passing "U" as
+   * the name filed a second entry under a user who does not exist, which cost
+   * a duplicate request to `/api/users/me/avatar` and survived a delete,
+   * because `useDeleteUserAvatar` removes only the real name's entry. An empty
+   * `name` also disables the request outright, which is what an unauthenticated
+   * shell wants.
+   */
+  fallback?: string;
   /** The user's emoji, shown when there is no image. */
   emoji?: string;
   /**
@@ -40,11 +52,20 @@ interface UserAvatarProps extends HTMLAttributes<HTMLDivElement> {
  */
 export const UserAvatar = memo(function UserAvatar({
   name,
+  fallback,
   emoji,
   hasAvatar,
   size = "md",
   ...props
 }: UserAvatarProps) {
   const src = useUserAvatarUrl(name, hasAvatar !== false);
-  return <Avatar fallback={name} size={size} src={src} emoji={emoji} {...props} />;
+  return (
+    <Avatar
+      fallback={fallback || name}
+      size={size}
+      src={src}
+      emoji={emoji}
+      {...props}
+    />
+  );
 });
