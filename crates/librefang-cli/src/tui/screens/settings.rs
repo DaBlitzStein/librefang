@@ -602,11 +602,9 @@ impl SettingsState {
                     self.status_msg.clear();
                 }
             }
-            KeyCode::Char('d') => {
-                // Only offer to clear a key that holds something.
-                if self.selected_vault_key().is_some_and(|entry| entry.set) {
-                    self.confirm_delete = true;
-                }
+            // Only offer to clear a key that holds something.
+            KeyCode::Char('d') if self.selected_vault_key().is_some_and(|entry| entry.set) => {
+                self.confirm_delete = true;
             }
             KeyCode::Char('r') => return SettingsAction::RefreshVault,
             _ => {}
