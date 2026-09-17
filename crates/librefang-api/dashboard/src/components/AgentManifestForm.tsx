@@ -48,6 +48,7 @@ function MemoryScopeNote({
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
 import { ModelParamField } from "./ui/ModelParamField";
 import { CollapsibleSection } from "./ui/CollapsibleSection";
+import type { CollapsibleSectionProps } from "./ui/CollapsibleSection";
 import { Field } from "./ui/Field";
 import { ModelPicker } from "./ui/ModelPicker";
 import {
@@ -140,7 +141,60 @@ interface AgentManifestFormProps {
    *   which one wins.
    */
   nameField?: "editable" | "readonly" | "hidden";
+  /**
+   * Which sections this caller renders, in the order they appear here.
+   *
+   * Omitted (the default) renders every section, which is what the
+   * create-agent modal wants: one scrolling page with the whole manifest.
+   *
+   * The agent drawer passes a subset per tab so the same editor backs
+   * "Conversation", "Routing", "Tools" … instead of living in a second
+   * drawer behind an "Edit full configuration" button. Splitting the
+   * manifest across tabs rather than stacking a second surface on top of
+   * the first is the point: advanced fields reveal in place, and there is
+   * no second place to look.
+   *
+   * Ids name a *section*, not a field, because a section is the unit a
+   * tab can host. Where two tabs need part of a former section the
+   * section was split rather than duplicated — `model` became `prompt`
+   * (Conversation) plus `model` (Routing), `discovery` became `skills`
+   * and `mcp_servers`, and `tags` moved into `identity`.
+   *
+   * An empty array is a caller error and renders nothing; pass
+   * `undefined` to mean "all".
+   */
+  sections?: ManifestSectionId[];
 }
+
+/**
+ * Every addressable section of the manifest editor, in render order. See
+ * `sections` on `AgentManifestFormProps` for why sections are the unit of
+ * composition.
+ *
+ * A runtime array rather than a bare union so callers that need to reason
+ * about the whole set — the tab map, and the tests that guard it — can,
+ * instead of restating the list and drifting from it.
+ */
+export const MANIFEST_SECTION_IDS = [
+  "identity",
+  "model",
+  "prompt",
+  "limits",
+  "capabilities",
+  "skills",
+  "mcp_servers",
+  "scheduling",
+  "fallback_models",
+  "thinking",
+  "autonomous",
+  "routing",
+  "context_injection",
+  "response_format",
+  "lifecycle",
+  "shared_folders",
+] as const;
+
+export type ManifestSectionId = (typeof MANIFEST_SECTION_IDS)[number];
 
 export function AgentManifestForm({
   value,
@@ -153,8 +207,24 @@ export function AgentManifestForm({
   toolCatalog,
   mcpCatalog,
   nameField = "editable",
+  sections,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
+
+  // `undefined` means "every section" (the create modal). A caller that
+  // passes a list gets exactly that list.
+  const shows = (id: ManifestSectionId): boolean =>
+    sections === undefined || sections.includes(id);
+
+  // Folding a section is this caller's choice, so the guard lives here rather
+  // than being repeated at every call site. An unshown section renders
+  // nothing at all rather than a collapsed shell: a heading the operator
+  // cannot open is still a heading they will look for.
+  const FormSection = ({
+    id,
+    ...props
+  }: { id: ManifestSectionId } & CollapsibleSectionProps) =>
+    shows(id) ? <CollapsibleSection sectionId={id} {...props} /> : null;
 
   // The provider the agent already runs on stays selectable even when the
   // caller filtered it out of `providers` (rejected key, local service down).
@@ -232,7 +302,7 @@ export function AgentManifestForm({
 
   return (
     <div className="space-y-4">
-      <Section title={t("agents.form.basics")}>
+      <Section when={shows("identity")} id="identity" title={t("agents.form.basics")}>
         {nameField !== "hidden" && (
           <Field
             label={t("agents.form.name")}
@@ -305,9 +375,16 @@ export function AgentManifestForm({
             </select>
           </Field>
         </div>
+        <Field label={t("agents.form.tags")}>
+          <TagInput
+            value={value.tags}
+            onChange={(next) => update({ tags: next })}
+            placeholder={t("agents.form.tags_placeholder")}
+          />
+        </Field>
       </Section>
 
-      <Section title={t("agents.form.model")}>
+      <Section when={shows("model")} id="model" title={t("agents.form.model")}>
         <div className="grid grid-cols-2 gap-3">
           <Field
             label={t("agents.form.provider")}
@@ -362,15 +439,6 @@ export function AgentManifestForm({
             )}
           </Field>
         </div>
-        <Field label={t("agents.form.system_prompt")}>
-          <textarea
-            value={value.model.system_prompt}
-            onChange={(e) => updateModel({ system_prompt: e.target.value })}
-            placeholder={t("agents.form.system_prompt_placeholder")}
-            rows={3}
-            className={textareaClass}
-          />
-        </Field>
         {/*
           Sampling preferences. Each is tri-state and empty means inherit —
           this agent has no opinion, so the per-model override supplies the
@@ -458,7 +526,19 @@ export function AgentManifestForm({
         </div>
       </Section>
 
-      <Section title={t("agents.form.resources")}>
+      <Section when={shows("prompt")} id="prompt" title={t("agents.form.system_prompt")}>
+        <Field label={t("agents.form.system_prompt")}>
+          <textarea
+            value={value.model.system_prompt}
+            onChange={(e) => updateModel({ system_prompt: e.target.value })}
+            placeholder={t("agents.form.system_prompt_placeholder")}
+            rows={3}
+            className={textareaClass}
+          />
+        </Field>
+      </Section>
+
+      <Section when={shows("limits")} id="limits" title={t("agents.form.resources")}>
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.tokens_per_hour")}>
             <input
@@ -546,7 +626,7 @@ export function AgentManifestForm({
         </div>
       </Section>
 
-      <Section title={t("agents.form.capabilities")}>
+      <Section when={shows("capabilities")} id="capabilities" title={t("agents.form.capabilities")}>
         <Field label={t("agents.form.network_hosts")} hint={t("agents.form.network_hosts_hint")}>
           <TagInput
             value={value.capabilities.network}
@@ -670,14 +750,7 @@ export function AgentManifestForm({
         </div>
       </Section>
 
-      <Section title={t("agents.form.discovery")}>
-        <Field label={t("agents.form.tags")}>
-          <TagInput
-            value={value.tags}
-            onChange={(next) => update({ tags: next })}
-            placeholder={t("agents.form.tags_placeholder")}
-          />
-        </Field>
+      <Section when={shows("skills")} id="skills" title={t("agents.form.skills")}>
         <Field label={t("agents.form.skills")} hint={t("agents.form.skills_hint")}>
           {skillFinder ? (
             <MultiSelectCmdk
@@ -702,6 +775,9 @@ export function AgentManifestForm({
             />
           )}
         </Field>
+      </Section>
+
+      <Section when={shows("mcp_servers")} id="mcp_servers" title={t("agents.form.mcp_servers")}>
         <Field label={t("agents.form.mcp_servers")} hint={t("agents.form.mcp_servers_hint")}>
           {mcpFinder ? (
             <MultiSelectCmdk
@@ -728,7 +804,7 @@ export function AgentManifestForm({
         </Field>
       </Section>
 
-      <CollapsibleSection
+      <FormSection id="scheduling"
         title={t("agents.form.scheduling")}
         defaultOpen={false}
         invalid={
@@ -823,9 +899,9 @@ export function AgentManifestForm({
             />
           </Field>
         )}
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection title={t("agents.form.fallback_models")} defaultOpen={false}>
+      <FormSection id="fallback_models" title={t("agents.form.fallback_models")} defaultOpen={false}>
         <p className="text-[10px] text-text-dim/70 mb-2">{t("agents.form.fallback_models_hint")}</p>
         {(value.fallback_models ?? []).map((fb, idx) => (
           <div
@@ -924,9 +1000,9 @@ export function AgentManifestForm({
               </button>
             </p>
           ))}
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection title={t("agents.form.thinking")} defaultOpen={false}>
+      <FormSection id="thinking" title={t("agents.form.thinking")} defaultOpen={false}>
         <Toggle
           label={t("agents.form.thinking_enabled")}
           checked={value.thinking.enabled}
@@ -954,9 +1030,9 @@ export function AgentManifestForm({
             </Field>
           </div>
         )}
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection title={t("agents.form.autonomous")} defaultOpen={false}>
+      <FormSection id="autonomous" title={t("agents.form.autonomous")} defaultOpen={false}>
         <Toggle
           label={t("agents.form.autonomous_enabled")}
           checked={value.autonomous.enabled}
@@ -1037,9 +1113,9 @@ export function AgentManifestForm({
             </Field>
           </div>
         )}
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection title={t("agents.form.routing")} defaultOpen={false}>
+      <FormSection id="routing" title={t("agents.form.routing")} defaultOpen={false}>
         <Toggle
           label={t("agents.form.routing_enabled")}
           checked={value.routing.enabled}
@@ -1103,9 +1179,9 @@ export function AgentManifestForm({
             </div>
           </div>
         )}
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection title={t("agents.form.context_injection")} defaultOpen={false}>
+      <FormSection id="context_injection" title={t("agents.form.context_injection")} defaultOpen={false}>
         <p className="text-[10px] text-text-dim/70 mb-2">
           {t("agents.form.context_injection_hint")}
         </p>
@@ -1179,9 +1255,9 @@ export function AgentManifestForm({
           <Plus className="w-3.5 h-3.5" />
           {t("agents.form.add_injection")}
         </button>
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection
+      <FormSection id="response_format"
         title={t("agents.form.response_format")}
         defaultOpen={false}
         invalid={invalidFields.has("response_format.schema")}
@@ -1273,9 +1349,9 @@ export function AgentManifestForm({
             />
           </div>
         )}
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection title={t("agents.form.lifecycle")} defaultOpen={false}>
+      <FormSection id="lifecycle" title={t("agents.form.lifecycle")} defaultOpen={false}>
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.session_mode")}>
             <select
@@ -1384,9 +1460,9 @@ export function AgentManifestForm({
             onChange={(checked) => update({ generate_identity_files: checked })}
           />
         </div>
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection
+      <FormSection id="shared_folders"
         title={t("agents.form.shared_folders")}
         defaultOpen={false}
         invalid={value.workspaces.some(
@@ -1468,7 +1544,7 @@ export function AgentManifestForm({
           <Plus className="w-3.5 h-3.5" />
           {t("agents.form.add_folder")}
         </button>
-      </CollapsibleSection>
+      </FormSection>
     </div>
   );
 }
@@ -1514,9 +1590,33 @@ function mergeCatalog(
   return { options, meta };
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+/**
+ * Always-open sibling of `CollapsibleSection`, for the handful of sections
+ * that carry the fields an operator edits most (identity, model, limits,
+ * grants). Those stay expanded because folding the common case behind a click
+ * trades no scroll for a click on every visit.
+ *
+ * `when` is the same render guard `FormSection` applies — a section this
+ * caller did not ask for renders nothing, not an empty frame.
+ */
+function Section({
+  title,
+  when = true,
+  id,
+  children,
+}: {
+  title: string;
+  when?: boolean;
+  /** Section identity, emitted as `data-section`. See `CollapsibleSectionProps.sectionId`. */
+  id?: string;
+  children: React.ReactNode;
+}) {
+  if (!when) return null;
   return (
-    <div className="space-y-2.5 rounded-xl border border-border-subtle/60 bg-surface/40 p-3">
+    <div
+      data-section={id}
+      className="space-y-2.5 rounded-xl border border-border-subtle/60 bg-surface/40 p-3"
+    >
       <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">{title}</p>
       {children}
     </div>
