@@ -511,6 +511,37 @@ max_cost_per_hour_usd = 1
     }
   });
 
+  it("keeps an exec_policy spelling the kernel accepts in a different case", () => {
+    // The kernel lowercases before mapping (`exec_policy_lenient`,
+    // `crates/librefang-types/src/serde_compat.rs:262`, wired in at
+    // `agent.rs:1347`), so `"Deny"` and `"FULL"` are manifests the runtime
+    // honours. Matching exactly here read them as a spelling the form did not
+    // know, returned an empty shorthand, and dropped the key on the next save.
+    // That loss widened the policy rather than narrowing it: an agent carrying
+    // `shell_exec` and no `exec_policy` is promoted to `Full`
+    // (`kernel/spawn.rs:236-250`, `kernel/boot.rs:2690-2705`).
+    const cases: Array<[string, string]> = [
+      ["Deny", "deny"],
+      ["FULL", "full"],
+      ["AllowList", "allowlist"],
+      ["None", "deny"],
+      ["UNRESTRICTED", "full"],
+    ];
+    for (const [spelling, canonical] of cases) {
+      const parsed = parseManifestToml(
+        `name = "a"\nexec_policy = "${spelling}"\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.form.exec_policy_shorthand).toBe(canonical);
+
+      // And the key survives the save — the failure this guards is the key
+      // disappearing, not the dropdown reading the wrong label.
+      const out = serializeManifestForm(parsed.form, parsed.extras);
+      expect(out).toContain("exec_policy");
+    }
+  });
+
   it("does not emit both response_format form-mode and preserved [response_format] extras", () => {
     // Same shape as the exec_policy P1: TOML carries an unmappable
     // response_format → preserved as extras → user picks json/json_schema
@@ -780,6 +811,81 @@ reasoning_mode = "none"
     expect(second.ok).toBe(true);
     if (!second.ok) return;
     expect(second.extras.thinking).toEqual({ reasoning_mode: "none" });
+  });
+
+  // The same loss, in a section that never got its slot.
+  //
+  // `[autonomous]` is in `FORM_TOP_LEVEL_KEYS`, so its table never reaches
+  // `extras.topLevel`, and `ManifestExtras` has no member for it — so every key
+  // the form has no widget for is consumed on parse and never re-emitted on
+  // save. `block_stall_degrade_after` is one today, and it is the loop-guard
+  // threshold, not a display preference: an agent that had it set comes back
+  // from an unrelated edit with the guard gone.
+  it("round-trips an unknown [autonomous] key such as block_stall_degrade_after", () => {
+    const original = `name = "agent"
+
+[autonomous]
+max_iterations = 50
+block_stall_degrade_after = 2
+`;
+    const result = parseManifestToml(original);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.form.autonomous.max_iterations).toBe("50");
+
+    const out = serializeManifestForm(result.form, result.extras);
+    expect(out).toContain("block_stall_degrade_after");
+
+    // Inside [autonomous], not leaked into whichever section follows: a scalar
+    // emitted after the next `[header]` belongs to that section instead.
+    const after = out.slice(out.indexOf("[autonomous]") + "[autonomous]".length);
+    const nextHeader = after.search(/\n\[/);
+    const block = nextHeader === -1 ? after : after.slice(0, nextHeader);
+    expect(block).toContain("block_stall_degrade_after");
+
+    // Stable across a second pass.
+    const second = parseManifestToml(out);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.extras.autonomous).toEqual({ block_stall_degrade_after: 2 });
+  });
+
+  // The other half of the same slot, and the one that is pure prophylaxis today:
+  // `ModelRoutingConfig` has exactly the five fields the form already knows, so
+  // no `[routing]` key can be dropped — yet. The next one added there would be,
+  // which is how `block_stall_degrade_after` and `reasoning_mode` went missing.
+  // `escalate_model` is not a field of that struct; it stands in for that next
+  // field, and what this test pins is the slot, not the name.
+  it("round-trips an unknown [routing] key the form has no field for", () => {
+    const original = `name = "agent"
+
+[routing]
+simple_model = "a"
+medium_model = "b"
+complex_model = "c"
+simple_threshold = 1000
+complex_threshold = 8000
+escalate_model = "d"
+`;
+    const result = parseManifestToml(original);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.form.routing.simple_model).toBe("a");
+
+    const out = serializeManifestForm(result.form, result.extras);
+    expect(out).toContain("escalate_model");
+
+    // Inside [routing], not leaked into whichever section follows.
+    const after = out.slice(out.indexOf("[routing]") + "[routing]".length);
+    const nextHeader = after.search(/\n\[/);
+    const block = nextHeader === -1 ? after : after.slice(0, nextHeader);
+    expect(block).toContain("escalate_model");
+
+    // Stable across a second pass.
+    const second = parseManifestToml(out);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.extras.routing).toEqual({ escalate_model: "d" });
   });
 
   // Unticking "enabled" is the user deleting the whole table, so the preserved
