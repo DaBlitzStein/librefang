@@ -101,6 +101,7 @@ def main():
         {o["op_id"]: o["raw_body_ct"] for o in raw_ops}
         == {
             "transcribe_audio": "audio/webm",
+            "upload_agent_avatar": "application/octet-stream",
             "upload_file": "application/octet-stream",
         },
         f"unexpected raw-body operations: {[(o['op_id'], o['raw_body_ct']) for o in raw_ops]}",
