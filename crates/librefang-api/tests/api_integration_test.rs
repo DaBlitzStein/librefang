@@ -3468,13 +3468,18 @@ async fn start_full_router_with_approval_second_factor(
     }
 }
 
-/// POST to `uri` as a routable public caller.
+/// POST to `uri` as a routable public caller from `peer`.
 ///
 /// The `ConnectInfo` peer is deliberately not loopback: `auth_rate_limit_layer`
 /// exempts loopback callers carrying no forwarding header, so a request from
-/// 127.0.0.1 would never be metered and the test below would pass for the
+/// 127.0.0.1 would never be metered and the tests below would pass for the
 /// wrong reason.
-fn public_post(uri: &str) -> Request<Body> {
+///
+/// `peer` is a parameter rather than a constant because the per-IP bucket
+/// outlives a policy change: a test that flips the policy mid-run has to spend
+/// its phases from different addresses, or the earlier phase's count decides
+/// the later phase's answer.
+fn public_post(uri: &str, peer: [u8; 4]) -> Request<Body> {
     let mut request = Request::builder()
         .method("POST")
         .uri(uri)
@@ -3484,8 +3489,7 @@ fn public_post(uri: &str) -> Request<Body> {
     request
         .extensions_mut()
         .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
-            [203, 0, 113, 77],
-            41234,
+            peer, 41234,
         ))));
     request
 }
@@ -3495,9 +3499,13 @@ fn public_post(uri: &str) -> Request<Body> {
 /// "Too many login attempts" — the reported symptom, since approving was
 /// spending the same per-IP bucket as `dashboard-login`.
 ///
-/// `rate_limiter::tests` pins the middleware's decision given a predicate; this
-/// pins that `server::build_router` supplies the live policy rather than a
-/// constant, through the same router production builds.
+/// `rate_limiter::tests` pins the middleware's decision given a predicate, and
+/// this pins the decision the production router reaches with a policy fixed at
+/// boot. What neither holds up is the *live* read — a `bool` captured while
+/// `server::build_router` runs satisfies both. That claim is
+/// `test_approvals_gate_follows_the_policy_flipped_at_runtime`'s, which flips
+/// the policy on a running router and is the only test here a boot snapshot
+/// fails.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_approvals_are_not_rate_limited_while_policy_requires_no_totp() {
     let harness = start_full_router_with_approval_second_factor(
@@ -3517,7 +3525,10 @@ async fn test_approvals_are_not_rate_limited_while_policy_requires_no_totp() {
         let resp = harness
             .app
             .clone()
-            .oneshot(public_post("/api/approvals/some-id/approve"))
+            .oneshot(public_post(
+                "/api/approvals/some-id/approve",
+                [203, 0, 113, 77],
+            ))
             .await
             .unwrap();
         assert_ne!(
@@ -3528,6 +3539,75 @@ async fn test_approvals_are_not_rate_limited_while_policy_requires_no_totp() {
             limit + 1
         );
     }
+}
+
+/// The gate follows the approval policy **at request time**, and this is the
+/// only test here that says so: it flips the policy on a running router and
+/// watches the middleware change its mind, in both directions.
+///
+/// A `bool` captured while `server::build_router` ran satisfies every other test
+/// in this file and fails here, whichever value it captured: a snapshot of `none`
+/// never meters approvals after the policy turns `totp` on, and a snapshot of
+/// `totp` keeps metering after the operator turns the second factor back off —
+/// the lockout this change exists to remove. Neither is hypothetical:
+/// `POST /api/config/reload` swaps the whole policy through
+/// `ApprovalManager::update_policy` (`config_reload_ops.rs:205`) without
+/// rebuilding the router, so the live read is the only thing that keeps the gate
+/// agreeing with the config.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approvals_gate_follows_the_policy_flipped_at_runtime() {
+    let harness = start_full_router_with_approval_second_factor(
+        librefang_types::approval::SecondFactor::None,
+    )
+    .await;
+    let limit = harness
+        .state
+        .kernel
+        .config_ref()
+        .rate_limit
+        .auth_rate_limit_per_ip;
+
+    /// Whether a full burst from `peer` is metered. `limit + 1` requests, so a
+    /// bucket that is being spent is guaranteed to trip.
+    async fn burst_is_metered(harness: &FullRouterHarness, peer: [u8; 4], limit: u32) -> bool {
+        for _ in 0..=limit {
+            let resp = harness
+                .app
+                .clone()
+                .oneshot(public_post("/api/approvals/some-id/approve", peer))
+                .await
+                .unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                return true;
+            }
+        }
+        false
+    }
+
+    let set_second_factor = |second_factor: librefang_types::approval::SecondFactor| {
+        let mut policy = harness.state.kernel.approvals().policy();
+        policy.second_factor = second_factor;
+        harness.state.kernel.approvals().update_policy(policy);
+    };
+
+    // A distinct peer per phase: the bucket is per IP and long-lived, so a
+    // phase that reused an address would inherit the previous phase's count.
+    assert!(
+        !burst_is_metered(&harness, [203, 0, 113, 101], limit).await,
+        "with second_factor = none no code is verified, so approvals must not be metered"
+    );
+
+    set_second_factor(librefang_types::approval::SecondFactor::Totp);
+    assert!(
+        burst_is_metered(&harness, [203, 0, 113, 102], limit).await,
+        "after the policy is flipped to totp at runtime, the same burst must be metered"
+    );
+
+    set_second_factor(librefang_types::approval::SecondFactor::None);
+    assert!(
+        !burst_is_metered(&harness, [203, 0, 113, 103], limit).await,
+        "after the policy is flipped back to none at runtime, the burst must stop being metered"
+    );
 }
 
 /// The control for the test above: the same burst against the same router, with
@@ -3556,7 +3636,10 @@ async fn test_approvals_stay_rate_limited_while_policy_requires_totp() {
         let resp = harness
             .app
             .clone()
-            .oneshot(public_post("/api/approvals/some-id/approve"))
+            .oneshot(public_post(
+                "/api/approvals/some-id/approve",
+                [203, 0, 113, 78],
+            ))
             .await
             .unwrap();
         last_status = resp.status();
