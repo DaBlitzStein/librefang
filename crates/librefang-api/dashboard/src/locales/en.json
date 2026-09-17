@@ -916,6 +916,8 @@
       "logs": "Logs",
       "routing": "Routing",
       "history": "History"
+      "history": "History",
+      "routing": "Routing"
     },
     "configure": "Configure",
     "select_an_agent": "Select an agent",
