@@ -66,6 +66,24 @@ pub enum MetadataSource {
 }
 
 impl MetadataSource {
+    /// Whether the capacities this layer produced came from a real source.
+    ///
+    /// The first four layers each have someone who asserted the number — the
+    /// operator, the registry, a prior probe, the endpoint itself. The L5 tail
+    /// does not: a substring table and two round constants are pattern-matching
+    /// on a model name, which is the same class of invention as the discovery
+    /// literals in `merge_discovered_models` (#7780). Warning an operator for
+    /// exceeding a limit that was guessed from their model's *name* is noise,
+    /// so entries from those layers are marked unknown.
+    pub fn limits_known(self) -> bool {
+        match self {
+            Self::AgentManifest | Self::Registry | Self::PersistedCache | Self::RuntimeProbe => {
+                true
+            }
+            Self::HardcodedFallback | Self::Default200kAnthropic | Self::Default32k => false,
+        }
+    }
+
     /// Stable string used in tracing and the dashboard surface.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -268,7 +286,9 @@ fn lookup_hardcoded(model_id: &str) -> Option<u64> {
 /// Build a synthetic `ModelCatalogEntry` for a layer that doesn't have a
 /// registry-backed entry to borrow (L1 / L3 / L4 / L5 / final default).
 ///
-/// `limits_known` mirrors the layer that produced the numbers, which is the same distinction [`MetadataSource`] already records alongside the entry.
+/// `source` is carried in so the entry records whether its capacities were
+/// asserted by someone or invented by the layer — see
+/// [`MetadataSource::limits_known`].
 /// An operator override, a persisted cache entry and a live probe all have a source; the L5 substring table and the two provider-shaped defaults are guesses this crate invented.
 /// Recording it on the entry means a caller that sees only the entry, and not the `ResolvedModel` wrapper, can still tell the two apart.
 fn synthesize_entry(
@@ -276,7 +296,7 @@ fn synthesize_entry(
     provider: &str,
     context_window: u64,
     max_output_tokens: u64,
-    limits_known: bool,
+    source: MetadataSource,
 ) -> ModelCatalogEntry {
     ModelCatalogEntry {
         id: model.to_string(),
@@ -286,10 +306,10 @@ fn synthesize_entry(
         modality: Modality::Text,
         context_window,
         max_output_tokens,
+        limits_known: source.limits_known(),
         input_cost_per_m: 0.0,
         output_cost_per_m: 0.0,
         pricing_known: false,
-        limits_known,
         image_input_cost_per_m: None,
         image_output_cost_per_m: None,
         supports_tools: false,
@@ -683,7 +703,13 @@ pub async fn resolve_model_metadata<'a>(
     // ----- Layer 1: agent manifest override -----
     if let Some(ctx) = request.manifest_override_context.filter(|v| *v > 0) {
         let max_out = request.manifest_override_max_output.unwrap_or(0);
-        let entry = synthesize_entry(request.model, request.provider, ctx, max_out, true);
+        let entry = synthesize_entry(
+            request.model,
+            request.provider,
+            ctx,
+            max_out,
+            MetadataSource::AgentManifest,
+        );
         return ResolvedModel {
             entry: Cow::Owned(entry),
             source: MetadataSource::AgentManifest,
@@ -721,7 +747,7 @@ pub async fn resolve_model_metadata<'a>(
                 request.provider,
                 cached.context_window,
                 cached.max_output_tokens,
-                true,
+                MetadataSource::PersistedCache,
             );
             return ResolvedModel {
                 entry: Cow::Owned(entry),
@@ -745,7 +771,13 @@ pub async fn resolve_model_metadata<'a>(
             },
         )
         .await;
-        let entry = synthesize_entry(request.model, request.provider, ctx, 0, true);
+        let entry = synthesize_entry(
+            request.model,
+            request.provider,
+            ctx,
+            0,
+            MetadataSource::RuntimeProbe,
+        );
         return ResolvedModel {
             entry: Cow::Owned(entry),
             source: MetadataSource::RuntimeProbe,
@@ -754,7 +786,13 @@ pub async fn resolve_model_metadata<'a>(
 
     // ----- Layer 5: hardcoded substring table + provider default -----
     if let Some(ctx) = lookup_hardcoded(stripped) {
-        let entry = synthesize_entry(request.model, request.provider, ctx, 0, false);
+        let entry = synthesize_entry(
+            request.model,
+            request.provider,
+            ctx,
+            0,
+            MetadataSource::HardcodedFallback,
+        );
         return ResolvedModel {
             entry: Cow::Owned(entry),
             source: MetadataSource::HardcodedFallback,
@@ -768,7 +806,7 @@ pub async fn resolve_model_metadata<'a>(
             request.provider,
             DEFAULT_ANTHROPIC_CONTEXT,
             0,
-            false,
+            MetadataSource::Default200kAnthropic,
         );
         return ResolvedModel {
             entry: Cow::Owned(entry),
@@ -780,7 +818,7 @@ pub async fn resolve_model_metadata<'a>(
         request.provider,
         DEFAULT_GENERIC_CONTEXT,
         0,
-        false,
+        MetadataSource::Default32k,
     );
     ResolvedModel {
         entry: Cow::Owned(entry),
@@ -808,6 +846,7 @@ mod tests {
             modality: Modality::Text,
             context_window,
             max_output_tokens: 4096,
+            limits_known: true,
             input_cost_per_m: 0.0,
             output_cost_per_m: 0.0,
             pricing_known: true,
