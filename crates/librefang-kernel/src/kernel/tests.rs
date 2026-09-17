@@ -3616,6 +3616,8 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
             "Worker will stall",
             Some("worker"),
             None,
+            0,
+            None,
             librefang_memory::TaskQueueCaps::UNLIMITED,
         )
         .await
@@ -3683,12 +3685,24 @@ async fn queue_depth_cap_reaches_task_post_and_answers_as_a_quota() {
     kernel.clone().set_self_handle();
 
     kernel
-        .task_post("first", "body", None, None)
+        .task_post(
+            "first",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect("the first post fits the cap");
 
     let err = kernel
-        .task_post("second", "body", None, None)
+        .task_post(
+            "second",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect_err("the second post exceeds max_depth_global = 1");
     assert!(
@@ -3723,9 +3737,24 @@ async fn a_reloaded_queue_depth_cap_takes_effect_without_a_restart() {
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
     kernel.clone().set_self_handle();
 
-    kernel.task_post("first", "body", None, None).await.unwrap();
     kernel
-        .task_post("second", "body", None, None)
+        .task_post(
+            "first",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
+        .await
+        .unwrap();
+    kernel
+        .task_post(
+            "second",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect_err("at the cap");
 
@@ -3734,7 +3763,13 @@ async fn a_reloaded_queue_depth_cap_takes_effect_without_a_restart() {
     kernel.config.store(Arc::new(raised));
 
     kernel
-        .task_post("second", "body", None, None)
+        .task_post(
+            "second",
+            "body",
+            None,
+            None,
+            &librefang_runtime::kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect("the raised cap is in force on the next post");
 
