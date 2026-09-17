@@ -26,6 +26,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     println!("cargo:rerun-if-env-changed=CI_COMMIT_SHA");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    rerun_when_commit_changes();
 
     // Capture git commit hash at build time.
     //
@@ -81,22 +82,49 @@ fn resolve_git_sha() -> String {
         }
     }
 
-    let Ok(git) = which::which("git") else {
-        return "unknown".to_string();
+    git_stdout(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Declare the files git rewrites when the commit under `HEAD` moves, so cargo re-runs this script and re-captures the commit id (refs #8414).
+///
+/// The `rerun-if-env-changed` directives above only cover the CI-supplied SHAs, and a commit moves none of them.
+/// Without an input that follows the repository, the script kept reporting the commit it captured on its first run, so a binary built at a later commit advertised the earlier one.
+///
+/// The paths are asked of git rather than spelled `.git/…`.
+/// In a linked worktree `.git` is a file, and the branch that worktree has checked out lives in the repository's common directory, which is what `rev-parse --git-path` relocates to.
+///
+/// `HEAD` alone is not enough: it holds `ref: refs/heads/<branch>`, which a commit leaves untouched.
+/// It is listed for the two cases that do move it — checking out a different branch, and a detached checkout, where the commit id is written into `HEAD` itself.
+fn rerun_when_commit_changes() {
+    // Nothing to watch outside a checkout; a registry tarball has no repository and falls back to `unknown` regardless.
+    let Some(git_dir) = git_stdout(&["rev-parse", "--absolute-git-dir"]) else {
+        return;
     };
-    Command::new(git)
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+    println!("cargo:rerun-if-changed={git_dir}/HEAD");
+
+    if let Some(branch) = git_stdout(&["symbolic-ref", "-q", "HEAD"]) {
+        // `--git-path` may answer relative to the directory git ran in, and that directory is this package's root — the same base cargo resolves a relative `rerun-if-changed` against, so the answer is passed through unchanged.
+        if let Some(reference) = git_stdout(&["rev-parse", "--git-path", &branch]) {
+            println!("cargo:rerun-if-changed={reference}");
+        }
+    }
+}
+
+/// Run `git <args>` and return its trimmed stdout, or `None` when git is missing, the command fails, or it prints nothing.
+///
+/// The binary is resolved through `which` rather than relying on shell PATH lookup semantics (refs #5667).
+fn git_stdout(args: &[&str]) -> Option<String> {
+    let git = which::which("git").ok()?;
+    let output = Command::new(git).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 fn short_sha(sha: &str) -> String {
