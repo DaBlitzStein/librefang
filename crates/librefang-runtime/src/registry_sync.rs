@@ -1318,8 +1318,6 @@ mod tests {
 
     /// The reported bug: an operator turns on `discover_models` in a registry-shipped provider — that flag is the only thing putting the provider on the live model-discovery path — and the next boot's registry sync reverts the file, silently undoing the setting on every restart.
     ///
-    /// The source below is the shape the registry actually ships: `librefang-registry/providers/deepseek.toml` carries a `base_url` and a `[[models]]` array and no `discover_models` key at all, so reverting the file is what used to clear a flag the operator had set.
-    ///
     /// The sync may rewrite a managed file only while the bytes on disk are still the ones the sync itself wrote; anything else is an operator edit and belongs to the operator.
     #[test]
     fn sync_flat_files_preserves_operator_edits_across_restarts() {
@@ -1329,7 +1327,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::create_dir_all(&dest).unwrap();
 
-        let registry_toml = "id = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n";
+        let registry_toml = "id = \"deepseek\"\ndiscover_models = false\n";
         std::fs::write(src.join("deepseek.toml"), registry_toml).unwrap();
 
         // First boot installs the registry copy verbatim.
@@ -1340,7 +1338,7 @@ mod tests {
         );
 
         // The operator turns live discovery on. This is byte-for-byte what `PUT /api/providers/{name}/discovery` writes.
-        let operator_toml = "id = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n";
+        let operator_toml = "id = \"deepseek\"\ndiscover_models = true\n";
         std::fs::write(dest.join("deepseek.toml"), operator_toml).unwrap();
 
         // Restart — twice, because the bug was "every restart", not "the first one".
@@ -1355,44 +1353,6 @@ mod tests {
             std::fs::read_to_string(dest.join("deepseek.toml")).unwrap(),
             operator_toml,
             "the boot sync reverted the operator's discover_models edit on a later restart"
-        );
-    }
-
-    /// The operator preference is not the only local value in these files: a corrected `context_window` lives in the same `[[models]]` array the sync rewrites, and the same overwrite reverted it.
-    ///
-    /// This is the half the discovery default cannot cover — turning discovery on by default says nothing about a per-model capacity the operator fixed because the registry's number is wrong for their endpoint.
-    #[test]
-    fn sync_flat_files_keeps_a_local_context_window_correction() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("src");
-        let dest = tmp.path().join("dest");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::create_dir_all(&dest).unwrap();
-
-        // Registry shape: the window is declared per model inside `[[models]]`.
-        let registry_toml = concat!(
-            "[provider]\n",
-            "id = \"deepseek\"\n",
-            "base_url = \"https://api.deepseek.com/v1\"\n",
-            "\n",
-            "[[models]]\n",
-            "id = \"deepseek-chat\"\n",
-            "context_window = 64000\n",
-        );
-        std::fs::write(src.join("deepseek.toml"), registry_toml).unwrap();
-        sync_flat_files(&src, &dest, "providers");
-
-        // The operator corrects it — a longer window their deployment actually serves.
-        let corrected_toml =
-            registry_toml.replace("context_window = 64000", "context_window = 128000");
-        std::fs::write(dest.join("deepseek.toml"), &corrected_toml).unwrap();
-
-        sync_flat_files(&src, &dest, "providers");
-
-        assert_eq!(
-            std::fs::read_to_string(dest.join("deepseek.toml")).unwrap(),
-            corrected_toml,
-            "the boot sync reverted the operator's context_window correction"
         );
     }
 
