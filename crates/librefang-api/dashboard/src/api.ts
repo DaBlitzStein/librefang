@@ -2118,6 +2118,13 @@ export interface AgentTemplate {
   model: string;
   source: AgentTypeSource;
   editable: boolean;
+  /**
+   * Whether a registry original exists to restore from. Only ever `true` for an
+   * `editable` row — an agent type created through `POST /api/templates` or
+   * `agent_type_create` has no registry counterpart, so its restore control has
+   * nothing to do (#8042).
+   */
+  from_registry: boolean;
 }
 
 /**
@@ -2227,6 +2234,40 @@ export interface PromoteAgentTypeResult {
  */
 export async function promoteAgentType(name: string): Promise<PromoteAgentTypeResult> {
   return post<PromoteAgentTypeResult>(`/api/templates/${encodeURIComponent(name)}/promote`, {});
+}
+
+/** A single field-level difference between local and registry manifests. */
+export interface FieldDiff {
+  field: string;
+  local: unknown;
+  registry: unknown;
+}
+
+/** Result of comparing a local agent type with its registry original. */
+export interface RegistryDiffResult {
+  name: string;
+  identical: boolean;
+  unlisted_diffs: number;
+  diffs: FieldDiff[];
+  local_toml: string;
+  registry_toml: string;
+}
+
+export async function getAgentTypeRegistryDiff(
+  name: string,
+): Promise<RegistryDiffResult> {
+  return get<RegistryDiffResult>(
+    `/api/templates/${encodeURIComponent(name)}/registry-diff`,
+  );
+}
+
+export async function restoreAgentTypeFromRegistry(
+  name: string,
+): Promise<AgentTypeDetail> {
+  return post<AgentTypeDetail>(
+    `/api/templates/${encodeURIComponent(name)}/restore`,
+    {},
+  );
 }
 
 // ---------------------------------------------------------------------------
