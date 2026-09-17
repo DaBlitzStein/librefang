@@ -27,6 +27,9 @@ pub const OPENROUTER_MODEL_CATALOG_TTL: Duration = Duration::from_secs(15 * 60);
 pub struct ModelCatalog {
     models: Vec<ModelCatalogEntry>,
     aliases: HashMap<String, String>,
+    /// The catalog's providers.
+    ///
+    /// Append through [`ModelCatalog::push_provider`], never directly: it applies the operator's discovery preference, and a provider that skips it is one the preference store has an opinion about and nobody applies (#8407).
     providers: Vec<ProviderInfo>,
     /// Providers whose model list was successfully fetched from their live API during this process.
     /// Kept separately from `available_models` so an empty successful response is distinguishable from "not probed yet".
@@ -1206,6 +1209,18 @@ impl ModelCatalog {
         adopted.len()
     }
 
+    /// Add a provider to the catalog, applying the operator's discovery preference to it.
+    ///
+    /// The one place a provider enters the catalog, and it has to stay that way.
+    /// [`Self::apply_discover_prefs`] only reaches the providers that exist when it runs, and several paths create providers *after* it — the `[provider_urls]` and region overlays through [`Self::set_provider_url`], the EveryAPI wiring, a merged catalog file — so stamping here is what makes "the store has an opinion about this provider" and "this provider carries it" the same statement, whatever creates it and whenever (#8407).
+    /// A provider the store says nothing about keeps whatever the caller built.
+    fn push_provider(&mut self, mut provider: ProviderInfo) {
+        if let Some(discover) = self.discover_prefs.get(&provider.id) {
+            provider.discover_models = *discover;
+        }
+        self.providers.push(provider);
+    }
+
     /// Push the stored preferences onto the providers currently loaded.
     fn apply_discover_prefs(&mut self) {
         // Move the map aside so the loop can hold `providers` mutably; restored below.
@@ -1479,7 +1494,7 @@ impl ModelCatalog {
         } else {
             // Custom provider — add a new entry so it appears in /api/providers
             let env_var = librefang_types::model_catalog::default_api_key_env(provider);
-            self.providers.push(ProviderInfo {
+            self.push_provider(ProviderInfo {
                 id: provider.to_string(),
                 display_name: provider.to_string(),
                 api_key_env: env_var,
@@ -1530,7 +1545,7 @@ impl ModelCatalog {
             provider.cli_managed = true;
             return true;
         }
-        self.providers.push(ProviderInfo {
+        self.push_provider(ProviderInfo {
             id: PROVIDER_ID.to_string(),
             display_name: "EveryAPI".to_string(),
             api_key_env: "EVERYAPI_API_KEY".to_string(),
@@ -1580,7 +1595,7 @@ impl ModelCatalog {
             provider.cli_managed = false;
             return true;
         }
-        self.providers.push(ProviderInfo {
+        self.push_provider(ProviderInfo {
             id: PROVIDER_ID.to_string(),
             display_name: "EveryAPI".to_string(),
             api_key_env: api_key_env.to_string(),
@@ -2036,7 +2051,7 @@ impl ModelCatalog {
                     existing.cli_managed = false;
                 }
             } else {
-                self.providers.push(prov_toml.into());
+                self.push_provider(prov_toml.into());
             }
         }
 

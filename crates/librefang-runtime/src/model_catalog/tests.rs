@@ -3451,6 +3451,99 @@ fn a_discovery_preference_survives_a_real_registry_fanout() {
     );
 }
 
+/// A provider created *after* the preference store is applied still receives its preference (#8407).
+///
+/// This is the population the removed TOML writer used to serve: an endpoint registered through `[provider_urls]` or `PUT /api/providers/{name}/url` does not exist on disk, so boot creates it *after* it has applied the store, and `set_provider_url` builds the record with `discover_models: false`.
+/// Applying the store only to the providers loaded from disk stores the setting and applies it to nobody — the same silent revert, for exactly the providers the discovery toggle was added to serve.
+///
+/// The control is in the middle: a provider that is on disk when the store is applied must keep receiving it, so a fix cannot trade one population for the other.
+#[test]
+fn a_provider_created_after_the_preference_load_still_receives_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::write(
+        providers.join("deepseek.toml"),
+        "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n",
+    )
+    .unwrap();
+
+    // Boot 1: the operator turns discovery on for a provider that is on disk, and
+    // registers a bare endpoint through `[provider_urls]` and turns it on too.
+    let mut first = ModelCatalog::new_from_dir(&providers);
+    assert!(first.set_provider_url("acme-gateway", "http://127.0.0.1:4100/v1"));
+    assert!(first.set_provider_discover_preference("deepseek", true));
+    assert!(first.set_provider_discover_preference("acme-gateway", true));
+    first
+        .save_discover_prefs(&prefs)
+        .expect("the preference must reach disk");
+
+    // Boot 2, in boot's order: the store is applied while only the on-disk
+    // providers exist, and the `[provider_urls]` overlay creates the other one
+    // afterwards.
+    let mut rebooted = ModelCatalog::new_from_dir(&providers);
+    rebooted.load_discover_prefs(&prefs);
+    assert!(
+        rebooted.get_provider("acme-gateway").is_none(),
+        "a bare endpoint lives in config.toml, not in providers/, so it cannot be there yet"
+    );
+    rebooted.apply_url_overrides(&BTreeMap::from([(
+        "acme-gateway".to_string(),
+        "http://127.0.0.1:4100/v1".to_string(),
+    )]));
+
+    // Control: the provider that existed when the store was applied.
+    assert!(
+        rebooted.get_provider("deepseek").unwrap().discover_models,
+        "control: a provider present at load time must keep receiving its preference"
+    );
+    // The hole: the provider creation created after the store was applied.
+    assert!(
+        rebooted
+            .get_provider("acme-gateway")
+            .unwrap()
+            .discover_models,
+        "a provider created after the store was applied must still receive the preference"
+    );
+}
+
+/// The other half of the migration question: a provider whose file says `false` explicitly is honoured, and is **not** adopted into the store.
+///
+/// An absent key and an explicit `false` are indistinguishable once parsed, so adopting every `false` would record an "off" for every provider nobody has expressed an opinion about — and since the store has the last word, that would override a `true` the registry may ship for one of them later.
+/// The asymmetry is the failure's own: losing a `true` turns discovery off, while losing a `false` lands back on the value an absent key already means.
+#[test]
+fn an_explicit_false_in_the_provider_file_is_honoured_but_not_adopted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::write(
+        providers.join("litellm.toml"),
+        "[provider]\nid = \"litellm\"\nbase_url = \"https://gateway.internal/v1\"\ndiscover_models = false\n",
+    )
+    .unwrap();
+
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    assert!(
+        !catalog.get_provider("litellm").unwrap().discover_models,
+        "the file's explicit false is honoured"
+    );
+    assert_eq!(
+        catalog.adopt_legacy_discover_flags(&prefs),
+        0,
+        "an explicit false is not a legacy opt-in"
+    );
+    assert!(
+        !prefs.exists(),
+        "nothing is recorded, because adopting would write an \"off\" for every provider that merely omits the key"
+    );
+
+    // And the file's own value still reaches the catalog on the next boot.
+    let rebooted = ModelCatalog::new_from_dir(&providers);
+    assert!(!rebooted.get_provider("litellm").unwrap().discover_models);
+}
+
 /// An install that enabled discovery before the preference store existed carries the flag only in its provider file (#8407).
 ///
 /// The first boot adopts it into the store, and every later boot leaves what it finds there alone — otherwise a stale `true` in a file would overrule an operator who has since turned the setting off.
