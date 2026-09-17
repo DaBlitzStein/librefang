@@ -366,6 +366,29 @@ impl GoalsState {
         }
     }
 
+    /// Move the open goal's pending verification-round budget by `delta`,
+    /// staying inside `1..=MAX_VERIFY_MAX_RETRIES`.
+    ///
+    /// The first press has to start somewhere. It starts from the budget the
+    /// pane is showing — the live run's, when there is one — so the number the
+    /// operator sees move is the number they were looking at. Only when there
+    /// is neither a pending edit nor a run does it fall back to this binary's
+    /// compiled default, and by then the operator is choosing the value
+    /// explicitly and can see it before `s` commits to it.
+    fn adjust_verify_max_retries(&mut self, delta: i32) {
+        let Some(goal) = self.selected_goal.and_then(|idx| self.goals.get(idx)) else {
+            return;
+        };
+        let id = goal.id.clone();
+        let base = self
+            .pending_verify_max_retries
+            .get(&id)
+            .copied()
+            .or(goal.run_verify_max_retries.filter(|&n| n > 0))
+            .unwrap_or(librefang_kernel::goal_runner::DEFAULT_VERIFY_MAX_RETRIES);
+        let next = (base as i32 + delta).clamp(1, MAX_VERIFY_MAX_RETRIES as i32) as u32;
+        self.pending_verify_max_retries.insert(id, next);
+    }
     pub fn handle_key(&mut self, key: KeyEvent) -> GoalsAction {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return GoalsAction::Continue;
@@ -499,6 +522,16 @@ impl GoalsState {
                         return Self::toggle_pause(g);
                     }
                 }
+            }
+            // The budget only reaches a run that uses loop engineering, so the
+            // keys stay inert on a goal where the number would change nothing.
+            KeyCode::Char('+') | KeyCode::Char('-') if self.selected_uses_loop_engineering() => {
+                let delta = if key.code == KeyCode::Char('+') {
+                    1
+                } else {
+                    -1
+                };
+                self.adjust_verify_max_retries(delta);
             }
             KeyCode::Char('r') => return GoalsAction::Refresh,
             _ => {}
