@@ -757,18 +757,22 @@ pub struct ProviderInfo {
     /// are routed through this proxy instead of the global proxy config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
-    /// Opt in to live model discovery for a provider that is not one of the
-    /// built-in local ids (`ollama` / `vllm` / `lmstudio` / `lemonade`).
+    /// Live model discovery, on unless the operator turns it off (#8407).
     ///
     /// When true, the periodic probe loop and the `/api/providers/{name}/test`
     /// handler poll this provider's OpenAI-compatible `/models` endpoint and
     /// merge the result into the catalog, exactly as they already do for the
     /// built-in local ids.
+    /// Absence means **true**: no registry-shipped provider file carries this
+    /// key, so reading an absent key as "off" is what let a registry sync
+    /// disable discovery for an operator who had enabled it.
+    /// Set `discover_models = false` in the provider's own TOML to keep it off
+    /// the probe path.
     /// The predicate that reads this field ORs it with the built-in id check
     /// (`librefang_runtime::provider_health::discovers_models`), so a built-in
-    /// local provider keeps discovering regardless of the flag's value and an
-    /// existing install sees no change.
-    #[serde(default)]
+    /// local provider keeps discovering regardless of the flag's value and only
+    /// an explicit `false` opts a provider out.
+    #[serde(default = "default_discover_models")]
     pub discover_models: bool,
 }
 
@@ -789,7 +793,7 @@ impl Default for ProviderInfo {
             is_custom: false,
             cli_managed: false,
             proxy_url: None,
-            discover_models: false,
+            discover_models: true,
         }
     }
 }
@@ -850,14 +854,26 @@ pub struct ProviderCatalogToml {
     /// Media capabilities supported by this provider (e.g. "image_generation", "text_to_speech").
     #[serde(default)]
     pub media_capabilities: Vec<String>,
-    /// Opt in to live model discovery — see [`ProviderInfo::discover_models`].
-    /// Absent in every registry-shipped file, so it defaults to `false` and the
-    /// built-in local ids keep discovering through the id branch of the predicate.
-    #[serde(default)]
+    /// Live model discovery — see [`ProviderInfo::discover_models`].
+    /// Absent in every registry-shipped file, and absent means `true`: reading an
+    /// absent key as "off" is what let a registry sync silently disable discovery
+    /// without writing anything that looks like an instruction (#8407).
+    #[serde(default = "default_discover_models")]
     pub discover_models: bool,
 }
 
 fn default_key_required() -> bool {
+    true
+}
+
+/// Serde default for [`ProviderInfo::discover_models`] and
+/// [`ProviderCatalogToml::discover_models`] — a named function rather than
+/// `#[serde(default)]`, which would make an absent key `false`.
+///
+/// The two must agree with the `Default` impls: a provider built in memory and a
+/// provider parsed from a file that omits the key have to land on the same value,
+/// or the catalog would depend on which path produced it.
+fn default_discover_models() -> bool {
     true
 }
 
@@ -1005,7 +1021,10 @@ mod tests {
         assert_eq!(info.api_key_env, "ACME_TOKEN");
         assert_eq!(info.base_url, "https://api.acme.test/v1");
         assert!(!info.key_required);
-        assert!(!info.discover_models, "absent flag stays off");
+        assert!(
+            info.discover_models,
+            "an absent flag means on (#8407) — every registry-shipped file omits it"
+        );
     }
 
     #[test]
@@ -1356,9 +1375,9 @@ aliases = []
         assert!(!info.discover_models);
     }
 
-    /// #6702: `discover_models` must survive the full TOML → `ProviderCatalogToml`
-    /// → `ProviderInfo` → TOML round-trip, and must default to `false` when the
-    /// key is absent — which is the shape of every registry-shipped provider file.
+    /// #6702: `discover_models` must survive the full TOML → `ProviderCatalogToml` → `ProviderInfo` → TOML round-trip.
+    ///
+    /// #8407: an absent key defaults to `true`, not `false` — every registry-shipped provider file omits it, so "absent means off" is what let a registry sync disable discovery without writing anything that looks like an instruction.
     #[test]
     fn provider_discover_models_round_trips_through_toml() {
         let with_flag = r#"
@@ -1393,11 +1412,11 @@ key_required = false
 "#;
         let legacy: ModelCatalogFile = toml::from_str(without_flag).expect("parses");
         assert!(
-            !legacy
+            legacy
                 .provider
                 .expect("has a [provider] section")
                 .discover_models,
-            "absent key defaults to false"
+            "absent key defaults to true — this fixture is the shape every registry file ships (#8407)"
         );
     }
 

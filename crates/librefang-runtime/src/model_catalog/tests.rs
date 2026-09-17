@@ -3094,11 +3094,44 @@ fn a_partial_overlay_never_clobbers_a_full_record_for_the_same_id() {
         assert_eq!(provider.display_name, "LiteLLM Gateway");
         assert!(
             provider.discover_models,
-            "opting in from any contributing file is enough"
+            "the flag is on when no contributing file turns it off (#8407)"
         );
         assert!(
             !provider.is_custom,
             "a registry-shipped contributor makes the entry non-deletable"
+        );
+    }
+}
+
+/// #8407, the mirror case: discovery is on by default now, so a file that omits the key must not out-vote a file that explicitly turns it off.
+///
+/// `merge_provider_record` ORed the flag while the default was `false`, so an opt-in in any contributing file won. With the default flipped, that same combiner would make an explicit `false` unenforceable, so it ANDs — the shape `key_required` already uses, the other default-true bool in that struct.
+#[test]
+fn an_explicit_opt_out_survives_a_merge_with_a_file_that_omits_the_key() {
+    let registry_shaped = concat!(
+        "[provider]\n",
+        "id = \"litellm\"\n",
+        "display_name = \"LiteLLM Gateway\"\n",
+        "api_key_env = \"LITELLM_TOKEN\"\n",
+        "base_url = \"https://gateway.internal/v1\"\n",
+    );
+    // What `PUT /api/providers/{name}/discovery` writes when the operator turns discovery off.
+    let opted_out = "[provider]\nid = \"litellm\"\ndiscover_models = false\n";
+
+    // Both orders, because `read_dir` order is arbitrary.
+    for sources in [
+        vec![source(registry_shaped, false), source(opted_out, false)],
+        vec![source(opted_out, false), source(registry_shaped, false)],
+    ] {
+        let catalog = ModelCatalog::from_sources(&sources, None);
+        let provider = catalog.get_provider("litellm").expect("merged entry");
+        assert!(
+            !provider.discover_models,
+            "an explicit `discover_models = false` must survive a merge with a file that omits the key"
+        );
+        assert_eq!(
+            provider.base_url, "https://gateway.internal/v1",
+            "the merge still supplies everything the partial file leaves out"
         );
     }
 }

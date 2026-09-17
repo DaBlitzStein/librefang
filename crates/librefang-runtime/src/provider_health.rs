@@ -848,10 +848,12 @@ mod tests {
         assert!(!is_local_provider("qwen-code"));
     }
 
-    /// #6702: discovery is the union of the built-in local ids and the
-    /// per-provider opt-in, never one replacing the other.
+    /// #6702, #8407: discovery is the union of the built-in local ids and every provider that has not explicitly opted out, never one replacing the other.
+    ///
+    /// The default flipped in #8407 — the registry ships no `discover_models` key in any of its provider files, so "absent" used to read as "off", and a sync that rewrote one of those files turned discovery off for the operator who had enabled it.
+    /// Absence now reads as "on" and only an explicit `false` keeps a provider off the probe path, which is why `is_local_provider` still wins over it.
     #[test]
-    fn discovers_models_is_local_id_or_opt_in() {
+    fn discovers_models_is_local_id_or_default_on() {
         use librefang_types::model_catalog::ProviderInfo;
 
         let builtin_local = ProviderInfo {
@@ -888,15 +890,28 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            !discovers_models(&custom_default),
-            "a custom provider without the flag stays out of the probe path"
+            discovers_models(&custom_default),
+            "a provider that never expressed a preference discovers: an absent flag is not an opt-out (#8407)"
         );
 
         let remote = ProviderInfo {
             id: "openai".to_string(),
             ..Default::default()
         };
-        assert!(!discovers_models(&remote));
+        assert!(
+            discovers_models(&remote),
+            "a remote provider discovers by default too — probing is how its live model list is known"
+        );
+
+        let custom_opted_out = ProviderInfo {
+            id: "openai".to_string(),
+            discover_models: false,
+            ..Default::default()
+        };
+        assert!(
+            !discovers_models(&custom_opted_out),
+            "an explicit `discover_models = false` keeps a provider off the probe path"
+        );
     }
 
     #[test]
