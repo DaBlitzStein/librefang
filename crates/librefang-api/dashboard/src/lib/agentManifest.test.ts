@@ -819,6 +819,44 @@ block_stall_degrade_after = 2
     expect(second.extras.autonomous).toEqual({ block_stall_degrade_after: 2 });
   });
 
+  // The other half of the same slot, and the one that is pure prophylaxis today:
+  // `ModelRoutingConfig` has exactly the five fields the form already knows, so
+  // no `[routing]` key can be dropped — yet. The next one added there would be,
+  // which is how `block_stall_degrade_after` and `reasoning_mode` went missing.
+  // `escalate_model` is not a field of that struct; it stands in for that next
+  // field, and what this test pins is the slot, not the name.
+  it("round-trips an unknown [routing] key the form has no field for", () => {
+    const original = `name = "agent"
+
+[routing]
+simple_model = "a"
+medium_model = "b"
+complex_model = "c"
+simple_threshold = 1000
+complex_threshold = 8000
+escalate_model = "d"
+`;
+    const result = parseManifestToml(original);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.form.routing.simple_model).toBe("a");
+
+    const out = serializeManifestForm(result.form, result.extras);
+    expect(out).toContain("escalate_model");
+
+    // Inside [routing], not leaked into whichever section follows.
+    const after = out.slice(out.indexOf("[routing]") + "[routing]".length);
+    const nextHeader = after.search(/\n\[/);
+    const block = nextHeader === -1 ? after : after.slice(0, nextHeader);
+    expect(block).toContain("escalate_model");
+
+    // Stable across a second pass.
+    const second = parseManifestToml(out);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.extras.routing).toEqual({ escalate_model: "d" });
+  });
+
   // Unticking "enabled" is the user deleting the whole table, so the preserved
   // keys go with it rather than stranding a [thinking] block nothing owns.
   it("drops preserved [thinking] extras when the section is disabled", () => {
