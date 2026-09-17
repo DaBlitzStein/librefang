@@ -380,12 +380,12 @@ format-bytes-kib = { $value } KiB
 format-bytes-b = { $value } B
 format-size-mb = ({ $value } MB)
 
-format-uptime-s = { $secs }s
-format-uptime-ms = { $mins }m { $secs }s
-format-uptime-hm = { $hours }h { $mins }m
-format-uptime-hms = { $hours }h { $mins }m { $secs }s
-format-uptime-dh = { $days }d { $hours }h
-format-uptime-dhm = { $days }d { $hours }h { $mins }m
+format-uptime-s = { $secs }秒
+format-uptime-ms = { $mins }分 { $secs }秒
+format-uptime-hm = { $hours }小时 { $mins }分
+format-uptime-hms = { $hours }小时 { $mins }分 { $secs }秒
+format-uptime-dh = { $days }天 { $hours }小时
+format-uptime-dhm = { $days }天 { $hours }小时 { $mins }分
 
 # --- Desktop install & Update errors ---
 desktop-install-unsupported-platform = 不支持的平台
@@ -1272,7 +1272,7 @@ tui-workflows-hints-run-result =   [Enter/Esc] 返回
 
 # --- Triggers screen ---
 tui-triggers-title-screen = 触发器
-tui-triggers-header-agent = Agent
+tui-triggers-header-agent = 智能体
 tui-triggers-header-pattern = 模式
 tui-triggers-header-fires = 触发次数
 tui-triggers-header-status = 状态
@@ -1284,7 +1284,7 @@ tui-triggers-create-new-option =   + 创建新触发器
 tui-triggers-hints-list =   [↑↓] 导航  [Enter] 创建  [d] 删除  [r] 刷新
 tui-triggers-title-create = 创建新触发器
 tui-triggers-create-step =   第 { $current } 步，共 { $total } 步
-tui-triggers-label-agent-id = Agent ID:
+tui-triggers-label-agent-id = 智能体 ID:
 tui-triggers-placeholder-agent-id = agent-uuid
 tui-triggers-label-pattern-picker =   选择模式类型:
 tui-triggers-prompt-param = { $type } 的模式参数:
@@ -1293,7 +1293,7 @@ tui-triggers-label-prompt = 提示词模板:
 tui-triggers-placeholder-prompt = 处理此项: {"{"}event{"}"}
 tui-triggers-label-max-fires = 最大触发次数 (0 = 无限制):
 tui-triggers-placeholder-max-fires = 0
-tui-triggers-review-agent =   Agent:   
+tui-triggers-review-agent =   智能体:   
 tui-triggers-review-pattern =   模式:   
 tui-triggers-review-prompt =   提示词: 
 tui-triggers-review-max =   最大:    
@@ -1900,89 +1900,97 @@ maintenance-update-cargo-blocked = 此二进制文件通过 cargo 安装。出�
 maintenance-update-unofficial-path = 自动更新仅支持官方安装路径（{ $path }）。当前二进制文件从其他位置运行。
 maintenance-update-package-manager-hint = 如果此二进制文件来自其他包管理器，请使用该包管理器更新。
 # doctor_cmd.rs
-doctor-check-librefang-dir-ok = librefangdirok完成 { $path }
-doctor-check-librefang-dir-fail = librefangdirfail失败
-doctor-check-librefang-dir-created = librefangdir已创建完成
-doctor-check-librefang-dir-create-fail = librefangdir创建fail失败
-doctor-check-librefang-dir-not-found-init = 未找到librefangdir未找到init
-doctor-check-env-ok = envok完成
-doctor-check-env-fixed = envfixed
-doctor-check-env-ok-generic = envokgeneric完成
-doctor-check-env-loose-warn = 警告：envloosewarn { $mode }
-doctor-check-env-not-found-warn = 未找到env未找到warn
-doctor-check-config-ok = 配置ok完成 { $path }
-doctor-check-config-syntax-fail = 配置syntaxfail失败：{ $error }
-doctor-check-config-not-found = 未找到配置未找到
+doctor-check-librefang-dir-ok = LibreFang 目录：{ $path }
+doctor-check-librefang-dir-fail = 未找到 LibreFang 目录。
+doctor-check-librefang-dir-created = 已创建 LibreFang 目录
+doctor-check-librefang-dir-create-fail = 创建目录失败
+doctor-check-librefang-dir-not-found-init = 未找到 LibreFang 目录。请先运行 `librefang init`。
+doctor-check-env-ok = .env 文件（权限正常）
+doctor-check-env-fixed = .env 文件（权限已修正为 0600）
+doctor-check-env-ok-generic = .env 文件
+doctor-check-env-loose-warn = .env 文件权限过于宽松（{ $mode }），应为 0600
+doctor-check-env-not-found-warn = 未找到 .env 文件（用 `librefang config set-key <provider>` 创建）
+doctor-check-config-ok = 配置文件：{ $path }
+doctor-check-config-syntax-fail = 配置文件存在语法错误：{ $error }
+doctor-check-config-not-found = 未找到配置文件。
 doctor-check-config-created = 配置已创建完成
-doctor-check-config-create-fail = 配置创建fail失败
-doctor-check-cli-version = cli版本 { $version } { $channel }
-doctor-check-update-available-warn = 警告：更新可用warn { $current } { $latest }
-doctor-check-cli-up-to-date = cliuptodate
-doctor-check-update-fail-warn = 更新failwarn失败
+doctor-check-config-create-fail = 创建 config.toml 失败
+doctor-check-cli-version = CLI 版本：{ $version }（通道：{ $channel }）
+doctor-check-update-available-warn = 有可用更新：{ $current } -> { $latest }（见 https://github.com/librefang/librefang/releases）
+doctor-check-cli-up-to-date = CLI 已是最新版本
+doctor-check-update-fail-warn = 无法检查更新（网络不可用）
 doctor-check-daemon-running = 守护进程运行中 { $url }
-doctor-check-daemon-not-running-warn = 警告：守护进程未运行中warn
+doctor-check-daemon-not-running-warn = 守护进程未运行（用 `librefang start` 启动）
 doctor-check-port-available = 端口可用 { $address }
-doctor-check-port-in-use-warn = 警告：端口inusewarn { $address }
+doctor-check-port-in-use-warn = 端口 { $address } 已被其他进程占用
 doctor-check-stale-daemon-json-removed = stale守护进程json已移除完成
-doctor-check-stale-daemon-json-warn = 警告：stale守护进程jsonwarn
-doctor-check-db-ok = dbok完成
-doctor-check-db-invalid-fail = db无效fail失败
-doctor-check-db-not-found-warn = 警告：db未找到warn
-doctor-check-disk-space-low-warn = 警告：diskspacelowwarn { $count }
-doctor-check-disk-space-ok = diskspaceok完成 { $count }
-doctor-check-manifests-ok = manifestsok完成
-doctor-check-manifest-invalid-fail = manifest无效fail失败：{ $file } { $error }
-doctor-check-home-dir-fail = homedirfail失败
-doctor-check-provider-key-rejected-warn = 警告：提供商密钥rejectedwarn { $name } { $env_var }
-doctor-check-endpoint-reachable = endpointreachable { $name } { $endpoint }
-doctor-check-endpoint-unreachable-warn = 警告：endpointunreachablewarn { $name } { $endpoint }
-doctor-check-channel-token-format-warn = 警告：频道令牌formatwarn { $name } { $env_var }
-doctor-check-config-env-missing-warn = 未找到配置env缺少warn { $env_var }
-doctor-check-config-deser-ok = 配置deserok完成
-doctor-check-exec-policy = execpolicy { $mode } { $count }
-doctor-check-include-file-ok = include文件ok完成 { $path }
-doctor-check-include-file-missing-warn = 未找到include文件缺少warn { $path }
-doctor-check-include-file-not-found-fail = include文件未找到fail失败：{ $path }
-doctor-check-mcp-servers-count = mcp服务器count { $count }
-doctor-check-mcp-empty-command-warn = 未找到mcp空命令warn { $name }
-doctor-check-mcp-empty-url-warn = 未找到mcp空URLwarn { $name }
-doctor-check-mcp-empty-base-url-warn = 未找到mcp空baseURLwarn { $name }
-doctor-check-mcp-no-compat-tools-warn = 未找到mcpnocompat工具warn { $name }
-doctor-check-mcp-compat-header-empty-name-warn = 未找到mcpcompatheader空名称warn { $name }
-doctor-check-mcp-compat-header-no-value-warn = 未找到mcpcompatheadernovaluewarn { $name }
-doctor-check-mcp-compat-tool-empty-name-warn = 未找到mcpcompat工具空名称warn { $name }
-doctor-check-mcp-compat-tool-empty-path-warn = 未找到mcpcompat工具空路径warn { $name }
-doctor-check-config-deser-fail = 配置deserfail失败：{ $error }
+doctor-check-stale-daemon-json-warn = 发现残留的 daemon.json（守护进程未运行）。用 --repair 运行以清理。
+doctor-check-db-ok = 数据库文件（有效的 SQLite）
+doctor-check-db-invalid-fail = 数据库文件存在，但不是有效的 SQLite 文件
+doctor-check-db-not-found-warn = 没有数据库文件（将在首次运行时创建）
+doctor-check-disk-space-low-warn = 磁盘空间不足：可用 { $count }MB
+doctor-check-disk-space-ok = 磁盘空间：可用 { $count }MB
+doctor-check-manifests-ok = Agent manifest 均有效
+doctor-check-manifest-invalid-fail = manifest { $file } 无效：{ $error }
+doctor-check-home-dir-fail = 无法确定用户主目录
+doctor-check-provider-key-rejected-warn = { $name }（{ $env_var }）- 密钥被拒绝（401/403）
+doctor-check-endpoint-reachable = { $name } 端点可访问（{ $endpoint }）
+doctor-check-endpoint-unreachable-warn = { $name } 端点无法访问（{ $endpoint }）
+doctor-check-channel-token-format-warn = { $name }（{ $env_var }）- 令牌格式异常
+doctor-check-config-env-missing-warn = 配置引用了 { $env_var }，但它未在环境变量或 .env 中设置
+doctor-check-config-deser-ok = 配置可反序列化为 KernelConfig
+doctor-check-exec-policy = 执行策略：mode={ $mode }，safe_bins={ $count }
+doctor-check-include-file-ok = 包含的文件：{ $path }
+doctor-check-include-file-missing-warn = 包含的文件缺失：{ $path }
+doctor-check-include-file-not-found-fail = 未找到包含的文件：{ $path }
+doctor-check-mcp-servers-count = 已配置的 MCP 服务器：{ $count }
+doctor-check-mcp-empty-command-warn = MCP 服务器 '{ $name }' 的命令为空
+doctor-check-mcp-empty-url-warn = MCP 服务器 '{ $name }' 的 URL 为空
+doctor-check-mcp-empty-base-url-warn = MCP 服务器 '{ $name }' 的 base_url 为空
+doctor-check-mcp-no-compat-tools-warn = MCP 服务器 '{ $name }' 未配置任何 http_compat 工具
+doctor-check-mcp-compat-header-empty-name-warn = MCP 服务器 '{ $name }' 的 http_compat header 名称为空
+doctor-check-mcp-compat-header-no-value-warn = MCP 服务器 '{ $name }' 的 http_compat header 缺少 value/value_env
+doctor-check-mcp-compat-tool-empty-name-warn = MCP 服务器 '{ $name }' 的 http_compat 工具名称为空
+doctor-check-mcp-compat-tool-empty-path-warn = MCP 服务器 '{ $name }' 的 http_compat 工具路径为空
+doctor-check-config-deser-fail = 配置无法反序列化为 KernelConfig：{ $error }
 doctor-check-skills-loaded = 技能已加载 { $count }
-doctor-check-skills-load-fail-warn = 技能加载failwarn失败：{ $error }
-doctor-check-skills-injection-ok = 技能injectionok完成
+doctor-check-skills-load-fail-warn = 加载技能失败：{ $error }
+doctor-check-skills-injection-ok = 所有技能均通过提示词注入扫描
 doctor-check-mcp-catalog-templates = mcp目录templates { $templates }
 doctor-check-mcp-configured-servers = mcp已配置服务器 { $configured }
 doctor-check-running-agents = 运行中代理 { $count }
-doctor-check-daemon-uptime = 守护进程uptime { $hours } { $mins }
-doctor-check-db-connectivity-ok = db连接性ok完成
-doctor-check-db-status-fail = db状态fail失败：{ $status }
-doctor-check-health-detail-status-warn = 警告：健康detail状态warn { $status }
-doctor-check-health-detail-fail-warn = 健康detailfailwarn失败：{ $error }
+doctor-check-daemon-uptime = 守护进程运行时长：{ $hours } 小时 { $mins } 分
+doctor-check-db-connectivity-ok = 数据库连接：正常
+doctor-check-db-status-fail = 数据库状态：{ $status }
+doctor-check-health-detail-status-warn = 健康详情返回 { $status }
+doctor-check-health-detail-fail-warn = 查询守护进程健康状况失败：{ $error }
 doctor-check-skills-loaded-daemon = 技能已加载守护进程 { $count }
 doctor-check-rust-version = rust版本 { $version }
-doctor-check-rust-not-found-fail = rust未找到fail失败
+doctor-check-rust-not-found-fail = 未找到 Rust 工具链
 doctor-check-python-version = python版本 { $version }
-doctor-check-python-not-found-warn = 未找到python未找到warn
+doctor-check-python-not-found-warn = 未找到 Python（Python 技能运行时需要）
 doctor-check-node-version = node版本 { $version }
-doctor-check-node-not-found-warn = 未找到node未找到warn
-doctor-prompt-create-dir = doctor提示词创建dir：
-doctor-prompt-create-config = doctor提示词创建配置：
-doctor-section-providers = doctorsection提供商
-doctor-section-connectivity = doctorsection连接性
-doctor-section-channels = doctorsection频道
-doctor-section-config-val = doctorsection配置val
-doctor-section-skills = doctorsection技能
-doctor-check-skills-injection-warn = 警告：技能injectionwarn { $name }
+doctor-check-node-not-found-warn = 未找到 Node.js（Node 技能运行时需要）
+doctor-prompt-create-dir =     现在创建？[Y/n] 
+doctor-prompt-create-config =     现在创建默认配置？[Y/n] 
+doctor-section-providers =   LLM 提供商：
+doctor-section-connectivity = 
+
+  网络连通性：
+doctor-section-channels = 
+
+  频道集成：
+doctor-section-config-val = 
+
+  配置校验：
+doctor-section-skills = 
+
+  技能：
+doctor-check-skills-injection-warn = 技能存在提示词注入风险：{ $name }
 doctor-section-mcp-servers = doctorsectionmcp服务器
 doctor-section-daemon-health = doctorsection守护进程健康
-doctor-check-daemon-mcp-status = 守护进程mcp状态 { $configured } { $connected }
-doctor-check-daemon-mcp-health = 守护进程mcp健康 { $healthy } { $total }
+doctor-check-daemon-mcp-status = MCP 服务器：已配置 { $configured } 个，已连接 { $connected } 个
+doctor-check-daemon-mcp-health = MCP 服务器健康状况：{ $healthy }/{ $total } 正常
 doctor-suggest-groq = https://console.groq.com       （免费、快速）
 doctor-suggest-gemini = https://aistudio.google.com    （免费套餐）
 doctor-suggest-deepseek = https://platform.deepseek.com  （低成本）
@@ -2203,7 +2211,7 @@ auth-pool-status-exhausted = 已耗尽
 auth-pool-status-cooldown = 冷却中
 auth-pool-status-env-missing = 缺少环境变量
 auth-pool-status-healthy = 健康
-auth-pool-key-requests = requests={ $count }
+auth-pool-key-requests = 请求数={ $count }
 auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
 auth-hash-add-config-hint = 添加到 config.toml：
 auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
@@ -2314,7 +2322,7 @@ skill-bundle-size =   大小：{ $size } 字节
 skill-dry-run = 仅试运行。
 skill-dry-run-repo =   Repo：{ $repo }
 skill-dry-run-tag =   Tag：{ $tag }
-skill-github-token-required = 请设置 GITHUB_TOKEN 或 GH_TOKEN 才能发布，或使用 --dry-run 重新运行。
+skill-github-token-required = 未找到 GitHub 令牌。请设置 GITHUB_TOKEN 或 GH_TOKEN，或使用 `librefang vault set GITHUB_TOKEN` 将其存入保险库，或使用 --dry-run 重新运行。
 skill-publishing-progress = 正在发布 { $name }@{ $tag }
 skill-publish-success = 已将 { $name } 发布到 { $repo }@{ $tag }
 skill-publish-release-url = Release：{ $url }
@@ -2332,17 +2340,17 @@ skill-created-step-install =   { $step }. 安装：librefang skill install { $pa
 # --- Monitoring & Status ---
 monitoring-no-audit = 未找到no审计
 monitoring-no-memory = 未找到no记忆 { $agent }
-monitoring-no-devices = 未找到nodevices
-monitoring-no-webhooks = 未找到nowebhooks
+monitoring-no-devices = 没有已配对的设备。
+monitoring-no-webhooks = 未配置 webhook。
 label-last-seen = 最后出现
 status-watch-header =   { $status }（每 { $interval } 秒刷新，Ctrl+C 退出）
 status-warning-config = 警告：{ $error }；状态显示将使用默认配置值
-status-summary-up = librefang { $version } { $state } uptime={ $uptime } { $auth } ({ $base })
+status-summary-up = librefang { $version } { $state } 运行时间={ $uptime } { $auth } ({ $base })
 status-peers-connected = { $connected } 已连接 / { $total } 已知
 status-agents-active = { $active } 运行中 / 共 { $total }
 status-mb = { $mb } MB
-status-summary-down = librefang down home={ $home } default={ $provider }/{ $model }
-status-uptime-format = { $hours }h { $mins }m
+status-summary-down = librefang 已停止 home={ $home } default={ $provider }/{ $model }
+status-uptime-format = { $hours }小时 { $mins }分
 # --- Brand/proper names ---
 
 # ── 用户组 (#7745) ──────────────────────────────────────────────────────────
@@ -2410,7 +2418,7 @@ tui-goals-count = { $count } 个目标
 tui-goals-filter = 过滤：{ $query }
 tui-goals-loading = 正在加载目标...
 tui-goals-empty = 暂无目标。按 [n] 创建一个。
-tui-goals-hints = [↑↓] 导航  [Enter] 详情  [n] 新建  [s] 启动/停止  [d] 删除  [/] 搜索  [r] 刷新
+tui-goals-hints = [↑↓] 导航  [Enter] 详情  [n] 新建  [s] 启动/停止  [p] 暂停/恢复  [d] 删除  [/] 搜索  [r] 刷新
 tui-goals-confirm-delete = 删除此目标？[y] 确认  [其他任意键] 取消
 tui-goals-none-selected = 未选择目标。
 tui-goals-agent-none = 未指定
@@ -2450,12 +2458,16 @@ tui-goal-created = 目标已创建: { $id }
 tui-goal-deleted = 目标已删除: { $id }
 tui-goal-run-started = 运行已开始: { $id }
 tui-goal-run-stopped = 运行已停止: { $id }
+tui-goal-run-paused = 运行已暂停: { $id }
+tui-goal-run-resumed = 运行已恢复: { $id }
 tui-goal-create-failed = 无法创建目标。
 tui-goal-create-error = 无法创建目标：{ $error }
 tui-goal-delete-failed = 无法删除目标。
 tui-goal-start-failed = 无法开始运行。
 tui-goal-start-error = 无法开始运行：{ $error }
 tui-goal-stop-failed = 无法停止运行。
+tui-goal-pause-failed = 无法暂停运行。
+tui-goal-resume-failed = 无法恢复运行。
 tui-goal-inproc-unavailable = 进程内模式下目标管理不可用。
 
 # --- goal command (CLI) ---
@@ -2471,6 +2483,7 @@ cmd-goal-finished = 目标已成功完成。
 cmd-goal-max-iterations = 目标已停止：已达迭代上限。
 cmd-goal-rate-limited = 目标已停止：提供商限流。
 cmd-goal-stopped = 目标运行已停止。
+cmd-goal-paused = 目标运行已暂停。
 cmd-goal-error = 错误：{ $error }
 cmd-goal-unknown-error = 未知错误
 cmd-goal-watch-poll-error = 无法读取运行状态（{ $count }/{ $max }）；正在重试…
@@ -2527,6 +2540,39 @@ tui-event-channels-not-available-in-process = 通道管理需要正在运行的�
 tui-event-channel-save-failed = 保存通道实例 { $name } 失败：{ $error }
 tui-event-channel-delete-failed = 删除通道实例 { $name } 失败：{ $error }
 tui-event-channels-reload-failed = 重载通道失败：{ $error }
+# Model routing editor (profile-based routing)
+tui-agents-title-model-routing = 模型路由
+tui-agents-label-routing-fixed = 固定 — 始终使用该智能体自己的模型
+tui-agents-label-routing-flexible = 灵活 — 由路由器按任务选择
+tui-agents-hint-routing-mode = [Tab] 切换模式
+tui-agents-label-routing-fixed-explainer = 该智能体始终使用其清单中的模型。按 Tab 让路由器按任务选择。
+tui-agents-label-no-router-profiles = 没有可用的模型配置。请添加到 ~/.librefang/model_profiles.toml。
+tui-agents-label-routing-any-profile = 全部
+tui-agents-hints-model-routing = [Tab] 模式  [↑↓] 导航  [Space] 切换配置  [+/-] 费用预算  [Enter] 保存  [Esc] 取消
+tui-agents-model-routing-not-loaded = 该智能体的路由设置尚未加载 — 请稍候片刻；若加载失败，请按 Esc 退出并用 r 重新打开。
+tui-event-model-routing-fetch-failed = 获取模型路由失败
+tui-event-model-routing-update-failed = 更新模型路由失败
+tui-mod-agent-model-routing-updated = 已更新智能体 { $id } 的模型路由。
+
+# Model routing CLI commands
+agent-routing-label-mode = 模式
+agent-routing-label-allowed = 允许的配置
+agent-routing-label-budget = 费用预算
+agent-routing-label-default = 默认配置
+agent-routing-any-profile = 全部
+agent-routing-no-cap = 无上限
+agent-routing-fixed-explainer = 该智能体始终使用其清单中的模型。
+agent-routing-label-fixed = 路由排除
+agent-routing-fixed-opt-out = 已固定 — 路由器不会处理该智能体
+agent-routing-updated = 智能体 { $id } 的模型路由已设置为 { $mode }。
+agent-routing-failed = 更新模型路由失败: { $error }
+agent-routing-profiles-header = 模型路由配置 (路由器: { $enabled }):
+tui-agents-line-routing-mode =   模式: { $mode }
+tui-agents-line-routing-summary =   费用预算: { $budget }    允许的配置: { $allowed }
+tui-agents-label-routing-no-cap = 无上限
+tui-agents-label-routing-cheap = 低价
+tui-agents-label-routing-medium = 中等
+tui-agents-label-routing-expensive = 高价
 
 tui-event-manifest-history-fetch-failed = 无法加载该代理的配置历史
 tui-event-model-params-fetch-failed = 无法加载该代理的模型参数

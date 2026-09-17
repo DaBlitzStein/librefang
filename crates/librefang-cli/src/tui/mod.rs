@@ -458,6 +458,38 @@ impl App {
                     .collect();
                 self.agents.mcp_cursor = 0;
             }
+            AppEvent::AgentModelRoutingLoaded {
+                mode,
+                allowed_profiles,
+                cost_budget,
+                default_profile,
+                fixed,
+                available,
+            } => {
+                // Populate the routing editor from the agent's real stored
+                // state, not from whatever the previous screen left behind.
+                self.agents.model_mode = mode;
+                self.agents.router_profiles = available
+                    .into_iter()
+                    .map(|name| {
+                        let checked = allowed_profiles.contains(&name);
+                        (name, checked)
+                    })
+                    .collect();
+                self.agents.router_profile_cursor = 0;
+                self.agents.cost_budget_idx = agents::COST_BUDGET_OPTIONS
+                    .iter()
+                    .position(|(_, wire)| *wire == cost_budget.as_deref())
+                    .unwrap_or(0);
+                self.agents.router_default_profile = default_profile;
+                self.agents.router_fixed = fixed;
+                self.agents.routing_loaded = true;
+            }
+            AppEvent::AgentModelRoutingUpdated(id) => {
+                self.agents.status_msg =
+                    crate::i18n::t_args("tui-mod-agent-model-routing-updated", &[("id", &id)]);
+                self.agents.sub = agents::AgentSubScreen::AgentDetail;
+            }
             AppEvent::AgentSkillsUpdated(id) => {
                 self.agents.status_msg =
                     crate::i18n::t_args("tui-mod-agent-skills-updated", &[("id", &id)]);
@@ -605,8 +637,7 @@ impl App {
 
             // ── Goals events ──
             AppEvent::GoalsLoaded(list) => {
-                self.goals.goals = list;
-                self.goals.refilter();
+                self.goals.replace_goals(list);
                 self.goals.loading = false;
             }
             AppEvent::GoalRunLoaded {
@@ -653,6 +684,16 @@ impl App {
             }
             AppEvent::GoalRunStopped(id) => {
                 self.goals.status_msg = crate::i18n::t_args("tui-goal-run-stopped", &[("id", &id)]);
+                self.refresh_goal_run(id);
+                self.refresh_goals();
+            }
+            AppEvent::GoalRunPaused(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-paused", &[("id", &id)]);
+                self.refresh_goal_run(id);
+                self.refresh_goals();
+            }
+            AppEvent::GoalRunResumed(id) => {
+                self.goals.status_msg = crate::i18n::t_args("tui-goal-run-resumed", &[("id", &id)]);
                 self.refresh_goal_run(id);
                 self.refresh_goals();
             }
@@ -2008,6 +2049,32 @@ impl App {
                     );
                 }
             }
+            agents::AgentAction::FetchAgentModelRouting(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_model_routing(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::UpdateModelRouting {
+                id,
+                mode,
+                allowed_profiles,
+                cost_budget,
+                default_profile,
+                fixed,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_update_agent_model_routing(
+                        backend,
+                        id,
+                        mode,
+                        allowed_profiles,
+                        cost_budget,
+                        default_profile,
+                        fixed,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
             agents::AgentAction::FetchAgentModelParams(id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_fetch_agent_model_params(backend, id, self.event_tx.clone());
@@ -2162,6 +2229,16 @@ impl App {
             goals::GoalsAction::StopRun { goal_id } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_stop_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::PauseRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_pause_goal_run(backend, goal_id, self.event_tx.clone());
+                }
+            }
+            goals::GoalsAction::ResumeRun { goal_id } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_resume_goal_run(backend, goal_id, self.event_tx.clone());
                 }
             }
         }
