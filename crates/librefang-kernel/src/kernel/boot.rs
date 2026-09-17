@@ -1199,6 +1199,17 @@ impl LibreFangKernel {
                 .join("suppressed_providers.json"),
         );
         model_catalog.load_overrides(&config.home_dir.join("data").join("model_overrides.json"));
+        // Operator-owned discovery preference (#8407), applied over the catalog the registry sync maintains — the setting used to live in the provider TOML the sync rewrites, which is how a reboot turned discovery off.
+        let discover_prefs_path = config.home_dir.join("data").join("provider_discovery.json");
+        model_catalog.load_discover_prefs(&discover_prefs_path);
+        // Adopt the flag out of `providers/*.toml` for installs that set it before this store existed, once; a provider already recorded here is left alone.
+        let adopted = model_catalog.adopt_legacy_discover_flags(&discover_prefs_path);
+        if adopted > 0 {
+            info!(
+                "adopted {adopted} provider discovery preference(s) out of providers/*.toml into {}",
+                discover_prefs_path.display()
+            );
+        }
         model_catalog.detect_auth();
         // Apply region selections first (lower priority than explicit provider_urls)
         if !config.provider_regions.is_empty() {

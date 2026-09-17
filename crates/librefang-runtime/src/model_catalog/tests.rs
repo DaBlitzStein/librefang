@@ -3368,3 +3368,128 @@ fn a_registry_entry_that_omits_the_flag_is_still_a_declaration() {
         VisionSupport::Unsupported
     );
 }
+
+// ---------------------------------------------------------------------------
+// #8407 — the discovery preference lives in `data/`, not in the file the
+// registry sync rewrites.
+// ---------------------------------------------------------------------------
+
+/// What the registry ships for every provider: a `[provider]` table and no `discover_models` key.
+const REGISTRY_SHAPED_PROVIDER: &str =
+    "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n";
+
+/// The reporter's symptom as an assertion: set the preference, let the boot-time registry sync rewrite the provider file, reboot, and discovery is still on.
+///
+/// The sync is represented by its effect — the bytes it writes — rather than by calling it, so the test stays hermetic while pinning the same contract: the preference is not in that file, so nothing the sync does to it can clear the preference.
+#[test]
+fn a_discovery_preference_survives_a_registry_sync_that_rewrites_the_provider_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    std::fs::write(providers.join("deepseek.toml"), REGISTRY_SHAPED_PROVIDER).unwrap();
+
+    // Boot 1: the operator turns discovery on.
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    assert!(catalog.set_provider_discover_preference("deepseek", true));
+    catalog
+        .save_discover_prefs(&prefs)
+        .expect("the preference must reach disk");
+    assert!(catalog.get_provider("deepseek").unwrap().discover_models);
+
+    // The boot-time registry sync rewrites the file from the registry's copy,
+    // which carries no key for the setting to survive in.
+    std::fs::write(providers.join("deepseek.toml"), REGISTRY_SHAPED_PROVIDER).unwrap();
+
+    // Boot 2: same file as boot 1 — the preference has to come back from `data/`.
+    let mut rebooted = ModelCatalog::new_from_dir(&providers);
+    assert!(
+        !rebooted.get_provider("deepseek").unwrap().discover_models,
+        "the provider file alone no longer carries the setting, which is why it is stored elsewhere"
+    );
+    rebooted.load_discover_prefs(&prefs);
+    assert!(
+        rebooted.get_provider("deepseek").unwrap().discover_models,
+        "the preference must survive the sync rewriting the provider file"
+    );
+}
+
+/// End to end, with the real fan-out running in between: the registry sync installs `providers/` from the fixture, the operator turns discovery on, the next boot's fan-out runs again over the same home, and the setting is still there.
+///
+/// This is the reporter's restart driven through the code that performs it.
+/// The preference survives because it is not in the file the fan-out owns — the digest manifest, which keeps an operator-edited file from being rewritten at all, is covered by the `registry_sync` tests.
+#[test]
+fn a_discovery_preference_survives_a_real_registry_fanout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().to_path_buf();
+    let prefs = home.join("data").join("provider_discovery.json");
+
+    // First boot: the fan-out installs `providers/*.toml` from the registry
+    // fixture, exactly like `sync_registry` does.
+    crate::registry_sync::seed_registry_fixture_for_tests(&home);
+    let mut catalog = ModelCatalog::new(&home);
+    assert!(
+        !catalog.get_provider("deepseek").unwrap().discover_models,
+        "the registry ships no `discover_models` key at all"
+    );
+
+    // The operator turns it on.
+    assert!(catalog.set_provider_discover_preference("deepseek", true));
+    catalog
+        .save_discover_prefs(&prefs)
+        .expect("the preference must reach disk");
+
+    // Restart: same fan-out, same cache, then the catalog is rebuilt the way boot does.
+    crate::registry_sync::seed_registry_fixture_for_tests(&home);
+    let mut rebooted = ModelCatalog::new(&home);
+    rebooted.load_discover_prefs(&prefs);
+
+    assert!(
+        rebooted.get_provider("deepseek").unwrap().discover_models,
+        "the preference has to survive a restart with the registry fan-out in between"
+    );
+}
+
+/// An install that enabled discovery before the preference store existed carries the flag only in its provider file (#8407).
+///
+/// The first boot adopts it into the store, and every later boot leaves what it finds there alone — otherwise a stale `true` in a file would overrule an operator who has since turned the setting off.
+#[test]
+fn a_legacy_discover_flag_is_adopted_once_and_never_re_adopted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    std::fs::write(
+        providers.join("deepseek.toml"),
+        "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n",
+    )
+    .unwrap();
+
+    // Boot 1: nothing recorded yet, so the file's flag is adopted.
+    let mut first = ModelCatalog::new_from_dir(&providers);
+    assert_eq!(first.adopt_legacy_discover_flags(&prefs), 1);
+    assert!(first.get_provider("deepseek").unwrap().discover_models);
+
+    // The operator turns it off through the preference store.
+    let mut second = ModelCatalog::new_from_dir(&providers);
+    second.load_discover_prefs(&prefs);
+    assert!(second.set_provider_discover_preference("deepseek", false));
+    second
+        .save_discover_prefs(&prefs)
+        .expect("the preference must reach disk");
+
+    // Boot 2: the file still says `true`, and the store has the last word.
+    let mut third = ModelCatalog::new_from_dir(&providers);
+    third.load_discover_prefs(&prefs);
+    assert_eq!(
+        third.adopt_legacy_discover_flags(&prefs),
+        0,
+        "an explicit preference is never re-adopted from the file"
+    );
+    assert!(
+        !third.get_provider("deepseek").unwrap().discover_models,
+        "turning it off has to stick even while the file still says true"
+    );
+}
