@@ -347,13 +347,12 @@ fn merge_provider_record(existing: &mut ProviderCatalogToml, incoming: ProviderC
     if !incoming.media_capabilities.is_empty() {
         existing.media_capabilities = incoming.media_capabilities;
     }
-    // `key_required` and `discover_models` both default to `true` when absent, so
-    // neither can distinguish "omitted" from "explicitly the default". Combine
-    // them so the result does not depend on `read_dir` order, and so the
-    // non-default value is the one that wins: any file declaring the provider
-    // keyless makes it keyless, any file opting out disables discovery.
+    // `key_required` and `discover_models` both default when absent, so neither
+    // can distinguish "omitted" from "explicitly the default". Combine them so
+    // the result does not depend on `read_dir` order: any file declaring the
+    // provider keyless makes it keyless, any file opting in enables discovery.
     existing.key_required &= incoming.key_required;
-    existing.discover_models &= incoming.discover_models;
+    existing.discover_models |= incoming.discover_models;
 }
 
 impl ModelCatalog {
