@@ -101,6 +101,15 @@ vi.mock("../lib/queries/agents", () => ({
   useAgentMcpServers: () => ({ data: [], isLoading: false }),
   usePromptVersions: () => ({ data: [], isLoading: false }),
   useTools: () => ({ data: [], isLoading: false }),
+  // Same reason as the mutation block below: the agent-editor and avatar
+  // branches each add an import to `AgentsPage`, and a `vi.mock` factory that
+  // omits one fails the file with a message about the mock rather than about
+  // the flow under test. Empty/undefined data is enough — none of these is
+  // read by the Quick Run path.
+  useAgentAvatarUrl: () => ({ data: undefined, isLoading: false }),
+  useAgentChannels: () => ({ data: [], isLoading: false }),
+  useAgentManifest: () => ({ data: undefined, isLoading: false }),
+  useAgentManifestHistory: () => ({ data: [], isLoading: false }),
 }));
 
 vi.mock("../lib/mutations/agents", () => ({
