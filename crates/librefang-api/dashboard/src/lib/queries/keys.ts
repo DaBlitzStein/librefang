@@ -86,6 +86,8 @@ export const agentKeys = {
   // every poll is the one thing this key exists to avoid.
   avatar: (agentId: string) =>
     [...agentKeys.all, "avatar", agentId] as const,
+  manifestHistory: (agentId: string) =>
+    [...agentKeys.all, "manifestHistory", agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
