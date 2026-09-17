@@ -2201,12 +2201,11 @@ tui-agents-opt-create-new = Створити нового агента
 
 tui-agents-hints-filter =   [Введення] Фільтр  [Enter] Застосувати  [Esc] Скасувати пошук
 tui-agents-hints-list =   [↑↓] Навігація  [Enter] Деталі  [/] Пошук  [Esc] Назад
-tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [p] Параметри моделі  [$] Токени  [h] Історія конфігурації  [c] Чат  [k] Зупинити  [Esc] Назад
+tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [w] Спільні папки  [p] Параметри моделі  [$] Токени  [h] Історія конфігурації  [c] Чат  [k] Зупинити  [Esc] Назад
 tui-agents-title-manifest-history = Історія конфігурації
 tui-agents-label-manifest-history-loading = Завантаження історії конфігурації...
 tui-agents-label-manifest-history-empty = Для цього агента ще не записано жодної зміни конфігурації.
 tui-agents-hints-manifest-history =   [↑↓] Перегляд версій  [Esc] Назад
-tui-agents-hints-detail =   [s] Змінити скіли  [m] Змінити MCP  [n] Змінити канали  [w] Спільні папки  [p] Параметри моделі  [$] Токени  [c] Чат  [k] Зупинити  [Esc] Назад
 tui-agents-title-model-params = Параметри моделі
 tui-agents-prompt-model-params = Налаштування цього агента мають перевагу над налаштуваннями моделі. `inherit` означає налаштування моделі.
 tui-agents-hints-model-params =   [←→] Змінити  [i] Успадкувати  [e] Своє значення  [Enter] Зберегти  [Esc] Скасувати
