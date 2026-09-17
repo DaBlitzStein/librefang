@@ -229,7 +229,13 @@ fn claim_and_write(name: &str, rendered: &str) -> Result<(), CreateAgentTypeErro
         CreateAgentTypeError::Io(format!("failed to create {}: {e}", dir.display()))
     })?;
 
-    let path = agent_type_path_in(home_dir, name);
+    // `agent_type_path_in(h, n)` is exactly `agent_types_dir_in(h).join("{n}.toml")`,
+    // and `dir` above is already `agent_types_dir()` — i.e. the same path with the
+    // ambient home this function is built on. `claim_and_write` is #8028's ambient
+    // extraction and its two callers are both ambient paths; #8112's explicit-home
+    // spelling lives in `create_agent_type_from_manifest_in`, which has its own copy.
+    // Using the explicit form here would need a `home_dir` this function never had.
+    let path = dir.join(format!("{name}.toml"));
     // `Path::exists()` followed by a write is check-then-act: two concurrent creates of the same name both observe "absent" and the second silently replaces the first, which is exactly the refusal this function promises.
     // Claiming the path with `File::create_new` — an atomic create-if-absent at the OS level — lets exactly one of them through.
     match std::fs::File::create_new(&path) {
