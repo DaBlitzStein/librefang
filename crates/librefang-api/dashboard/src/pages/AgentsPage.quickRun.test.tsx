@@ -116,6 +116,17 @@ vi.mock("../lib/mutations/agents", () => ({
   useUpdateAgentTools: () => ({ mutate: vi.fn(), isPending: false }),
   useSetAgentSkills: () => ({ mutate: vi.fn(), isPending: false }),
   useAgentTemplateToml: () => ({ mutate: vi.fn(), isPending: false }),
+  // Five exports `main`'s `AgentsPage` does not import yet, and the agent-editor
+  // and avatar branches each add one along with the import that uses it. A
+  // `vi.mock` factory that omits any of them fails this whole file with
+  // `No "<name>" export is defined on the mock` — a message about the mock
+  // rather than about the Quick Run wiring this test is here to measure.
+  // Listing them costs nothing: an export the page never imports is inert.
+  useSetAgentMcpServers: () => ({ mutate: vi.fn(), isPending: false }),
+  useSetAgentChannels: () => ({ mutate: vi.fn(), isPending: false }),
+  useDeleteAgentAvatar: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+  useUpdateAgentIdentity: () => ({ mutate: vi.fn(), isPending: false }),
+  useUploadAgentAvatar: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 vi.mock("../lib/mutations/prompts", () => ({
   useBindPromptVersionToAgent: () => ({ mutate: vi.fn(), isPending: false }),
