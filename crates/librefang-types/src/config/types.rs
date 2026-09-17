@@ -1032,7 +1032,15 @@ pub struct RateLimitConfig {
     #[serde(default = "default_ws_debounce_chars")]
     pub ws_debounce_chars: usize,
     /// Max login attempts per IP per 15-minute window on auth endpoints
-    /// (`/api/auth/dashboard-login`, `/api/auth/login*`). Default: 10.
+    /// (`/api/auth/dashboard-login`, `/api/auth/login*`,
+    /// `/api/auth/introspect`, `/api/auth/refresh`, the OAuth callback and the
+    /// passkey ceremonies), plus the endpoints that verify a TOTP or recovery
+    /// code: `/api/approvals/totp/confirm` always counts, and
+    /// `/api/approvals/{id}/approve` counts only while the approval policy
+    /// requires a code (`approval.second_factor` of `totp` or `both`) — with
+    /// the default `none` an approval verifies nothing, and metering it would
+    /// spend this login budget on approvals that already succeeded and lock a
+    /// working operator out. Default: 10.
     /// Set to 0 to disable the per-IP auth rate limiter.
     #[serde(default = "default_auth_rate_limit_per_ip")]
     pub auth_rate_limit_per_ip: u32,

@@ -1539,6 +1539,26 @@ impl ApprovalManager {
         policy.second_factor == SecondFactor::Totp
     }
 
+    /// Check whether the current policy requires a TOTP code on tool
+    /// approvals.
+    ///
+    /// Deliberately not [`Self::requires_totp`], which compares
+    /// `second_factor` against `Totp` alone: `SecondFactor::Both` also requires
+    /// an approval code (`SecondFactor::requires_approval_totp`), so the two
+    /// disagree exactly when `Both` is configured.
+    ///
+    /// This is the tool-independent half of
+    /// [`ApprovalPolicy::tool_requires_totp`] — the predicate `resolve` and
+    /// `approve_request` consult before demanding a code — and the HTTP layer
+    /// reads it to decide whether an approve request has a 6-digit credential
+    /// to brute-force at all. Reading the policy here rather than snapshotting
+    /// it at boot is what makes that decision survive
+    /// `POST /api/config/reload`, which swaps the whole policy through
+    /// `update_policy`.
+    pub fn requires_approval_totp(&self) -> bool {
+        self.read_policy().second_factor.requires_approval_totp()
+    }
+
     /// Verify a TOTP code against a base32-encoded secret.
     ///
     /// Uses RFC 6238 with SHA-1, 6 digits, 30-second step, and +-1 window tolerance.
