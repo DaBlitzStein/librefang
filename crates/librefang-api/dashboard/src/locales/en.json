@@ -826,7 +826,7 @@
       "check_interval_secs": "Check interval (seconds)",
       "schedule_invalid_interval": "Interval must be a positive integer (seconds)",
       "proactive_conditions": "Conditions (comma-separated)",
-      "proactive_conditions_hint": "This replaces the full condition list — it isn't pre-filled with the current one. Use the full manifest editor to see what's live today.",
+      "proactive_conditions_hint": "This replaces the full condition list — it isn't pre-filled with the current one. The conditions below are the ones in effect today.",
       "proactive_conditions_placeholder": "e.g. agent.tags contains 'urgent'",
       "proactive_conditions_required": "Enter at least one condition, separated by commas",
       "schedule_updated": "Schedule updated",
