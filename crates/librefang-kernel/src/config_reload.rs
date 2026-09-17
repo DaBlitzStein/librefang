@@ -456,6 +456,18 @@ pub fn build_reload_plan_with_caps(
         );
     }
 
+    if field_changed(&old.capabilities, &new.capabilities) {
+        // The global `[capabilities]` block is folded into `MediaConfig` and
+        // into `MediaDriverCache`'s preference table at boot, both of which
+        // are captured by value — same restart contract as `[media]` itself.
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "capabilities config changed (capability routing is folded into the \
+             boot-captured MediaEngine / media driver cache; restart required)"
+                .to_string(),
+        );
+    }
+
     if field_changed(&old.approval, &new.approval) {
         plan.hot_actions.push(HotAction::UpdateApprovalPolicy);
     }
@@ -816,6 +828,21 @@ pub fn build_reload_plan_with_caps(
         );
         restart_if_changed(field_changed(&old.heartbeat, &new.heartbeat), "heartbeat");
         restart_if_changed(field_changed(&old.plugins, &new.plugins), "plugins");
+        // `tts` minus the keys the runtime re-reads per turn: everything else in the section reaches the tool through `TtsEngine`, which `boot.rs` builds once from `config.tts.clone()` with no rebuild path — the same shape as `MediaEngine` and `BrowserManager` above, and classifying it NOOP made `POST /api/config/reload` answer "effective on next message" for a change that does nothing until the daemon restarts.
+        // The live keys are `enabled` (at the call sites that decide whether to lend the engine), `output_format` (through `LoopOptions.tts_config`, #8272), and — since #8296 — `provider`, the whole `[tts.google]` block and `[tts.elevenlabs] output_format`, all of which `tool_text_to_speech` now reads off the turn's live section rather than off the engine handle.
+        // They stay in the NOOP block below, which is also what lets `should_store_config` accept the swap at all.
+        //
+        // `[tts.elevenlabs]` is masked one field deep rather than wholesale: `voice_id`, `model_id`, `stability` and `similarity_boost` still only reach a provider through the engine, so a change to them is genuinely restart-required and masking the block would have promised otherwise.
+        let tts_except_live_keys_changed = {
+            let mut old_rest = old.tts.clone();
+            old_rest.enabled = new.tts.enabled;
+            old_rest.output_format = new.tts.output_format.clone();
+            old_rest.provider = new.tts.provider.clone();
+            old_rest.google = new.tts.google.clone();
+            old_rest.elevenlabs.output_format = new.tts.elevenlabs.output_format.clone();
+            field_changed(&old_rest, &new.tts)
+        };
+        restart_if_changed(tts_except_live_keys_changed, "tts");
         // `registry` minus `auto_sync`: the mirror / host / TTL are read once when the checkout is set up, but `auto_sync` is re-read from the config snapshot on every tick of the 24 h catalog task, so it belongs in the NOOP block below.
         // Classifying the whole section as restart-required made the documented "flip it off and the next automatic refresh stops" impossible: `should_store_config` swaps the config only when there is a hot action or a noop change, so a registry-only reload was recorded as restart-required and then discarded, leaving the task reading the old value until the daemon actually restarted.
         let registry_except_auto_sync_changed = {
@@ -963,7 +990,22 @@ pub fn build_reload_plan_with_caps(
             field_changed(&old.notification, &new.notification),
             "notification",
         );
-        noop_if_changed(field_changed(&old.tts, &new.tts), "tts");
+        // Only the keys the runtime re-reads per turn; the rest of `[tts]` is restart-required above because it is captured in `TtsEngine` at boot.
+        noop_if_changed(old.tts.enabled != new.tts.enabled, "tts.enabled");
+        noop_if_changed(
+            old.tts.output_format != new.tts.output_format,
+            "tts.output_format",
+        );
+        // #8296 moved these three off the `TtsEngine` handle and onto the turn's live `[tts]`, which is what makes them reach a deployment running on the shipped `enabled = false` default at all — and, having done so, makes them reloadable.
+        noop_if_changed(old.tts.provider != new.tts.provider, "tts.provider");
+        noop_if_changed(
+            field_changed(&old.tts.google, &new.tts.google),
+            "tts.google",
+        );
+        noop_if_changed(
+            old.tts.elevenlabs.output_format != new.tts.elevenlabs.output_format,
+            "tts.elevenlabs.output_format",
+        );
         // The hands marketplace install handler reads `hands.registry_allowed_hosts`
         // live from `config_snapshot()` on every request, so a swap is effective
         // on the next install with no explicit reapply action.
@@ -996,6 +1038,16 @@ pub fn build_reload_plan_with_caps(
         noop_if_changed(
             field_changed(&old.default_routing, &new.default_routing),
             "default_routing",
+        );
+        // Same read-live shape as `default_routing` directly above: the
+        // profile router reads `[model_router]` out of `config_snapshot()` at
+        // the top of every routed turn, so an ArcSwap swap is effective on the
+        // next turn. The profile catalog itself lives in a separate file and
+        // is re-read on mtime change (`ProfileCatalog::load_cached`), so
+        // editing `model_profiles.toml` needs no reload at all.
+        noop_if_changed(
+            field_changed(&old.model_router, &new.model_router),
+            "model_router",
         );
         // #6459 — the org-wide provider allowlist is read live from
         // `self.config.load()` by `resolve_driver` on every agent turn, and
@@ -1059,163 +1111,181 @@ pub const KERNEL_CONFIG_FIELD_ALIASES: &[&str] = &[
     "approval_policy", // alias for approval
 ];
 
-/// The exhaustive set of `KernelConfig` field names that
-/// [`build_reload_plan`] inspects and classifies (RequiresRestart /
-/// HotReload / Ignore).
+/// Every `KernelConfig` field name [`build_reload_plan`] inspects, mapped to the class it is documented under.
 ///
-/// This is a literal mirror of every field touched in
-/// `build_reload_plan_with_caps`. The
-/// `every_config_field_is_reload_classified` test asserts that this set is a
-/// superset of every real `KernelConfig` field, so a newly-added field that
-/// is not also wired into `build_reload_plan` fails the build instead of
-/// silently no-op-ing on `POST /api/config/reload`.
+/// `R` — restart required. `H` — hot-reloaded through a `HotAction`. `N` — no-op, the config swap is the whole of applying it.
+/// A `/`-joined value is a section that splits across classes by sub-field, as `queue` (`H/N/R`) and `external_auth` (`H/N`) do; the doc row's Meaning column says which sub-field falls where.
+/// `H*` is a class conditional on runtime state, which only `log_level` has.
 ///
-/// **When you add a field to `KernelConfig`:** add a branch to
-/// `build_reload_plan_with_caps` AND its name here. The test will remind you
-/// if you forget.
-pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
+/// A key may also be listed as `section.sub_key`, for a sub-field `build_reload_plan` classifies apart from the rest of its section and names that way in its reason string (`tts.enabled`, `registry.auto_sync`).
+/// The section's own row then describes the section *minus* those keys.
+/// Dotted keys are not `KernelConfig` fields, so `every_config_field_is_reload_classified` compares only the top-level names against the struct and instead requires that each dotted key's parent is itself classified here.
+///
+/// This is a literal mirror of every field touched in `build_reload_plan_with_caps`.
+/// The `every_config_field_is_reload_classified` test asserts that its keys are a superset of every real `KernelConfig` field, so a newly-added field that is not also wired into `build_reload_plan` fails the build instead of silently no-op-ing on `POST /api/config/reload`.
+///
+/// The class letter lives here rather than only in the doc table because a table no code reads can be wrong in the one direction that harms an operator: a field documented `N` that actually needs a restart makes `POST /api/config/reload` answer success and do nothing (#8305, and #8059 before it).
+/// With the letter mirrored, the two must agree — an edit to either side that forgets the other fails `doc_reload_table_matches_classified_reload_fields`.
+///
+/// **When you add a field to `KernelConfig`:** add a branch to `build_reload_plan_with_caps`, its name and class here, AND a row to `docs/operations/config-reload.md`.
+/// **When you carve a sub-key out of a section's classification:** add the dotted name here and to the doc, and a mutator to `dotted_carve_out_mutators` in the tests so its letter keeps being re-derived from a real plan.
+/// The tests will remind you if you forget any of the three.
+pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'static str> {
     [
         // -- hand-tuned branches at the top of build_reload_plan --
-        "api_listen",
-        "api_key",
-        "api_key_hash",
-        "dashboard_user",
-        "dashboard_pass",
-        "dashboard_pass_hash",
-        "passkey_enabled",
-        "passkey_rp_id",
-        "passkey_rp_origin",
-        "network_enabled",
-        "network",
-        "memory",
-        "memory_wiki",
-        "proxy",
-        "default_model",
-        "home_dir",
-        "data_dir",
-        "stable_prefix_mode",
-        "vault",
-        "channels",
-        "sidecar_channels",
-        "skills",
-        "usage_footer",
-        "web",
-        "browser",
-        "approval",
-        "max_cron_jobs",
-        "webhook_triggers",
-        "extensions",
-        "mcp_servers",
-        "mcp_runtime_store",
-        "taint_rules",
-        "a2a",
-        "fallback_providers",
-        "credential_pools",
-        "provider_urls",
-        "provider_regions",
-        "tool_policy",
-        "users",
-        "groups",
-        "default_owner",
-        "proactive_memory",
-        "queue",
-        "usage",
-        "budget",
-        "sanitize",
-        "provider_api_keys",
-        "log_level",
-        "language",
-        "mode",
+        ("api_listen", "R"),
+        ("api_key", "N"),
+        ("api_key_hash", "N"),
+        ("dashboard_user", "H"),
+        ("dashboard_pass", "H"),
+        ("dashboard_pass_hash", "H"),
+        ("passkey_enabled", "R"),
+        ("passkey_rp_id", "R"),
+        ("passkey_rp_origin", "R"),
+        ("network_enabled", "R"),
+        ("network", "R"),
+        ("memory", "R"),
+        ("memory_wiki", "R"),
+        ("proxy", "H"),
+        ("default_model", "H"),
+        ("home_dir", "R"),
+        ("data_dir", "R"),
+        ("stable_prefix_mode", "N"),
+        ("vault", "R"),
+        ("channels", "H"),
+        ("sidecar_channels", "H"),
+        ("skills", "H"),
+        ("usage_footer", "H"),
+        ("web", "H"),
+        ("browser", "R"),
+        ("approval", "H"),
+        ("max_cron_jobs", "H"),
+        ("webhook_triggers", "H"),
+        ("extensions", "H"),
+        ("mcp_servers", "H"),
+        ("mcp_runtime_store", "N"),
+        ("taint_rules", "H"),
+        ("a2a", "H"),
+        ("fallback_providers", "H"),
+        ("credential_pools", "H"),
+        ("provider_urls", "H"),
+        ("provider_regions", "H"),
+        ("tool_policy", "H"),
+        ("users", "H"),
+        ("groups", "N"),
+        ("default_owner", "N"),
+        ("proactive_memory", "H"),
+        ("queue", "H/N/R"),
+        ("usage", "N"),
+        ("budget", "H"),
+        ("sanitize", "N"),
+        ("provider_api_keys", "H"),
+        ("log_level", "H*"),
+        ("language", "N"),
+        ("mode", "N"),
         // hot-reloadable: ReloadExternalAuth on IdP-identity change, noop
         // (live-read) otherwise — see the hand-tuned branch above.
-        "external_auth",
+        ("external_auth", "H/N"),
         // -- backfilled RESTART branches --
-        "config_version",
-        "cors_origin",
-        "trusted_hosts",
-        "trusted_proxies",
-        "trust_forwarded_for",
-        "allowed_mount_roots",
-        "require_auth_for_reads",
-        "external_auth_proxy",
-        "channel_role_mapping",
-        "include",
-        "exec_policy",
-        "bindings",
-        "tool_exec",
-        "auth_profiles",
-        "vertex_ai",
-        "azure_openai",
-        "oauth",
-        "provider_request_timeout_secs",
-        "provider_max_retries",
-        "provider_proxy_urls",
-        "local_probe_interval_secs",
-        "health_check",
-        "heartbeat",
-        "plugins",
-        "registry",
-        "rate_limit",
-        "strict_config",
-        "parallel_tools",
-        "workflow_stale_timeout_minutes",
-        "workflow_default_total_timeout_secs",
-        "background",
-        "log_dir",
-        "workspaces_dir",
-        "llm",
-        "reload",
-        "max_request_body_bytes",
-        "max_upload_size_bytes",
-        "max_concurrent_uploads",
-        "max_concurrent_bg_llm",
-        "auto_dream",
-        "rl_export",
-        "audit",
-        "telemetry",
-        "context_engine",
-        "session",
-        "task_board",
-        "broadcast",
-        "auto_reply",
-        "canvas",
-        "update_channel",
-        "inbox",
-        "prompt_intelligence",
-        "docker",
-        "trusted_manifest_signers",
-        "terminal",
+        ("config_version", "R"),
+        ("cors_origin", "R"),
+        ("trusted_hosts", "R"),
+        ("trusted_proxies", "R"),
+        ("trust_forwarded_for", "R"),
+        ("allowed_mount_roots", "R"),
+        ("require_auth_for_reads", "R"),
+        ("external_auth_proxy", "R"),
+        ("channel_role_mapping", "R"),
+        ("include", "R"),
+        ("exec_policy", "R"),
+        ("bindings", "R"),
+        ("tool_exec", "R"),
+        ("auth_profiles", "R"),
+        ("vertex_ai", "R"),
+        ("azure_openai", "R"),
+        ("oauth", "R"),
+        ("provider_request_timeout_secs", "R"),
+        ("provider_max_retries", "R"),
+        ("provider_proxy_urls", "R"),
+        ("local_probe_interval_secs", "R"),
+        ("health_check", "R"),
+        ("heartbeat", "R"),
+        ("plugins", "R"),
+        ("registry", "R/N"),
+        ("rate_limit", "R"),
+        ("strict_config", "R"),
+        ("parallel_tools", "R"),
+        ("workflow_stale_timeout_minutes", "R"),
+        ("workflow_default_total_timeout_secs", "R"),
+        ("background", "R"),
+        ("log_dir", "R"),
+        ("workspaces_dir", "R"),
+        ("llm", "N"),
+        ("reload", "R"),
+        ("max_request_body_bytes", "R"),
+        ("max_upload_size_bytes", "R"),
+        ("max_concurrent_uploads", "R"),
+        ("max_concurrent_bg_llm", "R"),
+        ("auto_dream", "R"),
+        ("rl_export", "R"),
+        ("audit", "R"),
+        ("telemetry", "R"),
+        ("context_engine", "R"),
+        ("session", "R"),
+        ("task_board", "N"),
+        ("broadcast", "R"),
+        ("auto_reply", "R"),
+        ("canvas", "R"),
+        ("update_channel", "R"),
+        ("inbox", "R"),
+        ("prompt_intelligence", "R"),
+        ("docker", "R"),
+        ("trusted_manifest_signers", "R"),
+        ("terminal", "R"),
         // -- backfilled NOOP branches --
-        "agent_max_iterations",
-        "max_history_messages",
-        "memory_fact_budget_percent",
-        "max_agent_call_depth",
-        "tool_timeout_secs",
-        "tool_timeouts",
-        "thinking",
-        "triggers",
-        "notification",
-        "tts",
-        "media",
-        "hands",
-        "links",
-        "privacy",
-        "pairing",
-        "gateway_compression",
-        "tool_results",
-        "tool_invoke",
-        "default_routing",
-        "prompt_caching",
-        "prompt_cache",
-        "compaction",
-        "providers",
-        "qwen_code_path",
-        "cron_session_max_tokens",
-        "cron_session_max_messages",
-        "cron_session_warn_fraction",
-        "cron_session_warn_total_tokens",
-        "cron_session_compaction_mode",
-        "cron_session_compaction_keep_recent",
+        ("agent_max_iterations", "N"),
+        ("max_history_messages", "N"),
+        ("memory_fact_budget_percent", "N"),
+        ("max_agent_call_depth", "N"),
+        ("tool_timeout_secs", "N"),
+        ("tool_timeouts", "N"),
+        ("thinking", "N"),
+        ("triggers", "H/N"),
+        ("notification", "N"),
+        // Restart-required since #8274 moved the branch out of the noop block: `TtsEngine` is built once at boot from `config.tts.clone()`.
+        // The `tts.enabled` / `tts.output_format` carve-outs stay noop and are carried below as their own dotted rows, at the granularity the doc already used (#8342).
+        ("tts", "R"),
+        ("media", "R"),
+        ("capabilities", "R"),
+        ("hands", "N"),
+        ("links", "N"),
+        ("privacy", "N"),
+        ("pairing", "N"),
+        ("gateway_compression", "N"),
+        ("tool_results", "N"),
+        ("tool_invoke", "N"),
+        ("default_routing", "N"),
+        ("model_router", "N"),
+        ("prompt_caching", "N"),
+        ("prompt_cache", "N"),
+        ("compaction", "N"),
+        ("providers", "N"),
+        ("qwen_code_path", "N"),
+        ("cron_session_max_tokens", "N"),
+        ("cron_session_max_messages", "N"),
+        ("cron_session_warn_fraction", "N"),
+        ("cron_session_warn_total_tokens", "N"),
+        ("cron_session_compaction_mode", "N"),
+        ("cron_session_compaction_keep_recent", "N"),
+        // -- sub-keys `build_reload_plan` classifies apart from their section --
+        // A section row above describes the section minus these keys; each one here is the carve-out, named exactly as the planner names it in its reason string so the doc, this table and the plan all describe the same granularity (#8342).
+        // `every_dotted_carve_out_letter_is_derived_from_the_plan` re-derives each letter from a real mutation, so a carve-out that changes class fails here rather than in an operator's reload.
+        ("tts.enabled", "N"),
+        ("tts.output_format", "N"),
+        ("tts.provider", "N"),
+        ("tts.google", "N"),
+        ("tts.elevenlabs.output_format", "N"),
+        ("registry.auto_sync", "N"),
     ]
     .into_iter()
     .collect()
@@ -1462,6 +1532,120 @@ mod tests {
             .restart_reasons
             .iter()
             .any(|r| r.contains("memory config")));
+    }
+
+    /// The two `[tts]` keys the runtime re-reads per turn must reach a running
+    /// daemon, and the plan must be storable — `should_store_config` swaps the
+    /// config only when there is a hot action or a noop change, so classifying
+    /// the whole section restart-required would throw the new value away and
+    /// `[tts] output_format` would keep resolving to the boot-time value (#8272).
+    #[test]
+    fn tts_live_keys_are_read_per_turn_and_reach_the_config_store() {
+        for (label, mutate) in [
+            (
+                "tts.enabled",
+                Box::new(|c: &mut KernelConfig| c.tts.enabled = !c.tts.enabled)
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "tts.output_format",
+                Box::new(|c: &mut KernelConfig| c.tts.output_format = Some("ogg_opus".to_string()))
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            // #8296: read per call by `tool_text_to_speech` off the turn's live `[tts]` rather than off the `TtsEngine` handle the agent loop withholds when `enabled = false`.
+            (
+                "tts.provider",
+                Box::new(|c: &mut KernelConfig| c.tts.provider = Some("elevenlabs".to_string()))
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "tts.google",
+                Box::new(|c: &mut KernelConfig| c.tts.google.language_code = "pl-PL".to_string())
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "tts.elevenlabs.output_format",
+                Box::new(|c: &mut KernelConfig| {
+                    c.tts.elevenlabs.output_format = "mp3_44100_128".to_string()
+                }) as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+        ] {
+            let a = default_cfg();
+            let mut b = default_cfg();
+            mutate(&mut b);
+            let plan = build_reload_plan(&a, &b);
+
+            assert!(
+                !plan.restart_required,
+                "{label} is read per turn; restart_reasons: {:?}",
+                plan.restart_reasons
+            );
+            assert!(
+                plan.noop_changes.iter().any(|r| r.contains(label)),
+                "{label} must be recorded as a live-read change: {:?}",
+                plan.noop_changes
+            );
+            for mode in [ReloadMode::Hot, ReloadMode::Hybrid] {
+                assert!(
+                    should_store_config(mode, &plan),
+                    "{label}: the reloaded config must be stored in {mode:?} mode, \
+                     or the next turn keeps reading the old value"
+                );
+            }
+        }
+    }
+
+    /// Everything else in `[tts]` reaches the tool through `TtsEngine`, which is
+    /// built once at boot from `config.tts.clone()` with no rebuild path. A bare
+    /// config swap does nothing for these, so the reload report must say so
+    /// rather than claim "effective on next message" — the same honesty fix
+    /// `browser` got when its hot action turned out to be a no-op.
+    ///
+    /// `provider` and `elevenlabs.output_format` left this list in #8296, which moved them onto the turn's live `[tts]` — the same move `output_format` made in #8272.
+    /// `elevenlabs.voice_id` is here in their place, because the section is masked one field deep: the rest of `[tts.elevenlabs]` still only reaches a provider through the engine, and masking the whole block would have promised a reload it cannot deliver.
+    #[test]
+    fn tts_fields_other_than_the_live_keys_still_require_restart() {
+        for (label, mutate) in [
+            (
+                "max_text_length",
+                Box::new(|c: &mut KernelConfig| c.tts.max_text_length = 123)
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "timeout_secs",
+                Box::new(|c: &mut KernelConfig| c.tts.timeout_secs = 99)
+                    as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "elevenlabs.voice_id",
+                Box::new(|c: &mut KernelConfig| {
+                    c.tts.elevenlabs.voice_id = "not-the-default-voice".to_string()
+                }) as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+            (
+                "custom.base_url",
+                Box::new(|c: &mut KernelConfig| {
+                    c.tts.custom.base_url = "http://example.invalid/v1/audio/speech".to_string()
+                }) as Box<dyn Fn(&mut KernelConfig)>,
+            ),
+        ] {
+            let a = default_cfg();
+            let mut b = default_cfg();
+            mutate(&mut b);
+            let plan = build_reload_plan(&a, &b);
+
+            assert!(
+                plan.restart_required,
+                "[tts] {label} is captured in TtsEngine at boot and must be \
+                 reported restart-required; noop_changes: {:?}",
+                plan.noop_changes
+            );
+            assert!(
+                plan.restart_reasons.iter().any(|r| r.contains("tts")),
+                "[tts] {label} must name `tts` as the reason: {:?}",
+                plan.restart_reasons
+            );
+        }
     }
 
     /// Flipping `[registry] auto_sync` must reach the running catalog task.
@@ -2434,7 +2618,17 @@ mod tests {
             .filter(|f| !aliases.contains(f))
             .collect();
 
-        let covered = super::classified_reload_fields();
+        // Only the names matter here; the class each one carries is what
+        // `doc_reload_table_matches_classified_reload_fields` checks.
+        //
+        // Dotted keys name a sub-field of a section (`tts.enabled`), not a `KernelConfig` field, so they take part in neither direction of the comparison against the struct — they are checked below against their parent instead.
+        let all_covered: std::collections::BTreeSet<&str> =
+            super::classified_reload_fields().into_keys().collect();
+        let covered: std::collections::BTreeSet<&str> = all_covered
+            .iter()
+            .copied()
+            .filter(|f| !f.contains('.'))
+            .collect();
 
         let missing: Vec<&str> = fields.difference(&covered).copied().collect();
         assert!(
@@ -2462,20 +2656,35 @@ mod tests {
             "`classified_reload_fields()` lists names that are not \
              KernelConfig fields (renamed/removed?): {stale:?}"
         );
+
+        // A dotted key is only meaningful as a carve-out from a section that is itself classified: `tts.enabled` says "everything in `tts` except this key", which is nonsense if `tts` has no row.
+        // A dotted key whose parent was renamed away would otherwise sit in both the table and the doc, agreeing with each other and describing nothing.
+        let orphaned: Vec<&str> = all_covered
+            .iter()
+            .copied()
+            .filter(|f| f.contains('.'))
+            .filter(|f| {
+                let parent = f.split('.').next().unwrap_or_default();
+                !covered.contains(parent) || !known.contains(parent)
+            })
+            .collect();
+        assert!(
+            orphaned.is_empty(),
+            "`classified_reload_fields()` lists dotted sub-keys whose parent \
+             section is not itself a classified KernelConfig field: {orphaned:?}\n\
+             A carve-out is defined relative to its section; classify the \
+             section too, or drop the sub-key."
+        );
     }
 
-    /// The ops-facing reference table in `docs/operations/config-reload.md`
-    /// must list exactly the same set of fields that
-    /// [`super::classified_reload_fields`] classifies. The doc is
-    /// hand-transcribed from `build_reload_plan`, so without this guard a
-    /// classification change (or a newly-added field) could land in the code
-    /// while the doc silently rots — defeating the doc's stated purpose of
-    /// being the canonical "does this hot-reload?" answer.
+    /// The ops-facing reference table in `docs/operations/config-reload.md` must list exactly the same fields that [`super::classified_reload_fields`] classifies, **with the same class letter**.
+    /// The doc is hand-transcribed from `build_reload_plan`, so without this guard a classification change could land in the code while the doc silently rots — defeating the doc's stated purpose of being the canonical "does this hot-reload?" answer.
     ///
-    /// The doc lists each field as the first column of a markdown table row,
-    /// `| `field_name` | ... |`. We parse those backtick-wrapped leading
-    /// tokens and compare the set to `classified_reload_fields()` in both
-    /// directions.
+    /// Comparing the letter and not only the name is #8305. Until then this test read column 1 and ignored column 2, which left the asymmetry that matters: a field *missing* from the table failed the test, while a field *misdescribed* in it passed.
+    /// Misdescribed is the direction that harms an operator, because a row reading `N` for a restart-required field turns `POST /api/config/reload` into a call that reports success and changes nothing. #8059 is the prior instance of that class.
+    ///
+    /// Each field is the first column of a markdown table row, `| `field_name` | R | … |`.
+    /// The class is column 2 verbatim, so a section split across classes (`queue` is `H/N/R`) has to match on the whole string rather than on a set of letters — the ordering in the doc is the ordering here, which keeps the comparison total instead of letting `R/N` and `N/R` both pass.
     #[test]
     fn doc_reload_table_matches_classified_reload_fields() {
         // CARGO_MANIFEST_DIR = <repo>/crates/librefang-kernel
@@ -2485,32 +2694,57 @@ mod tests {
             panic!("failed to read {}: {e}", doc_path.display());
         });
 
-        // Collect the first-column backtick token of every table row.
-        let mut doc_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        // Collect `field -> class` from every table row.
+        let mut doc_fields: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
         for line in doc.lines() {
             let line = line.trim_start();
             let Some(rest) = line.strip_prefix("| `") else {
                 continue;
             };
-            // Token runs until the closing backtick. Field names are
-            // `[a-z0-9_]+`; anything else (legend rows, prose) won't match.
+            // Token runs until the closing backtick. Field names are `[a-z0-9_]+`, optionally dotted for a sub-key carve-out (`tts.enabled`); anything else (legend rows, prose) won't match.
+            //
+            // `.` is accepted since #8342. While it was not, a dotted row was skipped on the doc side and had no counterpart on the code side, so the two agreed by both saying nothing — which is how a row could promise `N` for a key that had become restart-required.
             let Some(end) = rest.find('`') else { continue };
             let token = &rest[..end];
-            if !token.is_empty()
-                && token
+            if token.is_empty()
+                || token.starts_with('.')
+                || token.ends_with('.')
+                || token.contains("..")
+                || !token
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.')
             {
-                doc_fields.insert(token.to_string());
+                continue;
             }
+            // Column 2 is what follows the closing backtick, between the next
+            // two pipes. A row whose shape does not yield one is a parse
+            // failure rather than a row to skip: silently dropping it is how
+            // the letter went unchecked in the first place.
+            let after_name = &rest[end + 1..];
+            let Some(after_pipe) = after_name.strip_prefix(" | ") else {
+                panic!(
+                    "table row for `{token}` does not have the expected `| `field` | CLASS | …` shape: {line}"
+                );
+            };
+            let Some(class_end) = after_pipe.find('|') else {
+                panic!("table row for `{token}` has no class column: {line}");
+            };
+            doc_fields.insert(
+                token.to_string(),
+                after_pipe[..class_end].trim().to_string(),
+            );
         }
 
-        let covered: std::collections::BTreeSet<String> = super::classified_reload_fields()
+        let covered: std::collections::BTreeMap<String, String> = super::classified_reload_fields()
             .iter()
-            .map(|s| s.to_string())
+            .map(|(name, class)| (name.to_string(), class.to_string()))
             .collect();
 
-        let missing_from_doc: Vec<&String> = covered.difference(&doc_fields).collect();
+        let doc_names: std::collections::BTreeSet<&String> = doc_fields.keys().collect();
+        let covered_names: std::collections::BTreeSet<&String> = covered.keys().collect();
+
+        let missing_from_doc: Vec<&&String> = covered_names.difference(&doc_names).collect();
         assert!(
             missing_from_doc.is_empty(),
             "fields classified in build_reload_plan but absent from \
@@ -2518,11 +2752,192 @@ mod tests {
              Add a table row for each in the doc."
         );
 
-        let extra_in_doc: Vec<&String> = doc_fields.difference(&covered).collect();
+        let extra_in_doc: Vec<&&String> = doc_names.difference(&covered_names).collect();
         assert!(
             extra_in_doc.is_empty(),
             "docs/operations/config-reload.md lists field names that are not \
              classified in build_reload_plan (renamed/removed?): {extra_in_doc:?}"
         );
+
+        // The half #8305 is about: the names agreeing says nothing about the
+        // letters agreeing, and the letter is the answer an operator came for.
+        let mismatched: Vec<String> = covered
+            .iter()
+            .filter_map(|(name, code_class)| {
+                let doc_class = doc_fields.get(name)?;
+                (doc_class != code_class)
+                    .then(|| format!("{name}: doc says `{doc_class}`, code says `{code_class}`"))
+            })
+            .collect();
+        assert!(
+            mismatched.is_empty(),
+            "class letter disagrees between docs/operations/config-reload.md and \
+             `classified_reload_fields()`:\n  {}\n\
+             Whichever is wrong, fix both — an operator reads the doc to decide \
+             whether an edit needs a restart.",
+            mismatched.join("\n  ")
+        );
+    }
+
+    /// The class recorded for a field must be one the legend defines, in the
+    /// spelling the legend uses.
+    ///
+    /// Without this, `classified_reload_fields()` and the doc could agree on a
+    /// typo — `HN` for `H/N`, or a lowercase `r` — and the comparison above
+    /// would pass over two copies of the same mistake.
+    #[test]
+    fn every_reload_class_is_a_known_spelling() {
+        const KNOWN: &[&str] = &["R", "H", "N", "H*", "H/N", "R/N", "H/N/R"];
+        let unknown: Vec<String> = super::classified_reload_fields()
+            .iter()
+            .filter(|(_, class)| !KNOWN.contains(class))
+            .map(|(name, class)| format!("{name}: `{class}`"))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "unrecognised reload class(es): {unknown:?}\n\
+             Known spellings are {KNOWN:?}. A new combination needs adding here \
+             and explaining in the doc's legend."
+        );
+    }
+
+    /// One mutation per dotted carve-out in [`super::classified_reload_fields`], touching that sub-key and nothing else.
+    ///
+    /// The mutation is what makes the letter derivable: the table and the doc are both hand-written, so comparing them to each other can only catch one of the two being edited alone — it cannot catch both being wrong, which is what happens when a section's classification changes underneath a carve-out that nobody re-read.
+    /// Running the planner over a real change closes that, because the third opinion comes from the code that actually answers `POST /api/config/reload`.
+    #[allow(clippy::type_complexity)]
+    fn dotted_carve_out_mutators() -> Vec<(&'static str, Box<dyn Fn(&mut KernelConfig)>)> {
+        vec![
+            (
+                "tts.enabled",
+                Box::new(|c: &mut KernelConfig| c.tts.enabled = !c.tts.enabled),
+            ),
+            (
+                "tts.output_format",
+                Box::new(|c: &mut KernelConfig| c.tts.output_format = Some("ogg_opus".to_string())),
+            ),
+            (
+                "tts.provider",
+                Box::new(|c: &mut KernelConfig| c.tts.provider = Some("elevenlabs".to_string())),
+            ),
+            (
+                "tts.google",
+                Box::new(|c: &mut KernelConfig| c.tts.google.language_code = "pl-PL".to_string()),
+            ),
+            (
+                "tts.elevenlabs.output_format",
+                Box::new(|c: &mut KernelConfig| {
+                    c.tts.elevenlabs.output_format = "mp3_44100_128".to_string()
+                }),
+            ),
+            (
+                "registry.auto_sync",
+                Box::new(|c: &mut KernelConfig| c.registry.auto_sync = !c.registry.auto_sync),
+            ),
+        ]
+    }
+
+    /// A dotted key's class letter must be the one `build_reload_plan` actually produces for a change to that sub-key, and the change must not trip its section's branch.
+    ///
+    /// This is the half of #8342 that a doc-versus-table comparison cannot reach.
+    /// #8274 moved `[tts]` from wholly-noop to restart-required-except-two-keys; had the carve-out been forgotten in that move, `tts.enabled` would have started requiring a restart while every name-based check stayed green and the doc kept promising `N`.
+    /// Deriving the letter from the plan means the next such move fails here instead of in an operator's reload.
+    #[test]
+    fn every_dotted_carve_out_letter_is_derived_from_the_plan() {
+        let classified = super::classified_reload_fields();
+        let mutators = dotted_carve_out_mutators();
+
+        let dotted: std::collections::BTreeSet<&str> = classified
+            .keys()
+            .copied()
+            .filter(|k| k.contains('.'))
+            .collect();
+        let with_mutator: std::collections::BTreeSet<&str> =
+            mutators.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            dotted, with_mutator,
+            "every dotted key in `classified_reload_fields()` needs a mutator in \
+             `dotted_carve_out_mutators`, and vice-versa — a carve-out with no \
+             mutator has its letter checked only against a hand-written doc row"
+        );
+
+        for (name, mutate) in &mutators {
+            let a = default_cfg();
+            let mut b = default_cfg();
+            mutate(&mut b);
+            let plan = build_reload_plan(&a, &b);
+
+            assert!(
+                plan.has_changes(),
+                "{name}: the mutator did not change anything the planner can see"
+            );
+
+            let prefix = format!("{name} changed");
+            let restart = plan.restart_reasons.iter().any(|r| r.starts_with(&prefix));
+            let noop = plan.noop_changes.iter().any(|r| r.starts_with(&prefix));
+            let hot = !plan.hot_actions.is_empty();
+
+            // A carve-out is only a carve-out if the section's own branch stays quiet.
+            // `tts.enabled` flipping must not also report `tts changed`, or the sub-key is restart-required in practice whatever its row says.
+            let parent = name.split('.').next().unwrap_or_default();
+            let parent_prefix = format!("{parent} changed");
+            assert!(
+                !plan
+                    .restart_reasons
+                    .iter()
+                    .any(|r| r.starts_with(&parent_prefix)),
+                "{name}: changing only this sub-key also tripped the `{parent}` \
+                 restart branch, so the carve-out does not hold: {:?}",
+                plan.restart_reasons
+            );
+
+            let derived = match (restart, hot, noop) {
+                (true, false, false) => "R",
+                (false, true, false) => "H",
+                (false, false, true) => "N",
+                other => panic!(
+                    "{name}: the plan does not classify this sub-key unambiguously \
+                     (restart/hot/noop = {other:?}); restart_reasons={:?}, \
+                     hot_actions={:?}, noop_changes={:?}",
+                    plan.restart_reasons, plan.hot_actions, plan.noop_changes
+                ),
+            };
+
+            let recorded = classified
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is not in classified_reload_fields()"));
+            assert_eq!(
+                &derived, recorded,
+                "{name}: `build_reload_plan` classifies a change to this sub-key as \
+                 `{derived}`, but `classified_reload_fields()` records `{recorded}`. \
+                 Fix the table and docs/operations/config-reload.md together — the \
+                 planner is the source of truth."
+            );
+        }
+    }
+
+    /// The doc-side parser must read a dotted row, which is the gap #8342 is about.
+    ///
+    /// Asserting it through `classified_reload_fields()` would be circular — both sides could stop carrying dotted names at once and the comparison would still pass over two empty sets.
+    /// Reading the doc directly is what makes the assertion mean "the table an operator reads contains this row".
+    #[test]
+    fn the_doc_table_carries_dotted_sub_key_rows() {
+        let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/operations/config-reload.md");
+        let doc = std::fs::read_to_string(&doc_path).unwrap_or_else(|e| {
+            panic!("failed to read {}: {e}", doc_path.display());
+        });
+
+        for name in super::classified_reload_fields()
+            .keys()
+            .filter(|k| k.contains('.'))
+        {
+            assert!(
+                doc.lines()
+                    .any(|line| line.trim_start().starts_with(&format!("| `{name}` | "))),
+                "docs/operations/config-reload.md has no table row for the \
+                 carve-out `{name}`"
+            );
+        }
     }
 }
