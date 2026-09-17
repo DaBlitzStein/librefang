@@ -143,7 +143,7 @@ pub fn create_agent_type(
     let rendered = toml::to_string_pretty(&manifest).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
     })?;
-    claim_and_write(name, &rendered)?;
+    claim_and_write(&librefang_home(), name, &rendered)?;
 
     Ok(CreatedAgentType {
         name: name.to_string(),
@@ -175,20 +175,24 @@ pub fn create_agent_type_from_manifest(
     let rendered = toml::to_string_pretty(manifest).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
     })?;
-    claim_and_write(name, &rendered)?;
+    claim_and_write(&librefang_home(), name, &rendered)?;
     Ok(rendered)
 }
 
 /// Claim `name`'s path atomically and write `rendered` into it — the shared landing of every
 /// create path, so the race-free claim and the leaves-nothing-behind cleanup on a failed write
 /// exist in exactly one place rather than risking drift between them.
-fn claim_and_write(name: &str, rendered: &str) -> Result<(), CreateAgentTypeError> {
-    let dir = agent_types_dir();
+fn claim_and_write(
+    home_dir: &std::path::Path,
+    name: &str,
+    rendered: &str,
+) -> Result<(), CreateAgentTypeError> {
+    let dir = agent_types_dir_in(home_dir);
     std::fs::create_dir_all(&dir).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to create {}: {e}", dir.display()))
     })?;
 
-    let path = agent_type_path(name);
+    let path = agent_type_path_in(home_dir, name);
     // `Path::exists()` followed by a write is check-then-act: two concurrent creates of the same name both observe "absent" and the second silently replaces the first, which is exactly the refusal this function promises.
     // Claiming the path with `File::create_new` — an atomic create-if-absent at the OS level — lets exactly one of them through.
     match std::fs::File::create_new(&path) {
