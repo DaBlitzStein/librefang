@@ -100,6 +100,8 @@ def main():
     expect(
         {o["op_id"]: o["raw_body_ct"] for o in raw_ops}
         == {
+            "post_agent_template_toml": "text/plain",
+            "put_agent_template_toml": "text/plain",
             "transcribe_audio": "audio/webm",
             "upload_file": "application/octet-stream",
         },
