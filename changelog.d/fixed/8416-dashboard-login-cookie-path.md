@@ -3,5 +3,4 @@ The cookie had carried `Path=/dashboard` since #2785, from when `/` was public a
 #8279 then made `/` a gated entry of the shell — the same gate as `/dashboard/*` — leaving the root depending on a cookie the browser is not allowed to send there, so a correct username and password returned 200 and the form came straight back: repeated `POST /api/auth/dashboard-login` 200s next to repeated `GET /` 401s, and not one request for a dashboard asset.
 The scope is not narrowed to `/dashboard` again because the login ends at `/` by design — that is the shell URL, and scoping the cookie below it is precisely what made the two halves disagree.
 The CSRF posture the old comment credited to the narrow scope is held by `SameSite=Lax` and by the auth middleware reading the cookie on shell paths only, all of which serve GET-only handlers; every `/api/*` route still requires the Bearer token, so a cookie that now travels with API requests cannot authenticate one.
-The logout clear moves with it, since a cookie is addressed by name, domain and path together and a clear naming a different path leaves the live cookie in the browser.
-(@DaBlitzStein)
+The logout clear moves with it, since a cookie is addressed by name, domain and path together and a clear naming a different path leaves the live cookie in the browser (#8416) (@DaBlitzStein)
