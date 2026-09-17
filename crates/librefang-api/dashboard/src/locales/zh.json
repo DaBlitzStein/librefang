@@ -514,7 +514,7 @@
       "duplicate_folder_name": "文件夹名称必须唯一。",
       "folder_path_invalid": "路径必须是相对于 workspaces_dir 的相对路径，且不能包含 '..'。",
       "name_placeholder": "例如 my-agent",
-      "name_locked_hint": "由 URL 决定，而非此字段——在此重命名不会生效。",
+      "name_locked_hint": "由 URL 决定，而非此字段——在此重命名不会生效。请在智能体标题处重命名——此字段在此处已锁定。",
       "module_placeholder": "例如 default",
       "model_id_placeholder": "例如 gpt-4o",
       "preferences_hint": "该代理的设置优先于模型设置。保持“继承默认值”则使用模型的设置。",
@@ -554,8 +554,7 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "移除 fallback",
-      "remove_context_injection": "移除上下文注入",
-      "name_locked_hint": "请在智能体标题处重命名——此字段在此处已锁定。"
+      "remove_context_injection": "移除上下文注入"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",
@@ -921,9 +920,6 @@
       "events_tail": "事件 · 尾部",
       "no_logs": "此智能体还没有记录的轮次。",
       "crashed_title": "{{name}} 处于错误状态",
-      "manifest_history": "清单历史",
-      "manifest_history_load_err": "无法加载清单历史。",
-      "no_history": "尚未记录配置更改。",
       "manifest_history": "清单历史",
       "manifest_history_load_err": "加载清单历史失败。",
       "no_history": "尚未记录配置更改。",

@@ -514,7 +514,7 @@
       "duplicate_folder_name": "Nazwy folderów muszą być unikalne.",
       "folder_path_invalid": "Ścieżka musi być względna względem workspaces_dir i nie może zawierać '..'.",
       "name_placeholder": "np. mój-agent",
-      "name_locked_hint": "Identyfikowane przez adres URL, nie przez to pole — zmiana nazwy tutaj nie ma żadnego efektu.",
+      "name_locked_hint": "Identyfikowane przez adres URL, nie przez to pole — zmiana nazwy tutaj nie ma żadnego efektu. Zmień nazwę w nagłówku agenta — to pole jest tutaj zablokowane.",
       "module_placeholder": "np. default",
       "model_id_placeholder": "np. gpt-4o",
       "preferences_hint": "Ustawienia tego agenta mają pierwszeństwo przed ustawieniami modelu. Pozostaw pole na „dziedzicz domyślne”, aby użyć ustawienia modelu.",
@@ -554,8 +554,7 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "mój_schemat",
       "remove_fallback": "usuń opcję awaryjną",
-      "remove_context_injection": "usuń wstrzykiwanie kontekstu",
-      "name_locked_hint": "Zmień nazwę w nagłówku agenta — to pole jest tutaj zablokowane."
+      "remove_context_injection": "usuń wstrzykiwanie kontekstu"
     },
     "delete_confirm": "Czy na pewno chcesz usunąć agenta \"{{name}}\"?",
     "prompts": "Prompty",

@@ -514,7 +514,7 @@
       "duplicate_folder_name": "폴더 이름은 고유해야 합니다.",
       "folder_path_invalid": "경로는 workspaces_dir 기준의 상대 경로여야 하며 '..'를 포함할 수 없습니다.",
       "name_placeholder": "예를 들어 내 에이전트",
-      "name_locked_hint": "URL로 식별되며 이 필드가 아닙니다 — 여기서 이름을 바꿔도 적용되지 않습니다.",
+      "name_locked_hint": "URL로 식별되며 이 필드가 아닙니다 — 여기서 이름을 바꿔도 적용되지 않습니다. 이름 변경은 에이전트 헤더에서 해주세요 — 이 필드는 잠겨 있습니다.",
       "module_placeholder": "예를 들어 기본",
       "model_id_placeholder": "예를 들어 gpt-4o",
       "preferences_hint": "이 에이전트의 설정이 모델 설정보다 우선합니다. “기본값 상속”으로 두면 모델 설정이 적용됩니다.",
@@ -554,8 +554,7 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "대체 제거",
-      "remove_context_injection": "컨텍스트 주입 제거",
-      "name_locked_hint": "이름 변경은 에이전트 헤더에서 해주세요 — 이 필드는 잠겨 있습니다."
+      "remove_context_injection": "컨텍스트 주입 제거"
     },
     "delete_confirm": "\"{{name}}\" 에이전트를 삭제하시겠습니까?",
     "prompts": "프롬프트",
