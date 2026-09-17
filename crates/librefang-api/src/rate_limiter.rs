@@ -23,12 +23,20 @@
 //! configurable number per 15-minute window. This provides brute-force
 //! protection independent of the general token budget. See [`AuthLoginLimiter`].
 //!
-//! It also covers the endpoints that verify a TOTP or recovery code, which
-//! is a superset of the password paths above and not the same set:
+//! It also covers two of the endpoints that verify a TOTP or recovery code:
 //! `/api/approvals/totp/confirm` is always counted, while
 //! `/api/approvals/{id}/approve` is counted only while the approval policy
 //! actually demands a code from the tool being approved — the per-request
 //! condition is documented on [`auth_rate_limit_layer`].
+//!
+//! Two more verify codes and are deliberately *not* counted here:
+//! `/api/approvals/totp/setup` (the `current_code` a re-enrollment sends) and
+//! `/api/approvals/totp/revoke`. Each is an Owner-only write an operator
+//! performs once, and each already fails closed on its own per-endpoint TOTP
+//! lockout — five failed codes, then a five-minute refusal
+//! (`ApprovalManager::check_and_record_totp_failure` under `SETUP_LOCKOUT_KEY`
+//! / `REVOKE_LOCKOUT_KEY`) — so adding them to this counter would layer a
+//! fifteen-minute brake on top of that for no gain in coverage.
 
 use axum::body::Body;
 use axum::http::{header, HeaderMap, HeaderValue, Request, Response, StatusCode};
@@ -372,6 +380,10 @@ pub struct AuthRateLimitState {
 /// check the handler itself consults. `totp/confirm` is not gated: it always
 /// verifies a code when it is reachable, and it runs once per enrollment, so
 /// the bucket costs a legitimate caller nothing.
+///
+/// `totp/setup` and `totp/revoke` are not in the set at all, though both
+/// verify a code too — see the module docs for why the count keeps them on
+/// their own lockout instead.
 ///
 /// Loopback callers are exempted — the CLI and SPA connecting to their own
 /// daemon must never be locked out. Non-loopback clients that have exceeded
