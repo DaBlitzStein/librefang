@@ -276,7 +276,11 @@ export function AgentManifestForm({
 
       <Section title={t("agents.form.model")}>
         <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.form.provider")} required invalid={invalidFields.has("model.provider")}>
+          <Field
+            label={t("agents.form.provider")}
+            hint={t("agents.form.inherit_default")}
+            invalid={invalidFields.has("model.provider")}
+          >
             <select
               value={value.model.provider}
               onChange={(e) => updateModel({ provider: e.target.value, model: "" })}
@@ -286,9 +290,9 @@ export function AgentManifestForm({
               {/* The option list is "providers you could pick", which excludes
                   one whose key was rejected or whose local service is down. The
                   agent may already be assigned to exactly that provider, and a
-                  controlled <select> with no matching <option> renders blank on
-                  a `required` field — so the current value is always listed,
-                  even when it is not something you would newly choose. */}
+                  controlled <select> with no matching <option> renders blank —
+                  so the current value is always listed, even when it is not
+                  something you would newly choose. */}
               {providerOptions.map((p) => (
                 <option key={p.name} value={p.name}>
                   {p.name}
@@ -296,7 +300,11 @@ export function AgentManifestForm({
               ))}
             </select>
           </Field>
-          <Field label={t("agents.form.model_id")} required invalid={invalidFields.has("model.model")}>
+          <Field
+            label={t("agents.form.model_id")}
+            hint={t("agents.form.inherit_default")}
+            invalid={invalidFields.has("model.model")}
+          >
             {filteredModels.length > 0 ? (
               <select
                 value={value.model.model}
