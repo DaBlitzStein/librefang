@@ -69,13 +69,5 @@
     "typescript-eslint": "^8.69.0",
     "vite": "^8.2.2",
     "vitest": "^5.0.0"
-  },
-  "pnpm": {
-    "overrides": {
-      "chevrotain>lodash-es": "^4.18.1",
-      "@chevrotain/cst-dts-gen>lodash-es": "^4.18.1",
-      "@chevrotain/gast>lodash-es": "^4.18.1",
-      "dagre-d3-es>lodash-es": "^4.18.1"
-    }
   }
 }
