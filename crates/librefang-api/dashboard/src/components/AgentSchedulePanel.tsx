@@ -814,7 +814,7 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
             <p className="text-[10px] text-text-dim/70 mt-1">
               {t("agents.detail.proactive_conditions_hint", {
                 defaultValue:
-                  "This replaces the full condition list — it isn't pre-filled with the current one. Use the full manifest editor to see what's live today.",
+                  "This replaces the full condition list — it isn't pre-filled with the current one. The conditions below are the ones in effect today.",
               })}
             </p>
           </div>
