@@ -11,26 +11,75 @@
 //! seeds `[[triggers]]`, `tool_allowlist`, `mcp_servers`, `max_history_messages`, `session_mode`
 //! and `[compaction]` first, then saves through the exact body the dashboard sends.
 //!
-//! ### Per-harness home directories
+//! ### Two home directories, and why both exist
 //!
-//! The handlers resolve their storage under `state.kernel.config_ref().home_dir` (#8112) — NOT
-//! the process-wide `LIBREFANG_HOME` env var, which is what an embedder's `KernelConfig` can point
-//! somewhere else entirely. Each [`boot`] call gets a fresh `MockKernelBuilder` tempdir as its own
-//! `home_dir`, so fixtures are seeded under *that* harness's own directory, after `boot()` returns
-//! it, rather than into one directory shared by the whole test binary. That also means no
-//! cross-test locking is needed: every harness is already isolated.
+//! The handlers resolve *agent-type* storage under `state.kernel.config_ref().home_dir` (#8112) —
+//! NOT the process-wide `LIBREFANG_HOME` env var, which is what an embedder's `KernelConfig` can
+//! point somewhere else entirely. Each [`boot`] call gets a fresh `MockKernelBuilder` tempdir as
+//! its own `home_dir`, so fixtures are seeded under *that* harness's own directory, after `boot()`
+//! returns it, rather than into one directory shared by the whole test binary.
+//!
+//! The *registry* side is the other spelling: `registry_cache_dir()` — which the registry-diff and
+//! restore handlers call — reads the ambient `LIBREFANG_HOME`, not the kernel's `home_dir`. So
+//! [`home`] pins that variable to a tempdir once ([`boot`] forces the init) and
+//! [`write_registry_agent_type`] seeds there. Those ambient fixtures *are* shared by the whole
+//! binary, which is what [`lock`] serialises; the per-harness paths need no lock, because each
+//! harness is already isolated.
 
 use axum::http::StatusCode;
 use librefang_api::server;
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use serde_json::{json, Value as Json};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use tempfile::TempDir;
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
+
+/// The process-wide home the *ambient* agent-type APIs resolve through
+/// (`librefang_types::agent_type_store::registry_cache_dir`, used by the registry-diff and
+/// restore handlers). Set once, to a tempdir, **before** the first kernel boots, so nothing
+/// in this binary can reach the developer's real `~/.librefang`.
+///
+/// Kept alongside the per-harness [`home_dir`] because the two spellings answer different
+/// questions: [#8112]'s `_in` functions take the kernel's own `home_dir`, while the ambient
+/// helpers that other PRs' fixtures use read `LIBREFANG_HOME`. Both exist in the file because
+/// both exist in production.
+fn home() -> PathBuf {
+    static HOME: OnceLock<TempDir> = OnceLock::new();
+    let dir = HOME.get_or_init(|| {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Safety: env mutation. Setting it once, before any concurrent test reads it, is the
+        // pattern the sibling template tests already use. The unsafe block is only required on
+        // Rust 2024+.
+        std::env::set_var("LIBREFANG_HOME", tmp.path());
+        tmp
+    });
+    dir.path().to_path_buf()
+}
+
+/// Serialises the tests that write into the ambient [`home`] directory. The per-harness
+/// paths need no lock — each `boot()` is its own tempdir — but the ambient registry fixtures
+/// are shared, and `write_registry_agent_type` lands in one directory for the whole binary.
+fn lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Remove what a test seeded under the ambient [`home`] directory.
+///
+/// The path is built here rather than through [`agent_type_file`] because that helper now
+/// takes a `&Harness`: its `home_dir` is the kernel's tempdir, which is a *different*
+/// directory from this one (see the module note on per-harness homes).
+fn cleanup(name: &str) {
+    let _ = std::fs::remove_file(home().join("agent-types").join(format!("{name}.toml")));
+    let _ = std::fs::remove_dir_all(home().join("workspaces").join("agents").join(name));
+    let _ = std::fs::remove_dir_all(home().join("registry").join("agent-types").join(name));
+}
 
 struct Harness {
     app: axum::Router,
@@ -44,6 +93,11 @@ impl Drop for Harness {
 }
 
 async fn boot() -> Harness {
+    // Force the ambient home init before the kernel boots so nothing reaches the developer's
+    // `~/.librefang`. The kernel gets its own tempdir from `MockKernelBuilder` regardless; this
+    // pins the *ambient* spelling the registry helpers and the handlers' `registry_cache_dir()`
+    // resolve through.
+    let _ = home();
     let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
         cfg.default_model.provider = "ollama".to_string();
         cfg.default_model.model = "test-model".to_string();
@@ -459,10 +513,10 @@ async fn registry_diff_refuses_a_name_that_only_resolves_through_a_live_agent() 
     let _g = lock().lock().await;
     let name = "at_registry_diff_liveagent";
     cleanup(name);
-    write_workspace_agent(name, &manifest_with_non_form_fields(name));
     write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 42));
 
     let h = boot().await;
+    write_workspace_agent(&h, name, &manifest_with_non_form_fields(name));
 
     let (status, body) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -486,16 +540,16 @@ async fn restore_refuses_a_name_that_only_resolves_through_a_live_agent() {
     let _g = lock().lock().await;
     let name = "at_registry_restore_liveagent";
     cleanup(name);
-    write_workspace_agent(name, &manifest_with_non_form_fields(name));
     write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 42));
 
     let h = boot().await;
+    write_workspace_agent(&h, name, &manifest_with_non_form_fields(name));
 
     let (status, body) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "template_not_editable", "{body}");
     assert!(
-        !agent_type_file(name).exists(),
+        !agent_type_file(&h, name).exists(),
         "a refused restore must not materialise an agent type shadowing the live agent's name"
     );
 
@@ -977,9 +1031,9 @@ async fn registry_diff_reports_registry_type_not_found_when_the_registry_copy_is
     let _g = lock().lock().await;
     let name = "at_registry_missing";
     cleanup(name);
-    write_agent_type(name, &registry_manifest_body(name, "local only", 42));
 
     let h = boot().await;
+    write_agent_type(&h, name, &registry_manifest_body(name, "local only", 42));
 
     let (status, body) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
@@ -996,10 +1050,10 @@ async fn registry_diff_reports_identical_when_local_and_registry_match_exactly()
     let name = "at_registry_identical";
     cleanup(name);
     let body = registry_manifest_body(name, "same everywhere", 42);
-    write_agent_type(name, &body);
     write_registry_agent_type(name, &body);
 
     let h = boot().await;
+    write_agent_type(&h, name, &body);
 
     let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::OK, "{diff}");
@@ -1018,10 +1072,10 @@ async fn registry_diff_marks_a_field_outside_the_projection_as_non_identical() {
     let _g = lock().lock().await;
     let name = "at_registry_hidden_diff";
     cleanup(name);
-    write_agent_type(name, &registry_manifest_body(name, "local", 42));
     write_registry_agent_type(name, &registry_manifest_body(name, "local", 99));
 
     let h = boot().await;
+    write_agent_type(&h, name, &registry_manifest_body(name, "local", 42));
 
     let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::OK, "{diff}");
@@ -1065,10 +1119,10 @@ system_prompt = "Seeded."
 "#
         )
     };
-    write_agent_type(name, &manifest_with_tags(r#"["a", "b"]"#));
     write_registry_agent_type(name, &manifest_with_tags(r#"["c", "d"]"#));
 
     let h = boot().await;
+    write_agent_type(&h, name, &manifest_with_tags(r#"["a", "b"]"#));
 
     let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::OK, "{diff}");
@@ -1094,10 +1148,10 @@ async fn restore_overwrites_the_local_copy_and_reads_back_the_registry_version()
     let _g = lock().lock().await;
     let name = "at_registry_restore";
     cleanup(name);
-    write_agent_type(name, &registry_manifest_body(name, "local", 42));
     write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
 
     let h = boot().await;
+    write_agent_type(&h, name, &registry_manifest_body(name, "local", 42));
 
     let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{restored}");
@@ -1127,13 +1181,14 @@ async fn restore_from_registry_records_a_recoverable_pre_restore_snapshot() {
     let _g = lock().lock().await;
     let name = "at_registry_restore_history";
     cleanup(name);
-    write_agent_type(
-        name,
-        &registry_manifest_body(name, "hand edited on disk", 42),
-    );
     write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
 
     let h = boot().await;
+    write_agent_type(
+        &h,
+        name,
+        &registry_manifest_body(name, "hand edited on disk", 42),
+    );
 
     let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{restored}");
@@ -1190,10 +1245,10 @@ async fn restore_refuses_to_overwrite_when_the_pre_restore_snapshot_fails() {
     let name = "at_registry_restore_snapshot_failure";
     cleanup(name);
     let hand_edited = registry_manifest_body(name, "hand edited on disk", 42);
-    write_agent_type(name, &hand_edited);
     write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
 
     let h = boot().await;
+    write_agent_type(&h, name, &hand_edited);
 
     // Break the snapshot store through the pool the substrate already exposes — the same
     // route `goals_routes_integration.rs` uses to make a substrate read fail from out here.
@@ -1214,7 +1269,8 @@ async fn restore_refuses_to_overwrite_when_the_pre_restore_snapshot_fails() {
     );
 
     // The assertion the finding is about: the operator's content survived.
-    let on_disk = std::fs::read_to_string(agent_type_file(name)).expect("agent type still on disk");
+    let on_disk =
+        std::fs::read_to_string(agent_type_file(&h, name)).expect("agent type still on disk");
     assert_eq!(
         on_disk, hand_edited,
         "the hand-edited manifest must still be on disk — it was the only copy, and the \
@@ -1236,7 +1292,6 @@ async fn restore_from_registry_pins_the_manifest_name_to_the_url_segment() {
     let _g = lock().lock().await;
     let name = "at_registry_restore_name_mismatch";
     cleanup(name);
-    write_agent_type(name, &registry_manifest_body(name, "local", 42));
     write_registry_agent_type(
         name,
         r#"name = "Some Other Display Name"
@@ -1251,6 +1306,7 @@ system_prompt = "Seeded."
     );
 
     let h = boot().await;
+    write_agent_type(&h, name, &registry_manifest_body(name, "local", 42));
 
     let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{restored}");
@@ -1260,7 +1316,7 @@ system_prompt = "Seeded."
          restored through, not the registry document's declared name: {restored}"
     );
 
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(
         stored.contains(&format!("name = \"{name}\"")),
         "the file on disk must carry the pinned name too: {stored}"
@@ -1512,9 +1568,10 @@ async fn toml_put_round_trips_every_section_the_flat_editor_cannot_express() {
     let _g = lock().lock().await;
     let name = "at_toml_roundtrip";
     cleanup(name);
-    write_agent_type(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_agent_type(&h, name, "name = \"seed\"\n");
+
     let doc = toml_tab_document(name);
     let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1564,9 +1621,10 @@ async fn toml_put_records_a_version_snapshot() {
     let _g = lock().lock().await;
     let name = "at_toml_history";
     cleanup(name);
-    write_agent_type(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_agent_type(&h, name, "name = \"seed\"\n");
+
     let doc = toml_tab_document(name);
     let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1599,9 +1657,10 @@ async fn toml_put_reports_keys_the_manifest_does_not_recognise() {
     let _g = lock().lock().await;
     let name = "at_toml_typo";
     cleanup(name);
-    write_agent_type(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_agent_type(&h, name, "name = \"seed\"\n");
+
     let doc = format!("name = \"{name}\"\nsesion_mode = \"new\"\n");
     let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1612,7 +1671,7 @@ async fn toml_put_reports_keys_the_manifest_does_not_recognise() {
     );
 
     // And the stored document confirms what the report says: the unrecognised key is gone.
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(
         !stored.contains("sesion_mode"),
         "the typo key survived the save despite the report: {stored}"
@@ -1632,12 +1691,14 @@ async fn toml_put_does_not_misreport_an_explicitly_cleared_list_as_unrecognised(
     let _g = lock().lock().await;
     let name = "at_toml_triggers_cleared";
     cleanup(name);
+
+    let h = boot().await;
     write_agent_type(
+        &h,
         name,
         &format!("name = \"{name}\"\n\n[[triggers]]\npattern = \"git.push\"\n"),
     );
 
-    let h = boot().await;
     let doc = format!("name = \"{name}\"\ntriggers = []\n");
     let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1711,18 +1772,20 @@ async fn toml_post_refuses_a_name_that_already_exists() {
     let _g = lock().lock().await;
     let name = "at_toml_post_exists";
     cleanup(name);
+
+    let h = boot().await;
     write_agent_type(
+        &h,
         name,
         &format!("name = \"{name}\"\ndescription = \"already here\"\n"),
     );
 
-    let h = boot().await;
     let doc = format!("name = \"{name}\"\n");
     let (status, body) = post_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "template_exists", "{body}");
 
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(
         stored.contains("already here"),
         "a refused create must not touch the existing file: {stored}"
@@ -1739,9 +1802,10 @@ async fn toml_post_refuses_a_name_that_belongs_to_a_live_agent() {
     let _g = lock().lock().await;
     let name = "at_toml_post_liveagent";
     cleanup(name);
-    write_workspace_agent(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_workspace_agent(&h, name, "name = \"seed\"\n");
+
     let doc = format!("name = \"{name}\"\n");
     let (status, body) = post_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -1757,9 +1821,9 @@ async fn toml_put_rejects_malformed_toml_with_a_400() {
     let _g = lock().lock().await;
     let name = "at_toml_bad";
     cleanup(name);
-    write_agent_type(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_agent_type(&h, name, "name = \"seed\"\n");
 
     for doc in [
         "name = \nbroken[".to_string(),
@@ -1775,7 +1839,7 @@ async fn toml_put_rejects_malformed_toml_with_a_400() {
     }
 
     // The seeded document is untouched by the refusals.
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(stored.contains("seed"), "{stored}");
 
     cleanup(name);
@@ -1787,9 +1851,9 @@ async fn toml_put_refuses_unknown_and_live_agent_names() {
     let _g = lock().lock().await;
     let name = "at_toml_liveagent";
     cleanup(name);
-    write_workspace_agent(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_workspace_agent(&h, name, "name = \"seed\"\n");
 
     let (status, body) =
         put_toml(&h, "/api/templates/at_toml_missing/toml", "name = \"x\"\n").await;
@@ -1814,9 +1878,10 @@ async fn toml_put_refuses_an_oversize_body_before_parsing() {
     let _g = lock().lock().await;
     let name = "at_toml_oversize";
     cleanup(name);
-    write_agent_type(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_agent_type(&h, name, "name = \"seed\"\n");
+
     let padding = "x".repeat(1024 * 1024);
     let doc = format!("name = \"{name}\"\ndescription = \"{padding}\"\n");
     let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
@@ -1824,7 +1889,7 @@ async fn toml_put_refuses_an_oversize_body_before_parsing() {
     assert_eq!(body["code"], "template_manifest_too_large", "{body}");
 
     // The seeded document is untouched.
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(stored.contains("seed"), "{stored}");
 
     cleanup(name);
@@ -1840,18 +1905,19 @@ async fn toml_put_pins_the_name_to_the_url_rather_than_the_body() {
     let renamed = "at_toml_pin_moved";
     cleanup(name);
     cleanup(renamed);
-    write_agent_type(name, "name = \"seed\"\n");
 
     let h = boot().await;
+    write_agent_type(&h, name, "name = \"seed\"\n");
+
     let doc = format!("name = \"{renamed}\"\ndescription = \"kept\"\n");
     let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["name"], name, "{body}");
     assert!(
-        !agent_type_file(renamed).exists(),
+        !agent_type_file(&h, renamed).exists(),
         "a body name moved the document out from under the URL that addressed it"
     );
-    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    let stored = std::fs::read_to_string(agent_type_file(&h, name)).unwrap();
     assert!(stored.contains("kept"), "{stored}");
 
     cleanup(name);
@@ -1872,24 +1938,27 @@ async fn templates_list_flags_from_registry_per_row() {
     cleanup(unsynced);
     cleanup(live);
 
-    // An agent type with a registry original.
+    // An agent type with a registry original. The registry copy is ambient, so it is seeded
+    // before `boot()`; the local copy belongs to the harness and is seeded after.
     let manifest = registry_manifest_body(synced, "synced with the registry", 42);
-    write_agent_type(synced, &manifest);
     write_registry_agent_type(synced, &manifest);
+    let unsynced_manifest = registry_manifest_body(unsynced, "local only", 42);
+    let live_manifest = registry_manifest_body(live, "a live agent", 42);
+
+    let h = boot().await;
+
+    // An agent type with a registry original.
+    write_agent_type(&h, synced, &manifest);
 
     // Created locally with no registry counterpart — e.g. through `POST
     // /api/templates` or the `agent_type_create` tool.
-    write_agent_type(
-        unsynced,
-        &registry_manifest_body(unsynced, "local only", 42),
-    );
+    write_agent_type(&h, unsynced, &unsynced_manifest);
 
     // A live agent's own manifest: never editable, so never eligible to
     // restore from the registry either — the row must not even attempt the
     // lookup a registry-backed name might otherwise accidentally satisfy.
-    write_workspace_agent(live, &registry_manifest_body(live, "a live agent", 42));
+    write_workspace_agent(&h, live, &live_manifest);
 
-    let h = boot().await;
     let (status, body) = get(&h, "/api/templates").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let templates = body["templates"].as_array().expect("templates array");

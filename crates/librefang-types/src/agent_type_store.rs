@@ -184,7 +184,7 @@ pub fn create_agent_type_in(
     let rendered = toml::to_string_pretty(&manifest).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
     })?;
-    claim_and_write(name, &rendered)?;
+    claim_and_write(home_dir, name, &rendered)?;
 
     Ok(CreatedAgentType {
         name: name.to_string(),
@@ -208,34 +208,23 @@ pub fn create_agent_type_from_manifest(
     name: &str,
     manifest: &AgentManifest,
 ) -> Result<String, CreateAgentTypeError> {
-    validate_agent_type_name(name).map_err(|_| CreateAgentTypeError::InvalidName)?;
-    if workspace_agent_manifest_path(name).exists() {
-        return Err(CreateAgentTypeError::ShadowsLiveAgent);
-    }
-
-    let rendered = toml::to_string_pretty(manifest).map_err(|e| {
-        CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
-    })?;
-    claim_and_write(name, &rendered)?;
-    Ok(rendered)
+    create_agent_type_from_manifest_in(&librefang_home(), name, manifest, None)
 }
 
 /// Claim `name`'s path atomically and write `rendered` into it — the shared landing of every
 /// create path, so the race-free claim and the leaves-nothing-behind cleanup on a failed write
 /// exist in exactly one place rather than risking drift between them.
-fn claim_and_write(name: &str, rendered: &str) -> Result<(), CreateAgentTypeError> {
-    let dir = agent_types_dir();
+fn claim_and_write(
+    home_dir: &std::path::Path,
+    name: &str,
+    rendered: &str,
+) -> Result<(), CreateAgentTypeError> {
+    let dir = agent_types_dir_in(home_dir);
     std::fs::create_dir_all(&dir).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to create {}: {e}", dir.display()))
     })?;
 
-    // `agent_type_path_in(h, n)` is exactly `agent_types_dir_in(h).join("{n}.toml")`,
-    // and `dir` above is already `agent_types_dir()` — i.e. the same path with the
-    // ambient home this function is built on. `claim_and_write` is #8028's ambient
-    // extraction and its two callers are both ambient paths; #8112's explicit-home
-    // spelling lives in `create_agent_type_from_manifest_in`, which has its own copy.
-    // Using the explicit form here would need a `home_dir` this function never had.
-    let path = dir.join(format!("{name}.toml"));
+    let path = agent_type_path_in(home_dir, name);
     // `Path::exists()` followed by a write is check-then-act: two concurrent creates of the same name both observe "absent" and the second silently replaces the first, which is exactly the refusal this function promises.
     // Claiming the path with `File::create_new` — an atomic create-if-absent at the OS level — lets exactly one of them through.
     match std::fs::File::create_new(&path) {
@@ -267,17 +256,17 @@ fn claim_and_write(name: &str, rendered: &str) -> Result<(), CreateAgentTypeErro
 ///
 /// The `_in` spelling matches [`agent_type_path_in`] and [`agent_types_dir_in`]: the API layer already holds `state.kernel.config_ref().home_dir` by the time it calls this, and resolving through `LIBREFANG_HOME` a second time here would let the two diverge for any caller that built its `KernelConfig` with an explicit `home_dir` — an embedder, or a test harness pinning both independently.
 ///
-/// `snapshot_of` is the name of the live agent being snapshotted, and it is the one name exempt from the [`CreateAgentTypeError::ShadowsLiveAgent`] check [`create_agent_type`] applies.
+/// `snapshot_of` is `Some(name_of_the_live_agent_being_snapshotted)` for `save-as-agent-type`, and `None` for a plain create, where no name is exempt.
 ///
 /// Saving an agent under its own name is the case `save-as-agent-type` exists for, and that name necessarily already has a workspace on disk, so an unconditional check would reject the feature's main path. Every OTHER live agent's name stays refused, for the reason [`CreateAgentTypeError::ShadowsLiveAgent`] documents: the type wins subsequent catalog reads and leaves that agent unreachable. Since `resolve_manifest` now prefers this store over the workspace directory, it wins outright rather than merely usually.
 pub fn create_agent_type_from_manifest_in(
     home_dir: &std::path::Path,
     name: &str,
     manifest: &AgentManifest,
-    snapshot_of: &str,
+    snapshot_of: Option<&str>,
 ) -> Result<String, CreateAgentTypeError> {
     validate_agent_type_name(name).map_err(|_| CreateAgentTypeError::InvalidName)?;
-    if name != snapshot_of && workspace_agent_manifest_path_in(home_dir, name).exists() {
+    if snapshot_of != Some(name) && workspace_agent_manifest_path_in(home_dir, name).exists() {
         return Err(CreateAgentTypeError::ShadowsLiveAgent);
     }
 
@@ -285,31 +274,10 @@ pub fn create_agent_type_from_manifest_in(
         CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
     })?;
 
-    let dir = agent_types_dir_in(home_dir);
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        CreateAgentTypeError::Io(format!("failed to create {}: {e}", dir.display()))
-    })?;
-
-    let path = agent_type_path_in(home_dir, name);
-    // Same TOCTOU concern `create_agent_type` documents: claim the path atomically before writing, so two concurrent saves of the same name never let the second silently replace the first.
-    match std::fs::File::create_new(&path) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(CreateAgentTypeError::NameTaken)
-        }
-        Err(e) => {
-            return Err(CreateAgentTypeError::Io(format!(
-                "failed to claim agent type '{name}': {e}"
-            )))
-        }
-    }
-
-    if let Err(e) = atomic_write(&path, rendered.as_bytes()) {
-        let _ = std::fs::remove_file(&path);
-        return Err(CreateAgentTypeError::Io(format!(
-            "failed to write agent type '{name}': {e}"
-        )));
-    }
+    // Same claim-then-write discipline as every other create path, through the one helper that
+    // implements it — the TOCTOU rationale lives there. A second inline copy is what let this
+    // file's two halves resolve different homes without anyone noticing.
+    claim_and_write(home_dir, name, &rendered)?;
 
     Ok(rendered)
 }

@@ -797,7 +797,12 @@ pub async fn post_agent_template_toml(
         );
     }
 
-    match store_create_from_manifest(&name, &manifest) {
+    // #8112: the same `home_dir` the detail routes, the catalog and the `POST /api/templates`
+    // create all resolve against — the ambient `LIBREFANG_HOME` would land this document in a
+    // directory none of them read. This is a plain create, so no name is exempt from the
+    // live-agent shadow check (`None`).
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    match store_create_from_manifest(&home_dir, &name, &manifest, None) {
         Ok(rendered) => {
             let _ = record_template_version(&state, &name, &rendered, "create");
             let mut detail =
@@ -863,7 +868,7 @@ fn parse_manifest_toml_body(
 // the tool writes through the kernel's own `home_dir` too (`kernel::handles::agent_control`), so
 // all three writers of `agent-types/` agree on where the file lands.
 use librefang_types::agent_type_store::{
-    create_agent_type_from_manifest as store_create_from_manifest,
+    create_agent_type_from_manifest_in as store_create_from_manifest,
     create_agent_type_in as store_create_in, persist_agent_type_in, CreateAgentTypeError,
 };
 

@@ -1686,7 +1686,7 @@ pub async fn save_agent_as_agent_type(
         home,
         &template_name,
         &manifest,
-        &entry.manifest.name,
+        Some(&entry.manifest.name),
     ) {
         Ok(_rendered) => (
             StatusCode::CREATED,
