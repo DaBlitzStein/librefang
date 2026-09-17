@@ -2865,6 +2865,10 @@
     "select_agent_desc": "Choose an agent from the list to establish a communication link.",
     "transmit_command": "Transmit neural pulse...",
     "send": "Send",
+    "scale_current": "Text size: {{percent}}%",
+    "scale_decrease": "Smaller text",
+    "scale_increase": "Larger text",
+    "scale_reset": "Reset text size",
     "secure_link": "Secure Link",
     "standby": "Standby",
     "end_history": "End of history",
@@ -3022,7 +3026,9 @@
     "verifier_agent": "Verifier agent",
     "no_verifier_selected": "No verifier (run ungated)",
     "evaluator_model": "Evaluator model",
-    "evaluator_model_placeholder": "Evaluator model (optional)"
+    "evaluator_model_placeholder": "Evaluator model (optional)",
+    "run_pause": "Pause autonomous run",
+    "run_resume": "Resume autonomous run"
   },
   "sessions": {
     "title": "Sessions",
@@ -4260,7 +4266,8 @@
     "status_failed": "Failed",
     "assignee_none": "Unassigned — any agent may claim it",
     "no_agents_hint": "No agents registered yet. Create an agent before assigning tasks.",
-    "field_description_hint": "The agent reads this verbatim. Include the goal, the constraints, and what \"done\" looks like."
+    "field_description_hint": "The agent reads this verbatim. Include the goal, the constraints, and what \"done\" looks like.",
+    "field_assignee_placeholder": "Agent name or ID"
   },
   "prompts": {
     "title": "Prompts",
@@ -4314,6 +4321,7 @@
   },
   "agentTypes": {
     "confirm_delete": "Delete the agent type '{{name}}'? Agents already spawned from it are not affected.",
+    "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "New agent type",
     "created": "Agent type created",
     "delete": "Delete",

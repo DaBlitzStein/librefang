@@ -857,17 +857,27 @@ impl GoalRunner {
             last_progress: checkpoint.last_progress,
             last_error: None,
             // The checkpoint stores the run's progress, not its loop-engineering
-            // configuration, so these come back from the goal document — the same
-            // place `start()`'s caller reads them from. Reconstructing them from
-            // the clock-free source keeps a paused run's reported verifier the one
-            // its resume will actually use, instead of a blank that reads as "no
-            // gate on this run".
+            // configuration, so the verifier and the evaluator come back from the
+            // goal document — the same place `start()`'s caller reads them from.
+            // Reconstructing them from the clock-free source keeps a paused run's
+            // reported verifier the one its resume will actually use, instead of a
+            // blank that reads as "no gate on this run".
             verify_agent_id: goal
                 .as_ref()
                 .filter(|g| g.loop_engineering)
                 .and_then(|g| g.verify_agent_id),
+            // The retry budget is the exception, because it is the one
+            // loop-engineering value the goal document does not hold: it is a
+            // per-run number the operator sets on the start body, so the
+            // checkpoint is its only record. Resolved exactly as `start()`
+            // resolves it on the way back in — checkpoint, then compiled default
+            // — so the readout and the bodyless `/resume` that follows it cannot
+            // disagree about the budget the run is under.
             verify_max_retries: match goal.as_ref() {
-                Some(g) if g.loop_engineering => DEFAULT_VERIFY_MAX_RETRIES.max(1),
+                Some(g) if g.loop_engineering => checkpoint
+                    .verify_max_retries
+                    .unwrap_or(DEFAULT_VERIFY_MAX_RETRIES)
+                    .max(1),
                 _ => 0,
             },
             evaluator_model: goal
@@ -5383,6 +5393,168 @@ mod tests {
         );
 
         assert!(runner.stop(goal_id));
+    }
+
+    /// `state()` reports `None` for a run that is alive and well, whenever the loop happens to hold the state mutex.
+    ///
+    /// It reads the live run under `try_lock`, deliberately — `state()` is sync, so it cannot await a tokio mutex, and blocking here would let a slow reader stall the loop.
+    /// The cost is that "no state" and "could not read the state right now" are the same answer, and a caller that reads the second as the first will report a healthy run as a failure.
+    /// `POST /api/goals/{id}/start` did exactly that and took `main` red twice on the macOS lane (#8388, #8391), which is why it now retries instead of believing the first empty read.
+    ///
+    /// Holding the lock explicitly is what makes this deterministic: the real contention window is a few instructions wide and cannot be hit on purpose.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn state_is_empty_while_the_run_loop_holds_the_state_lock() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store, substrate.clone());
+        // The turn never resolves, so the run stays `Running` for the whole test and
+        // any empty read below is the lock, not the run having ended.
+        runner.start(
+            goal_id,
+            agent_id,
+            Some(25),
+            substrate,
+            |_agent_id, _message| async move { std::future::pending::<Result<String, String>>().await },
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            None,
+            None,
+            None,
+        );
+
+        let live = runner
+            .state(goal_id)
+            .expect("a started run must be readable");
+        assert_eq!(live.phase, GoalRunPhase::Running);
+
+        let handle_state = runner
+            .runs
+            .get(&goal_id)
+            .expect("the run must be registered")
+            .state
+            .clone();
+        let held = handle_state.lock().await;
+        assert!(
+            runner.state(goal_id).is_none(),
+            "state() cannot read a locked run, so callers must not read its None as `did not start`"
+        );
+        drop(held);
+
+        assert!(
+            runner.state(goal_id).is_some(),
+            "the same run must be readable again once the lock is released"
+        );
+        assert!(runner.stop(goal_id));
+    }
+
+    /// A paused run's readout must report the retry budget its own resume will use.
+    ///
+    /// `state()` reconstructs a paused run from its checkpoint once the loop task has exited and self-cleaned its registry slot, and the checkpoint carries `verify_max_retries` for exactly this reason — see [`ResumePoint::verify_max_retries`], whose stated justification is that without it `GET /api/goals/{id}/run` reports the compiled default.
+    /// Taking the number from the goal document instead reports 3 for a run paused at 8, so the readout and the bodyless `/resume` that follows it disagree about the run's own budget, and it is the resume that is right.
+    /// The sibling `max_iterations` two fields up already reads the checkpoint; this is the same restore for the same reason.
+    #[tokio::test]
+    async fn a_paused_readout_reports_the_checkpoints_verify_max_retries() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let agent_id = AgentId::new();
+        let mut goal = test_goal(agent_id);
+        goal.loop_engineering = true;
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
+
+        persist_pause_checkpoint(
+            &substrate,
+            goal_id,
+            &GoalRunState {
+                goal_id,
+                agent_id,
+                phase: GoalRunPhase::Paused,
+                iteration: 5,
+                max_iterations: 100,
+                last_progress: 10,
+                last_error: None,
+                verify_agent_id: None,
+                verify_max_retries: 8,
+                evaluator_model: None,
+                started_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            &[],
+        );
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store, substrate.clone());
+
+        // No live run, so this is the checkpoint-reconstruction path.
+        let paused = runner
+            .state(goal_id)
+            .expect("the checkpoint must be visible");
+        assert_eq!(paused.phase, GoalRunPhase::Paused);
+        assert_eq!(
+            paused.max_iterations, 100,
+            "the cap already comes from the checkpoint — this is the behaviour \
+             verify_max_retries is being held to"
+        );
+        assert_eq!(
+            paused.verify_max_retries, 8,
+            "a paused run must report the retry budget it was actually running \
+             under, not the compiled default the resume will not use"
+        );
+    }
+
+    /// Loop engineering off still means no verifier budget on the paused readout.
+    ///
+    /// The checkpoint of a run that never used the verifier cannot carry a
+    /// budget, but a goal whose `loop_engineering` was switched off while the
+    /// run was suspended can still be read against a checkpoint that does.
+    /// Reporting that number would advertise a gate the resume will not apply.
+    #[tokio::test]
+    async fn a_paused_readout_reports_no_verifier_budget_without_loop_engineering() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        assert!(!goal.loop_engineering);
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
+
+        persist_pause_checkpoint(
+            &substrate,
+            goal_id,
+            &GoalRunState {
+                goal_id,
+                agent_id,
+                phase: GoalRunPhase::Paused,
+                iteration: 5,
+                max_iterations: 100,
+                last_progress: 10,
+                last_error: None,
+                verify_agent_id: None,
+                verify_max_retries: 8,
+                evaluator_model: None,
+                started_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            &[],
+        );
+
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store, substrate.clone());
+
+        let paused = runner
+            .state(goal_id)
+            .expect("the checkpoint must be visible");
+        assert_eq!(
+            paused.verify_max_retries, 0,
+            "a run without loop engineering has no verifier budget to report"
+        );
     }
 
     /// An explicit cap is an operator re-budgeting the run's total ceiling,
