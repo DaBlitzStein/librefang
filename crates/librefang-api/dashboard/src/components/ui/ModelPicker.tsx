@@ -259,8 +259,8 @@ export function ModelPicker({
               onChange={(e) => setSearch(e.target.value)}
               aria-label={
                 drilldown
-                  ? t("chat.search_models", { defaultValue: "Search models" })
-                  : t("chat.search_providers", { defaultValue: "Search providers" })
+                  ? t("chat.search_models", { defaultValue: "Search models..." })
+                  : t("chat.search_providers", { defaultValue: "Search providers..." })
               }
               placeholder={
                 drilldown
