@@ -3083,7 +3083,10 @@
     "evaluator_model": "평가 모델",
     "evaluator_model_placeholder": "평가 모델(선택)",
     "run_pause": "자율 실행 일시 중지",
-    "run_resume": "자율 실행 재개"
+    "run_resume": "자율 실행 재개",
+    "tick_interval": "반복 간격",
+    "tick_interval_placeholder": "루프 반복 사이의 초 (기본값 {{defaultSecs}})",
+    "tick_interval_out_of_range": "반복 간격은 {{min}}초에서 {{max}}초 사이의 정수여야 합니다."
   },
   "sessions": {
     "title": "세션",
