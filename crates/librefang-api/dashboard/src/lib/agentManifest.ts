@@ -1422,10 +1422,20 @@ const parseExecPolicyShorthand = (
   raw: unknown,
 ): ManifestFormState["exec_policy_shorthand"] => {
   if (typeof raw !== "string") return "";
-  if ((EXEC_SHORTHANDS as readonly string[]).includes(raw)) {
-    return raw as ManifestFormState["exec_policy_shorthand"];
+  // Lowercased first, because the kernel lowercases it: `exec_policy_lenient`
+  // normalises through `to_lowercase()` before mapping
+  // (`crates/librefang-types/src/serde_compat.rs:262`, wired in at
+  // `agent.rs:1347`), so `"Deny"` and `"FULL"` are valid manifests the runtime
+  // honours. Matching exactly here read them as a spelling the form did not
+  // know, returned "", and dropped the key on the next save — an agent whose
+  // policy was `"Deny"` came back with none, and one carrying `shell_exec` is
+  // promoted to `Full` when none is present
+  // (`kernel/spawn.rs:236-250`, `kernel/boot.rs:2690-2705`).
+  const spelling = raw.toLowerCase();
+  if ((EXEC_SHORTHANDS as readonly string[]).includes(spelling)) {
+    return spelling as ManifestFormState["exec_policy_shorthand"];
   }
-  return EXEC_POLICY_ALIASES[raw] ?? "";
+  return EXEC_POLICY_ALIASES[spelling] ?? "";
 };
 
 const parseResponseFormatField = (raw: unknown): ManifestFormState["response_format"] => {

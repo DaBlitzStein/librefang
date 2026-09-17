@@ -511,6 +511,37 @@ max_cost_per_hour_usd = 1
     }
   });
 
+  it("keeps an exec_policy spelling the kernel accepts in a different case", () => {
+    // The kernel lowercases before mapping (`exec_policy_lenient`,
+    // `crates/librefang-types/src/serde_compat.rs:262`, wired in at
+    // `agent.rs:1347`), so `"Deny"` and `"FULL"` are manifests the runtime
+    // honours. Matching exactly here read them as a spelling the form did not
+    // know, returned an empty shorthand, and dropped the key on the next save.
+    // That loss widened the policy rather than narrowing it: an agent carrying
+    // `shell_exec` and no `exec_policy` is promoted to `Full`
+    // (`kernel/spawn.rs:236-250`, `kernel/boot.rs:2690-2705`).
+    const cases: Array<[string, string]> = [
+      ["Deny", "deny"],
+      ["FULL", "full"],
+      ["AllowList", "allowlist"],
+      ["None", "deny"],
+      ["UNRESTRICTED", "full"],
+    ];
+    for (const [spelling, canonical] of cases) {
+      const parsed = parseManifestToml(
+        `name = "a"\nexec_policy = "${spelling}"\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.form.exec_policy_shorthand).toBe(canonical);
+
+      // And the key survives the save — the failure this guards is the key
+      // disappearing, not the dropdown reading the wrong label.
+      const out = serializeManifestForm(parsed.form, parsed.extras);
+      expect(out).toContain("exec_policy");
+    }
+  });
+
   it("does not emit both response_format form-mode and preserved [response_format] extras", () => {
     // Same shape as the exec_policy P1: TOML carries an unmappable
     // response_format → preserved as extras → user picks json/json_schema
