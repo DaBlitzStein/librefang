@@ -3451,6 +3451,44 @@ fn a_discovery_preference_survives_a_real_registry_fanout() {
     );
 }
 
+/// The preference store outranks the provider file for discovery, in both directions (#8407).
+///
+/// The registry sync keeps an operator-edited file and says so in a WARN, which reads as "your edit is in force" — and for everything else in that file it is.
+/// Discovery is the exception: it is operator state that lives in the store, and the store is applied after the catalog is loaded from those files, so a hand edit to the flag loses for any provider the store has an entry for.
+/// Pinned here so it is a decision rather than an accident; the WARN says the same thing to whoever reads it.
+#[test]
+fn the_preference_store_outranks_the_provider_file_for_discovery() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+
+    std::fs::write(
+        providers.join("off-in-file.toml"),
+        "[provider]\nid = \"off-in-file\"\nbase_url = \"http://127.0.0.1:4200/v1\"\ndiscover_models = false\n",
+    )
+    .unwrap();
+    std::fs::write(
+        providers.join("on-in-file.toml"),
+        "[provider]\nid = \"on-in-file\"\nbase_url = \"http://127.0.0.1:4300/v1\"\ndiscover_models = true\n",
+    )
+    .unwrap();
+    std::fs::write(&prefs, r#"{"off-in-file": true, "on-in-file": false}"#).unwrap();
+
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    catalog.load_discover_prefs(&prefs);
+
+    assert!(
+        catalog.get_provider("off-in-file").unwrap().discover_models,
+        "the store's `true` outranks the file's `false`: the store is applied after the files are loaded"
+    );
+    assert!(
+        !catalog.get_provider("on-in-file").unwrap().discover_models,
+        "and the store's `false` outranks the file's `true` — the direction a WARN that only says \"kept local\" would have hidden"
+    );
+}
+
 /// A provider created *after* the preference store is applied still receives its preference (#8407).
 ///
 /// This is the population the removed TOML writer used to serve: an endpoint registered through `[provider_urls]` or `PUT /api/providers/{name}/url` does not exist on disk, so boot creates it *after* it has applied the store, and `set_provider_url` builds the record with `discover_models: false`.

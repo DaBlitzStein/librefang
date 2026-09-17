@@ -778,10 +778,19 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
                 .and_then(|recorded| recorded.as_deref())
                 .is_some_and(|recorded| content_digest(&dst_content) == recorded);
             if !ours {
+                // "kept local" on its own reads as "your edit is in force", and for
+                // `discover_models` that is not true: the preference store is applied
+                // after the catalog is loaded from these files, so an entry there
+                // outranks what the file says (#8407). The message has to say both.
+                let discovery_note = if label == "providers" {
+                    " `discover_models` is the exception: while data/provider_discovery.json has an entry for this provider, that store decides, not this file"
+                } else {
+                    ""
+                };
                 tracing::warn!(
                     "{label}: kept local {name} — it differs from the registry copy and was not \
-                     written by the registry sync, so it is treated as an operator edit; delete \
-                     {} to restore the registry version",
+                     written by the registry sync, so the registry will not overwrite it; delete \
+                     {} to restore the registry version.{discovery_note}",
                     dest_file.display()
                 );
                 operator_owned.insert(name);
@@ -1483,6 +1492,75 @@ mod tests {
         assert!(
             dest.join("legacy.toml").exists(),
             "an operator-edited file must outlive upstream dropping the name"
+        );
+    }
+
+    /// A source the sync cannot read does not authorise deleting a destination it cannot vouch for (#8407).
+    ///
+    /// An unreadable source is skipped before the destination is classified, so that name reaches the prune pass in neither the managed set nor the operator-owned one, and the prune decides on the manifest alone.
+    /// What it still requires is the digest: bytes it can prove it wrote are removed and reinstalled by the next sync, bytes it cannot are left alone — the same rule the digest exists for everywhere else.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_source_does_not_authorise_deleting_an_unprovable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let source = src.join("alpha.toml");
+        std::fs::write(&source, "id = \"alpha\"\n").unwrap();
+        sync_flat_files(&src, &dest, "providers");
+
+        // The operator edits the installed copy, so the recorded digest no longer matches.
+        let edited = "id = \"alpha\"\ndiscover_models = true\n";
+        std::fs::write(dest.join("alpha.toml"), edited).unwrap();
+
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(
+            std::fs::read(&source).is_err(),
+            "precondition: this test needs the source unreadable, which a root user bypasses"
+        );
+
+        sync_flat_files(&src, &dest, "providers");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("alpha.toml")).unwrap(),
+            edited,
+            "the prune may not delete bytes it cannot prove it wrote, however the source failed"
+        );
+
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    /// The residual the manifest cannot rule out, pinned so that changing it has to be a decision (#8407).
+    ///
+    /// A bare name from a pre-digest manifest carries no proof of authorship, and once upstream drops the name there is nothing left to compare against: the main loop never classifies the file, so it never reaches the operator-owned set, and the prune removes it on the manifest's word alone.
+    /// The file could have been the operator's — `None` means "unprovable", not "ours" — so a future combiner that keeps it belongs here, and this assertion is what will fail when someone makes that call.
+    #[test]
+    fn a_pre_digest_entry_is_pruned_after_an_upstream_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // A manifest written before digests existed: names only.
+        std::fs::write(dest.join(REGISTRY_MANAGED_MANIFEST), "legacy.toml").unwrap();
+        std::fs::write(
+            dest.join("legacy.toml"),
+            "id = \"legacy\"\ndiscover_models = true\n",
+        )
+        .unwrap();
+
+        // Upstream dropped the name, so the source does not list it and the main loop cannot classify it.
+        sync_flat_files(&src, &dest, "providers");
+
+        assert!(
+            !dest.join("legacy.toml").exists(),
+            "today's rule: an entry with no digest is pruned once upstream drops the name, and an operator edit to such a file goes with it"
         );
     }
 
