@@ -766,7 +766,7 @@ maintenance-launchdaemon-remove-failed = Failed to remove the LaunchDaemon plist
 maintenance-launchdaemon-not-found = No LaunchDaemon found — nothing to remove.
 maintenance-launchdaemon-status-registered = Boot-time LaunchDaemon is registered
 maintenance-launchdaemon-status-not-registered = No boot-time LaunchDaemon registered (the daemon starts only after login).
-maintenance-status-label-daemon-loaded = LaunchDaemon loaded
+maintenance-status-label-daemon-loaded =   LaunchDaemon loaded
 maintenance-launchctl-load-failed = launchctl load failed: { $error }
 maintenance-launchctl-run-failed = Failed to run launchctl: { $error }
 maintenance-windows-startup-added = Added to Windows startup (HKCU\Software\Microsoft\Windows\CurrentVersion\Run)
@@ -1265,7 +1265,7 @@ skill-bundle-size =   Size: { $size } bytes
 skill-dry-run = Dry run only.
 skill-dry-run-repo =   Repo: { $repo }
 skill-dry-run-tag =   Tag: { $tag }
-skill-github-token-required = Set GITHUB_TOKEN or GH_TOKEN to publish, or re-run with --dry-run.
+skill-github-token-required = No GitHub token found. Set GITHUB_TOKEN or GH_TOKEN, or store one in the vault with `librefang vault set GITHUB_TOKEN`, or re-run with --dry-run.
 skill-publishing-progress = Publishing { $name }@{ $tag }
 skill-publish-success = Published { $name } to { $repo }@{ $tag }
 skill-publish-release-url = Release: { $url }
@@ -2154,6 +2154,7 @@ tui-agents-hints-skills =     [↑↓] Navigate  [Space] Toggle  [Enter] Next  [
 tui-agents-hints-mcp =     [↑↓] Navigate  [Space] Toggle  [Enter] Create  [Esc] Back
 tui-agents-hints-save =     [↑↓] Navigate  [Space] Toggle  [Enter] Save  [Esc] Cancel
 
+
 tui-agents-placeholder-name = my-agent
 tui-agents-placeholder-desc = A custom agent
 tui-agents-placeholder-prompt = You are a helpful agent.
@@ -2417,13 +2418,27 @@ agent-set-invalid-integer = { $field } must be a positive whole number, got '{ $
 agent-set-invalid-decimal = { $field } must be a decimal number, got '{ $value }'
 agent-set-limit-warning = warning: { $message }
 
+# Model routing editor (profile-based routing)
+tui-agents-title-model-routing = Model Routing
+tui-agents-label-routing-fixed = fixed — always use this agent's own model
+tui-agents-label-routing-flexible = flexible — let the router pick per task
+tui-agents-hint-routing-mode = [Tab] switch mode
+tui-agents-label-routing-fixed-explainer = This agent always uses the model in its own manifest. Press Tab to let the router choose per task.
+tui-agents-label-no-router-profiles = No model profiles available. Add them to ~/.librefang/model_profiles.toml.
+tui-agents-label-routing-any-profile = any
+tui-agents-hints-model-routing = [Tab] Mode  [↑↓] Navigate  [Space] Toggle profile  [+/-] Cost budget  [Enter] Save  [Esc] Cancel
+tui-agents-model-routing-not-loaded = This agent's routing settings have not loaded — wait a moment, or press Esc and reopen with r if the fetch failed.
+tui-event-model-routing-fetch-failed = Failed to fetch model routing
+tui-event-model-routing-update-failed = Failed to update model routing
+tui-mod-agent-model-routing-updated = Model routing updated for agent { $id }.
+
 # --- Goals screen (TUI) ---
 tui-goals-title = ⌖ Goals
 tui-goals-count = { $count } goals
 tui-goals-filter = filter: { $query }
 tui-goals-loading = Loading goals...
 tui-goals-empty = No goals yet. Press [n] to create one.
-tui-goals-hints = [↑↓] Navigate  [Enter] Detail  [n] New  [s] Start/stop  [d] Delete  [/] Search  [r] Refresh
+tui-goals-hints = [↑↓] Navigate  [Enter] Detail  [n] New  [s] Start/stop  [p] Pause/resume  [d] Delete  [/] Search  [r] Refresh
 tui-goals-confirm-delete = Delete this goal? [y] confirm  [any other key] cancel
 tui-goals-none-selected = No goal selected.
 tui-goals-agent-none = unassigned
@@ -2463,12 +2478,16 @@ tui-goal-created = Goal created: { $id }
 tui-goal-deleted = Goal deleted: { $id }
 tui-goal-run-started = Run started: { $id }
 tui-goal-run-stopped = Run stopped: { $id }
+tui-goal-run-paused = Run paused: { $id }
+tui-goal-run-resumed = Run resumed: { $id }
 tui-goal-create-failed = Could not create the goal.
 tui-goal-create-error = Could not create the goal: { $error }
 tui-goal-delete-failed = Could not delete the goal.
 tui-goal-start-failed = Could not start the run.
 tui-goal-start-error = Could not start the run: { $error }
 tui-goal-stop-failed = Could not stop the run.
+tui-goal-pause-failed = Could not pause the run.
+tui-goal-resume-failed = Could not resume the run.
 tui-goal-inproc-unavailable = Goal management is unavailable in in-process mode.
 
 # --- goal command (CLI) ---
@@ -2484,11 +2503,11 @@ cmd-goal-finished = Goal finished successfully.
 cmd-goal-max-iterations = Goal stopped: iteration cap reached.
 cmd-goal-rate-limited = Goal stopped: provider rate limit.
 cmd-goal-stopped = Goal run stopped.
+cmd-goal-paused = Goal run paused.
 cmd-goal-error = error: { $error }
 cmd-goal-unknown-error = unknown error
 cmd-goal-watch-poll-error = Could not read the run state ({ $count }/{ $max }); retrying…
 cmd-goal-watch-poll-gave-up = Gave up observing the run after { $count } failed polls — the outcome is unknown and the run may still be executing.
-
 
 
 
@@ -2638,3 +2657,23 @@ tui-event-config-failed = Failed to load the current configuration
 tui-event-config-unreadable = The daemon answered, but the current configuration could not be read: { $error }
 tui-event-config-set-failed = Failed to save { $path }
 tui-event-config-need-daemon = Editing configuration needs a running daemon
+
+# Model routing CLI commands
+agent-routing-label-mode = Mode
+agent-routing-label-allowed = Allowed profiles
+agent-routing-label-budget = Cost budget
+agent-routing-label-default = Default profile
+agent-routing-any-profile = any
+agent-routing-no-cap = no cap
+agent-routing-fixed-explainer = This agent always uses the model in its own manifest.
+agent-routing-label-fixed = Router opt-out
+agent-routing-fixed-opt-out = fixed — the router never touches this agent
+agent-routing-updated = Model routing for agent { $id } set to { $mode }.
+agent-routing-failed = Failed to update model routing: { $error }
+agent-routing-profiles-header = Model router profiles (router is { $enabled }):
+tui-agents-line-routing-mode =   Mode: { $mode }
+tui-agents-line-routing-summary =   Cost budget: { $budget }    Allowed profiles: { $allowed }
+tui-agents-label-routing-no-cap = no cap
+tui-agents-label-routing-cheap = cheap
+tui-agents-label-routing-medium = medium
+tui-agents-label-routing-expensive = expensive

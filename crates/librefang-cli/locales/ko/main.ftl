@@ -689,10 +689,10 @@ mcp-catalog-install-hint =   MCP 서버를 설치하려면 `librefang mcp add <i
 mcp-none-configured = 구성된 MCP 서버가 없습니다.
 mcp-list-catalog-hint =   설치 가능한 항목을 나열하려면 `librefang mcp catalog`을(를) 사용하십시오.
 mcp-vault-set-hint =   librefang vault set { $name }  # { $help }
-mcp-header-name = name
+mcp-header-name = 이름
 mcp-header-template-id = template_id
-mcp-header-transport = transport
-mcp-header-details = details
+mcp-header-transport = 전송
+mcp-header-details = 세부 정보
 
 # monitoring.rs
 monitoring-audit-reset-destructive = 감사 초기화 재설정은 파괴적입니다 — 진행하려면 `--confirm`과 함께 다시 실행하십시오
@@ -1077,7 +1077,7 @@ ui-label-next-steps = 다음 단계
 ui-label-fix = 수정:
 ui-label-try = 시도:
 ui-provider-not-set = { $env_var }이(가) 설정되지 않음
-progress-fail = [FAIL]
+progress-fail = [실패]
 
 # Table headers / Shared labels
 label-header-name = 이름
@@ -1120,7 +1120,7 @@ model-header-context = 컨텍스트
 model-header-resolves-to = 확인 대상
 model-header-auth = 인증
 model-header-models = 모델
-model-header-base-url = BASE URL
+model-header-base-url = 기본 URL
 model-overrides-cleared = 모델 { $model }의 오버라이드가 초기화되었습니다.
 model-overrides-clear-failed = { $model }의 오버라이드 초기화 실패: { $status }
 model-overrides-header-field = 필드
@@ -1149,9 +1149,9 @@ auth-pool-cooldown-left = ({ $secs }초 남음)
 auth-pool-status-invalid = 유효하지 않음
 auth-pool-status-exhausted = 소진됨
 auth-pool-status-cooldown = 쿨다운
-auth-pool-status-env-missing = env-missing
+auth-pool-status-env-missing = 환경 변수 없음
 auth-pool-status-healthy = 정상
-auth-pool-key-requests = requests={ $count }
+auth-pool-key-requests = 요청={ $count }
 auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
 auth-hash-add-config-hint = config.toml에 추가하십시오:
 auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
@@ -1265,7 +1265,7 @@ skill-bundle-size =   크기: { $size } bytes
 skill-dry-run = 테스트 실행만 수행합니다.
 skill-dry-run-repo =   저장소: { $repo }
 skill-dry-run-tag =   태그: { $tag }
-skill-github-token-required = 게시하려면 GITHUB_TOKEN 또는 GH_TOKEN을 설정하거나 --dry-run으로 다시 실행하십시오.
+skill-github-token-required = GitHub 토큰을 찾을 수 없습니다. GITHUB_TOKEN 또는 GH_TOKEN을 설정하거나 `librefang vault set GITHUB_TOKEN`으로 볼트에 저장하거나 --dry-run으로 다시 실행하십시오.
 skill-publishing-progress = { $name }@{ $tag } 게시 중
 skill-publish-success = { $name }을(를) { $repo }@{ $tag }에 게시했습니다
 skill-publish-release-url = 릴리스: { $url }
@@ -1289,7 +1289,7 @@ monitoring-no-webhooks = 구성된 웹훅이 없습니다.
 label-last-seen = 마지막 확인
 status-watch-header =   { $status } ({ $interval }초마다 새로고침, Ctrl+C로 종료)
 status-warning-config = 경고: { $error }; 상태 표시에 기본 구성 값을 사용합니다
-status-summary-up = librefang { $version } { $state } uptime={ $uptime } { $auth } ({ $base })
+status-summary-up = librefang { $version } { $state } 가동시간={ $uptime } { $auth } ({ $base })
 status-peers-connected = { $connected }개 연결됨 / { $total }개 알려짐
 status-agents-active = { $active }개 실행 중 / 총 { $total }개
 status-mb = { $mb } MB
@@ -1850,7 +1850,7 @@ tui-dashboard-hints =   [r] 새로고침  [a] 에이전트  [↑↓] 스크롤  
 tui-dashboard-dreams-title = DREAMS
 tui-dashboard-auto-dream-enabled = Auto-Dream 활성화됨
 tui-dashboard-auto-dream-disabled = Auto-Dream 비활성화됨
-tui-dashboard-dream-details = phase={ $phase }  tools={ $tools }  mems={ $mems }
+tui-dashboard-dream-details = 단계={ $phase }  도구={ $tools }  기억={ $mems }
 tui-dashboard-stat-agents = 에이전트
 tui-dashboard-stat-uptime = 가동 시간
 tui-dashboard-stat-provider = 공급자
@@ -2152,7 +2152,7 @@ tui-agents-hints-save =     [↑↓] 탐색  [Space] 전환  [Enter] 저장  [Es
 tui-agents-placeholder-name = my-agent
 tui-agents-placeholder-desc = 사용자 지정 에이전트
 tui-agents-placeholder-prompt = 당신은 유용한 에이전트입니다.
-tui-agents-label-placeholder =     placeholder: { $placeholder }
+tui-agents-label-placeholder =     자리 표시자: { $placeholder }
 
 tui-agents-detail-id =   ID:       
 tui-agents-detail-name =   이름:      
@@ -2239,7 +2239,7 @@ tui-triggers-label-pattern-picker =   패턴 유형을 선택하십시오:
 tui-triggers-prompt-param = { $type }의 패턴 매개변수:
 tui-triggers-placeholder-pattern-param = 예: .*error.*
 tui-triggers-label-prompt = 프롬프트 템플릿:
-tui-triggers-placeholder-prompt = Handle this: {"{"}event{"}"}
+tui-triggers-placeholder-prompt = 이 이벤트를 처리하세요: {"{"}event{"}"}
 tui-triggers-label-max-fires = 최대 발동 횟수 (0 = 무제한):
 tui-triggers-placeholder-max-fires = 0
 tui-triggers-review-agent =   에이전트:  
@@ -2416,13 +2416,27 @@ agent-set-invalid-integer = { $field }은(는) 양의 정수여야 합니다. �
 agent-set-invalid-decimal = { $field }은(는) 실수여야 합니다. 입력값: '{ $value }'
 agent-set-limit-warning = 경고: { $message }
 
+# Model routing editor (profile-based routing)
+tui-agents-title-model-routing = 모델 라우팅
+tui-agents-label-routing-fixed = 고정 — 항상 이 에이전트의 자체 모델 사용
+tui-agents-label-routing-flexible = 유연 — 작업별로 라우터가 선택
+tui-agents-hint-routing-mode = [Tab] 모드 전환
+tui-agents-label-routing-fixed-explainer = 이 에이전트는 항상 자체 매니페스트의 모델을 사용합니다. Tab을 눌러 작업별로 라우터가 선택하도록 하세요.
+tui-agents-label-no-router-profiles = 사용 가능한 모델 프로필이 없습니다. ~/.librefang/model_profiles.toml에 추가하세요.
+tui-agents-label-routing-any-profile = 전체
+tui-agents-hints-model-routing = [Tab] 모드  [↑↓] 탐색  [Space] 프로필 전환  [+/-] 비용 예산  [Enter] 저장  [Esc] 취소
+tui-agents-model-routing-not-loaded = 이 에이전트의 라우팅 설정을 아직 불러오지 못했습니다 — 잠시 기다리거나, 가져오기에 실패했다면 Esc를 누른 뒤 r 키로 다시 여세요.
+tui-event-model-routing-fetch-failed = 모델 라우팅을 가져오지 못했습니다
+tui-event-model-routing-update-failed = 모델 라우팅을 업데이트하지 못했습니다
+tui-mod-agent-model-routing-updated = 에이전트 { $id }의 모델 라우팅이 업데이트되었습니다.
+
 # --- Goals screen (TUI) ---
 tui-goals-title = ⌖ 목표
 tui-goals-count = 목표 { $count }개
 tui-goals-filter = 필터: { $query }
 tui-goals-loading = 목표 불러오는 중...
 tui-goals-empty = 아직 목표가 없습니다. [n] 키로 만드세요.
-tui-goals-hints = [↑↓] 이동  [Enter] 상세  [n] 새로 만들기  [s] 시작/중지  [d] 삭제  [/] 검색  [r] 새로고침
+tui-goals-hints = [↑↓] 이동  [Enter] 상세  [n] 새로 만들기  [s] 시작/중지  [p] 일시정지/재개  [d] 삭제  [/] 검색  [r] 새로고침
 tui-goals-confirm-delete = 이 목표를 삭제할까요? [y] 확인  [다른 키] 취소
 tui-goals-none-selected = 선택된 목표가 없습니다.
 tui-goals-agent-none = 지정되지 않음
@@ -2444,14 +2458,14 @@ tui-goals-agent-hint = 목표를 수행할 에이전트의 이름 또는 UUID. �
 tui-goals-nav-next = [Enter] 다음  [Esc] 뒤로
 tui-goals-nav-submit = [Enter] 만들기  [Esc] 뒤로
 tui-goals-create-incomplete = 제목과 에이전트가 모두 필요합니다.
-tui-goals-phase-actv = ● ACTV
-tui-goals-phase-done = ○ DONE
-tui-goals-phase-canc = ○ CANC
-tui-goals-phase-fail = ● FAIL
-tui-goals-phase-pend = ○ PEND
-tui-goals-phase-paused = ⏸ PAUS
-tui-goals-phase-rate-limited = ⚡ RLIM
-tui-goals-phase-max-iterations = ⏱ MXIT
+tui-goals-phase-actv = ● 활성
+tui-goals-phase-done = ○ 완료
+tui-goals-phase-canc = ○ 취소
+tui-goals-phase-fail = ● 실패
+tui-goals-phase-pend = ○ 대기
+tui-goals-phase-paused = ⏸ 일시정지
+tui-goals-phase-rate-limited = ⚡ 속도제한
+tui-goals-phase-max-iterations = ⏱ 최대반복
 tui-goals-run-running = 실행 중
 tui-goals-run-paused = 일시 중지됨
 tui-goals-run-finished = 완료됨
@@ -2462,12 +2476,16 @@ tui-goal-created = 목표 생성됨: { $id }
 tui-goal-deleted = 목표 삭제됨: { $id }
 tui-goal-run-started = 실행 시작됨: { $id }
 tui-goal-run-stopped = 실행 중지됨: { $id }
+tui-goal-run-paused = 실행 일시정지됨: { $id }
+tui-goal-run-resumed = 실행 재개됨: { $id }
 tui-goal-create-failed = 목표를 생성하지 못했습니다.
 tui-goal-create-error = 목표를 생성하지 못했습니다: { $error }
 tui-goal-delete-failed = 목표를 삭제하지 못했습니다.
 tui-goal-start-failed = 실행을 시작하지 못했습니다.
 tui-goal-start-error = 실행을 시작하지 못했습니다: { $error }
 tui-goal-stop-failed = 실행을 중지하지 못했습니다.
+tui-goal-pause-failed = 실행을 일시정지하지 못했습니다.
+tui-goal-resume-failed = 실행을 재개하지 못했습니다.
 tui-goal-inproc-unavailable = 인프로세스 모드에서는 목표 관리를 사용할 수 없습니다.
 
 # --- goal command (CLI) ---
@@ -2483,11 +2501,11 @@ cmd-goal-finished = 목표가 성공적으로 완료되었습니다.
 cmd-goal-max-iterations = 목표 중지: 반복 한도에 도달했습니다.
 cmd-goal-rate-limited = 목표 중지: 제공자 속도 제한.
 cmd-goal-stopped = 목표 실행이 중지되었습니다.
+cmd-goal-paused = 목표 실행이 일시 중지되었습니다.
 cmd-goal-error = 오류: { $error }
 cmd-goal-unknown-error = 알 수 없는 오류
 cmd-goal-watch-poll-error = 실행 상태를 읽을 수 없습니다({ $count }/{ $max }); 다시 시도하는 중…
 cmd-goal-watch-poll-gave-up = { $count }회 연속 폴링 실패 후 관찰을 중단했습니다 — 결과를 알 수 없으며 실행은 계속 진행 중일 수 있습니다.
-
 
 
 
@@ -2637,3 +2655,23 @@ tui-event-config-failed = 현재 구성을 불러오지 못했습니다
 tui-event-config-unreadable = 데몬이 응답했지만 현재 설정을 읽을 수 없습니다: { $error }
 tui-event-config-set-failed = { $path }을(를) 저장하지 못했습니다
 tui-event-config-need-daemon = 구성 편집에는 실행 중인 데몬이 필요합니다
+
+# Model routing CLI commands
+agent-routing-label-mode = 모드
+agent-routing-label-allowed = 허용된 프로필
+agent-routing-label-budget = 비용 예산
+agent-routing-label-default = 기본 프로필
+agent-routing-any-profile = 전체
+agent-routing-no-cap = 제한 없음
+agent-routing-fixed-explainer = 이 에이전트는 항상 자체 매니페스트의 모델을 사용합니다.
+agent-routing-label-fixed = 라우터 제외
+agent-routing-fixed-opt-out = 고정됨 — 라우터가 이 에이전트를 건드리지 않습니다
+agent-routing-updated = 에이전트 { $id }의 모델 라우팅이 { $mode }(으)로 설정되었습니다.
+agent-routing-failed = 모델 라우팅 업데이트 실패: { $error }
+agent-routing-profiles-header = 모델 라우터 프로필 (라우터: { $enabled }):
+tui-agents-line-routing-mode =   모드: { $mode }
+tui-agents-line-routing-summary =   비용 예산: { $budget }    허용된 프로필: { $allowed }
+tui-agents-label-routing-no-cap = 제한 없음
+tui-agents-label-routing-cheap = 저비용
+tui-agents-label-routing-medium = 중간
+tui-agents-label-routing-expensive = 고비용
