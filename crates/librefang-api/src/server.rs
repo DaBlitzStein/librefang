@@ -4112,8 +4112,14 @@ mod session_cookie_attrs_tests {
         let secure = session_cookie_attrs(ip("172.19.0.5"), &https_headers, &trusted);
 
         assert!(
-            secure.contains("Secure"),
+            attr_tokens(secure).contains(&"Secure"),
             "the HTTPS branch must keep `Secure`: {secure}"
+        );
+        assert!(
+            !attr_tokens(plain).contains(&"Secure"),
+            "the plain-HTTP branch must NOT carry `Secure`: the browser drops a `Secure` \
+             cookie over http://, so emitting one here puts the login loop back on the \
+             operator's own LAN bind: {plain}"
         );
         for attrs in [plain, secure] {
             let tokens = attr_tokens(attrs);
