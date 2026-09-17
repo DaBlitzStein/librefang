@@ -100,18 +100,3 @@ export function useRestoreTemplateVersion() {
     },
   });
 }
-
-// The `useSpawnEphemeral` hook lived here. Its only caller was the agent-types
-// page's Quick Run modal, and #8384 replaced that control with one that
-// instantiates the type instead, so the hook had no consumer left.
-//
-// The endpoint it wrapped (`POST /api/agents/spawn-ephemeral`) is untouched and
-// still reachable — over HTTP directly, and in-turn through the `agent_spawn`
-// tool with `ephemeral: true`. The CLI is not on that list: no subcommand
-// forwards to it.
-//
-// `spawnEphemeral` itself stays in `api.ts`, which is the client for the
-// daemon's published endpoints rather than UI glue. It has no caller today,
-// including the re-export in `http/client.ts` — which is the file this
-// paragraph argues it does not belong in, so the function is documented here
-// rather than there.
