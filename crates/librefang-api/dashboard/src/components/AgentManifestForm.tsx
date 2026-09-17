@@ -297,18 +297,27 @@ export function AgentManifestForm({
             param="top_p"
             value={value.model.top_p}
             onChange={(next) => updateModel({ top_p: next })}
+            hint={t("agents.form.sampling_provider_hint", {
+              defaultValue: "OpenAI-compatible providers and Ollama only",
+            })}
             invalid={invalidFields.has("model.top_p")}
           />
           <ModelParamField
             param="frequency_penalty"
             value={value.model.frequency_penalty}
             onChange={(next) => updateModel({ frequency_penalty: next })}
+            hint={t("agents.form.sampling_provider_hint", {
+              defaultValue: "OpenAI-compatible providers and Ollama only",
+            })}
             invalid={invalidFields.has("model.frequency_penalty")}
           />
           <ModelParamField
             param="presence_penalty"
             value={value.model.presence_penalty}
             onChange={(next) => updateModel({ presence_penalty: next })}
+            hint={t("agents.form.sampling_provider_hint", {
+              defaultValue: "OpenAI-compatible providers and Ollama only",
+            })}
             invalid={invalidFields.has("model.presence_penalty")}
           />
         </div>
