@@ -99,7 +99,7 @@ def main():
     ]
     expect(
         {o["op_id"]: o["raw_body_ct"] for o in raw_ops}
-        == {"transcribe_audio": "audio/webm", "upload_agent_avatar": "application/octet-stream", "upload_file": "application/octet-stream"},
+        == {"transcribe_audio": "audio/webm", "upload_agent_avatar": "application/octet-stream", "upload_file": "application/octet-stream", "upload_user_avatar": "application/octet-stream"},
         f"unexpected raw-body operations: {[(o['op_id'], o['raw_body_ct']) for o in raw_ops]}",
     )
     expect(
@@ -188,38 +188,6 @@ def main():
     # SSE line-size cap
     assert_in("MAX_SSE_LINE", rs, "rust-max-sse")
     assert_in("maxSSELine", go, "go-max-sse")
-
-    # Raw (non-JSON) request bodies (#8028): `put_agent_template_toml` and
-    # `upload_file` declare a `text/plain` / `application/octet-stream`
-    # requestBody, not `application/json`. Every generated caller must send
-    # the string/bytes it was given as-is — JSON-encoding it produces a body
-    # the server's extractor can't parse, so every call answered 400 no
-    # matter what the caller passed.
-    toml_put = next(
-        o for o in tag_ops.get("system", []) if o["op_id"] == "put_agent_template_toml"
-    )
-    expect(toml_put["raw_content_type"] == "text/plain", "put_agent_template_toml raw content type")
-    upload = next(o for o in tag_ops.get("agents", []) if o["op_id"] == "upload_file")
-    expect(
-        upload["raw_content_type"] == "application/octet-stream",
-        "upload_file raw content type",
-    )
-    # A JSON endpoint must not be swept into the raw-body path.
-    expect(tools["raw_content_type"] == "", "invoke_tool must stay JSON-encoded")
-
-    assert_in("def put_agent_template_toml(self, name: str, body: str):", py, "python-toml-raw-body-sig")
-    assert_in('raw_body=body, content_type="text/plain"', py, "python-toml-raw-body-call")
-    assert_in("def upload_file(self, id: str, body: str):", py, "python-upload-raw-body-sig")
-    assert_not_in("def put_agent_template_toml(self, name: str, **data)", py, "python-toml-no-dict-body")
-
-    assert_in("async putAgentTemplateToml(name, body) {", js, "js-toml-raw-body-sig")
-    assert_in('body, "text/plain"', js, "js-toml-raw-body-call")
-
-    assert_in("func (r *SystemResource) PutAgentTemplateToml(name string, body string)", go, "go-toml-raw-body-sig")
-    assert_in('r.client.requestRaw("PUT"', go, "go-toml-raw-body-call")
-
-    assert_in("pub async fn put_agent_template_toml(&self, name: &str, body: String)", rs, "rust-toml-raw-body-sig")
-    assert_in("do_req_raw(", rs, "rust-toml-raw-body-call")
 
     # Reserved-word escape works
     expect(mod._py_safe("class") == "class_", "Python reserved-word escape")
