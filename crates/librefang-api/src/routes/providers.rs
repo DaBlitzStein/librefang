@@ -916,7 +916,7 @@ fn merge_probe_into_catalog(
 /// Failures are non-fatal by construction: `probe_provider_cached` reports an unreachable result instead of erroring, the merge is skipped, and the response falls back to the checked-in catalogue.
 /// The 60-second [`ProbeCache`](librefang_kernel::provider_health::ProbeCache) TTL is what keeps a dashboard that polls the Models page from turning every poll into a round-trip to the operator's own infrastructure, and it is the same cache `GET /api/providers` already fills on every dashboard load.
 async fn refresh_discovered_models(state: &AppState, provider_filter: Option<&str>) {
-    // `local_provider_probe_targets` is the single definition of "participates in discovery" — built-in local ids plus `discover_models` opt-ins, with an empty base URL and user-suppressed providers excluded.
+    // `local_provider_probe_targets` is the single definition of "participates in discovery" — built-in local ids plus every provider that has not opted out of `discover_models`, which is on by default (#8407) — with an empty base URL and user-suppressed providers excluded.
     // Going through it keeps this handler from drifting away from the periodic probe loop.
     let targets: Vec<(String, String, Option<String>)> = {
         let catalog = state.kernel.model_catalog_ref().load();
