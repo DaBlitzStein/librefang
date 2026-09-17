@@ -1521,7 +1521,7 @@ fn migrate_v60(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// v61: per-task claim TTL override (`task_queue.timeout_secs`).
+/// v62: per-task claim TTL override (`task_queue.timeout_secs`).
 ///
 /// The stuck-task sweeper reclaims an `in_progress` row once it has been held
 /// longer than `[task_board] claim_ttl_secs`, a single global number.
@@ -1530,9 +1530,9 @@ fn migrate_v60(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// hours; tuned for the probe, the import is torn away from a worker that is
 /// still making progress.
 ///
-/// `NULL` means "use the global", which is exactly what every pre-v61 row
+/// `NULL` means "use the global", which is exactly what every pre-v62 row
 /// means, so the column needs no backfill.
-fn migrate_v61(conn: &Connection) -> Result<(), rusqlite::Error> {
+fn migrate_v62(conn: &Connection) -> Result<(), rusqlite::Error> {
     // No `table_exists` guard: `task_queue` is created unconditionally by
     // `migrate_v1`, so it is present on every database that reaches this step.
     // `try_column_exists` is still required — SQLite has no
@@ -1547,20 +1547,20 @@ fn migrate_v61(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (61, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
+         VALUES (62, datetime('now'), 'Per-task claim TTL override on task_queue (timeout_secs)')",
         [],
     )?;
     Ok(())
 }
 
-/// v62 (#7752): session parentage — `sessions.parent_session_id`.
+/// v61 (#7752): session parentage — `sessions.parent_session_id`.
 ///
 /// Idempotent in both halves: `try_column_exists` guards the `ALTER TABLE`
 /// (SQLite has no `ADD COLUMN IF NOT EXISTS`) and the index is
 /// `CREATE INDEX IF NOT EXISTS`, so re-running against a database that
 /// already has the column is a no-op rather than
 /// "duplicate column name: parent_session_id".
-fn migrate_v62(conn: &Connection) -> Result<(), rusqlite::Error> {
+fn migrate_v61(conn: &Connection) -> Result<(), rusqlite::Error> {
     if !try_column_exists(conn, "sessions", "parent_session_id")? {
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT DEFAULT NULL",
@@ -1573,7 +1573,7 @@ fn migrate_v62(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (62, datetime('now'), 'Add sessions.parent_session_id for sub-agent run lineage (#7752)')",
+         VALUES (61, datetime('now'), 'Add sessions.parent_session_id for sub-agent run lineage (#7752)')",
         [],
     )?;
     Ok(())
