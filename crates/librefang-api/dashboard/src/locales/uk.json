@@ -2889,6 +2889,10 @@
     "select_agent_desc": "Оберіть агента зі списку, щоб встановити зв'язок.",
     "transmit_command": "Надіслати нейроімпульс...",
     "send": "Надіслати",
+    "scale_current": "Розмір тексту: {{percent}}%",
+    "scale_decrease": "Менший текст",
+    "scale_increase": "Більший текст",
+    "scale_reset": "Скинути розмір тексту",
     "secure_link": "Захищене з'єднання",
     "standby": "Очікування",
     "end_history": "Кінець історії",
@@ -3046,7 +3050,9 @@
     "verifier_agent": "Агент-перевіряч",
     "no_verifier_selected": "Без перевіряча (без контролю)",
     "evaluator_model": "Модель-оцінювач",
-    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)"
+    "evaluator_model_placeholder": "Модель-оцінювач (необов'язково)",
+    "run_pause": "Призупинити автономний запуск",
+    "run_resume": "Відновити автономний запуск"
   },
   "sessions": {
     "title": "Сесії",
@@ -4288,7 +4294,8 @@
     "status_failed": "Провалено",
     "assignee_none": "Без виконавця — будь-який агент може взяти",
     "no_agents_hint": "Жодного агента ще не зареєстровано. Створіть агента, перш ніж призначати таски.",
-    "field_description_hint": "Агент читає це дослівно. Вкажіть мету, обмеження та критерій завершення."
+    "field_description_hint": "Агент читає це дослівно. Вкажіть мету, обмеження та критерій завершення.",
+    "field_assignee_placeholder": "Ім'я або ID агента"
   },
   "prompts": {
     "title": "Промпти",
@@ -4344,6 +4351,7 @@
   },
   "agentTypes": {
     "confirm_delete": "Видалити тип агента '{{name}}'? Уже створених із нього агентів це не торкнеться.",
+    "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "Новий тип агента",
     "created": "Тип агента створено",
     "delete": "Видалити",

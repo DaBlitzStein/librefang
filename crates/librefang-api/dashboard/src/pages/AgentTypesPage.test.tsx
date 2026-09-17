@@ -16,7 +16,7 @@ import * as agentTypeMutations from "../lib/mutations/agentTypes";
 import { ApiError } from "../lib/http/errors";
 import { useUIStore } from "../lib/store";
 import { createTestQueryClient } from "../lib/test/query-client";
-import type { AgentTemplate, AgentTypeDetail } from "../api";
+import type { AgentTemplate, AgentTypeDetail, TemplateVersionEntry } from "../api";
 
 // The promotion flow (#7771) is the part of this page with no net: it opens a
 // pull request against a public registry, so a control that fires the wrong
@@ -153,6 +153,15 @@ const DETAIL: AgentTypeDetail = {
   },
 };
 
+const VERSION: TemplateVersionEntry = {
+  id: 7,
+  template_name: "researcher",
+  // Stored naive-UTC, exactly as the history endpoint returns it.
+  timestamp: "2026-09-01T10:30:00",
+  manifest_toml: 'name = "researcher"\ndescription = "Read papers"\n',
+  change_source: "edit",
+};
+
 const idle = { mutateAsync: vi.fn(), isPending: false };
 
 function mockQuery<T>(data: T) {
@@ -166,19 +175,31 @@ function mockQuery<T>(data: T) {
   };
 }
 
-/** The promote mutation is the only one a test ever varies. */
+type MutationStub = { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean };
+
+/**
+ * Promotion is the mutation every test varies; the type list, the restore stub
+ * and the history payload are opt-in so the tests that do not need them keep
+ * reading as one argument.
+ */
 function renderPage(
-  promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean },
-  types: AgentTemplate[] = [TYPE],
+  promote: MutationStub,
+  extras: {
+    types?: AgentTemplate[];
+    restore?: MutationStub;
+    versions?: TemplateVersionEntry[];
+  } = {},
 ) {
   vi.mocked(useAgentTypes).mockReturnValue(
-    mockQuery(types) as unknown as ReturnType<typeof useAgentTypes>,
+    mockQuery(extras.types ?? [TYPE]) as unknown as ReturnType<typeof useAgentTypes>,
   );
   vi.mocked(useAgentType).mockReturnValue(
     mockQuery(DETAIL) as unknown as ReturnType<typeof useAgentType>,
   );
   vi.mocked(useAgentTypeHistory).mockReturnValue(
-    mockQuery({ versions: [] }) as unknown as ReturnType<typeof useAgentTypeHistory>,
+    mockQuery({ versions: extras.versions ?? [] }) as unknown as ReturnType<
+      typeof useAgentTypeHistory
+    >,
   );
   vi.mocked(useTools).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useTools>);
   vi.mocked(useSkills).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useSkills>);
@@ -199,6 +220,11 @@ function renderPage(
   vi.mocked(usePromoteAgentType).mockReturnValue(
     promote as unknown as ReturnType<typeof usePromoteAgentType>,
   );
+  if (extras.restore) {
+    vi.mocked(useRestoreTemplateVersion).mockReturnValue(
+      extras.restore as unknown as ReturnType<typeof useRestoreTemplateVersion>,
+    );
+  }
 
   return render(
     <QueryClientProvider client={createTestQueryClient()}>
@@ -250,7 +276,7 @@ describe("AgentTypesPage run", () => {
   // the wanted row second closes that: a name read off the list, or off the
   // first row, now sends `analyst` and fails here.
   it("takes the name from the row it was pressed on", () => {
-    renderPage(idle, [OTHER_TYPE, TYPE]);
+    renderPage(idle, { types: [OTHER_TYPE, TYPE] });
     fireEvent.click(screen.getByRole("button", { name: `${RUN_LABEL}: ${TYPE.name}` }));
     expect(navigateSpy).toHaveBeenCalledWith({
       to: "/agents",
@@ -331,5 +357,59 @@ describe("AgentTypesPage promotion", () => {
     // A refused promotion has opened no pull request, so the success dialog
     // must stay closed.
     expect(screen.queryByRole("link", { name: /View pull request/ })).toBeNull();
+  });
+});
+
+// Restoring rewrites the template's agent.toml on disk, and the snapshot the
+// server records afterwards holds the restored content rather than what it
+// replaced — so the row's Restore button is as destructive as Delete and must
+// reach a confirmation before the mutation fires (#8334).
+describe("AgentTypesPage template history", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useUIStore.setState({ toasts: [] });
+  });
+
+  function openHistory(restore: MutationStub) {
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, { restore, versions: [VERSION] });
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+  }
+
+  it("does not restore a version until the confirmation is accepted", async () => {
+    const mutateAsync = vi.fn().mockResolvedValue(DETAIL);
+    openHistory({ mutateAsync, isPending: false });
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    expect(mutateAsync).not.toHaveBeenCalled();
+
+    // The history list is a column of near-identical rows, so the dialog has to
+    // say *which* version it is about to write over the template.
+    const message = screen.getByText(/Restore 'researcher' to the version saved/);
+    // jest-dom collapses the element's whitespace but not the expected string,
+    // and en-US separates the time from AM/PM with U+202F — normalize both sides.
+    const stamp = new Date(VERSION.timestamp + "Z").toLocaleString().replace(/\s+/g, " ");
+    expect(message).toHaveTextContent(stamp);
+    expect(message).toHaveTextContent("(edit)");
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({ name: "researcher", versionId: 7 }),
+    );
+    expect(useUIStore.getState().toasts.map((t) => t.message)).toContain("Version restored");
+  });
+
+  it("writes nothing when the restore confirmation is cancelled", () => {
+    const mutateAsync = vi.fn();
+    openHistory({ mutateAsync, isPending: false });
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(mutateAsync).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Restore 'researcher' to the version saved/)).toBeNull();
+    // The history modal itself stays open — cancelling the dialog is not
+    // cancelling the browse.
+    expect(screen.getByText(/History: researcher/)).toBeInTheDocument();
   });
 });

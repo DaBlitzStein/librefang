@@ -2889,6 +2889,10 @@
     "select_agent_desc": "Wybierz agenta z listy, aby nawiązać połączenie komunikacyjne.",
     "transmit_command": "Prześlij impuls neuronowy...",
     "send": "Wyślij",
+    "scale_current": "Rozmiar tekstu: {{percent}}%",
+    "scale_decrease": "Mniejszy tekst",
+    "scale_increase": "Większy tekst",
+    "scale_reset": "Przywróć rozmiar tekstu",
     "secure_link": "Bezpieczne połączenie",
     "standby": "Tryb gotowości",
     "end_history": "Koniec historii",
@@ -3046,7 +3050,9 @@
     "verifier_agent": "Agent weryfikujący",
     "no_verifier_selected": "Bez weryfikatora (bez kontroli)",
     "evaluator_model": "Model oceniający",
-    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)"
+    "evaluator_model_placeholder": "Model oceniający (opcjonalnie)",
+    "run_pause": "Wstrzymaj autonomiczne uruchomienie",
+    "run_resume": "Wznów autonomiczne uruchomienie"
   },
   "sessions": {
     "title": "Sesje",
@@ -4288,7 +4294,8 @@
     "status_failed": "Nieudane",
     "assignee_none": "Nieprzypisane — dowolny agent może pobrać",
     "no_agents_hint": "Nie zarejestrowano jeszcze żadnych agentów. Utwórz agenta przed przypisywaniem zadań.",
-    "field_description_hint": "Agent czyta to dosłownie. Podaj cel, ograniczenia i kryteria ukończenia."
+    "field_description_hint": "Agent czyta to dosłownie. Podaj cel, ograniczenia i kryteria ukończenia.",
+    "field_assignee_placeholder": "Nazwa lub ID agenta"
   },
   "prompts": {
     "title": "Prompty",
@@ -4344,6 +4351,7 @@
   },
   "agentTypes": {
     "confirm_delete": "Usunąć typ agenta '{{name}}'? Agenci już z niego utworzeni pozostaną nienaruszeni.",
+    "confirm_restore": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the template's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
     "create_title": "Nowy typ agenta",
     "created": "Utworzono typ agenta",
     "delete": "Usuń",
