@@ -4,7 +4,7 @@ use chrono::Utc;
 use dashmap::{mapref::entry::Entry, DashMap};
 use librefang_types::approval::{
     ApprovalAuditEntry, ApprovalDecision, ApprovalEvent, ApprovalPolicy, ApprovalRequest,
-    ApprovalResponse, RiskLevel, SecondFactor, TimeoutFallback,
+    ApprovalResponse, RiskLevel, TimeoutFallback,
 };
 use librefang_types::capability::glob_matches;
 use librefang_types::error::{LibreFangError, LibreFangResult};
@@ -1534,9 +1534,25 @@ impl ApprovalManager {
     // -----------------------------------------------------------------------
 
     /// Check whether the current policy requires TOTP verification.
+    ///
+    /// Forwards to [`Self::requires_approval_totp`], which is the question every
+    /// caller actually has: an approval notifies, renders buttons, and is
+    /// resolved against `tool_requires_totp`, and that predicate is true for
+    /// `SecondFactor::Both` as much as for `Totp`.
+    ///
+    /// This used to compare `second_factor` against `Totp` alone, so `Both`
+    /// answered `false` here while `resolve` still demanded a code. The channel
+    /// notification then omitted the "reply with a 6-digit code" instruction and
+    /// offered an Approve button whose press could not succeed — the approval
+    /// came back "TOTP code required for approval (second_factor = totp)".
+    /// See `kernel::tests::test_interactive_approval_notification_asks_for_a_code_when_second_factor_is_both`.
+    ///
+    /// The login half of the second factor is a different question and keeps its
+    /// own predicate, [`librefang_types::approval::SecondFactor::requires_login_totp`];
+    /// `SecondFactor::Login` deliberately does not appear here, because it leaves
+    /// tool approvals verifying nothing.
     pub fn requires_totp(&self) -> bool {
-        let policy = self.read_policy();
-        policy.second_factor == SecondFactor::Totp
+        self.requires_approval_totp()
     }
 
     /// Check whether the current policy requires a TOTP code on tool

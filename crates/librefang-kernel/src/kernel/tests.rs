@@ -649,6 +649,74 @@ async fn test_interactive_approval_notification_reaches_a_named_instance_8055() 
     kernel.shutdown();
 }
 
+/// `SecondFactor::Both` requires a code on tool approvals exactly as `Totp`
+/// does, so the interactive notification must ask for it — and must not offer
+/// an Approve button.
+///
+/// The branch this exercises reads `ApprovalManager::requires_totp()`, which
+/// compared `second_factor` against `Totp` alone and therefore answered `false`
+/// for `Both`. The approver got the plain escalation text plus an `[Approve]`
+/// button, pressed it, and `resolve` then rejected the approval with "TOTP code
+/// required for approval (second_factor = totp)" — a button inviting an action
+/// that cannot succeed, on the one notification whose entire purpose is that
+/// decision.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_interactive_approval_notification_asks_for_a_code_when_second_factor_is_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        approval: librefang_types::approval::ApprovalPolicy {
+            second_factor: librefang_types::approval::SecondFactor::Both,
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let adapter = Arc::new(RecordingChannelAdapter::new("slack"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack".to_string(), adapter);
+
+    kernel
+        .push_approval_interactive(
+            &NotificationTarget {
+                channel_type: "slack".to_string(),
+                recipient: "C0BN6UAQ75M".to_string(),
+                thread_id: None,
+            },
+            "agent wants to run `file_write`",
+            "abcdef1234",
+        )
+        .await;
+
+    let sent = sent.lock().unwrap().clone();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the notification must be delivered exactly once: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("TOTP required. Reply: /approve abcdef12 <6-digit-code>"),
+        "second_factor = both verifies a code on approvals, so the notification must ask for it: {sent:?}"
+    );
+    assert!(
+        !sent[0].contains("[Approve]"),
+        "no Approve button may be offered when the code has to be typed — `resolve` rejects that approval: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("[Reject]"),
+        "the Reject button must still be offered: {sent:?}"
+    );
+
+    kernel.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_channel_type_resolution_refuses_to_guess_between_tenants_8055() {
     // The #8055 channel-type scan must never widen cross-tenant reach.
