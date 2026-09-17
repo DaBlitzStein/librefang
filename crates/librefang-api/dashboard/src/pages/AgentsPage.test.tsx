@@ -5,7 +5,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { canEditAgentIdentity, cloneResultNotice, createDrawerSeed, hasTokenFootprintData, SystemPromptSection, DescriptionSection, ChannelsSection } from "./AgentsPage";
+import {
+  canEditAgentIdentity,
+  cloneResultNotice,
+  createDrawerSeed,
+  hasTokenFootprintData,
+  SystemPromptSection,
+  DescriptionSection,
+  ChannelsSection,
+  TAB_SECTIONS,
+} from "./AgentsPage";
+import { MANIFEST_SECTION_IDS } from "../components/AgentManifestForm";
 import { usePatchAgent, useSetAgentChannels } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
 import { usePromptVersions, useAgentChannels } from "../lib/queries/agents";
@@ -347,5 +357,46 @@ describe("ChannelsSection (#7742)", () => {
       agentId: "agent-1",
       channels: ["telegram", "discord"],
     });
+  });
+});
+
+describe("agent drawer — manifest section layout", () => {
+  const hosted = Object.entries(TAB_SECTIONS).flatMap(([tab, ids]) =>
+    (ids ?? []).map((id) => ({ tab, id })),
+  );
+
+  // A section the form can render but no tab hosts is a field the operator
+  // cannot reach — the same defect as a manifest key with no widget, one level
+  // up, and invisible in every other test because the form would still render
+  // it happily wherever it was asked to.
+  it("hosts every manifest section somewhere", () => {
+    const orphans = MANIFEST_SECTION_IDS.filter(
+      (id) => !hosted.some((entry) => entry.id === id),
+    );
+    expect(
+      orphans,
+      `Sections exist in the editor that no tab renders, so they are ` +
+        `unreachable from the drawer. Add each to TAB_SECTIONS.\n\n` +
+        `Orphaned: ${orphans.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  // A section hosted twice is the redundancy the single-surface design exists
+  // to remove: two controls writing one field from two places, which is how the
+  // complexity router ended up split between a tab and a drawer two levels
+  // down.
+  it("hosts no manifest section in two tabs", () => {
+    const seen = new Map<string, string>();
+    const clashes: string[] = [];
+    for (const { tab, id } of hosted) {
+      const previous = seen.get(id);
+      if (previous) clashes.push(`${id} (${previous} and ${tab})`);
+      else seen.set(id, tab);
+    }
+    expect(
+      clashes,
+      `A section rendered by two tabs means two controls for one field.\n\n` +
+        `Duplicated: ${clashes.join(", ")}`,
+    ).toEqual([]);
   });
 });

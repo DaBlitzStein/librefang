@@ -196,6 +196,39 @@ export const MANIFEST_SECTION_IDS = [
 
 export type ManifestSectionId = (typeof MANIFEST_SECTION_IDS)[number];
 
+/**
+ * Which section renders the field a validation message names.
+ *
+ * `validateManifestForm` reports a dotted field path (`schedule.cron`), and
+ * with the sections split across tabs a message is only actionable if the
+ * operator is already looking at the tab that hosts the field. The caller
+ * needs to be able to send them there, which means knowing which section owns
+ * each path.
+ *
+ * The prefixes are matched in order, so the first entry that matches wins and
+ * a bare `name` cannot be swallowed by a `model.` rule.
+ *
+ * A test fails when `validateManifestForm` grows a path no entry covers, so a
+ * new rule cannot quietly produce an error nobody can find.
+ */
+const FIELD_PREFIX_TO_SECTION: ReadonlyArray<readonly [RegExp, ManifestSectionId]> = [
+  [/^name$/, "identity"],
+  [/^model\./, "model"],
+  [/^schedule\./, "scheduling"],
+  [/^response_format\./, "response_format"],
+  [/^workspaces\./, "shared_folders"],
+];
+
+/** The section that renders `path`, or `undefined` when no entry covers it. */
+export const sectionForInvalidField = (
+  path: string,
+): ManifestSectionId | undefined =>
+  FIELD_PREFIX_TO_SECTION.find(([pattern]) => pattern.test(path))?.[1];
+
+/** Every field path prefix the validator's errors are expected to start with. */
+export const knownInvalidFieldPrefixes = (): string[] =>
+  FIELD_PREFIX_TO_SECTION.map(([pattern]) => pattern.source);
+
 export function AgentManifestForm({
   value,
   onChange,

@@ -1,12 +1,15 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import {
   AgentManifestForm,
   type ManifestCatalogEntry,
   type ManifestSectionId,
   MANIFEST_SECTION_IDS,
+  sectionForInvalidField,
 } from "./AgentManifestForm";
 import {
   emptyManifestExtras,
@@ -635,5 +638,36 @@ describe("AgentManifestForm — section addressing", () => {
     // would put the entire manifest on a tab that asked for none of it.
     const { container } = render(<Harness sections={[]} />);
     expect(renderedSections(container)).toEqual([]);
+  });
+});
+
+// A validation message that names a field on a tab the operator is not
+// looking at is indistinguishable from no message at all, and with the
+// sections split across tabs that became possible for the first time.
+// `sectionForInvalidField` is what lets the caller jump to the right tab, and
+// it is only correct while it covers everything the validator can report.
+describe("AgentManifestForm — validation paths are routable", () => {
+  it("maps every field path validateManifestForm can report to a section", () => {
+    const source = readFileSync(
+      join(__dirname, "..", "lib", "agentManifest.ts"),
+      "utf8",
+    );
+    // Every `errors.push("…")` in the validator. Template literals included:
+    // `workspaces.${ws._uid}.name` is captured with its placeholder intact,
+    // which still matches the `workspaces.` prefix.
+    const reported = [...source.matchAll(/errors\.push\(\s*["`]([^"`]+)["`]/g)].map(
+      (m) => m[1],
+    );
+
+    expect(reported.length).toBeGreaterThan(0);
+
+    const unrouted = reported.filter((path) => sectionForInvalidField(path) === undefined);
+    expect(
+      unrouted,
+      `validateManifestForm reports field paths that no section claims, so an ` +
+        `operator who trips one would be told to fix a field the editor cannot ` +
+        `navigate to. Add the prefix to FIELD_PREFIX_TO_SECTION.\n\n` +
+        `Unrouted: ${unrouted.join(", ")}`,
+    ).toEqual([]);
   });
 });
