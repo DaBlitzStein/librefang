@@ -133,6 +133,7 @@ const OTHER_TYPE: AgentTemplate = {
   model: "claude-sonnet-5",
   source: "agent-type",
   editable: true,
+  from_registry: false,
 };
 
 const DETAIL: AgentTypeDetail = {
@@ -375,13 +376,13 @@ describe("AgentTypesPage restore control", () => {
   // than through a helper that would have to already know which case it is.
 
   it("is enabled when the type has a registry original", () => {
-    renderPage({ mutateAsync: vi.fn(), isPending: false }, { templates: [{ ...TYPE, from_registry: true }] });
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, { types: [{ ...TYPE, from_registry: true }] });
 
     expect(screen.getByRole("button", { name: "Restore from registry" })).toBeEnabled();
   });
 
   it("is disabled and explains why when the type has no registry original", () => {
-    renderPage({ mutateAsync: vi.fn(), isPending: false }, { templates: [{ ...TYPE, from_registry: false }] });
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, { types: [{ ...TYPE, from_registry: false }] });
 
     expect(
       screen.getByRole("button", { name: "This agent type does not exist in the registry." }),

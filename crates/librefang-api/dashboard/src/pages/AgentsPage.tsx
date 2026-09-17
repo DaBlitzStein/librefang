@@ -45,18 +45,13 @@ import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch, History, History, ChevronRight, Radio, Route, Route } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch, History, ChevronRight, Radio, Route } from "lucide-react";
 import {
   buildModelConfigPatch,
   emptyModelNumerics,
   seedModelNumerics,
   type ModelDraft,
 } from "../lib/agentModelPatch";
-import { buildModelConfigPatch } from "../lib/agentModelPatch";
-=======
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch, ChevronRight, Radio, Route } from "lucide-react";
-import { buildModelConfigPatch } from "../lib/agentModelPatch";
->>>>>>> fork/feat/agent-editor-parity
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -98,7 +93,6 @@ import {
   useAgentSkills,
   useAgentMcpServers,
   useAgentAvatarUrl,
-  useAgentManifestHistory,
   useAgentManifestHistory,
   useAgentManifest,
   useAgentChannels,

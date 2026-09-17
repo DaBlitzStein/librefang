@@ -97,8 +97,6 @@ export const agentKeys = {
   // every poll is the one thing this key exists to avoid.
   avatar: (agentId: string) =>
     [...agentKeys.all, "avatar", agentId] as const,
-  manifestHistory: (agentId: string) =>
-    [...agentKeys.all, "manifestHistory", agentId] as const,
   // Nested under `detail(agentId)`, not a sibling of `details()`: the history
   // of one agent's manifest is a property of that agent, and every write that
   // produces a new snapshot already invalidates its detail. As a sibling it

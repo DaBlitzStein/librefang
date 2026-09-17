@@ -249,6 +249,13 @@ export function usePatchAgent() {
       // Reaches `manifestHistory` too — it is nested under this key.
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.manifestHistory(variables.agentId) });
+      if (variables.body.manifest_toml !== undefined) {
+        qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
+      }
     },
   });
 }
@@ -357,13 +364,6 @@ export function useDeleteAgentAvatar() {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
-      if (variables.body.manifest_toml !== undefined) {
-        qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
-        qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
-        qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
-        qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
-        qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
-      }
     },
   });
 }

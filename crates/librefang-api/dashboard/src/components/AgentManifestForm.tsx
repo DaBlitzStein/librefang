@@ -857,7 +857,7 @@ export function AgentManifestForm({
                   value={fb.model ? { provider: fb.provider, model: fb.model } : null}
                   onChange={(next) =>
                     update({
-                      fallback_models: patchListItem(value.fallback_models, idx, {
+                      fallback_models: patchListItem(value.fallback_models ?? [], idx, {
                         ...fb,
                         provider: next.provider,
                         model: next.model,
