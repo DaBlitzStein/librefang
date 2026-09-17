@@ -2233,6 +2233,18 @@ pub async fn build_router(
                 max_attempts: auth_rl_max_attempts,
                 trusted_proxies: trusted_proxies.clone(),
                 trust_forwarded_for,
+                // Read live rather than snapshotted: this decides whether an
+                // approve request has a TOTP/recovery code to brute-force, and
+                // `POST /api/config/reload` swaps the whole approval policy
+                // (`ApprovalManager::update_policy`). A bool captured at boot
+                // would keep metering approvals after an operator set
+                // `second_factor` back to `none`, which is the lockout this
+                // gates — while a snapshot taken the other way would drop the
+                // #4020 brake on a path that had started verifying codes.
+                approvals_require_totp: {
+                    let kernel = Arc::clone(&state.kernel);
+                    Arc::new(move || kernel.approvals().requires_approval_totp())
+                },
             },
             rate_limiter::auth_rate_limit_layer,
         ))
