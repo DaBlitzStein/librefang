@@ -2173,13 +2173,9 @@ pub async fn enable_provider(
 /// a built-in local one: the periodic probe loop, `POST .../test`, and the
 /// live-model filter applied to `/api/models`.
 ///
-/// The flag is persisted into the provider's own `providers/{name}.toml`
-/// `[provider]` table, which is where the catalog reads it back from on the
-/// next boot. Registry-managed files are rewritten by the boot-time registry
-/// sync when their content drifts from the upstream copy, so the flag is
-/// durable for the custom providers this endpoint exists to serve and
-/// intentionally best-effort for built-in ids — whose discovery behaviour is
-/// decided by the id branch of the predicate anyway.
+/// The flag is persisted into the provider's own `providers/{name}.toml` `[provider]` table, which is where the catalog reads it back from on the next boot.
+/// Writing that file takes it out of the registry sync's hands: the boot-time sync only rewrites a file whose bytes are still the ones it wrote itself, so from the first edit onwards it keeps the operator's copy and warns that it did (see `registry_sync::ManagedManifest`).
+/// The setting therefore survives restarts for every provider, built-in ids included.
 #[utoipa::path(
     put,
     path = "/api/providers/{name}/discovery",
