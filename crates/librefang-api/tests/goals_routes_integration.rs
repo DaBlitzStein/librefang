@@ -2156,14 +2156,54 @@ async fn updating_a_verified_goal_to_completed_stops_its_active_run() {
 /// wired unconditionally: a non-terminal update is an edit, not an operator
 /// ending the run. Without this the three tests above all pass against a
 /// `stop_goal_run` called on every `PUT`.
+///
+/// The run is given an agent that resolves, and that is what separates this
+/// assertion from a coin flip. A run that ends on its own is indistinguishable
+/// from one `stop_goal_run` ended: the loop's self-cleanup drops the same
+/// registry entry (`GoalRunner::start`'s `remove_if`) and deletes the same
+/// durable row (`run_loop`'s `delete_persisted_run`) that `stop_locked`
+/// deletes, so a run allowed to die takes the evidence with it — and every
+/// observable surface reports the same `running: false` either way. Pointed at
+/// the fabricated `11111111-…` id, the turn fails `Agent not found`,
+/// `MAX_ERROR_STREAK` consecutive failures end the run, and the entry is gone
+/// ~8s later (measured). Asserting anything about that run, registry entry
+/// included, races the scheduler rather than the edit.
+///
+/// A live agent's turn returns `Ok` — an explicitly driverless test kernel
+/// resolves `StubDriver`, whose `is_configured() == false` short-circuits the
+/// agent loop into a blank reply — so the loop keeps iterating at the goal's
+/// tick cadence until its `max_iterations` cap. Twenty-five ticks at the
+/// default 2s interval is a floor the machine's speed can only raise, against
+/// assertions that land milliseconds after the `PUT`: the run cannot end
+/// first. `running == true` is then the original assertion with its original
+/// meaning, and `GET /run` reports `false` on exactly the event a stop
+/// produces, so a `stop_goal_run` wired onto every `PUT` still fails here.
+///
+/// One residual way this can report a false red, and it is not this test's to
+/// fix: `GoalRunner::state` reads the registry and then `try_lock`s the handle,
+/// so a loop caught mid-update answers without a `run` key at all —
+/// indistinguishable from a stopped run. This is the only test in the file that
+/// reads the readout while the entry is still alive, which is why it is the one
+/// that can see it. Filed as #8397; the window is microseconds, so a red here
+/// is worth re-running before it is worth bisecting.
 #[tokio::test(flavor = "multi_thread")]
 async fn updating_a_goal_without_a_terminal_status_leaves_its_run_alone() {
     let h = boot().await;
+    let manifest = librefang_types::agent::AgentManifest {
+        name: format!("goal-edit-probe-{}", uuid::Uuid::new_v4()),
+        ..Default::default()
+    };
+    let agent = h
+        ._state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn_agent_typed must succeed in test kernel");
+
     let goal = create_goal(
         &h,
         serde_json::json!({
             "title": "Still going",
-            "agent_id": "11111111-1111-1111-1111-111111111111",
+            "agent_id": agent.to_string(),
         }),
     )
     .await;
@@ -2178,13 +2218,15 @@ async fn updating_a_goal_without_a_terminal_status_leaves_its_run_alone() {
         serde_json::json!({"title": "Renamed mid-run"}),
         serde_json::json!({"status": "in_progress"}),
     ] {
+        let edit = payload.to_string();
         let (put_status, body) =
             json_request(&h, Method::PUT, &format!("/api/goals/{id}"), Some(payload)).await;
         assert_eq!(put_status, StatusCode::OK, "got: {body:?}");
         let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
         assert_eq!(
             run["running"], true,
-            "an ordinary edit must not stop the run"
+            "an ordinary edit must not stop the run: {edit} left it reporting `running: false`, \
+             which is what stopping it does. Got: {run:?}"
         );
     }
 }
