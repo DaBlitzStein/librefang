@@ -199,6 +199,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(get_agent_mcp_servers).put(set_agent_mcp_servers),
         )
         .route(
+            "/agents/{id}/model_routing",
+            axum::routing::get(get_agent_model_routing).put(set_agent_model_routing),
+        )
+        .route(
             "/agents/{id}/channels",
             axum::routing::get(get_agent_channels).put(set_agent_channels),
         )
@@ -305,11 +309,15 @@ const DEFAULT_AGENT_LIST_LIMIT: usize = 500;
 const MAX_AGENT_LIST_LIMIT: usize = 500;
 
 /// Enrich an `AgentEntry` into a JSON value with catalog data.
+///
+/// `provisioned` is the agent's declaration in the deployment's provisioning tree, or `None` when it is the operator's own.
+/// It is a parameter rather than a lookup inside this function because the function has no kernel handle, and because a list endpoint resolving it per row should be the caller's decision to make.
 pub(crate) fn enrich_agent_json(
     e: &librefang_types::agent::AgentEntry,
     dm: &librefang_types::config::DefaultModelConfig,
     catalog: Option<&librefang_kernel::model_catalog::ModelCatalog>,
     bulk_stats: Option<&std::collections::HashMap<String, (u64, f64)>>,
+    provisioned: Option<&librefang_kernel::provisioning::ResourceProvenance>,
 ) -> serde_json::Value {
     let provider = if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default"
     {
@@ -391,6 +399,13 @@ pub(crate) fn enrich_agent_json(
         "resume_pending": e.resume_pending,
         "reset_reason": e.reset_reason,
         "has_processed_message": e.has_processed_message,
+        // Whether the deployment declares this agent, and where.
+        //
+        // `guard_provisioned_agent` refuses eleven manifest-writing routes with `423 Locked` on a provisioned agent, and the kernel has known which agents those are all along — but the payload never said, so a client could not tell before trying (#8354).
+        // An operator would type an emoji and save, or pick an image and upload the whole thing, only to be refused at the end by something that was never going to work.
+        //
+        // `source` is the declaring file, which is the one thing a client needs beyond "you cannot": it says where to go and change it instead.
+        "provisioned": provisioned.map(|p| serde_json::json!({ "source": p.source })),
     })
 }
 
@@ -705,6 +720,13 @@ fn kernel_err_to_status(e: &crate::error::KernelError) -> StatusCode {
     use librefang_types::error::LibreFangError;
     match e {
         KernelError::LibreFang(LibreFangError::AgentNotFound(_)) => StatusCode::NOT_FOUND,
+        // The other two "not found" shapes the kernel can produce. Leaving
+        // them in the `_` arm reported a missing session, or a tool-level
+        // resource a `ToolError::NotFound` had already typed, as a server
+        // fault — and `kernel_err_body` then scrubbed the reason away, so the
+        // caller could not tell a bad id from an outage.
+        KernelError::LibreFang(LibreFangError::SessionNotFound(_)) => StatusCode::NOT_FOUND,
+        KernelError::LibreFang(LibreFangError::ResourceNotFound { .. }) => StatusCode::NOT_FOUND,
         KernelError::LibreFang(LibreFangError::AgentAlreadyExists(_)) => StatusCode::CONFLICT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
