@@ -992,6 +992,8 @@ fn test_spawn_agent_applies_local_default_model_override() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "default".to_string(),
                     model: "default".to_string(),
                     max_tokens: Some(4096),
@@ -1474,6 +1476,8 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "cloudverse".to_string(),
                     model: "anthropic-claude-4-5-sonnet".to_string(),
                     max_tokens: Some(4096),
@@ -1591,6 +1595,225 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
     assert_eq!(inherited.manifest.model.model, "default");
     assert!(inherited.manifest.model.api_key_env.is_none());
     assert!(inherited.manifest.model.base_url.is_none());
+
+    kernel.shutdown();
+}
+
+/// #7781 review: the credential half of a provider switch was already cleared
+/// (`test_set_agent_model_clears_overrides_when_provider_changes`); the
+/// capacity half was not.
+/// `context_window` / `max_output_tokens` describe what the *endpoint* can do,
+/// so an operator moving an agent from a large-window provider to a small-window
+/// one through the dashboard's model picker left the old endpoint's window
+/// attached to the new one — the same gap the model router closed for
+/// `apply_routed_profile` and `apply_tier_routed_model`, in the file next door.
+/// Both paths now share `clear_stale_provider_overrides`.
+#[test]
+fn switching_provider_also_drops_the_old_endpoints_capacity_limits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-provider-switch-limits");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // An agent pinned to a provider whose endpoint accepts a 200k window.
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "switch-provider-limits-agent".to_string(),
+                source_template: None,
+                description: "carries the previous endpoint's limits".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
+                    provider: "cloudverse".to_string(),
+                    model: "anthropic-claude-4-5-sonnet".to_string(),
+                    api_key_env: Some("CLOUDVERSE_API_KEY".to_string()),
+                    base_url: Some("https://cloudverse.freshworkscorp.com/api/v1".to_string()),
+                    context_window: Some(200_000),
+                    max_output_tokens: Some(64_000),
+                    // Flattened verbatim into the request body, so it only
+                    // means anything to the provider it was set for.
+                    extra_params: std::collections::BTreeMap::from([(
+                        "enable_memory".to_string(),
+                        serde_json::json!(true),
+                    )]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let pre = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent registry entry");
+    assert_eq!(pre.manifest.model.context_window, Some(200_000));
+    assert_eq!(pre.manifest.model.max_output_tokens, Some(64_000));
+    assert!(pre
+        .manifest
+        .model
+        .extra_params
+        .contains_key("enable_memory"));
+
+    // The dashboard's model picker, switching to a different provider.
+    kernel
+        .set_agent_model(agent_id, "gpt-4o-mini", Some("openai"))
+        .expect("provider switch should succeed");
+
+    let post = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent registry entry after switch");
+    assert_eq!(post.manifest.model.provider, "openai");
+    assert_eq!(
+        post.manifest.model.context_window, None,
+        "the previous endpoint's context_window must not cap the new provider — \
+         resolution falls back to the registry / probe chain for the new model"
+    );
+    assert_eq!(
+        post.manifest.model.max_output_tokens, None,
+        "the previous endpoint's max_output_tokens must not cap the new provider"
+    );
+    assert!(
+        post.manifest.model.extra_params.is_empty(),
+        "extra_params is flattened verbatim into the request body, so carrying the \
+         previous provider's keys onto the new one sends parameters it does not know: \
+         {:?}",
+        post.manifest.model.extra_params
+    );
+
+    // The same-provider swap keeps them: on one endpoint these are a
+    // deliberate per-agent override, not a leftover.
+    kernel
+        .agents
+        .registry
+        .update_context_window(agent_id, Some(128_000))
+        .expect("seed a deliberate per-agent window");
+    kernel
+        .agents
+        .registry
+        .update_model_max_output_tokens(agent_id, Some(16_000))
+        .expect("seed a deliberate per-agent output cap");
+    kernel
+        .set_agent_model(agent_id, "gpt-4o", Some("openai"))
+        .expect("same-provider model swap should succeed");
+
+    let same_provider = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent after same-provider swap");
+    assert_eq!(
+        same_provider.manifest.model.context_window,
+        Some(128_000),
+        "a same-provider model swap must preserve a deliberate per-agent context_window"
+    );
+    assert_eq!(
+        same_provider.manifest.model.max_output_tokens,
+        Some(16_000),
+        "a same-provider model swap must preserve a deliberate per-agent max_output_tokens"
+    );
+
+    kernel.shutdown();
+}
+
+/// The same five-field clear also runs on the boot restore path, under a branch
+/// whose first disjunct — `is_default_provider && is_default_model` — is true for
+/// a row that is *already* on the `default` sentinel. There the two assignments
+/// above it restate what is there and no endpoint moves, so clearing is not
+/// repointing hygiene: it is data loss on a path that runs on every restart.
+///
+/// Without the gate an operator's hand-set window, output cap and
+/// `[model.extra_params]` on any agent inheriting the global model are nulled by
+/// the next daemon restart and made permanent by the following `save_agent`.
+#[test]
+fn restarting_keeps_the_overrides_of_an_agent_already_on_the_default_sentinel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-boot-restore-overrides");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let agent_id = {
+        let kernel =
+            LibreFangKernel::boot_with_config(config.clone()).expect("first boot should succeed");
+        let id = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "sentinel-overrides-agent".to_string(),
+                    source_template: None,
+                    description: "inherits the global model, with deliberate overrides".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    model: ModelConfig {
+                        mode: librefang_types::agent::ModelMode::Fixed,
+                        router_override: None,
+                        // Already the sentinel: the restore branch restates these.
+                        provider: "default".to_string(),
+                        model: "default".to_string(),
+                        context_window: Some(32_000),
+                        max_output_tokens: Some(8_000),
+                        extra_params: std::collections::BTreeMap::from([(
+                            "enable_memory".to_string(),
+                            serde_json::json!(true),
+                        )]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("agent should spawn");
+        kernel.shutdown();
+        id
+    };
+
+    // Second boot over the same home — the restore the deploy's restart performs.
+    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot should succeed");
+    let restored = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("the agent should be restored");
+
+    assert_eq!(
+        restored.manifest.model.context_window,
+        Some(32_000),
+        "a restart must not null a window the operator set on an agent that never moved endpoints"
+    );
+    assert_eq!(
+        restored.manifest.model.max_output_tokens,
+        Some(8_000),
+        "same for the output cap: nothing repointed, so nothing is stale"
+    );
+    assert!(
+        restored
+            .manifest
+            .model
+            .extra_params
+            .contains_key("enable_memory"),
+        "extra_params is provider-specific, but this agent's provider did not change: {:?}",
+        restored.manifest.model.extra_params
+    );
 
     kernel.shutdown();
 }
@@ -3319,7 +3542,13 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
 
     // Post and claim a task so status = in_progress.
     let task_id = mem
-        .task_post("Stuck work", "Worker will stall", Some("worker"), None)
+        .task_post(
+            "Stuck work",
+            "Worker will stall",
+            Some("worker"),
+            None,
+            librefang_memory::TaskQueueCaps::UNLIMITED,
+        )
         .await
         .expect("post");
     let claimed = mem
@@ -3358,6 +3587,87 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0]["id"], task_id);
     assert_eq!(pending[0]["assigned_to"], "");
+
+    kernel.shutdown();
+}
+
+/// `[queue] max_depth_global` reaches the kernel's enqueue, and reaching it answers `QuotaExceeded` rather than `Internal`.
+///
+/// The distinction is the whole point of wiring it: `Internal` reaches an HTTP client as a scrubbed 500, which says "the daemon broke" and invites an immediate retry of the request the cap just declined. `QuotaExceeded` maps to 429 (#8219).
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_depth_cap_reaches_task_post_and_answers_as_a_quota() {
+    use librefang_runtime::kernel_handle::TaskQueue;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.queue.max_depth_global = 1;
+    // The shipped 3600s default spawns a sweep at boot; off so it cannot race the assertions.
+    config.queue.task_ttl_secs = 0;
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+    kernel.clone().set_self_handle();
+
+    kernel
+        .task_post("first", "body", None, None)
+        .await
+        .expect("the first post fits the cap");
+
+    let err = kernel
+        .task_post("second", "body", None, None)
+        .await
+        .expect_err("the second post exceeds max_depth_global = 1");
+    assert!(
+        matches!(
+            err,
+            librefang_runtime::kernel_handle::KernelOpError::QuotaExceeded(_)
+        ),
+        "a full queue must not be flattened into Internal: {err:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// The cap is read from the live config on every post, so `POST /api/config/reload` moves it without a restart.
+///
+/// Capturing it at boot would have made a knob in a section whose other fields hot-reload quietly restart-required, which is the class of bug `docs/operations/config-reload.md` exists to prevent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reloaded_queue_depth_cap_takes_effect_without_a_restart() {
+    use librefang_runtime::kernel_handle::TaskQueue;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.queue.max_depth_global = 1;
+    config.queue.task_ttl_secs = 0;
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+    kernel.clone().set_self_handle();
+
+    kernel.task_post("first", "body", None, None).await.unwrap();
+    kernel
+        .task_post("second", "body", None, None)
+        .await
+        .expect_err("at the cap");
+
+    let mut raised = (*kernel.config.load_full()).clone();
+    raised.queue.max_depth_global = 10;
+    kernel.config.store(Arc::new(raised));
+
+    kernel
+        .task_post("second", "body", None, None)
+        .await
+        .expect("the raised cap is in force on the next post");
 
     kernel.shutdown();
 }
@@ -10776,7 +11086,29 @@ fn goal_run_start_reports_unset_self_handle() {
     let goal_id = librefang_types::goal::GoalId::new();
     let agent_id = AgentId::new();
 
-    assert!(!kernel.goal_run_start(goal_id, agent_id, Some(1)));
+    assert!(!kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None));
+    assert!(kernel.goal_run_status(goal_id).is_none());
+}
+
+/// #7785 review: `goal_run_start` used to end with `self.workflows.goal_runner.start(...); true`,
+/// discarding the runner's own refusal — `GoalRunner::start` returns `false`
+/// when the goal is missing from the shared store (the race a deletion wins
+/// against a caller's stale read). The goal here is simply never seeded, the
+/// same "not found when the runner loads it" condition, and self_handle is
+/// set so the run reaches the runner's `start()` rather than bailing out on
+/// the earlier unset-handle check this file already covers above.
+#[test]
+fn goal_run_start_propagates_the_runners_refusal_of_a_missing_goal() {
+    let (kernel, _dir) = minimal_kernel("goal-run-start-missing-goal");
+    let kernel = Arc::new(kernel);
+    LibreFangKernel::set_self_handle(&kernel);
+    let goal_id = librefang_types::goal::GoalId::new();
+    let agent_id = AgentId::new();
+
+    assert!(
+        !kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None),
+        "a goal absent from the store must not be reported as started"
+    );
     assert!(kernel.goal_run_status(goal_id).is_none());
 }
 
@@ -15171,6 +15503,8 @@ fn test_context_report_uses_catalog_context_window_not_200k() {
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
         model: ModelConfig {
+            mode: librefang_types::agent::ModelMode::Fixed,
+            router_override: None,
             provider: "fake-provider".to_string(),
             model: "fake-1m-model".to_string(),
             ..Default::default()
@@ -15219,6 +15553,8 @@ fn test_context_report_honours_manifest_context_window_override() {
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
         model: ModelConfig {
+            mode: librefang_types::agent::ModelMode::Fixed,
+            router_override: None,
             provider: "ollama".to_string(),
             model: "some-local-model".to_string(),
             context_window: Some(262_144),
@@ -15334,6 +15670,8 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "default".to_string(),
                     model: "default".to_string(),
                     max_tokens: Some(4096),
@@ -15360,6 +15698,8 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "anthropic".to_string(),
                     model: "claude-old-default".to_string(),
                     max_tokens: Some(4096),
@@ -15666,6 +16006,8 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "openrouter".to_string(),
                     model: "poolside/laguna-xs.2:free".to_string(),
                     max_tokens: Some(4096),
@@ -15693,6 +16035,8 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "openrouter".to_string(),
                     model: "openai/gpt-4o".to_string(),
                     max_tokens: Some(4096),
@@ -18047,6 +18391,24 @@ fn ephemeral_spawn_wires_every_capability_the_permanent_path_wires() {
          kernel-backed tool answers `Unavailable`, and a worker could never reach \
          `agent_spawn`, which is what the depth guard exists to bound"
     );
+
+    // Same shape, same reason (#7789 review): the four `apply_model_override`
+    // unit tests exercise the extracted function, and nothing else asserts the
+    // spawn path still calls it. Whether it is called, and on what, *is* an
+    // argument at a call site — inline the block again, or narrow it back to
+    // `&mut manifest.model`, and every provider- and model-keyed field of the
+    // parent (its endpoint, its key, its window, its output cap, its extension
+    // params, its whole fallback chain) rides into the worker unchanged, with
+    // no test the poorer.
+    assert!(
+        ephemeral.contains("apply_model_override(&mut manifest, over)"),
+        "the ephemeral spawn path must hand the *whole* manifest to \
+         `apply_model_override`. Scoped to `manifest.model` it structurally \
+         cannot clear `fallback_models`, whose entries carry their own \
+         `api_key_env` and `base_url` — so the first fallback promotes the \
+         worker onto the parent's model with the parent's credential, past \
+         `allowed_profiles` and `cost_budget` alike"
+    );
 }
 
 /// A worker that spawns a worker is bounded by the same counter `agent_send`
@@ -18576,4 +18938,257 @@ fn a_requested_iteration_cap_is_clamped_to_the_operator_ceiling() {
         10,
         "zero is not a request for a worker that does nothing before answering"
     );
+}
+
+/// Buffered `tracing` writer for the #8221 warning tests.
+///
+/// Kept local to this pair of tests rather than promoted to a shared helper: `config.rs` and `cron.rs` each carry their own copy, and factoring the three together is a change to two files this PR has no other reason to touch.
+#[derive(Clone)]
+struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogs;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl CapturedLogs {
+    fn new() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Vec::new())))
+    }
+
+    /// Install this buffer as the calling thread's subscriber for the duration of the returned guard.
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        use tracing_subscriber::layer::SubscriberExt;
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(self.clone())
+            .with_ansi(false)
+            .with_target(false);
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(layer))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).expect("utf8")
+    }
+}
+
+/// A `KernelConfig` rooted in `dir` with `[tool_exec]` pointed at a well-formed SSH backend.
+///
+/// Well-formed matters: `ToolExecConfig::validate` rejects `kind = "ssh"` without a populated sub-table, and boot turns that rejection into a `BootFailed`. The configuration under test is the one that passes every existing check and still does nothing.
+fn ssh_tool_exec_config(dir: &std::path::Path) -> KernelConfig {
+    let home_dir = dir.join("librefang-tool-exec-warning-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        tool_exec: librefang_types::tool_exec::ToolExecConfig {
+            kind: librefang_types::tool_exec::BackendKind::Ssh,
+            ssh: Some(librefang_types::tool_exec::SshBackendConfig {
+                host: "build.example.com".to_string(),
+                user: "agent".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    }
+}
+
+/// #8221: booting with `[tool_exec] kind = "ssh"` must say out loud that tool calls still run on the daemon host.
+///
+/// `docs/architecture/tool-exec-backends.md` has promised this warning since #3332 and it was never implemented, which left the deferral invisible: `librefang_runtime::tool_exec_backend::build_backend` has no production caller, so the resolved kind reaches nothing.
+/// An operator who set this to keep shell commands off the daemon machine got the opposite of what they configured, with a clean boot and no log line anywhere.
+///
+/// Asserting on the rendered text rather than on a predicate, because the text is the entire deliverable — a warning nobody can act on is the same defect one level up.
+#[test]
+fn boot_warns_that_a_non_local_tool_exec_backend_does_not_route_tool_calls_8221() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = ssh_tool_exec_config(tmp.path());
+
+    let logs = CapturedLogs::new();
+    let kernel = {
+        let _g = logs.install();
+        LibreFangKernel::boot_with_config(config).expect(
+            "a well-formed non-local backend is a missing feature, not a broken config; boot must succeed",
+        )
+    };
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("#8221"),
+        "warning must cite the tracking issue so the operator can find the status; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("ssh"),
+        "warning must name the backend that was configured and ignored; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("not a sandbox"),
+        "warning must deny the security property an operator most plausibly assumed; captured: {captured:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// #8220: booting with `[docker] mode = "all"` must say out loud that agent tool calls still run on the daemon host.
+///
+/// Nothing in the daemon matches on `[docker] mode`, so an operator who set it believing they had moved every agent into a container moved nothing — `shell_exec` and `process_start` kept running as subprocesses, and the only path into a container stayed the `docker_exec` tool the model chooses for itself.
+/// The rest of `[docker]` is live and governs those containers, which is what made the gap so easy to miss: the section visibly works.
+///
+/// `enabled` is left `false` deliberately. The mode is meaningless either way, and warning only when Docker is enabled would have hidden it from exactly the operator most likely to be wrong — the one who set `mode` and expected it to be the switch.
+#[test]
+fn boot_warns_that_a_docker_sandbox_mode_does_not_route_tool_calls_8220() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-docker-mode-warning-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.docker.mode = librefang_types::config::DockerSandboxMode::All;
+
+    let logs = CapturedLogs::new();
+    let kernel = {
+        let _g = logs.install();
+        LibreFangKernel::boot_with_config(config).expect(
+            "an unimplemented mode is a missing feature, not a broken config; boot must succeed",
+        )
+    };
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("#8220"),
+        "warning must cite the tracking issue so the operator can find the status; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("all"),
+        "warning must name the mode that was configured and ignored; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("not a sandbox"),
+        "warning must deny the security property an operator most plausibly assumed; captured: {captured:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// The default config must boot silent: a warning that fires for everyone is one nobody reads.
+#[test]
+fn boot_does_not_warn_about_docker_mode_when_it_is_off_8220() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-docker-mode-quiet-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    assert_eq!(
+        config.docker.mode,
+        librefang_types::config::DockerSandboxMode::Off,
+        "the shipped default is what this test is about"
+    );
+
+    let logs = CapturedLogs::new();
+    let kernel = {
+        let _g = logs.install();
+        LibreFangKernel::boot_with_config(config).expect("boot")
+    };
+    assert!(
+        !logs.text().contains("#8220"),
+        "the default configuration must not produce the warning; captured: {:?}",
+        logs.text()
+    );
+
+    kernel.shutdown();
+}
+
+/// #8221, per-agent half: the same gap reached through `agent.toml`'s `tool_exec_backend`.
+///
+/// Warned per spawn rather than at boot because a manifest can be written long after the daemon started, so a boot-time sweep would never see it.
+/// The kernel here boots on the default (local) config, which also proves the two warnings are independent — this one fires with nothing wrong in `config.toml`.
+#[test]
+fn spawn_warns_that_a_per_agent_tool_exec_backend_does_not_route_tool_calls_8221() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-per-agent-tool-exec-warning-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    // `validate_override` rejects an override whose sub-table is absent, so the manifest needs a config that can satisfy it. `kind` stays `local`: only the per-agent override is under test.
+    config.tool_exec.ssh = Some(librefang_types::tool_exec::SshBackendConfig {
+        host: "build.example.com".to_string(),
+        user: "agent".to_string(),
+        ..Default::default()
+    });
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "remote-runner".to_string(),
+        description: "asks for a backend that does not exist yet".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        tool_exec_backend: Some(librefang_types::tool_exec::BackendKind::Ssh),
+        ..Default::default()
+    };
+
+    let logs = CapturedLogs::new();
+    {
+        let _g = logs.install();
+        kernel
+            .validate_spawnable(&manifest, "remote-runner")
+            .expect("an unimplemented backend must not make an agent unspawnable");
+    }
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("#8221"),
+        "warning must cite the tracking issue; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("remote-runner"),
+        "warning must name the agent, since one manifest among many is the thing to fix; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("not a sandbox"),
+        "warning must deny the security property an operator most plausibly assumed; captured: {captured:?}"
+    );
+
+    // A local override is the configured default and must stay silent, or the warning becomes noise on every spawn.
+    let local = AgentManifest {
+        name: "local-runner".to_string(),
+        module: "builtin:chat".to_string(),
+        tool_exec_backend: Some(librefang_types::tool_exec::BackendKind::Local),
+        ..Default::default()
+    };
+    let quiet = CapturedLogs::new();
+    {
+        let _g = quiet.install();
+        kernel
+            .validate_spawnable(&local, "local-runner")
+            .expect("local override is always valid");
+    }
+    assert!(
+        !quiet.text().contains("#8221"),
+        "an explicit local override must not warn; captured: {:?}",
+        quiet.text()
+    );
+
+    kernel.shutdown();
 }

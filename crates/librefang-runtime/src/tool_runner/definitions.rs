@@ -426,6 +426,10 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Permanent only: preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
+                        },
+                        "profile": {
+                            "type": "string",
+                            "description": "Model profile the new agent should run on, by name (e.g. 'quick', 'coder', 'architect', 'researcher'). Works for both shapes: a permanent agent is pinned to the profile's provider and model, and a worker (ephemeral) runs its task on the profile's model. Use a cheap profile for narrow work — a sub-agent that only checks whether something is done does not need the most capable model. Omit to inherit the default model. Naming a profile that does not exist fails with the list of available ones. When the spawning agent is capped by its own [model.router_override], only profiles it permits are accepted, and an explicit `model` override is refused."
                         }
                     },
                     "required": ["name"]
@@ -1182,7 +1186,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         "text": { "type": "string", "description": "The text to convert to speech (max 4096 chars)" },
                         "voice": { "type": "string", "description": "Voice (provider-specific). OpenAI: 'alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer' (default 'alloy'). ElevenLabs: the 20-character voice_id from https://elevenlabs.io/app/voice-library (e.g. '21m00Tcm4TlvDq8ikWAM' for Rachel); names like 'Rachel' are NOT accepted." },
                         "format": { "type": "string", "description": "Output format: 'mp3', 'opus', 'aac', 'flac', 'wav' (default: 'mp3')" },
-                        "output_format": { "type": "string", "enum": ["mp3", "ogg_opus"], "description": "Final output format. 'ogg_opus' converts to OGG Opus via ffmpeg (required for WhatsApp voice notes); falls back to provider format if ffmpeg is unavailable or conversion fails. Default: 'mp3'" },
+                        "output_format": { "type": "string", "enum": librefang_types::config::TTS_OUTPUT_FORMATS, "description": "Final output format. 'ogg_opus' converts to OGG Opus via ffmpeg (required for voice notes on WhatsApp and other messaging channels); falls back to provider format if ffmpeg is unavailable or conversion fails. 'mp3' means no conversion — the provider's own format is kept, whatever it is, so a provider returning Opus still yields Opus. Omit to use the operator's `[tts] output_format` setting, which itself defaults to 'mp3'." },
                         "provider": { "type": "string", "description": "Provider: 'openai', 'gemini', 'minimax', 'elevenlabs'. Auto-detected if omitted." },
                         "model": { "type": "string", "description": "Model ID (provider-specific). OpenAI: 'tts-1', 'tts-1-hd'. ElevenLabs: 'eleven_multilingual_v2' (default), 'eleven_turbo_v2_5'. Default varies by provider." },
                         "speed": { "type": "number", "description": "Playback speed (0.25-4.0). OpenAI only. Default: 1.0" }

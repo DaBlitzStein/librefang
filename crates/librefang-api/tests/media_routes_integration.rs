@@ -428,6 +428,42 @@ async fn media_providers_lists_all_known_with_unconfigured_status() {
     }
 }
 
+/// A registry provider this daemon has no way to reach is not listed at all.
+///
+/// The `Err` branch narrows the registry's declared set to what the generic OpenAI-compatible driver implements, which is image generation and nothing else.
+/// For a provider that declares only video — no compiled-in driver, and no overlap with the generic one — that leaves an empty array.
+///
+/// An entry with no capabilities is worse than no entry: it files under no dashboard tab and reads as "this provider can do nothing" rather than "we have no way to serve this yet".
+/// The route is called `list_media_providers`; a provider nothing can serve is not one.
+///
+/// Reachable without a code change, because the provider registry is fetched rather than checked in — a video-only entry can arrive at any time.
+#[tokio::test(flavor = "multi_thread")]
+async fn media_providers_omits_a_provider_nothing_here_can_serve() {
+    let providers = vec![librefang_types::model_catalog::ProviderInfo {
+        id: "videoonly".to_string(),
+        display_name: "Video Only".to_string(),
+        api_key_env: "VIDEOONLY_API_KEY".to_string(),
+        media_capabilities: vec!["video_generation".into()],
+        ..Default::default()
+    }];
+    let h = boot_with_catalog(Some((providers, Vec::new()))).await;
+    let (status, body) = json_request(&h, Method::GET, "/api/media/providers", None).await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    let listed = body["providers"].as_array().expect("providers array");
+
+    assert!(
+        !listed.iter().any(|p| p["name"] == "videoonly"),
+        "a provider whose only declared capability the generic driver cannot \
+         serve must be omitted, not listed with an empty array: {body}"
+    );
+    // The compiled-in drivers are still there — the omission is scoped to the unreachable entry, not a blanket filter.
+    let names: Vec<&str> = listed.iter().filter_map(|p| p["name"].as_str()).collect();
+    assert!(
+        names.contains(&"google_tts"),
+        "built-in drivers must survive: {names:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn media_providers_lists_registry_declared_providers_with_no_builtin_driver() {
     // `byteplus` is the real case this guards: it declares image and video
@@ -461,16 +497,23 @@ async fn media_providers_lists_registry_declared_providers_with_no_builtin_drive
         names.contains(&"byteplus"),
         "registry provider declaring media_capabilities is missing from: {names:?}"
     );
-    // A provider with no compiled-in driver still has to report which
-    // functions it would serve, or the dashboard cannot file it under a tab.
+    // A provider with no compiled-in driver reports what it would serve *here*,
+    // which is what the generic OpenAI-compatible driver implements — images
+    // and nothing else. The registry declares the service can also do video,
+    // and this assertion used to repeat that, which made configuring the
+    // provider look like it removed a capability: the driver reports only
+    // `image_generation`, so the dashboard's video tab dropped byteplus at the
+    // exact moment it started working. One answer on both sides of
+    // `configured` is the honest one; offering video here would advertise a
+    // path that has no implementation behind it.
     let byteplus = listed
         .iter()
         .find(|p| p["name"] == "byteplus")
         .expect("byteplus entry");
     assert_eq!(
         byteplus["capabilities"],
-        serde_json::json!(["image_generation", "video_generation"]),
-        "declared capabilities lost: {byteplus}"
+        serde_json::json!(["image_generation"]),
+        "unconfigured capabilities must be what we can actually serve: {byteplus}"
     );
     assert_eq!(byteplus["configured"], false, "got: {byteplus}");
 

@@ -385,6 +385,93 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
 }
 
 #[allow(clippy::while_let_on_iterator)]
+/// True when the literal that follows `collapsed` sits inside a still-open
+/// `tracing` macro invocation, so it is a log message rather than user-facing
+/// output.
+///
+/// A suffix test on `debug!(` only recognises the message-first form. The
+/// structured form puts fields ahead of the message — `debug!(%error, "…")` —
+/// and dropping those fields to satisfy the scanner would make the logs worse,
+/// so match the whole argument list instead: inside the statement the literal
+/// belongs to, take the last log-macro opener and walk its argument list to
+/// see whether the opener's own parenthesis is still open where the literal
+/// starts.
+///
+/// The search stops at the enclosing statement or block boundary on purpose. A
+/// scan over the whole file prefix would exempt any literal that merely follows
+/// a log call somewhere earlier in the file. `collapsed` must already have
+/// every earlier string literal's contents blanked out (see
+/// `collapse_code_prefix`), or a `;` / `{` / `}` inside an earlier literal's
+/// text — a format placeholder is the common case — would be mistaken for one
+/// of these boundary characters (#8179 review).
+fn is_inside_log_macro_args(collapsed: &str) -> bool {
+    const LOG_MACRO_OPENERS: &[&str] = &["debug!(", "info!(", "warn!(", "error!(", "trace!("];
+
+    let statement = match collapsed.rfind([';', '{', '}']) {
+        Some(idx) => &collapsed[idx + 1..],
+        None => collapsed,
+    };
+    let Some(args_start) = LOG_MACRO_OPENERS
+        .iter()
+        .filter_map(|opener| statement.rfind(opener).map(|idx| idx + opener.len()))
+        .max()
+    else {
+        return false;
+    };
+    // Depth starts at 1 for the opener's own already-open '('. Comparing
+    // total '(' vs ')' counts (the old `>=` check) let an unrelated
+    // statement's parens *after* this call had already closed masquerade as
+    // still being inside it — e.g. a sibling match arm's `println!(` that
+    // follows an `error!(...)` which in fact already closed. Walking forward
+    // and stopping the instant depth returns to 0 catches that (#8179
+    // review).
+    let mut depth = 1;
+    for ch in statement[args_start..].chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth > 0
+}
+
+/// Build a whitespace-stripped copy of `content[..end]` with the text of
+/// every already-closed string literal in `literal_spans` blanked out.
+///
+/// [`is_inside_log_macro_args`] and the `i18n::t(` / clap-attribute suffix
+/// checks that use this string all reason about code structure — statement
+/// boundaries, macro openers, parenthesis depth — so a boundary character
+/// that only occurs inside an *earlier* literal's text (a `{}` format
+/// placeholder, a literal `;`) must not be mistaken for a code-level one
+/// (#8179 review).
+fn collapse_code_prefix(content: &str, end: usize, literal_spans: &[(usize, usize)]) -> String {
+    content[..end]
+        .char_indices()
+        .filter(|&(i, ch)| !ch.is_whitespace() && !is_within_literal_span(i, literal_spans))
+        .map(|(_, ch)| ch)
+        .collect()
+}
+
+/// Whether byte index `i` falls inside one of `literal_spans`.
+///
+/// Binary search rather than a linear scan: spans are pushed one per closed
+/// literal in file order, so by construction they are already sorted by
+/// start and disjoint (literals never overlap), and `partition_point` finds
+/// the one span that could contain `i` in O(log spans). A linear `.any()`
+/// scan here made `collapse_code_prefix` — already O(file size) per literal,
+/// which is unchanged — pay an extra factor of the literal count on every
+/// character, measured at 48x on a real file (#8179 review, finding 3).
+fn is_within_literal_span(i: usize, literal_spans: &[(usize, usize)]) -> bool {
+    let idx = literal_spans.partition_point(|&(start, _)| start <= i);
+    idx > 0 && i < literal_spans[idx - 1].1
+}
+
 fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, String)> {
     let mut violations = Vec::new();
     let mut chars = content.char_indices().peekable();
@@ -392,6 +479,9 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
     let mut in_quote = false;
     let mut current_literal = String::new();
     let mut literal_start_idx = 0;
+    // Byte spans of every string literal closed so far, used to blank their
+    // text out of later `collapse_code_prefix` calls (#8179 review).
+    let mut literal_spans: Vec<(usize, usize)> = Vec::new();
 
     let mut in_line_comment = false;
     let mut in_block_comment = false;
@@ -428,7 +518,7 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
             let remaining = &content[idx..];
             if remaining.starts_with("r\"") {
                 chars.next(); // consume '"'
-                while let Some((_, rc)) = chars.next() {
+                for (_, rc) in chars.by_ref() {
                     if rc == '\n' {
                         line_number += 1;
                     }
@@ -439,8 +529,8 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
                 continue;
             } else if remaining.starts_with("r#") {
                 let mut hashes = 0;
-                let mut temp_chars = chars.clone();
-                while let Some((_, hc)) = temp_chars.next() {
+                let temp_chars = chars.clone();
+                for (_, hc) in temp_chars {
                     if hc == '#' {
                         hashes += 1;
                     } else if hc == '"' {
@@ -633,15 +723,10 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
                 // End of string literal
                 let is_byte_string =
                     literal_start_idx > 0 && content.as_bytes()[literal_start_idx - 1] == b'b';
-                let prefix = &content[..literal_start_idx];
-                let collapsed: String = prefix.chars().filter(|ch| !ch.is_whitespace()).collect();
+                let collapsed = collapse_code_prefix(content, literal_start_idx, &literal_spans);
                 let is_localized = collapsed.ends_with("i18n::t(")
                     || collapsed.ends_with("i18n::t_args(")
-                    || collapsed.ends_with("debug!(")
-                    || collapsed.ends_with("info!(")
-                    || collapsed.ends_with("warn!(")
-                    || collapsed.ends_with("error!(")
-                    || collapsed.ends_with("trace!(")
+                    || is_inside_log_macro_args(&collapsed)
                     || collapsed.ends_with("about=")
                     || collapsed.ends_with("long_about=")
                     || collapsed.ends_with("help=")
@@ -659,7 +744,8 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
                     || collapsed.ends_with("alias=")
                     || collapsed.ends_with("short=")
                     || collapsed.ends_with("long=")
-                    || collapsed.ends_with("constAFTER_HELP:&str=");
+                    || collapsed.ends_with("constAFTER_HELP:&str=")
+                    || is_static_assertion_message(&collapsed);
                 if !is_byte_string
                     && !is_localized
                     && is_potential_untranslated_literal(&current_literal)
@@ -670,6 +756,10 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
 
                 current_literal.clear();
                 in_quote = false;
+                // idx is the closing '"', which is 1 byte; the span end is
+                // exclusive so later prefixes blank the whole literal
+                // including its delimiters.
+                literal_spans.push((literal_start_idx, idx + 1));
             } else {
                 in_quote = true;
                 literal_start_idx = idx;
@@ -688,6 +778,21 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
         }
     }
     violations
+}
+/// Whether the literal that follows `collapsed` is the message of a `const _: () = assert!(…)`.
+///
+/// A static assertion's message is a compiler diagnostic, not output: it is emitted by rustc at build time, into a build log, and no operator ever sees it through the CLI.
+/// Translating it would mean shipping a locale string that cannot be reached, and the alternative the lint leaves open — dropping the message — costs the next person the explanation of what the assertion is protecting.
+///
+/// Scoped to the statement the literal is in rather than searched for anywhere in the file: `collapsed` is every non-whitespace character before the literal, so an unscoped `contains` would exempt every literal after the first static assertion in the file.
+/// Statements end at `;` or a brace, none of which appear inside the assertion's condition expression, and the assertion's own `);` terminator keeps one static assertion from reaching the next.
+///
+/// `contains` rather than `starts_with` within that window because `collapsed` is built from the raw source: the doc comment that explains what the assertion protects sits between the previous `;` and the `const`, and is part of the window.
+fn is_static_assertion_message(collapsed: &str) -> bool {
+    let statement = collapsed
+        .rfind([';', '{', '}'])
+        .map_or(collapsed, |end| &collapsed[end + 1..]);
+    statement.contains("const_:()=assert!(") || statement.contains("const_:()=debug_assert!(")
 }
 
 fn get_line_at_index(content: &str, index: usize) -> String {
@@ -970,10 +1075,38 @@ fn collect_required_i18n_keys(
     required_keys
 }
 
+/// Every locale directory under `locales/` that ships a `main.ftl`, sorted.
+///
+/// Read from disk so a locale added later is covered without anyone editing a list — the hole in #8151 was `ko` being absent from a hand-written one, and the same hole reopens for the next locale added if the list stays manual.
+///
+/// A directory without `main.ftl` is skipped rather than failing: the loader resolves that file specifically, so a directory that does not have one is not a locale the binary can serve.
+fn shipped_locales(manifest_dir: &Path) -> Vec<String> {
+    let locales_dir = manifest_dir.join("locales");
+    let mut locales: Vec<String> = std::fs::read_dir(&locales_dir)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", locales_dir.display()))
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.file_type().ok()?.is_dir() {
+                return None;
+            }
+            if !entry.path().join("main.ftl").is_file() {
+                return None;
+            }
+            entry.file_name().into_string().ok()
+        })
+        .collect();
+    locales.sort();
+    assert!(
+        locales.iter().any(|l| l == "en"),
+        "locales/en/main.ftl is the reference every other locale is checked against — \
+         finding no `en` means this scan is looking in the wrong place, not that English was dropped"
+    );
+    locales
+}
+
 fn assert_locale_covers_required_i18n_keys(
     manifest_dir: &Path,
     locale: &str,
-    display_name: &str,
     required_keys: &std::collections::BTreeSet<String>,
 ) {
     let locale_keys: std::collections::BTreeSet<String> =
@@ -989,10 +1122,54 @@ fn assert_locale_covers_required_i18n_keys(
 
     if !missing_keys.is_empty() {
         panic!(
-            "{display_name} locale is missing keys referenced by CLI Rust code:\n{}",
+            "locales/{locale}/main.ftl is missing {} key(s) referenced by CLI Rust code:\n{}",
+            missing_keys.len(),
             missing_keys.join("\n")
         );
     }
+}
+
+/// A literal in a sibling match arm must still be flagged even when the
+/// preceding arm's log call has already closed by the time it appears —
+/// the old total-count balance check let `println!(`'s open paren, arriving
+/// after `error!(...)` had already closed, read as "still inside a log
+/// macro" (#8179 review).
+#[test]
+fn scan_flags_a_literal_in_a_sibling_arm_after_a_preceding_log_call_closes() {
+    let content = r#"
+fn f(r: Result<(), Error>) {
+    match r {
+        Err(e) => error!(%e, "failed"),
+        Ok(v) => println!("Untranslated {v}"),
+    }
+}
+"#;
+    let violations = scan_file_for_untranslated_strings(content);
+    assert!(
+        violations
+            .iter()
+            .any(|(_, lit, _)| lit == "Untranslated {v}"),
+        "the println! literal in the sibling arm must be flagged: {violations:?}"
+    );
+}
+
+/// A literal argument nested inside a log call must not be flagged just
+/// because an earlier argument to the same call happened to contain a `{}`
+/// format placeholder — the old scan ran over raw (non-blanked) text, so that
+/// placeholder was mistaken for the enclosing statement's opening brace and
+/// hid the `error!(` opener from the search entirely (#8179 review).
+#[test]
+fn scan_does_not_flag_a_literal_nested_behind_a_preceding_format_placeholder() {
+    let content = r#"
+fn f() {
+    error!("failed after {} tries", describe("retry attempt"));
+}
+"#;
+    let violations = scan_file_for_untranslated_strings(content);
+    assert!(
+        !violations.iter().any(|(_, lit, _)| lit == "retry attempt"),
+        "a literal argument nested inside error!(...) must not be flagged: {violations:?}"
+    );
 }
 
 #[test]
@@ -1094,10 +1271,389 @@ fn test_locales_cover_used_i18n_keys() {
     let known_prefixes = locale_key_prefixes(&english_keys.iter().cloned().collect::<Vec<_>>());
     let required_keys = collect_required_i18n_keys(manifest_dir, &known_prefixes);
 
-    assert_locale_covers_required_i18n_keys(manifest_dir, "en", "English", &required_keys);
-    assert_locale_covers_required_i18n_keys(manifest_dir, "uk", "Ukrainian", &required_keys);
-    assert_locale_covers_required_i18n_keys(manifest_dir, "zh-CN", "Chinese", &required_keys);
-    // ko was the one shipped locale this assertion did not cover, which is why the
-    // eight Auxiliary-tab keys reached a branch without anything failing.
-    assert_locale_covers_required_i18n_keys(manifest_dir, "ko", "Korean", &required_keys);
+    // Every locale that ships, discovered from disk rather than listed here.
+    //
+    // The list used to be hand-written, and `ko` was missing from it while `locales/ko/main.ftl` was a complete 2510-line locale — so eight Auxiliary-tab keys reached a branch with no Korean translation and nothing failed (#8151).
+    // Adding the missing line fixes that one locale; reading the directory fixes the shape, because the failure mode was a locale nobody remembered to list, and a hand-written list re-arms it for the next one added.
+    for locale in shipped_locales(manifest_dir) {
+        assert_locale_covers_required_i18n_keys(manifest_dir, &locale, &required_keys);
+    }
+}
+
+/// One reason, and the key/locale pairs it covers, for values that are supposed to match English.
+struct IdenticalValueExemption {
+    /// Why the English text is the right text here. Written for whoever reads the failure, not for whoever wrote the entry.
+    reason: &'static str,
+    /// Locales the exemption applies to; empty means all of them.
+    locales: &'static [&'static str],
+    keys: &'static [&'static str],
+}
+
+impl IdenticalValueExemption {
+    fn covers(&self, locale: &str, key: &str) -> bool {
+        (self.locales.is_empty() || self.locales.contains(&locale)) && self.keys.contains(&key)
+    }
+}
+
+/// Locale values that are legitimately byte-identical to English, and why.
+///
+/// Every entry is a deliberate statement that the English text is the correct text for that locale, not a record that translating it is still to do — a key that simply has not been translated yet belongs in the locale file with a translation, not here.
+/// `locales` empty means the exemption holds for every locale; naming locales narrows it, so a locale that does translate the value keeps being checked.
+///
+/// Adding an entry costs a written reason and shows up in review as data rather than as a change to the check, which is the point: #8178 was filed because the exception list is the policy, and a policy that lives inside a regex cannot be reviewed.
+const IDENTICAL_VALUE_EXEMPTIONS: &[IdenticalValueExemption] = &[
+    IdenticalValueExemption {
+        reason: "Product, brand and company names. Spelled the same in every locale by definition, which is what the `brand-` prefix exists to declare.",
+        locales: &[],
+        keys: &[
+            "brand-alibaba-coding-plan",
+            "brand-azure-openai",
+            "brand-byteplus",
+            "brand-claude-code",
+            "brand-deepinfra",
+            "brand-deepseek",
+            "brand-discord",
+            "brand-github-copilot",
+            "brand-huggingface",
+            "brand-kimi-coding",
+            "brand-nvidia-nim",
+            "brand-openai",
+            "brand-openai-codex",
+            "brand-openclaw",
+            "brand-openclaw-openfang",
+            "brand-openfang",
+            "brand-openrouter",
+            "brand-slack-app",
+            "brand-slack-bot",
+            "brand-telegram",
+            "brand-vertex-ai",
+            "brand-zai",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Identifiers and acronyms used as literal column headers or field labels. `ID`, `URL`, `PID`, `API`, `MCP` and `Top-p` are not translated in any of the shipped locales, and a column header that differs from the API field it shows is harder to read, not easier.",
+        locales: &[],
+        keys: &[
+            "label-api",
+            "label-header-id",
+            "label-header-url",
+            "label-id",
+            "label-pid",
+            "tui-agents-detail-id",
+            "tui-agents-detail-mcp",
+            "tui-agents-header-id",
+            "tui-agents-param-top-p",
+            "tui-event-daemon-http-status",
+            "tui-extensions-header-id",
+            "tui-memory-header-id",
+            "tui-workflows-header-id",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Commands and config snippets the user copies verbatim into a shell or a config file. Translating any word here produces something that does not run.",
+        locales: &[],
+        keys: &[
+            "auth-api-key-config-entry",
+            "auth-hash-config-entry",
+            "auth-pool-add-example",
+            "channel-install-sdk-cmd",
+            "desktop-install-skipped-brew",
+            "mcp-vault-set-hint",
+            "tui-workflows-placeholder-steps",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Layouts made of placeables, punctuation and literal marker tokens, with no prose to translate. The `key=value` field names match the config keys or the API fields they report.",
+        locales: &[],
+        keys: &[
+            "auth-pool-header",
+            "auth-pool-key-item",
+            "channel-last-error-entry",
+            "chat-runner-owner-notice",
+            "model-picker-item",
+            "tui-event-promote-http-error",
+            "tui-guide-warn-env",
+            "tui-mod-error-symbol",
+            "tui-triggers-placeholder-agent-id",
+            "tui-triggers-placeholder-max-fires",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Names of LibreFang features and of the ClawHub marketplace, carried as-is the way the brand keys are.",
+        locales: &[],
+        keys: &[
+            "tui-dashboard-dreams-title",
+            "tui-skills-tab-clawhub",
+            "ui-brand-title",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Trigger-type names as they appear on the wire and in `agent.toml`. An operator matching a screen against a config file needs the same spelling in both.",
+        locales: &[],
+        keys: &[
+            "tui-triggers-type-agentspawned-name",
+            "tui-triggers-type-channelmessage-name",
+            "tui-triggers-type-contentmatch-name",
+            "tui-triggers-type-schedule-name",
+            "tui-triggers-type-webhook-name",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Trigger-type names as they appear on the wire and in `agent.toml`. An operator matching a screen against a config file needs the same spelling in both.",
+        locales: &["uk", "zh-CN"],
+        keys: &[
+            "tui-triggers-type-lifecycle-name",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Only the punctuation differs from English, and Korean and Ukrainian use the same ASCII colon, parentheses and brackets that English does. zh-CN differs solely because it uses the fullwidth forms.",
+        locales: &["ko", "uk"],
+        keys: &[
+            "agent-spawn-id-label",
+            "automation-workflow-created-id",
+            "channel-prompt-default",
+            "channel-prompt-optional",
+            "channel-prompt-required",
+            "skill-bundle-sha",
+            "tui-channels-group-count",
+            "tui-event-daemon-failure-detail",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Binary and decimal unit abbreviations. Korean and Chinese write these in Latin script; only Ukrainian transliterates them into Cyrillic.",
+        locales: &["ko", "zh-CN"],
+        keys: &[
+            "format-bytes-b",
+            "format-bytes-gib",
+            "format-bytes-kib",
+            "format-bytes-mib",
+            "format-size-mb",
+            "status-mb",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "A language runtime's own name followed by its version. Korean and Ukrainian keep the upstream spelling.",
+        locales: &["ko", "uk"],
+        keys: &[
+            "doctor-check-node-version",
+            "doctor-check-python-version",
+            "doctor-check-rust-version",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "Example values the user copies into a field that only accepts them as written: `template_id` is the API field name, and agent and workflow names are validated as ASCII slugs.",
+        locales: &["ko", "zh-CN"],
+        keys: &[
+            "mcp-header-template-id",
+            "tui-agents-placeholder-name",
+            "tui-workflows-placeholder-name",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "`Hand` is a LibreFang product concept. Ukrainian and Chinese keep the English term; Korean transliterates it. This is a terminology decision that has not been made explicitly — it is recorded here rather than settled, so that flipping it is one edit in one place.",
+        locales: &["uk", "zh-CN"],
+        keys: &[
+            "label-hands",
+            "label-header-hand",
+            "tui-hands-header-hand",
+            "tui-hands-title",
+            "tui-tab-hands",
+        ],
+    },
+    IdenticalValueExemption {
+        reason: "`Hand` is a LibreFang product concept. Ukrainian and Chinese keep the English term; Korean transliterates it. This is a terminology decision that has not been made explicitly — it is recorded here rather than settled, so that flipping it is one edit in one place.",
+        locales: &["zh-CN"],
+        keys: &[
+            "label-hand",
+        ],
+    },
+];
+
+/// Every `key = value` pair in a locale file, with multiline continuations folded in.
+///
+/// Separate from [`collect_locale_keys`] because that one deliberately discards values; the untranslated-value check is entirely about them.
+/// Continuation lines are joined with a newline and trimmed the way Fluent renders them, so a value the loader treats as one string compares as one string here.
+fn collect_locale_entries(locale_file: &Path) -> std::collections::BTreeMap<String, String> {
+    let content = fs::read_to_string(locale_file)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", locale_file.display()));
+    let mut entries = std::collections::BTreeMap::new();
+    let mut current: Option<String> = None;
+    // A blank line does not end a Fluent message on its own — `doctor-section-*` are written as an empty first line, a blank line, then the indented text — so blank lines are held back and only folded in once an indented line proves the message continued.
+    let mut pending_blanks = 0usize;
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            if current.is_some() {
+                pending_blanks += 1;
+            }
+            continue;
+        }
+        if line.trim_start().starts_with('#') {
+            current = None;
+            pending_blanks = 0;
+            continue;
+        }
+        if line.starts_with(char::is_whitespace) {
+            // A continuation of the previous message, or an attribute / selector line inside it. Either way it belongs to the value already being accumulated.
+            if let Some(key) = &current {
+                let value: &mut String = entries.get_mut(key).expect("current key was inserted");
+                for _ in 0..pending_blanks {
+                    value.push('\n');
+                }
+                value.push('\n');
+                value.push_str(line.trim());
+            }
+            pending_blanks = 0;
+            continue;
+        }
+        current = None;
+        pending_blanks = 0;
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let mut chars = key.chars();
+        if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            continue;
+        }
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            continue;
+        }
+        // Only the leading space of `key = value` is Fluent syntax; anything past it is part of the value and several keys use it for column alignment.
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        entries.insert(key.to_string(), value.to_string());
+        current = Some(key.to_string());
+    }
+    entries
+}
+
+/// A locale value byte-identical to English is not a translation (#8178).
+///
+/// The missing-key check next door cannot see this one: the key is present, so coverage is satisfied, and the string renders as fluent English inside an otherwise translated screen.
+/// That reads as a deliberate choice rather than as a bug, so nobody files it — eight `tui-settings-*auxiliary*` keys reached `uk` and `zh-CN` with their English values and stayed green the whole time.
+///
+/// Exemptions are data in [`IDENTICAL_VALUE_EXEMPTIONS`], not a pattern in this function.
+/// The distinction matters more than it looks: a heuristic that decides "this looks like a format string" keeps passing as the strings around it drift, and nothing in a diff shows that it stopped catching anything, whereas an entry added to the table is a line a reviewer reads.
+///
+/// The check is not symmetric with the locale — `en` is the reference and is skipped rather than compared against itself.
+#[test]
+fn test_locale_values_are_not_copies_of_english() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
+    let manifest_dir = Path::new(&manifest_dir);
+    let english = collect_locale_entries(&manifest_dir.join("locales/en/main.ftl"));
+
+    let mut untranslated: Vec<String> = Vec::new();
+    for locale in shipped_locales(manifest_dir) {
+        if locale == "en" {
+            continue;
+        }
+        let entries =
+            collect_locale_entries(&manifest_dir.join(format!("locales/{locale}/main.ftl")));
+        for (key, value) in &entries {
+            let Some(english_value) = english.get(key) else {
+                // A key absent from `en` is a different defect and belongs to the dead-key check, which reports it with the context to act on.
+                continue;
+            };
+            if value != english_value {
+                continue;
+            }
+            if IDENTICAL_VALUE_EXEMPTIONS
+                .iter()
+                .any(|exemption| exemption.covers(&locale, key))
+            {
+                continue;
+            }
+            untranslated.push(format!("  {locale}/{key} = {english_value:?}"));
+        }
+    }
+
+    assert!(
+        untranslated.is_empty(),
+        "These locale values are byte-identical to the English text, so the screen shows English \
+         to a user who selected another language (#8178):\n{}\n\nTranslate them. If the English \
+         text really is correct for that locale — a brand name, a shell command, a column header \
+         that matches an API field — add the key to IDENTICAL_VALUE_EXEMPTIONS in this file with \
+         a reason saying which.",
+        untranslated.join("\n")
+    );
+}
+
+/// Guards the exemption table against the two ways it rots into a rubber stamp.
+///
+/// An entry for a key that no longer exists, or for one whose value is no longer identical, is an exemption nobody can see is unused — and the next key to reuse that name inherits it silently.
+/// A reason that says nothing defeats the reason the table is data rather than a regex.
+#[test]
+fn identical_value_exemptions_are_all_still_load_bearing() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
+    let manifest_dir = Path::new(&manifest_dir);
+    let english = collect_locale_entries(&manifest_dir.join("locales/en/main.ftl"));
+    let locales: Vec<String> = shipped_locales(manifest_dir)
+        .into_iter()
+        .filter(|l| l != "en")
+        .collect();
+    let entries: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
+        locales
+            .iter()
+            .map(|locale| {
+                (
+                    locale.clone(),
+                    collect_locale_entries(
+                        &manifest_dir.join(format!("locales/{locale}/main.ftl")),
+                    ),
+                )
+            })
+            .collect();
+
+    let mut stale: Vec<String> = Vec::new();
+    let mut seen: std::collections::BTreeSet<(&str, &str)> = std::collections::BTreeSet::new();
+    for exemption in IDENTICAL_VALUE_EXEMPTIONS {
+        assert!(
+            exemption.reason.split_whitespace().count() >= 8,
+            "exemption reason {:?} is too short to tell a reader why the English text is correct here",
+            exemption.reason
+        );
+        for named in exemption.locales {
+            assert!(
+                locales.iter().any(|l| l == named),
+                "exemption names locale {named:?}, which ships no locales/{named}/main.ftl"
+            );
+        }
+        for key in exemption.keys {
+            assert!(
+                seen.insert((
+                    if exemption.locales.is_empty() {
+                        ""
+                    } else {
+                        exemption.locales[0]
+                    },
+                    key
+                )),
+                "{key} is exempted twice for the same locales; two reasons for one key means one of them is wrong"
+            );
+            let Some(english_value) = english.get(*key) else {
+                stale.push(format!("  {key} — no longer in locales/en/main.ftl"));
+                continue;
+            };
+            let applies: Vec<&String> = locales
+                .iter()
+                .filter(|l| exemption.locales.is_empty() || exemption.locales.contains(&l.as_str()))
+                .collect();
+            for locale in applies {
+                match entries[locale].get(*key) {
+                    None => stale.push(format!("  {locale}/{key} — key absent from that locale")),
+                    Some(value) if value != english_value => stale.push(format!(
+                        "  {locale}/{key} — now translated ({value:?}), so the exemption is dead"
+                    )),
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+
+    assert!(
+        stale.is_empty(),
+        "IDENTICAL_VALUE_EXEMPTIONS has entries that no longer describe anything:\n{}\n\nDrop them. \
+         An exemption that matches nothing is invisible until a future key reuses the name and \
+         inherits it.",
+        stale.join("\n")
+    );
 }
