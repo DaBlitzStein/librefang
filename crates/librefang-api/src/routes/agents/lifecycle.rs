@@ -5,7 +5,11 @@ use librefang_types::agent_type_store;
 // Shared manifest resolution helper
 // ---------------------------------------------------------------------------
 /// Maximum manifest size (1MB) to prevent parser memory exhaustion.
-const MAX_MANIFEST_SIZE: usize = 1024 * 1024;
+///
+/// `pub(crate)` because every surface that accepts a whole agent manifest — the
+/// agent spawn path here and `PUT /api/templates/{name}/toml` in
+/// `agent_templates` — must enforce the same cap, not just this one.
+pub(crate) const MAX_MANIFEST_SIZE: usize = 1024 * 1024;
 
 /// Resolved manifest ready for spawning.
 struct ResolvedManifest {
