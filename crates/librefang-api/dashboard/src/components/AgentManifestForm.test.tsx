@@ -2,7 +2,12 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, it, expect, vi } from "vitest";
-import { AgentManifestForm, type ManifestCatalogEntry } from "./AgentManifestForm";
+import {
+  AgentManifestForm,
+  type ManifestCatalogEntry,
+  type ManifestSectionId,
+  MANIFEST_SECTION_IDS,
+} from "./AgentManifestForm";
 import {
   emptyManifestExtras,
   emptyManifestForm,
@@ -38,6 +43,7 @@ function Harness({
   providers = [{ name: "openai" }],
   nameField,
   routingInertReason,
+  sections,
 }: {
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
@@ -48,6 +54,7 @@ function Harness({
   providers?: { name: string }[];
   nameField?: "editable" | "readonly" | "hidden";
   routingInertReason?: "stable_mode" | null;
+  sections?: ManifestSectionId[];
 }) {
   const [state, setState] = useState<ManifestFormState>(() => initialState ?? emptyManifestForm());
   return (
@@ -63,6 +70,7 @@ function Harness({
       mcpCatalog={mcpCatalog}
       nameField={nameField}
       routingInertReason={routingInertReason}
+      sections={sections}
     />
   );
 }
@@ -606,5 +614,50 @@ describe("AgentManifestForm — routing in Stable mode", () => {
     render(<Harness routingInertReason={null} />);
 
     expect(screen.queryByText("agents.form.routing_stable_inert")).not.toBeInTheDocument();
+  });
+});
+
+// The agent drawer hosts this form *inside* its tabs, so the same editor
+// backs "Conversation", "Routing", "Tools" … rather than living in a second
+// "Edit full configuration" drawer. That only works if a caller can name the
+// sections it wants, and if naming a subset actually drops the rest — an
+// ignored `sections` prop would render the whole manifest on every tab and
+// look, to a reader, exactly like the feature working.
+describe("AgentManifestForm — section addressing", () => {
+  const renderedSections = (container: HTMLElement): string[] =>
+    Array.from(container.querySelectorAll("[data-section]")).map(
+      (el) => el.getAttribute("data-section") ?? "",
+    );
+
+  it("renders every section when the caller passes no list", () => {
+    const { container } = render(<Harness />);
+    expect(renderedSections(container)).toEqual([...MANIFEST_SECTION_IDS]);
+  });
+
+  it("renders only the sections the caller asked for", () => {
+    const { container } = render(<Harness sections={["routing"]} />);
+    expect(renderedSections(container)).toEqual(["routing"]);
+  });
+
+  it("renders one section per tab set, in the order asked", () => {
+    // The Routing tab. Each of these used to sit elsewhere: the tiers were
+    // two drawers deep and the fallback chain was its own collapsed block in
+    // the other surface.
+    const routingTab: ManifestSectionId[] = [
+      "model",
+      "fallback_models",
+      "thinking",
+      "routing",
+    ];
+    const { container } = render(<Harness sections={routingTab} />);
+    expect(renderedSections(container)).toEqual(routingTab);
+  });
+
+  it("renders nothing, not everything, for an empty list", () => {
+    // The failure mode worth guarding: an empty array is falsy-ish in the
+    // places a caller might spread it, and falling back to "all sections"
+    // would put the entire manifest on a tab that asked for none of it.
+    const { container } = render(<Harness sections={[]} />);
+    expect(renderedSections(container)).toEqual([]);
   });
 });
