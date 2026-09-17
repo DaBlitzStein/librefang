@@ -138,42 +138,39 @@ describe("AgentManifestForm — complexity routing tiers", () => {
 
 describe("AgentManifestForm — provider selection", () => {
   // The caller passes only providers that can serve a request, so an agent
-  // assigned to one whose key was rejected (or whose local service is down)
-  // would face a `required` <select> with no matching <option>: React sets
-  // selectedIndex -1 and the field renders blank, unable to show or re-pick
-  // the provider the agent is actually on.
-  it("lists the provider the agent already uses even when it is not selectable anew", () => {
+  // assigned to one whose key was rejected (or whose local service is down) is
+  // not in that list. The control has to offer it anyway: an operator who
+  // cannot see the provider their agent runs on cannot change the model
+  // without first moving the agent somewhere it is not.
+  //
+  // This is deliberately asserted here rather than left to the picker's own
+  // suite. The picker only knows the list it is handed; adding the current
+  // provider back is `providerOptions`, which is this component's job.
+  async function openModelPicker() {
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^agents\.form\.model:/ }));
+    return user;
+  }
+
+  it("offers the provider the agent already uses even when it is not selectable anew", async () => {
     const state = emptyManifestForm();
     state.model = { ...state.model, provider: "deepseek", model: "deepseek-chat" };
 
     render(<Harness initialState={state} providers={[{ name: "openai" }]} />);
+    await openModelPicker();
 
-    // `Field` renders its label as an unassociated <span> (#5246), so the
-    // select has no accessible name to query by — anchor on its own placeholder
-    // option instead.
-    const select = screen
-      .getByRole("option", { name: "agents.form.select_provider" })
-      .closest("select") as HTMLSelectElement;
-    expect(select).toHaveValue("deepseek");
-    expect(
-      within(select).getByRole("option", { name: "deepseek" }),
-    ).toBeInTheDocument();
-    expect(within(select).getByRole("option", { name: "openai" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "deepseek" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "openai" })).toBeInTheDocument();
   });
 
-  it("does not duplicate a current provider that is already offered", () => {
+  it("does not list a current provider that is already offered, twice", async () => {
     const state = emptyManifestForm();
     state.model = { ...state.model, provider: "openai", model: "gpt-4o" };
 
     render(<Harness initialState={state} providers={[{ name: "openai" }]} />);
+    await openModelPicker();
 
-    // `Field` renders its label as an unassociated <span> (#5246), so the
-    // select has no accessible name to query by — anchor on its own placeholder
-    // option instead.
-    const select = screen
-      .getByRole("option", { name: "agents.form.select_provider" })
-      .closest("select") as HTMLSelectElement;
-    expect(within(select).getAllByRole("option", { name: "openai" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "openai" })).toHaveLength(1);
   });
 });
 

@@ -282,11 +282,6 @@ export function AgentManifestForm({
   const updateRouting = (patch: Partial<ManifestFormState["routing"]>): void =>
     onChange({ ...value, routing: { ...value.routing, ...patch } });
 
-  const filteredModels = useMemo(
-    () => (value.model.provider ? models.filter((m) => m.provider === value.model.provider) : models),
-    [models, value.model.provider],
-  );
-
   // The picker wants `{ id }` rather than `{ name }`. Memoised because it is
   // passed to every fallback row, and a fresh array each render would defeat
   // the picker's own memoisation of its provider list.
@@ -418,60 +413,42 @@ export function AgentManifestForm({
       </Section>
 
       <Section when={shows("model")} id="model" title={t("agents.form.model")}>
-        <div className="grid grid-cols-2 gap-3">
-          <Field
-            label={t("agents.form.provider")}
-            hint={t("agents.form.inherit_default")}
-            invalid={invalidFields.has("model.provider")}
-          >
-            <select
-              value={value.model.provider}
-              onChange={(e) => updateModel({ provider: e.target.value, model: "" })}
-              className={inputClass}
-            >
-              <option value="">{t("agents.form.select_provider")}</option>
-              {/* The option list is "providers you could pick", which excludes
-                  one whose key was rejected or whose local service is down. The
-                  agent may already be assigned to exactly that provider, and a
-                  controlled <select> with no matching <option> renders blank —
-                  so the current value is always listed, even when it is not
-                  something you would newly choose. */}
-              {providerOptions.map((p) => (
-                <option key={p.name} value={p.name}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field
-            label={t("agents.form.model_id")}
-            hint={t("agents.form.inherit_default")}
-            invalid={invalidFields.has("model.model")}
-          >
-            {filteredModels.length > 0 ? (
-              <select
-                value={value.model.model}
-                onChange={(e) => updateModel({ model: e.target.value })}
-                className={inputClass}
-              >
-                <option value="">{t("agents.form.select_model")}</option>
-                {filteredModels.map((m) => (
-                  <option key={`${m.provider}/${m.id}`} value={m.id}>
-                    {m.id}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                type="text"
-                value={value.model.model}
-                onChange={(e) => updateModel({ model: e.target.value })}
-                placeholder={t("agents.form.model_id_placeholder")}
-                className={inputClass}
-              />
-            )}
-          </Field>
-        </div>
+        <Field
+          label={t("agents.form.model")}
+          hint={t("agents.form.inherit_default")}
+          invalid={
+            invalidFields.has("model.provider") || invalidFields.has("model.model")
+          }
+        >
+          {/* One control for choosing a model, the same one the fallback chain,
+              the routing tiers and `pinned_model` already use. A provider
+              <select> beside a model <select> answered the same question a
+              second way, and it was the pair that could not search: the
+              catalog runs to hundreds of ids, and the fallback rows had a
+              finder while the primary model — the field an operator sets
+              first — did not.
+
+              `allowCustom` is not a nicety. The catalog comes from live
+              discovery, and the control this replaces fell back to free text
+              whenever discovery returned nothing for a provider. Without the
+              escape hatch an operator could not set a model at all in exactly
+              the situation that needs one. */}
+          <ModelPicker
+            label={t("agents.form.model")}
+            variant="pair"
+            allowCustom
+            value={
+              value.model.provider || value.model.model
+                ? { provider: value.model.provider, model: value.model.model }
+                : null
+            }
+            onChange={(next) =>
+              updateModel({ provider: next.provider, model: next.model })
+            }
+            models={models}
+            providers={providerPickerList}
+          />
+        </Field>
         {/*
           Sampling preferences. Each is tri-state and empty means inherit —
           this agent has no opinion, so the per-model override supplies the
