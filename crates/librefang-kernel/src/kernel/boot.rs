@@ -1164,9 +1164,8 @@ impl LibreFangKernel {
         // Initialize git repo for config version control (first boot)
         init_git_if_missing(&config.home_dir);
 
-        // Auto-sync registry content on first boot or after upgrade when
-        // Sync registry: downloads if cache is stale, pre-installs providers/agents/integrations.
-        // Skips download if cache is fresh; skips copy if files already exist.
+        // Sync registry content on boot: downloads when the cache is stale, then pre-installs providers/, channels/, the MCP catalog, agent types and workflow templates.
+        // Those are two separate steps — a fresh cache skips the download only, and the fan-out runs on every boot regardless, rewriting a file while its bytes are still the ones the sync wrote and keeping one the operator has edited (#8407).
         // `[registry] auto_sync = false` freezes `~/.librefang/registry/`: the sync fast-forwards that checkout with `git reset --hard origin/main`, which destroys every local modification under it — including the ones `PUT /api/hands/{id}/manifest` writes for a registry-shipped hand.
         // Explicit operator actions (`librefang init`, `POST /api/catalog/update`) still fetch; `POST /api/hands/reload` only reloads whatever is already on disk and never fetched from upstream, so it is unaffected either way.
         if config.registry.auto_sync {
