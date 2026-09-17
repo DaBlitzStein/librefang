@@ -20,6 +20,8 @@ export {
   // agents
   listAgents,
   getAgentDetail,
+  getAgentManifest,
+  getAgentChannels,
   getAgentStats,
   listAgentEvents,
   listAgentSessions,
@@ -153,7 +155,6 @@ export {
   getAgentSkills,
   // per-agent MCP server assignment — read (#7713)
   getAgentMcpServers,
-  getAgentChannels,
   getAgentManifestHistory,
   getAgentTemplateToml,
   getTemplateHistory,
@@ -251,6 +252,10 @@ export {
   deleteUserAvatar,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
+  // per-agent MCP server grant — write (#6565 follow-up)
+  setAgentMcpServers,
+  // per-agent channel allowlist — write (#7742)
+  setAgentChannels,
   createAgentSession,
   switchAgentSession,
   deleteSession,
