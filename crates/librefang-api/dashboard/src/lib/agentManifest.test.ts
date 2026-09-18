@@ -2523,3 +2523,102 @@ describe("skill_workshop overrides", () => {
     expect(parsed.form.skill_workshop.auto_capture).toBe(true);
   });
 });
+
+// `[channel_overrides]` is the largest table here: 29 fields, of which eight
+// have defaults that come from named functions rather than the type's zero.
+// That is the whole risk — a form that writes one of those defaults back turns
+// "inherit" into "override with the value it happened to have".
+describe("channel_overrides", () => {
+  it("writes no table when every field holds its default", () => {
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("[channel_overrides]");
+  });
+
+  it("writes none of the custom defaults when they are untouched", () => {
+    // These are `#[serde(default = "…")]` on the Rust side, so an absent key
+    // means the function's value. Emitting them would pin the agent to
+    // whatever those functions return today.
+    const toml = serializeManifestForm(emptyManifestForm());
+    for (const key of [
+      "message_debounce_max_ms",
+      "message_debounce_max_buffer",
+      "auto_route_ttl_minutes",
+      "auto_route_confidence_threshold",
+      "auto_route_sticky_bonus",
+      "auto_route_divergence_count",
+      "conversation_ownership_ttl_seconds",
+    ]) {
+      expect(toml, `${key} was written while untouched`).not.toContain(key);
+    }
+  });
+
+  it("has a form default matching default_thread_ownership_enabled", () => {
+    // The fourth default in this work that reads backwards: the Rust default
+    // is `true`, so `false` is the value worth writing and `true` is the state
+    // that must produce no key at all.
+    const form = emptyManifestForm();
+    expect(form.channel_overrides.thread_ownership_enabled).toBe(true);
+    expect(serializeManifestForm(form)).not.toContain("thread_ownership_enabled");
+
+    form.channel_overrides.thread_ownership_enabled = false;
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[channel_overrides]");
+    expect(toml).toContain("thread_ownership_enabled = false");
+  });
+
+  it("round-trips every field away from its default", () => {
+    const form = emptyManifestForm();
+    form.channel_overrides = {
+      model: "openai/gpt-4o",
+      system_prompt: "be brief",
+      dm_policy: "allowed_only",
+      group_policy: "mention_only",
+      group_trigger_patterns: ["^!"],
+      reply_precheck: true,
+      reply_precheck_model: "cheap/model",
+      rate_limit_per_minute: "30",
+      rate_limit_per_user: "5",
+      threading: true,
+      output_format: "telegram_html",
+      usage_footer: "tokens",
+      typing_mode: "thinking",
+      message_debounce_ms: "500",
+      message_debounce_max_ms: "5000",
+      message_debounce_max_buffer: "32",
+      clear_done_reaction: true,
+      disable_commands: true,
+      allowed_commands: ["/help"],
+      blocked_commands: ["/rm"],
+      auto_route: "sticky_ttl",
+      auto_route_ttl_minutes: "60",
+      auto_route_confidence_threshold: "7",
+      auto_route_sticky_bonus: "4",
+      auto_route_divergence_count: "2",
+      prefix_agent_name: "bracket",
+      thread_ownership_enabled: false,
+      conversation_ownership_ttl_seconds: "1800",
+      conversation_ownership_include_dms: true,
+    };
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.channel_overrides).toEqual(form.channel_overrides);
+  });
+
+  it("preserves keys inside the table the form does not render", () => {
+    const source = [
+      'name = "x"',
+      "",
+      "[channel_overrides]",
+      "threading = true",
+      "future_toggle = true",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("future_toggle = true");
+    expect(round).toContain("threading = true");
+  });
+});
