@@ -1025,7 +1025,8 @@
     "tools_declared_desc": "Tools this agent can use. Leave empty for unrestricted access to all tools.",
     "token_usage_title": "Token footprint",
     "token_injected_total": "Injected per request",
-    "token_recent": "Recent calls"
+    "token_recent": "Recent calls",
+    "use_global_default": "Use global default"
   },
   "providers": {
     "title": "Providers",

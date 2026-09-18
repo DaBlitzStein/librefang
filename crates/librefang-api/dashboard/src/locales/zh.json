@@ -1025,7 +1025,8 @@
     "tools_declared_desc": "此智能体可使用的工具。留空则可不受限制地访问所有工具。",
     "token_usage_title": "令牌占用",
     "token_injected_total": "每次请求注入",
-    "token_recent": "最近调用"
+    "token_recent": "最近调用",
+    "use_global_default": "使用全局默认模型"
   },
   "providers": {
     "title": "供应商",
