@@ -198,6 +198,14 @@ export interface ManifestFormState {
     router_allowed_profiles: string[];
     router_cost_budget: "" | "cheap" | "medium" | "expensive";
     router_default_profile: string;
+    /**
+     * Keys inside `router_override` the form has no widget for.
+     * `AgentRouterOverride` carries no `deny_unknown_fields`
+     * (crates/librefang-types/src/model_profile.rs), so such a key is a legal
+     * manifest member the daemon keeps on disk — the stash is what lets the
+     * re-emitted inline table carry it back instead of dropping it.
+     */
+    router_override_preserved?: TomlTable;
   };
 
   /** Tri-state: `null` = key absent (inherit global fallback_providers),
@@ -866,6 +874,13 @@ const INJECTION_POSITIONS = ["system", "before_user", "after_reset"] as const;
 const MODEL_MODES = ["fixed", "flexible"] as const;
 /** `CostTier`'s spellings, which the router API echoes byte for byte. */
 const COST_TIERS = ["cheap", "medium", "expensive"] as const;
+/** The members of `AgentRouterOverride` the form renders. */
+const ROUTER_OVERRIDE_KEYS = new Set([
+  "fixed",
+  "allowed_profiles",
+  "cost_budget",
+  "default_profile",
+]);
 const EXEC_SHORTHANDS = ["allow", "deny", "full", "allowlist"] as const;
 // These three mirror `rename_all` on the Rust enums, not the variant names:
 // `ToolProfile` and `OrphanPolicy` are `snake_case`, `BackendKind` is
@@ -1700,6 +1715,14 @@ const renderRouterOverride = (m: ManifestFormState["model"]): string[] => {
   }
   const fallback = m.router_default_profile.trim();
   if (fallback) parts.push(`default_profile = ${escapeTomlString(fallback)}`);
+  // The un-widgeted keys merge back into the single inline table — the same
+  // merge response_format's preserved stash gets, and for the same reason:
+  // a `[model.router_override.<key>]` header after this bare assignment
+  // would re-anchor TOML scoping, so inline is the only legal home.
+  for (const [key, value] of Object.entries(m.router_override_preserved ?? {})) {
+    if (value === null || value === undefined) continue;
+    parts.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+  }
   return parts.length ? [`router_override = { ${parts.join(", ")} }`] : [];
 };
 
@@ -2264,6 +2287,10 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.model.router_allowed_profiles = asStringArray(routerOverride.allowed_profiles);
   form.model.router_cost_budget = asOptionalEnum(routerOverride.cost_budget, COST_TIERS);
   form.model.router_default_profile = asString(routerOverride.default_profile);
+  const routerPreserved = stripKnown(routerOverride, ROUTER_OVERRIDE_KEYS);
+  if (Object.keys(routerPreserved).length) {
+    form.model.router_override_preserved = routerPreserved;
+  }
   extras.model = stripKnown(modelTable, FORM_MODEL_KEYS);
 
   // [[fallback_models]] — capture provider-specific flatten extras too,

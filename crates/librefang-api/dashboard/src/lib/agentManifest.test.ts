@@ -2514,6 +2514,21 @@ describe("every table the form owns keeps the keys it does not render", () => {
     });
   }
 
+  // The [model] fixture above is top-level only, and the form appropriates
+  // one level deeper than it: router_override is an inline table inside
+  // [model] whose unknown members the form re-emits or drops whole. A guard
+  // that never looks one level down swept this instance by nothing.
+  it("[model.router_override] keeps an unknown key nested inside", () => {
+    const parsed = parseManifestToml(
+      `name = "x"\n\n[model]\nrouter_override = { zz_unknown = 7 }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("zz_unknown = 7");
+  });
+
   it("sweeps every table the form claims, not a hand-kept list", () => {
     // A table added to the form without an entry above would be swept by
     // nothing — which is the state `[rl_export]` was in when it was found.
@@ -2921,6 +2936,46 @@ describe("model router fields round-trip through the form", () => {
   // legal (no deny_unknown_fields) and the daemon keeps it on disk, inert
   // until fixed is cleared. Deleting keys the operator did not touch is the
   // silent-deletion class, so the form preserves.
+  // AgentRouterOverride carries no deny_unknown_fields
+  // (crates/librefang-types/src/model_profile.rs), so a key the form has no
+  // widget for is a legal manifest member the daemon keeps on disk. The
+  // form re-emits only the four members it renders — the same silent
+  // deletion response_format's preserved stash fixed, one level down.
+  it("keeps an unknown key nested inside the override", () => {
+    const parsed = parseManifestToml(
+      `${BASE}\nrouter_override = { cost_budget = "cheap", zz_unknown = 7 }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain(
+      'router_override = { cost_budget = "cheap", zz_unknown = 7 }',
+    );
+  });
+
+  // And the stash is the whole table when nothing else is set: an unknown
+  // key alone is still content the file carried.
+  it("emits the override for a preserved-only table", () => {
+    const parsed = parseManifestToml(`${BASE}\nrouter_override = { zz_unknown = 7 }\n`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.router_fixed).toBe(false);
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain("router_override = { zz_unknown = 7 }");
+  });
+
+  it("an empty override stays unwritten", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).not.toContain("router_override");
+  });
+
   it("keeps the constraints beside a fixed override, as the file format allows", () => {
     const parsed = parseManifestToml(
       `${BASE}\nrouter_override = { fixed = true, allowed_profiles = ["coding"], cost_budget = "cheap" }\n`,
