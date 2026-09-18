@@ -480,7 +480,21 @@ pub trait ChannelBridgeHandle: Send + Sync {
 
     /// Check if auto-reply is enabled and the message should trigger one.
     /// Returns Some(reply_text) if auto-reply fires, None otherwise.
-    async fn check_auto_reply(&self, _agent_id: AgentId, _message: &str) -> Option<String> {
+    ///
+    /// `sender` is the same [`SenderContext`] the ordinary dispatch path
+    /// builds for a channel message, and it carries the identity the tool
+    /// authorization gate reads (`channel` + `user_id`). The auto-reply runs
+    /// a full agent turn — tools included — so it must be handed the sender
+    /// it is running on behalf of, exactly as `send_message_with_sender`
+    /// hands it to a normal turn. Dropping it here silently demotes the turn
+    /// to an unidentified sender, which the RBAC gate answers with
+    /// `NeedsApproval` for every tool outside the read-only allowlist.
+    async fn check_auto_reply(
+        &self,
+        _agent_id: AgentId,
+        _message: &str,
+        _sender: &SenderContext,
+    ) -> Option<String> {
         None
     }
 
@@ -5151,9 +5165,20 @@ async fn dispatch_message(
         return;
     }
 
+    // Build the sender's identity once, ahead of everything below that can branch on it.
+    //
+    // Every turn this function runs from here on — the auto-reply one and the
+    // ordinary one alike — runs on behalf of this sender, and the tool
+    // authorization gate derives its `(channel, sender_id)` pair from this
+    // context. When the construction sat after the auto-reply branch instead,
+    // that branch could return without it: the turn reached the gate with no
+    // channel and no sender, and the gate answered with the guest allowlist —
+    // the seven read-only tools, everything else `NeedsApproval`.
+    let sender_ctx = build_sender_context(message, overrides.as_ref());
+
     // Auto-reply check — if enabled, the engine decides whether to process this message.
     // If auto-reply is enabled but suppressed for this message, skip agent call entirely.
-    if let Some(reply) = handle.check_auto_reply(agent_id, &text).await {
+    if let Some(reply) = handle.check_auto_reply(agent_id, &text, &sender_ctx).await {
         let reply = maybe_prefix_response(handle, overrides.as_ref(), agent_id, reply).await;
         send_response(adapter, &message.sender, reply, thread_id, output_format).await;
         handle
@@ -5258,9 +5283,6 @@ async fn dispatch_message(
 
     upsert_sender_into_roster(handle, message).await;
     upsert_enumerated_members_into_roster(handle, message).await;
-
-    // Build sender context to propagate identity to the agent
-    let sender_ctx = build_sender_context(message, overrides.as_ref());
 
     // Streaming path: if the adapter supports progressive output, pipe text
     // deltas directly to it instead of waiting for the full response.
