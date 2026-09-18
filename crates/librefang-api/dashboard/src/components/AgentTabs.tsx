@@ -52,9 +52,13 @@ export function AgentTabBar<Id extends string>({
       role="tablist"
       aria-label={ariaLabel}
       className={
+        // `flex-wrap` rather than a horizontal scrollbar: the config bar has
+        // eight groups whose labels do not fit on one row at any ordinary
+        // width, and a group that is only reachable by scrolling a strip with
+        // no visible affordance is a group the operator will not find.
         isUnderline
-          ? `flex gap-1 border-b border-border-subtle overflow-x-auto ${className}`
-          : `flex gap-1 ${className}`
+          ? `flex flex-wrap gap-1 border-b border-border-subtle ${className}`
+          : `flex flex-wrap gap-1 ${className}`
       }
     >
       {tabs.map((tab) => {
