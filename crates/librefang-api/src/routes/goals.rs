@@ -454,35 +454,13 @@ async fn start_or_resume(
         );
     }
 
-    // `started` above already answered "did the run start". This read only describes
-    // it, and an empty answer does not mean the start failed — `GoalRunner::state()`
-    // reads the live run under `try_lock`, so it reports `None` whenever the run loop
-    // happens to hold that mutex, for a run that is very much alive.
+    // `started` above already answered "did the run start".
+    // This read only describes it, and an empty answer does not mean the start failed: it means the run has already reached a terminal phase, so the loop dropped its own registry entry and a resume has already cleared the pause checkpoint `state()` would otherwise fall back to.
+    // That is still not a failed start, so it answers 200 with a null run — the same thing `GET /api/goals/{id}/run` says for the same state.
     //
-    // That is why this retries rather than reporting immediately. The loop's own
-    // contract is that it never holds the state lock across I/O (see the comment on
-    // `state()`), so contention is always brief and a yield is enough to clear it;
-    // what makes it reachable at all is machine load, which is how it reached `main`
-    // twice — `Test / macOS` runs the whole suite in one process and lost a race the
-    // four-way Linux shards kept winning, reporting `Failed to start goal run` for a
-    // run that had started (#8388, #8391).
-    //
-    // A run that has genuinely ended by the time we look is the other empty case: it
-    // reaches a terminal phase, the loop drops its own registry entry, and a resume
-    // has already cleared the pause checkpoint `state()` would otherwise fall back
-    // to. That is still not a failed start, so it answers 200 with a null run — the
-    // same thing `GET /api/goals/{id}/run` says for the same state.
-    const RUN_READ_ATTEMPTS: usize = 8;
-    let mut run_state = None;
-    for attempt in 0..RUN_READ_ATTEMPTS {
-        run_state = state.kernel.goal_run_state(goal_id);
-        if run_state.is_some() {
-            break;
-        }
-        if attempt + 1 < RUN_READ_ATTEMPTS {
-            tokio::task::yield_now().await;
-        }
-    }
+    // It used to read eight times across yields, because `GoalRunner::state()` took the run's state lock with `try_lock` and so reported a busy run as a missing one (#8388, #8391).
+    // `state()` waits for that lock now, so a run that is alive is never the empty answer here and one read settles it.
+    let run_state = state.kernel.goal_run_state(goal_id);
 
     match run_state {
         Some(run) => (
