@@ -860,3 +860,70 @@ describe("AgentManifestForm — the counters report before the server does", () 
     );
   });
 });
+
+// The user's brief for the unified editor: "everything in the same place, with
+// an ADVANCED button to give each section more depth, and in BASIC mode each
+// section shows what matters most." The basic/advanced split is per section:
+// the fields an operator sets first render always, and everything beyond them
+// folds behind the section's own Advanced disclosure — the same details/sum-
+// mary mechanism CollapsibleSection uses for the section itself.
+describe("AgentManifestForm — basic and advanced per section", () => {
+  /** The Advanced disclosure inside one section, addressed by section id. */
+  function advancedGroup(sectionId: string): HTMLDetailsElement | null {
+    const section = document.querySelector(`[data-section="${sectionId}"]`);
+    if (!section) return null;
+    const summary = Array.from(section.querySelectorAll("summary")).find(
+      // The harness's i18n stub echoes the key; the advanced group's summary
+      // is the only one this component renders itself.
+      (s) => s.textContent === "agents.form.advanced",
+    );
+    return summary ? (summary.closest("details") as HTMLDetailsElement) : null;
+  }
+
+  it("keeps the model section basic: the sampling knobs fold behind Advanced", () => {
+    render(<Harness />);
+    const group = advancedGroup("model");
+    expect(group, "the model section has an Advanced disclosure").toBeTruthy();
+    // BASIC: closed. The temperature field exists in the DOM (a closed
+    // details still contains its children) but the disclosure says so.
+    expect(group).not.toHaveAttribute("open");
+    expect(group!.querySelector("input")).toBeTruthy();
+  });
+
+  it("opens the advanced group when a validation error lands inside it", () => {
+    // A hidden error reads as no error — the same rule CollapsibleSection
+    // applies to a folded section, one level down.
+    render(<Harness invalidFields={new Set(["model.temperature"])} />);
+    expect(advancedGroup("model")).toHaveAttribute("open");
+  });
+
+  it("opens and closes on its own summary, like any details", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    const group = advancedGroup("model");
+    expect(group).not.toHaveAttribute("open");
+    await user.click(group!.querySelector("summary")!);
+    expect(group).toHaveAttribute("open");
+    await user.click(group!.querySelector("summary")!);
+    expect(group).not.toHaveAttribute("open");
+  });
+
+  it("folds the identity extras behind Advanced too", () => {
+    render(<Harness />);
+    const group = advancedGroup("identity");
+    expect(group).toBeTruthy();
+    expect(group).not.toHaveAttribute("open");
+    // Name stays outside the fold: it is the field the section is about.
+    expect(
+      group!.querySelector('input[aria-label="agents.form.name"]'),
+    ).toBeNull();
+  });
+
+  it("hides nothing when the caller never asked for a split section", () => {
+    // A section list without `model` renders no model section at all; the
+    // split must not break a caller that hosts other sections.
+    render(<Harness sections={["identity"]} />);
+    expect(advancedGroup("identity")).toBeTruthy();
+    expect(advancedGroup("model")).toBeNull();
+  });
+});

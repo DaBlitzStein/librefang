@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, Plus, Trash2, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
 import {
   AUTO_ROUTE_STRATEGIES,
   CAPABILITY_ROUTING_KEYS,
@@ -453,54 +453,58 @@ export function AgentManifestForm({
             className={inputClass}
           />
         </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.form.version")}>
-            <input
-              type="text"
-              value={value.version}
-              onChange={(e) => update({ version: e.target.value })}
-              className={inputClass}
+        {/* BASIC: name and description. Version, module, priority and tags are
+            bookkeeping the manifest carries but an operator rarely sets. */}
+        <AdvancedFields>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label={t("agents.form.version")}>
+              <input
+                type="text"
+                value={value.version}
+                onChange={(e) => update({ version: e.target.value })}
+                className={inputClass}
+              />
+            </Field>
+            <Field label={t("agents.form.author")}>
+              <input
+                type="text"
+                value={value.author}
+                onChange={(e) => update({ author: e.target.value })}
+                className={inputClass}
+              />
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label={t("agents.form.module")}>
+              <input
+                type="text"
+                value={value.module}
+                onChange={(e) => update({ module: e.target.value })}
+                placeholder={t("agents.form.module_placeholder")}
+                className={inputClass}
+              />
+            </Field>
+            <Field label={t("agents.form.priority")}>
+              <select
+                value={value.priority}
+                onChange={(e) => update({ priority: e.target.value as ManifestFormState["priority"] })}
+                className={inputClass}
+              >
+                <option value="Low">{t("agents.form.priority_low")}</option>
+                <option value="Normal">{t("agents.form.priority_normal")}</option>
+                <option value="High">{t("agents.form.priority_high")}</option>
+                <option value="Critical">{t("agents.form.priority_critical")}</option>
+              </select>
+            </Field>
+          </div>
+            <Field label={t("agents.form.tags")}>
+            <TagInput
+              value={value.tags}
+              onChange={(next) => update({ tags: next })}
+              placeholder={t("agents.form.tags_placeholder")}
             />
           </Field>
-          <Field label={t("agents.form.author")}>
-            <input
-              type="text"
-              value={value.author}
-              onChange={(e) => update({ author: e.target.value })}
-              className={inputClass}
-            />
-          </Field>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.form.module")}>
-            <input
-              type="text"
-              value={value.module}
-              onChange={(e) => update({ module: e.target.value })}
-              placeholder={t("agents.form.module_placeholder")}
-              className={inputClass}
-            />
-          </Field>
-          <Field label={t("agents.form.priority")}>
-            <select
-              value={value.priority}
-              onChange={(e) => update({ priority: e.target.value as ManifestFormState["priority"] })}
-              className={inputClass}
-            >
-              <option value="Low">{t("agents.form.priority_low")}</option>
-              <option value="Normal">{t("agents.form.priority_normal")}</option>
-              <option value="High">{t("agents.form.priority_high")}</option>
-              <option value="Critical">{t("agents.form.priority_critical")}</option>
-            </select>
-          </Field>
-        </div>
-        <Field label={t("agents.form.tags")}>
-          <TagInput
-            value={value.tags}
-            onChange={(next) => update({ tags: next })}
-            placeholder={t("agents.form.tags_placeholder")}
-          />
-        </Field>
+        </AdvancedFields>
       </Section>
 
       <Section when={shows("model")} id="model" title={t("agents.form.model")}>
@@ -540,6 +544,19 @@ export function AgentManifestForm({
             providers={providerPickerList}
           />
         </Field>
+        {/*
+          BASIC: which model runs. Everything else in this section — sampling
+          preferences, endpoint limits, credentials, the router's per-agent
+          settings — is depth the Advanced disclosure unfolds in place.
+        */}
+        <AdvancedFields
+          invalid={[
+            "model.temperature",
+            "model.top_p",
+            "model.frequency_penalty",
+            "model.presence_penalty",
+          ].some((f) => invalidFields.has(f))}
+        >
         {/*
           Sampling preferences. Each is tri-state and empty means inherit —
           this agent has no opinion, so the per-model override supplies the
@@ -699,6 +716,7 @@ export function AgentManifestForm({
             />
           </Field>
         </div>
+        </AdvancedFields>
       </Section>
 
       <Section when={shows("prompt")} id="prompt" title={t("agents.form.system_prompt")}>
@@ -714,6 +732,9 @@ export function AgentManifestForm({
       </Section>
 
       <Section when={shows("limits")} id="limits" title={t("agents.form.resources")}>
+        {/* BASIC: the two quotas an operator sets first — the hourly token
+            budget and the daily cost ceiling. The rest of the resource table
+            folds behind Advanced. */}
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.tokens_per_hour")}>
             <StepLadderInput
@@ -728,6 +749,25 @@ export function AgentManifestForm({
               min={0}
             />
           </Field>
+          <Field label={t("agents.form.cost_per_day")}>
+            <StepLadderInput
+              label={t("agents.form.cost_per_day")}
+              value={value.resources.max_cost_per_day_usd}
+              onChange={(next) => updateResources({ max_cost_per_day_usd: next })}
+              ladder={COST_PER_DAY_LADDER}
+              formatRung={formatUsd}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.unlimited_placeholder")}
+              min={0}
+              // Dollars, so the custom box must accept cents: an unset step
+              // defaults to 1 and the browser marks a value like 0.50 invalid.
+              step={0.01}
+            />
+          </Field>
+        </div>
+        <AdvancedFields>
+          <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.tool_calls_per_minute")}>
             <StepLadderInput
               label={t("agents.form.tool_calls_per_minute")}
@@ -747,22 +787,6 @@ export function AgentManifestForm({
               value={value.resources.max_cost_per_hour_usd}
               onChange={(next) => updateResources({ max_cost_per_hour_usd: next })}
               ladder={COST_PER_HOUR_LADDER}
-              formatRung={formatUsd}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              customPlaceholder={t("agents.form.unlimited_placeholder")}
-              min={0}
-              // Dollars, so the custom box must accept cents: an unset step
-              // defaults to 1 and the browser marks a value like 0.50 invalid.
-              step={0.01}
-            />
-          </Field>
-          <Field label={t("agents.form.cost_per_day")}>
-            <StepLadderInput
-              label={t("agents.form.cost_per_day")}
-              value={value.resources.max_cost_per_day_usd}
-              onChange={(next) => updateResources({ max_cost_per_day_usd: next })}
-              ladder={COST_PER_DAY_LADDER}
               formatRung={formatUsd}
               inheritLabel={t("model_param.inherit")}
               customLabel={t("model_param.custom")}
@@ -828,13 +852,7 @@ export function AgentManifestForm({
               min={0}
             />
           </Field>
-        </div>
-        {/*
-          The same ladder shape as `min_similarity`: a fraction the runtime
-          clamps to 0.01..=1.0 at enforcement time, so the control carries what
-          the operator wrote rather than snapping it into range — an off-rung
-          value is reported by the custom box, not refused.
-        */}
+          </div>
         <Field label={t("agents.form.burst_ratio")} hint={t("agents.form.burst_ratio_hint")}>
           <StepLadderInput
             label={t("agents.form.burst_ratio")}
@@ -849,7 +867,7 @@ export function AgentManifestForm({
             max={1}
             step={0.01}
           />
-        </Field>
+        </Field>        </AdvancedFields>
       </Section>
 
       <Section when={shows("capabilities")} id="capabilities" title={t("agents.form.capabilities")}>
@@ -867,6 +885,10 @@ export function AgentManifestForm({
             placeholder={t("agents.form.shell_commands_placeholder")}
           />
         </Field>
+        {/* BASIC: what the agent may reach on the network and run in a shell.
+            The per-tool grant, the memory glob lists and the media-routing
+            table are depth. */}
+        <AdvancedFields>
         <Field label={t("agents.form.cap_tools")} hint={t("agents.form.cap_tools_hint")}>
           {toolFinder ? (
             <MultiSelectCmdk
@@ -993,6 +1015,7 @@ export function AgentManifestForm({
             </select>
           </Field>
         </div>
+        </AdvancedFields>
       </Section>
 
       <Section when={shows("skills")} id="skills" title={t("agents.form.skills")}>
@@ -1295,21 +1318,26 @@ export function AgentManifestForm({
           onChange={(checked) => updateAutonomous({ enabled: checked })}
         />
         {value.autonomous.enabled && (
-          <div className="grid grid-cols-2 gap-3 mt-2">
-            <Field label={t("agents.form.max_iterations")}>
-              <StepLadderInput
-                label={t("agents.form.max_iterations")}
-                value={value.autonomous.max_iterations}
-                onChange={(next) => updateAutonomous({ max_iterations: next })}
-                ladder={MAX_ITERATIONS_LADDER}
-                formatRung={formatCount}
-                inheritLabel={t("model_param.inherit")}
-                customLabel={t("model_param.custom")}
-                customPlaceholder={t("agents.form.max_iterations_placeholder")}
-                min={1}
-              />
-            </Field>
-
+          <>
+            {/* BASIC: how long an autonomous run may go on. The restart cap,
+                the heartbeats and quiet hours are depth. */}
+            <div className="grid grid-cols-2 gap-3 mt-2">
+              <Field label={t("agents.form.max_iterations")}>
+                <StepLadderInput
+                  label={t("agents.form.max_iterations")}
+                  value={value.autonomous.max_iterations}
+                  onChange={(next) => updateAutonomous({ max_iterations: next })}
+                  ladder={MAX_ITERATIONS_LADDER}
+                  formatRung={formatCount}
+                  inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")}
+                  customPlaceholder={t("agents.form.max_iterations_placeholder")}
+                  min={1}
+                />
+              </Field>
+            </div>
+            <AdvancedFields>
+              <div className="grid grid-cols-2 gap-3 mt-2">
             <Field label={t("agents.form.max_restarts")}>
               <StepLadderInput
                 label={t("agents.form.max_restarts")}
@@ -1387,7 +1415,9 @@ export function AgentManifestForm({
                 className={inputClass}
               />
             </Field>
-          </div>
+              </div>
+            </AdvancedFields>
+          </>
         )}
       </FormSection>
 
@@ -1416,6 +1446,12 @@ export function AgentManifestForm({
             value={value.proactive_memory.auto_retrieve}
             onChange={(next) => updateProactiveMemory({ auto_retrieve: next })}
           />
+        </div>
+        {/* BASIC: what automatic memory does. The scoping stamp, the
+            consolidation gate, the extraction model and the similarity
+            floor are depth. */}
+        <AdvancedFields>
+          <div className="grid grid-cols-2 gap-3">
           <TriStateField
             label={t("memory.session_scoped_recall")}
             value={value.proactive_memory.session_scoped_recall}
@@ -1439,8 +1475,9 @@ export function AgentManifestForm({
               className={inputClass}
             />
           </Field>
-        </div>
+          </div>
         <Field label={t("agents.form.proactive_memory_min_similarity")}>
+
           <StepLadderInput
             label={t("agents.form.proactive_memory_min_similarity")}
             value={value.proactive_memory.min_similarity}
@@ -1454,6 +1491,7 @@ export function AgentManifestForm({
             step={0.01}
           />
         </Field>
+        </AdvancedFields>
       </FormSection>
 
       <FormSection
@@ -1537,6 +1575,11 @@ export function AgentManifestForm({
                     placeholder={t("agents.form.inherit_default")} className={inputClass} />
                 </Field></div>
         </div>
+        {/* BASIC: how the agent replies on a channel — the model, the
+            prompt and the reply policies. Rate limits, debouncing,
+            auto-routing, command control and thread ownership fold
+            behind Advanced. */}
+        <AdvancedFields>
         <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim mt-3">{t("agents.form.channel_overrides_group_limits")}</p>
         <div className="grid grid-cols-2 gap-3">
               <div className="col-span-2"><Field label={t("agents.form.channel_overrides_rate_limit_per_minute")}>
@@ -1667,6 +1710,7 @@ export function AgentManifestForm({
               <div><Toggle label={t("agents.form.channel_overrides_conversation_ownership_include_dms")} checked={value.channel_overrides.conversation_ownership_include_dms}
                   onChange={(checked) => updateChannelOverrides({ conversation_ownership_include_dms: checked })} /></div>
         </div>
+        </AdvancedFields>
       </FormSection>
 
       <FormSection id="compaction" shows={shows} title={t("config.sec_compaction")} defaultOpen={false}>
@@ -1691,6 +1735,9 @@ export function AgentManifestForm({
             onChange={(checked) => updateSkillWorkshop({ auto_capture: checked })}
           />
         </div>
+        {/* BASIC: the two switches. Approval, review and evolution modes
+            and the pending caps fold behind Advanced. */}
+        <AdvancedFields>
         <div className="grid grid-cols-2 gap-3 mt-2">
           <Field label={t("agents.form.skill_workshop_approval_policy")}>
             <select
@@ -1763,11 +1810,13 @@ export function AgentManifestForm({
             </select>
           </Field>
         </div>
+        </AdvancedFields>
       </FormSection>
 
         {/* Nine overrides of the kernel's compaction defaults, all `Option`, so
             every one of them leads with inherit and an untouched table is not
             written at all. */}
+        <AdvancedFields>
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("config.fld_threshold_messages")}>
             <StepLadderInput
@@ -1879,6 +1928,7 @@ export function AgentManifestForm({
             onChange={(next) => updateCompaction({ aggregate_developer_loops: next })}
           />
         </div>
+        </AdvancedFields>
       </FormSection>
 
       <FormSection
@@ -1982,6 +2032,9 @@ export function AgentManifestForm({
             </div>
           </div>
         )}
+        {/* BASIC: the router and its three tiers. Orphan reconciliation
+            and the tool profile are depth. */}
+        <AdvancedFields>
           <div className="grid grid-cols-2 gap-3 mt-2">
             <Field label={t("agents.form.reconcile_orphans")} hint={t("agents.form.inherit_default")}>
               <select
@@ -2022,6 +2075,7 @@ export function AgentManifestForm({
               </select>
             </Field>
           </div>
+        </AdvancedFields>
       </FormSection>
 
       <FormSection id="context_injection" shows={shows} title={t("agents.form.context_injection")} defaultOpen={false}>
@@ -2194,6 +2248,10 @@ export function AgentManifestForm({
       </FormSection>
 
       <FormSection id="lifecycle" shows={shows} title={t("agents.form.lifecycle")} defaultOpen={false}>
+        {/* BASIC: whether this agent runs, and whether an automated invocation
+            reuses its session. Everything else in the section — the export and
+            search switches, exec policy, plugins, the history and concurrency
+            caps — folds behind Advanced. */}
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.session_mode")}>
             <select
@@ -2207,6 +2265,21 @@ export function AgentManifestForm({
               <option value="new">{t("agents.form.session_new")}</option>
             </select>
           </Field>
+        </div>
+        <div className="flex flex-wrap gap-4 pt-2">
+          <Toggle
+            label={t("agents.form.enabled")}
+            checked={value.enabled}
+            onChange={(checked) => update({ enabled: checked })}
+          />
+        </div>
+        <AdvancedFields
+          invalid={
+            invalidFields.has("max_history_messages") ||
+            invalidFields.has("max_concurrent_invocations")
+          }
+        >
+          <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.rl_export")}>
             <select
               value={value.rl_export}
@@ -2307,12 +2380,7 @@ export function AgentManifestForm({
             />
           </Field>
         </div>
-        <div className="flex flex-wrap gap-4 pt-2">
-          <Toggle
-            label={t("agents.form.enabled")}
-            checked={value.enabled}
-            onChange={(checked) => update({ enabled: checked })}
-          />
+          <div className="flex flex-wrap gap-4 pt-2">
           <Toggle
             label={t("agents.form.skills_disabled")}
             checked={value.skills_disabled}
@@ -2410,6 +2478,7 @@ export function AgentManifestForm({
             </p>
           </Field>
         </div>
+        </AdvancedFields>
       </FormSection>
 
       <FormSection id="shared_folders" shows={shows}
@@ -2570,6 +2639,47 @@ function Section({
       <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">{title}</p>
       {children}
     </div>
+  );
+}
+
+/**
+ * The rest of a section — the fields beyond the ones an operator sets first.
+ *
+ * The unified editor's contract, in the user's own words: "todo en el mismo
+ * sitio, con un botón de ADVANCED para dar más profundidad a cada sección, y
+ * en el modo BASIC que se vea lo primordial de cada sección." A section that
+ * opts in renders its essential fields always and folds everything else
+ * behind this disclosure. Native details/summary — the same mechanism
+ * `CollapsibleSection` uses for the section itself — so the keyboard and
+ * toggle behaviour come free, and the fold survives every re-render because
+ * there is no per-group state to keep in sync.
+ *
+ * `invalid` forces the group open: a validation error the operator cannot
+ * see is indistinguishable from no error at all. One level down, the same
+ * rule the section fold itself applies.
+ */
+function AdvancedFields({
+  children,
+  invalid,
+}: {
+  children: React.ReactNode;
+  invalid?: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <details
+      data-advanced
+      className="group rounded-lg border border-border-subtle/40 bg-main/30"
+      open={invalid}
+    >
+      <summary className="flex cursor-pointer list-none items-center justify-between px-2.5 py-1.5 select-none">
+        <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim group-open:text-text-main">
+          {t("agents.form.advanced")}
+        </span>
+        <ChevronDown className="h-3.5 w-3.5 text-text-dim transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="space-y-2.5 px-2.5 pb-2.5 pt-1">{children}</div>
+    </details>
   );
 }
 
