@@ -64,6 +64,7 @@ import { ModelPicker } from "./ui/ModelPicker";
 import { StepLadderInput } from "./ui/StepLadderInput";
 import {
   ASYNC_TASK_TIMEOUT_LADDER,
+  BURST_RATIO_LADDER,
   CHANNEL_DEBOUNCE_BUFFER_LADDER,
   CHANNEL_DEBOUNCE_MAX_LADDER,
   CHANNEL_DEBOUNCE_MS_LADDER,
@@ -624,6 +625,80 @@ export function AgentManifestForm({
             />
           </Field>
         </div>
+        {/*
+          The profile router's per-agent settings — the same five values
+          `GET/PUT /api/agents/{id}/model_routing` reads and writes, which were
+          the last manifest fields only a separate panel could reach. They are
+          manifest fields, so they live with the rest of the manifest.
+        */}
+        <p className="text-[11px] text-text-dim">{t("agents.form.router_hint")}</p>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label={t("agents.form.router_mode")} hint={t("agents.form.router_mode_hint")}>
+            {/* A closed two-state enum with a `#[default]` variant, so unlike
+                the tri-state selects below there is no inherit option: the
+                state always names a mode, and `fixed` is simply not written. */}
+            <select
+              value={value.model.mode}
+              onChange={(e) =>
+                updateModel({ mode: e.target.value as ManifestFormState["model"]["mode"] })
+              }
+              className={inputClass}
+            >
+              <option value="fixed">{t("agents.form.router_mode_fixed")}</option>
+              <option value="flexible">{t("agents.form.router_mode_flexible")}</option>
+            </select>
+          </Field>
+          <Field
+            label={t("agents.form.router_cost_budget")}
+            hint={t("agents.form.router_cost_budget_hint")}
+          >
+            {/* Empty is the daemon's "no cap": the router may pick any tier. */}
+            <select
+              value={value.model.router_cost_budget}
+              onChange={(e) =>
+                updateModel({
+                  router_cost_budget: e.target.value as
+                    ManifestFormState["model"]["router_cost_budget"],
+                })
+              }
+              className={inputClass}
+            >
+              <option value="">{t("agents.form.router_cost_budget_none")}</option>
+              <option value="cheap">cheap</option>
+              <option value="medium">medium</option>
+              <option value="expensive">expensive</option>
+            </select>
+          </Field>
+        </div>
+        <Toggle
+          label={t("agents.form.router_fixed")}
+          checked={value.model.router_fixed}
+          onChange={(checked) => updateModel({ router_fixed: checked })}
+        />
+        <div className="grid grid-cols-2 gap-3">
+          <Field
+            label={t("agents.form.router_allowed_profiles")}
+            hint={t("agents.form.router_allowed_profiles_hint")}
+          >
+            <TagInput
+              value={value.model.router_allowed_profiles}
+              onChange={(next) => updateModel({ router_allowed_profiles: next })}
+              placeholder={t("agents.form.router_allowed_profiles_placeholder")}
+            />
+          </Field>
+          <Field
+            label={t("agents.form.router_default_profile")}
+            hint={t("agents.form.router_default_profile_hint")}
+          >
+            <input
+              type="text"
+              value={value.model.router_default_profile}
+              onChange={(e) => updateModel({ router_default_profile: e.target.value })}
+              placeholder={t("agents.form.router_default_profile_placeholder")}
+              className={inputClass}
+            />
+          </Field>
+        </div>
       </Section>
 
       <Section when={shows("prompt")} id="prompt" title={t("agents.form.system_prompt")}>
@@ -754,6 +829,27 @@ export function AgentManifestForm({
             />
           </Field>
         </div>
+        {/*
+          The same ladder shape as `min_similarity`: a fraction the runtime
+          clamps to 0.01..=1.0 at enforcement time, so the control carries what
+          the operator wrote rather than snapping it into range — an off-rung
+          value is reported by the custom box, not refused.
+        */}
+        <Field label={t("agents.form.burst_ratio")} hint={t("agents.form.burst_ratio_hint")}>
+          <StepLadderInput
+            label={t("agents.form.burst_ratio")}
+            value={value.resources.burst_ratio}
+            onChange={(next) => updateResources({ burst_ratio: next })}
+            ladder={BURST_RATIO_LADDER}
+            formatRung={formatPercent}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            customPlaceholder={t("agents.form.burst_ratio_placeholder")}
+            min={0}
+            max={1}
+            step={0.01}
+          />
+        </Field>
       </Section>
 
       <Section when={shows("capabilities")} id="capabilities" title={t("agents.form.capabilities")}>

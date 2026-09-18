@@ -719,6 +719,9 @@ const FORM_RESOURCE_KEYS = new Set([
   "max_memory_bytes",
   "max_cpu_time_ms",
   "max_network_bytes_per_hour",
+  // Has a widget too, so it is the form's to emit: leaving it out of this set
+  // would put it in the extras as well and emit it twice.
+  "burst_ratio",
 ]);
 const FALLBACK_MODEL_KEYS = new Set([
   "provider",
@@ -1310,6 +1313,11 @@ export const serializeManifestForm = (
   writeIntegerScalar(resourceBody, "max_memory_bytes", parseUnsignedTomlInteger(form.resources.max_memory_bytes));
   writeIntegerScalar(resourceBody, "max_cpu_time_ms", parseUnsignedTomlInteger(form.resources.max_cpu_time_ms));
   writeIntegerScalar(resourceBody, "max_network_bytes_per_hour", parseUnsignedTomlInteger(form.resources.max_network_bytes_per_hour));
+  // A fraction of the hourly budget one minute may spend. `parseFloatish`
+  // returns null for the absent key and for garbage, so neither is written;
+  // in-range values the form does not recognise as a rung pass through
+  // unclamped — the runtime does the clamping, at enforcement time.
+  writeNumberScalar(resourceBody, "burst_ratio", parseFloatish(form.resources.burst_ratio));
   const resourceExtras = renderExtraScalars(safeResourceExtras);
   if (resourceBody.length || resourceExtras.length) {
     lines.push("", "[resources]", ...resourceBody, ...resourceExtras);
@@ -2167,6 +2175,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.resources.max_memory_bytes = asNumberString(resourceTable.max_memory_bytes);
   form.resources.max_cpu_time_ms = asNumberString(resourceTable.max_cpu_time_ms);
   form.resources.max_network_bytes_per_hour = asNumberString(resourceTable.max_network_bytes_per_hour);
+  form.resources.burst_ratio = asNumberString(resourceTable.burst_ratio);
   extras.resources = stripKnown(resourceTable, FORM_RESOURCE_KEYS);
 
   // [capabilities]

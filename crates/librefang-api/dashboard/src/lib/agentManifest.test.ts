@@ -2627,3 +2627,166 @@ describe("channel_overrides", () => {
     expect(round).toContain("threading = true");
   });
 });
+
+// The five manifest fields the profile router edits — `[model] mode` plus
+// `router_override` — and `[resources] burst_ratio` round-trip through the
+// form like every other field. These are the fields
+// `GET/PUT /api/agents/{id}/model_routing` reads and writes, so a form that
+// drops one would let the routing panel and this editor disagree about the
+// same manifest.
+describe("model router fields round-trip through the form", () => {
+  const BASE = ['name = "x"', "", "[model]", 'provider = "openai"', 'model = "gpt-4o"'].join(
+    "\n",
+  );
+
+  it("mode = flexible round-trips", () => {
+    const parsed = parseManifestToml(`${BASE}\nmode = "flexible"\n`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.mode).toBe("flexible");
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain('mode = "flexible"');
+
+    const reparsed = parseManifestToml(toml);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.model.mode).toBe("flexible");
+  });
+
+  it("mode = fixed is the default that is not written", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+
+    const toml = serializeManifestForm(form);
+    // `fixed` is `ModelMode`'s `#[default]` variant; writing it would record a
+    // decision nobody made and pin the agent if that default ever changes.
+    expect(toml).not.toMatch(/^mode = /m);
+  });
+
+  it("router_override round-trips all four members", () => {
+    const parsed = parseManifestToml(
+      `${BASE}\nrouter_override = { fixed = true, allowed_profiles = ["coding", "research"], cost_budget = "cheap", default_profile = "research" }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.router_fixed).toBe(true);
+    expect(parsed.form.model.router_allowed_profiles).toEqual(["coding", "research"]);
+    expect(parsed.form.model.router_cost_budget).toBe("cheap");
+    expect(parsed.form.model.router_default_profile).toBe("research");
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain(
+      'router_override = { fixed = true, allowed_profiles = ["coding", "research"], cost_budget = "cheap", default_profile = "research" }',
+    );
+
+    const reparsed = parseManifestToml(toml);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.model.router_fixed).toBe(true);
+    expect(reparsed.form.model.router_allowed_profiles).toEqual(["coding", "research"]);
+    expect(reparsed.form.model.router_cost_budget).toBe("cheap");
+    expect(reparsed.form.model.router_default_profile).toBe("research");
+  });
+
+  it("a router_override with one member set writes only that member", () => {
+    const parsed = parseManifestToml(
+      `${BASE}\nrouter_override = { cost_budget = "expensive" }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain('router_override = { cost_budget = "expensive" }');
+    // The members with "no opinion" defaults must not re-appear: `fixed = false`
+    // is what the absent key already means, and an empty allowlist means "any
+    // profile is allowed" — writing them would turn silence into a decision.
+    expect(toml).not.toContain("fixed =");
+    expect(toml).not.toContain("allowed_profiles");
+    expect(toml).not.toContain("default_profile");
+  });
+
+  it("an unset router_override is not written at all", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+
+    const toml = serializeManifestForm(form);
+    // The Rust field is `Option<AgentRouterOverride>`; an empty table would
+    // configure nothing and still look configured.
+    expect(toml).not.toContain("router_override");
+  });
+
+  it("an empty allowed_profiles keeps meaning every profile", () => {
+    const parsed = parseManifestToml(
+      `${BASE}\nrouter_override = { allowed_profiles = [] }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.router_allowed_profiles).toEqual([]);
+
+    // The empty list carries no information the daemon does not already have,
+    // so the empty override collapses to nothing on save.
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).not.toContain("router_override");
+  });
+
+  it("unknown mode and cost_budget spellings fall back to the defaults", () => {
+    const parsed = parseManifestToml(
+      `${BASE}\nmode = "yolo"\nrouter_override = { cost_budget = "bargain" }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.mode).toBe("fixed");
+    expect(parsed.form.model.router_cost_budget).toBe("");
+  });
+});
+
+// `[resources] burst_ratio` is `Option<f32>` clamped to 0.01..=1.0 at
+// enforcement time, not at write time — so the form neither clamps a value
+// nor refuses one, it just carries what the operator wrote.
+describe("resources burst_ratio round-trips through the form", () => {
+  const BASE = ['name = "x"', "", "[resources]", "max_llm_tokens_per_hour = 100000"].join(
+    "\n",
+  );
+
+  it("round-trips a ladder rung", () => {
+    const parsed = parseManifestToml(`${BASE}\nburst_ratio = 0.5\n`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.resources.burst_ratio).toBe("0.5");
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain("burst_ratio = 0.5");
+
+    const reparsed = parseManifestToml(toml);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.resources.burst_ratio).toBe("0.5");
+  });
+
+  it("round-trips a custom fraction the ladder does not carry", () => {
+    // Below the smallest rung (0.05) but above the enforcement floor (0.01):
+    // the operator's number is written back byte-identical, not snapped to a
+    // preset they did not choose.
+    const parsed = parseManifestToml(`${BASE}\nburst_ratio = 0.03\n`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.resources.burst_ratio).toBe("0.03");
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain("burst_ratio = 0.03");
+  });
+
+  it("writes no key when unset", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+
+    const toml = serializeManifestForm(form);
+    // "" is the absent key, which means the compiled default of 0.2 applies.
+    expect(toml).not.toContain("burst_ratio");
+  });
+});
