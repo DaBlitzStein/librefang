@@ -1759,3 +1759,39 @@ describe("agentManifest capability routing", () => {
     expect(parsed.form.capabilities.image_understanding).toBe("openai/gpt-4o");
   });
 });
+
+// `assignee_wake` is an `Option<bool>` on the Rust side: absent means "inherit
+// the kernel's [task_board].assignee_wake", and the agent writes a value only
+// when an operator overrides it. That makes it a tri-state, and a tri-state
+// over a boolean is where this file has been wrong before — the same shape as
+// `fallback_models = []` (an explicit empty list is a statement, not an
+// absence) and `system_prompt` (a blank prompt is a statement too).
+describe("assignee_wake tri-state", () => {
+  it("omits the key when the agent has no opinion", () => {
+    const form = emptyManifestForm();
+    form.assignee_wake = "";
+
+    // Absent, not `false`: writing `false` would pin the agent against a later
+    // change to the deployment-wide default.
+    expect(serializeManifestForm(form)).not.toContain("assignee_wake");
+  });
+
+  it("emits an explicit false, which is a real override", () => {
+    const form = emptyManifestForm();
+    form.assignee_wake = "false";
+
+    expect(serializeManifestForm(form)).toContain("assignee_wake = false");
+  });
+
+  it("round-trips both explicit values", () => {
+    for (const value of ["true", "false"] as const) {
+      const form = emptyManifestForm();
+      form.assignee_wake = value;
+
+      const parsed = parseManifestToml(serializeManifestForm(form));
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.form.assignee_wake).toBe(value);
+    }
+  });
+});

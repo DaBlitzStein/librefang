@@ -21,6 +21,12 @@ export interface ManifestFormState {
   priority: "Low" | "Normal" | "High" | "Critical";
   session_mode: "persistent" | "new";
   web_search_augmentation: "off" | "auto" | "always";
+  // Tri-state: `""` inherits the kernel's `[task_board].assignee_wake`, and the
+  // two strings are an explicit override. A plain boolean cannot say "this
+  // agent has no opinion", and this key is precisely a per-agent override of a
+  // global default — writing `false` where the operator meant "inherit" would
+  // silently pin the agent against a later deployment-wide change.
+  assignee_wake: "" | "true" | "false";
   pinned_model: string;
   workspace: string;
 
@@ -215,6 +221,7 @@ export const emptyManifestForm = (): ManifestFormState => ({
   priority: "Normal",
   session_mode: "persistent",
   web_search_augmentation: "auto",
+  assignee_wake: "",
   pinned_model: "",
   workspace: "",
   schedule: { mode: "reactive" },
@@ -356,6 +363,7 @@ const FORM_TOP_LEVEL_KEYS = new Set([
   "priority",
   "session_mode",
   "web_search_augmentation",
+  "assignee_wake",
   "pinned_model",
   "workspace",
   "skills_disabled",
@@ -613,6 +621,9 @@ export const serializeManifestForm = (
   }
   if (form.web_search_augmentation !== "auto") {
     writeStringScalar(lines, "web_search_augmentation", form.web_search_augmentation);
+  }
+  if (form.assignee_wake !== "") {
+    writeBoolScalar(lines, "assignee_wake", form.assignee_wake === "true");
   }
   writeStringScalar(lines, "pinned_model", form.pinned_model.trim());
   writeStringScalar(lines, "workspace", form.workspace.trim());
@@ -1268,6 +1279,12 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     WEB_SEARCH_MODES,
     "auto",
   );
+  form.assignee_wake =
+    typeof parsed.assignee_wake === "boolean"
+      ? parsed.assignee_wake
+        ? "true"
+        : "false"
+      : "";
   form.pinned_model = asString(parsed.pinned_model);
   form.workspace = asString(parsed.workspace);
   form.skills_disabled = asBoolean(parsed.skills_disabled, false);
