@@ -572,7 +572,10 @@
       "auto_dream_min_hours": "Idle hours before dreaming",
       "auto_dream_min_sessions": "Sessions before dreaming",
       "async_tasks": "Async tasks",
-      "async_tasks_notify_on_timeout": "Notify on timeout"
+      "async_tasks_notify_on_timeout": "Notify on timeout",
+      "compaction_aggregate_developer_loops": "Aggregate developer loops",
+      "compaction_max_loop_steps_before_aggregate": "Loop steps before aggregating",
+      "compaction_strip_reasoning_after_turns": "Strip reasoning after turns"
     },
     "delete_confirm": "\"{{name}}\" 에이전트를 삭제하시겠습니까?",
     "prompts": "프롬프트",

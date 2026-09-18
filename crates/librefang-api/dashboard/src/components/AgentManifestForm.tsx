@@ -56,6 +56,14 @@ import {
   ASYNC_TASK_TIMEOUT_LADDER,
   AUTO_DREAM_MIN_HOURS_LADDER,
   AUTO_DREAM_MIN_SESSIONS_LADDER,
+  COMPACTION_CHUNK_CHARS_LADDER,
+  COMPACTION_KEEP_RECENT_LADDER,
+  COMPACTION_LOOP_STEPS_LADDER,
+  COMPACTION_MAX_RETRIES_LADDER,
+  COMPACTION_STRIP_REASONING_LADDER,
+  COMPACTION_SUMMARY_TOKENS_LADDER,
+  COMPACTION_THRESHOLD_LADDER,
+  COMPACTION_TOKEN_RATIO_LADDER,
   COST_PER_DAY_LADDER,
   COST_PER_HOUR_LADDER,
   COST_PER_MONTH_LADDER,
@@ -221,6 +229,7 @@ export const MANIFEST_SECTION_IDS = [
   "autonomous",
   "proactive_memory",
   "auto_dream",
+  "compaction",
   "async_tasks",
   "routing",
   "context_injection",
@@ -340,6 +349,11 @@ export function AgentManifestForm({
     onChange({ ...value, thinking: { ...value.thinking, ...patch } });
   const updateAutonomous = (patch: Partial<ManifestFormState["autonomous"]>): void =>
     onChange({ ...value, autonomous: { ...value.autonomous, ...patch } });
+  const updateCompaction = (
+    patch: Partial<ManifestFormState["compaction"]>,
+  ): void =>
+    onChange({ ...value, compaction: { ...value.compaction, ...patch } });
+
   const updateProactiveMemory = (
     patch: Partial<ManifestFormState["proactive_memory"]>,
   ): void =>
@@ -1375,6 +1389,123 @@ export function AgentManifestForm({
               min={0}
             />
           </Field>
+        </div>
+      </FormSection>
+
+      <FormSection id="compaction" title={t("config.sec_compaction")} defaultOpen={false}>
+        {/* Nine overrides of the kernel's compaction defaults, all `Option`, so
+            every one of them leads with inherit and an untouched table is not
+            written at all. */}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label={t("config.fld_threshold_messages")}>
+            <StepLadderInput
+              label={t("config.fld_threshold_messages")}
+              value={value.compaction.threshold_messages}
+              onChange={(next) => updateCompaction({ threshold_messages: next })}
+              ladder={COMPACTION_THRESHOLD_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </Field>
+          <Field label={t("config.fld_keep_recent")}>
+            <StepLadderInput
+              label={t("config.fld_keep_recent")}
+              value={value.compaction.keep_recent}
+              onChange={(next) => updateCompaction({ keep_recent: next })}
+              ladder={COMPACTION_KEEP_RECENT_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+            />
+          </Field>
+          <Field label={t("config.fld_max_summary_tokens")}>
+            <StepLadderInput
+              label={t("config.fld_max_summary_tokens")}
+              value={value.compaction.max_summary_tokens}
+              onChange={(next) => updateCompaction({ max_summary_tokens: next })}
+              ladder={COMPACTION_SUMMARY_TOKENS_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </Field>
+          <Field label={t("config.fld_token_threshold_ratio")}>
+            <StepLadderInput
+              label={t("config.fld_token_threshold_ratio")}
+              value={value.compaction.token_threshold_ratio}
+              onChange={(next) => updateCompaction({ token_threshold_ratio: next })}
+              ladder={COMPACTION_TOKEN_RATIO_LADDER}
+              formatRung={formatPercent}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+              max={1}
+              step={0.01}
+            />
+          </Field>
+          <Field label={t("config.fld_max_chunk_chars")}>
+            <StepLadderInput
+              label={t("config.fld_max_chunk_chars")}
+              value={value.compaction.max_chunk_chars}
+              onChange={(next) => updateCompaction({ max_chunk_chars: next })}
+              ladder={COMPACTION_CHUNK_CHARS_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </Field>
+          <Field label={t("config.fld_max_retries")}>
+            <StepLadderInput
+              label={t("config.fld_max_retries")}
+              value={value.compaction.max_retries}
+              onChange={(next) => updateCompaction({ max_retries: next })}
+              ladder={COMPACTION_MAX_RETRIES_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+            />
+          </Field>
+          <Field label={t("agents.form.compaction_max_loop_steps_before_aggregate")}>
+            <StepLadderInput
+              label={t("agents.form.compaction_max_loop_steps_before_aggregate")}
+              value={value.compaction.max_loop_steps_before_aggregate}
+              onChange={(next) => updateCompaction({ max_loop_steps_before_aggregate: next })}
+              ladder={COMPACTION_LOOP_STEPS_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </Field>
+          <Field label={t("agents.form.compaction_strip_reasoning_after_turns")}>
+            <StepLadderInput
+              label={t("agents.form.compaction_strip_reasoning_after_turns")}
+              value={value.compaction.strip_reasoning_after_turns}
+              onChange={(next) => updateCompaction({ strip_reasoning_after_turns: next })}
+              ladder={COMPACTION_STRIP_REASONING_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+            />
+          </Field>
+        </div>
+        {/* A tri-state select, not a toggle: the value is an `Option<bool>`, and
+            a toggle collapses "inherit" and "false" onto the same unchecked
+            state — so touching it would write an explicit `false` where the
+            operator had not decided anything. */}
+        <div className="mt-2">
+          <TriStateField
+            label={t("agents.form.compaction_aggregate_developer_loops")}
+            value={value.compaction.aggregate_developer_loops}
+            onChange={(next) => updateCompaction({ aggregate_developer_loops: next })}
+          />
         </div>
       </FormSection>
 
