@@ -2432,3 +2432,94 @@ describe("compaction overrides", () => {
     expect(round).toContain("threshold_messages = 40");
   });
 });
+
+// `[skill_workshop]` is not all-`Option` like the other tables: its fields are
+// plain `bool` / enum / `u32` with a `Default` on the struct, so "absent" and
+// "the default" are the same state. That means the form's defaults have to
+// match the Rust ones exactly, in the direction that writes nothing when they
+// agree.
+describe("skill_workshop overrides", () => {
+  const DEFAULTS = {
+    enabled: false,
+    // Not `false`. `impl Default for SkillWorkshopConfig` sets this to `true`:
+    // the workshop is off, but its capture pass is on, so that switching the
+    // master switch on gives a workshop that does something. A form that
+    // defaulted it to `false` would write `auto_capture = false` for every
+    // agent opened and saved, turning capture off for anyone who had never
+    // expressed an opinion.
+    auto_capture: true,
+    approval_policy: "pending" as const,
+    review_mode: "heuristic" as const,
+    max_pending: "",
+    max_pending_age_days: "",
+    evolution_mode: "free" as const,
+  };
+
+  it("starts at the Rust defaults", () => {
+    expect(emptyManifestForm().skill_workshop).toEqual(DEFAULTS);
+  });
+
+  it("writes no table while every field holds its default", () => {
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("[skill_workshop]");
+  });
+
+  it("writes auto_capture only when it is turned off, never when it is on", () => {
+    const on = emptyManifestForm();
+    on.skill_workshop.auto_capture = true;
+    expect(serializeManifestForm(on)).not.toContain("auto_capture");
+
+    const off = emptyManifestForm();
+    off.skill_workshop.auto_capture = false;
+    const toml = serializeManifestForm(off);
+    expect(toml).toContain("[skill_workshop]");
+    expect(toml).toContain("auto_capture = false");
+  });
+
+  it("writes enabled only when it is turned on", () => {
+    const on = emptyManifestForm();
+    on.skill_workshop.enabled = true;
+    expect(serializeManifestForm(on)).toContain("enabled = true");
+
+    const off = emptyManifestForm();
+    off.skill_workshop.enabled = false;
+    expect(serializeManifestForm(off)).not.toContain("enabled =");
+  });
+
+  it("writes an enum only when it leaves its default", () => {
+    const form = emptyManifestForm();
+    form.skill_workshop.approval_policy = "auto";
+    form.skill_workshop.review_mode = "none";
+    form.skill_workshop.evolution_mode = "controlled";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain('approval_policy = "auto"');
+    expect(toml).toContain('review_mode = "none"');
+    expect(toml).toContain('evolution_mode = "controlled"');
+  });
+
+  it("round-trips every field away from its default", () => {
+    const form = emptyManifestForm();
+    form.skill_workshop = {
+      enabled: true,
+      auto_capture: false,
+      approval_policy: "auto",
+      review_mode: "threshold_llm",
+      max_pending: "50",
+      max_pending_age_days: "14",
+      evolution_mode: "controlled",
+    };
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.skill_workshop).toEqual(form.skill_workshop);
+  });
+
+  it("reads an absent auto_capture as on, matching the Rust default", () => {
+    const parsed = parseManifestToml('[skill_workshop]\nenabled = true\n');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.skill_workshop.enabled).toBe(true);
+    expect(parsed.form.skill_workshop.auto_capture).toBe(true);
+  });
+});
