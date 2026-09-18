@@ -69,8 +69,6 @@ import { useWhoami } from "../lib/queries/authz";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import type { ManifestSectionId } from "../components/AgentManifestForm";
 import { sectionForInvalidField } from "../components/AgentManifestForm";
-import { AgentModelParamFields } from "../components/AgentModelParamFields";
-import { selectModelLimits } from "../lib/modelLimits";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
 import { AgentModelRoutingPanel } from "../components/AgentModelRoutingPanel";
 import { AgentSkillItem } from "../components/AgentSkillItem";
@@ -1784,13 +1782,6 @@ export function AgentsPage() {
   // Both facts are read off `buildModelConfigPatch`, the same strict builder Save itself calls: a null patch means the draft is invalid, an empty patch means nothing changed.
   // Sharing the builder also keeps trailing garbage ("4096abc") from enabling a button that then no-ops, because the parse that rejects it is the parse that would have built the request.
   const currentModel = detailAgent?.model;
-  // The declared capacities for the model being edited, so the drawer trims rungs the endpoint
-  // cannot honour and warns on an over-limit value — the same two things the create form does with
-  // the same helper, instead of the drawer silently offering both.
-  const drawerModelLimits = useMemo(
-    () => selectModelLimits(visibleModels, modelDraft.model, modelDraft.provider),
-    [visibleModels, modelDraft.model, modelDraft.provider],
-  );
   const modelPatchPreview = buildModelConfigPatch(modelDraft, currentModel).patch;
   const modelValid = modelPatchPreview !== null;
   const modelDirty = modelPatchPreview !== null && Object.keys(modelPatchPreview).length > 0;
@@ -3865,26 +3856,15 @@ export function AgentsPage() {
                           </datalist>
                         </DetailRow>
                         {/*
-                          The same step ladders the create form and the model
-                          settings use, rather than a second set of hand-rolled
-                          number boxes. One parameter, one control: a bare
-                          `<input type="number">` stated neither the usual value
-                          nor the ceiling, so setting a temperature meant knowing
-                          that 0.7 is typical and 2 is the limit, while the
-                          identical parameter elsewhere in the app was a labelled
-                          ladder.
-
-                          Every field is tri-state, and `""` is the third state:
-                          it means the agent has no opinion and the model's own
-                          setting applies. That is why an untouched row must stay
-                          empty (#5917).
+                          Provider and model only. The seven sampling and
+                          endpoint parameters used to render here too, but they
+                          are manifest fields with widgets in the manifest form
+                          the Routing tab hosts — a second surface for the same
+                          seven values was the redundancy the unified editor
+                          exists to remove. They stay in the draft so a save
+                          that changes nothing but the provider carries no
+                          numeric patch at all (#5917).
                         */}
-                        <AgentModelParamFields
-                          draft={modelDraft}
-                          onChange={(field, next) => setModelDraft(d => ({ ...d, [field]: next }))}
-                          isHand={detailAgent.is_hand === true}
-                          limits={drawerModelLimits}
-                        />
                         <div className="flex justify-end gap-2 pt-1">
                           <button
                             onClick={cancelModelEdit}
