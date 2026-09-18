@@ -558,7 +558,14 @@
       "show_progress_hint": "Stream the agent's steps to the session instead of only the final reply.",
       "cache_context": "Cache context",
       "cache_context_hint": "Reuse the cached prompt prefix across turns. Cheaper, but a changed system prompt can serve a stale prefix.",
-      "mcp_disabled": "Disable MCP servers"
+      "mcp_disabled": "Disable MCP servers",
+      "max_history_messages": "History messages",
+      "max_history_messages_hint": "How many recent messages the agent keeps in context. Compiles to 60 by default, and anything under 4 is raised to 4.",
+      "max_concurrent_invocations": "Concurrent invocations",
+      "max_concurrent_invocations_hint": "How many runs of this agent may overlap. A persistent session clamps this to 1, because two writers to one history are undefined.",
+      "tool_exec_backend": "Tool execution backend",
+      "profile": "Tool profile",
+      "reconcile_orphans": "Orphaned triggers"
     },
     "delete_confirm": "Ви впевнені, що хочете видалити агента \"{{name}}\"?",
     "prompts": "Промпти",

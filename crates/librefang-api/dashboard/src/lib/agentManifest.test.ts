@@ -1856,3 +1856,91 @@ describe("booleans whose default is true", () => {
     }
   });
 });
+
+// `Option<usize>` / `Option<u32>` / `Option<Enum>` fields: absent is a state,
+// and it is not zero and not the first variant. A count written as `0` is a
+// limit of nothing; an enum written as its Rust variant name is a value the
+// daemon cannot deserialise, and because these fields all carry
+// `#[serde(default)]` that failure is a silent revert rather than an error.
+describe("optional manifest overrides", () => {
+  it("omits the counts when they are not set", () => {
+    const toml = serializeManifestForm(emptyManifestForm());
+    expect(toml).not.toContain("max_history_messages");
+    expect(toml).not.toContain("max_concurrent_invocations");
+  });
+
+  it("emits a count as a bare number, not a string", () => {
+    const form = emptyManifestForm();
+    form.max_history_messages = "80";
+    form.max_concurrent_invocations = "3";
+
+    const toml = serializeManifestForm(form);
+    // TOML-typed: `max_history_messages = "80"` would be a string and the
+    // daemon would refuse the manifest.
+    expect(toml).toContain("max_history_messages = 80");
+    expect(toml).toContain("max_concurrent_invocations = 3");
+  });
+
+  it("round-trips the counts", () => {
+    const form = emptyManifestForm();
+    form.max_history_messages = "80";
+    form.max_concurrent_invocations = "3";
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.max_history_messages).toBe("80");
+    expect(parsed.form.max_concurrent_invocations).toBe("3");
+  });
+
+  it("omits every optional enum when unset, and round-trips every value", () => {
+    // Plain string keys, not `keyof ManifestFormState`: a keyof union includes
+    // symbol, which cannot be interpolated into the TOML assertions below.
+    const cases: Array<[string, readonly string[]]> = [
+      ["tool_exec_backend", ["local", "docker", "ssh", "daytona"]],
+      ["profile", ["minimal", "coding", "research", "messaging", "automation", "full", "custom"]],
+    ];
+
+    for (const [field, values] of cases) {
+      expect(serializeManifestForm(emptyManifestForm())).not.toContain(`${field} =`);
+
+      for (const value of values) {
+        const form = emptyManifestForm();
+        (form as unknown as Record<string, string>)[field] = value;
+
+        const toml = serializeManifestForm(form);
+        expect(toml).toContain(`${field} = "${value}"`);
+
+        const parsed = parseManifestToml(toml);
+        expect(parsed.ok).toBe(true);
+        if (!parsed.ok) return;
+        expect((parsed.form as unknown as Record<string, string>)[field]).toBe(value);
+      }
+    }
+  });
+
+  // `reconcile_orphans` is not an `Option`: it is an `OrphanPolicy` whose serde
+  // default is `Keep`. So the form has to agree on what "unset" means, and
+  // `keep` is the state that must not be written — an agent that has never
+  // been given a policy should not acquire one just by being opened and saved.
+  it("leaves reconcile_orphans out while it holds the default", () => {
+    const form = emptyManifestForm();
+    expect(form.reconcile_orphans).toBe("keep");
+    expect(serializeManifestForm(form)).not.toContain("reconcile_orphans");
+  });
+
+  it("writes reconcile_orphans for the two non-default policies", () => {
+    for (const value of ["warn", "delete"] as const) {
+      const form = emptyManifestForm();
+      form.reconcile_orphans = value;
+
+      const toml = serializeManifestForm(form);
+      expect(toml).toContain(`reconcile_orphans = "${value}"`);
+
+      const parsed = parseManifestToml(toml);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.form.reconcile_orphans).toBe(value);
+    }
+  });
+});

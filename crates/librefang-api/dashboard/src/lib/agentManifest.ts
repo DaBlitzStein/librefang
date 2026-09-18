@@ -32,6 +32,25 @@ export interface ManifestFormState {
   show_progress: boolean;
   cache_context: boolean;
   mcp_disabled: boolean;
+  // Tri-state counts: `""` inherits, a number is an override. Same shape as
+  // the sampling knobs — an absent key and a zero are different statements.
+  max_history_messages: string;
+  max_concurrent_invocations: string;
+  // Enum overrides. The values are serde's renamed forms, not the Rust variant
+  // names: `ToolProfile` and `OrphanPolicy` are `rename_all = "snake_case"` and
+  // `BackendKind` is `rename_all = "lowercase"`, so `"Full"` or `"Docker"`
+  // written here would be a manifest the daemon cannot deserialise.
+  tool_exec_backend: "" | "local" | "docker" | "ssh" | "daytona";
+  profile:
+    | ""
+    | "minimal"
+    | "coding"
+    | "research"
+    | "messaging"
+    | "automation"
+    | "full"
+    | "custom";
+  reconcile_orphans: "keep" | "warn" | "delete";
   pinned_model: string;
   workspace: string;
 
@@ -230,6 +249,11 @@ export const emptyManifestForm = (): ManifestFormState => ({
   show_progress: true,
   cache_context: false,
   mcp_disabled: false,
+  max_history_messages: "",
+  max_concurrent_invocations: "",
+  tool_exec_backend: "",
+  profile: "",
+  reconcile_orphans: "keep",
   pinned_model: "",
   workspace: "",
   schedule: { mode: "reactive" },
@@ -375,6 +399,11 @@ const FORM_TOP_LEVEL_KEYS = new Set([
   "show_progress",
   "cache_context",
   "mcp_disabled",
+  "max_history_messages",
+  "max_concurrent_invocations",
+  "tool_exec_backend",
+  "profile",
+  "reconcile_orphans",
   "pinned_model",
   "workspace",
   "skills_disabled",
@@ -474,6 +503,21 @@ const SESSION_MODES = ["persistent", "new"] as const;
 const WEB_SEARCH_MODES = ["off", "auto", "always"] as const;
 const INJECTION_POSITIONS = ["system", "before_user", "after_reset"] as const;
 const EXEC_SHORTHANDS = ["allow", "deny", "full", "allowlist"] as const;
+// These three mirror `rename_all` on the Rust enums, not the variant names:
+// `ToolProfile` and `OrphanPolicy` are `snake_case`, `BackendKind` is
+// `lowercase`. The form has to speak the serialised form because that is what
+// lands in the TOML — `"Full"` would deserialise to the default instead.
+export const TOOL_EXEC_BACKENDS = ["local", "docker", "ssh", "daytona"] as const;
+export const TOOL_PROFILES = [
+  "minimal",
+  "coding",
+  "research",
+  "messaging",
+  "automation",
+  "full",
+  "custom",
+] as const;
+export const ORPHAN_POLICIES = ["keep", "warn", "delete"] as const;
 
 const escapeTomlString = (value: string): string => {
   let escaped = "";
@@ -636,6 +680,21 @@ export const serializeManifestForm = (
   if (!form.show_progress) writeBoolScalar(lines, "show_progress", false);
   if (form.cache_context) writeBoolScalar(lines, "cache_context", true);
   if (form.mcp_disabled) writeBoolScalar(lines, "mcp_disabled", true);
+  // Counts are `Option<usize>` / `Option<u32>`: `""` omits the key rather than
+  // writing a zero, which would be a limit of nothing.
+  if (form.max_history_messages.trim() !== "") {
+    lines.push(`max_history_messages = ${form.max_history_messages.trim()}`);
+  }
+  if (form.max_concurrent_invocations.trim() !== "") {
+    lines.push(`max_concurrent_invocations = ${form.max_concurrent_invocations.trim()}`);
+  }
+  if (form.tool_exec_backend !== "") {
+    writeStringScalar(lines, "tool_exec_backend", form.tool_exec_backend);
+  }
+  if (form.profile !== "") writeStringScalar(lines, "profile", form.profile);
+  if (form.reconcile_orphans !== "keep") {
+    writeStringScalar(lines, "reconcile_orphans", form.reconcile_orphans);
+  }
   if (form.assignee_wake !== "") {
     writeBoolScalar(lines, "assignee_wake", form.assignee_wake === "true");
   }
@@ -1253,6 +1312,22 @@ const asEnum = <T extends readonly string[]>(
   return fallback;
 };
 
+/**
+ * Like `asEnum`, for a key whose Rust type is `Option<Enum>`.
+ *
+ * An absent key is a state of its own — inherit — and not one of the enum's
+ * variants, so `""` is a legitimate result that `asEnum`'s signature (its
+ * fallback must be one of `allowed`) cannot express. Widening `asEnum` instead
+ * would make every one of its callers handle a `""` their field cannot hold.
+ */
+const asOptionalEnum = <T extends readonly string[]>(
+  v: unknown,
+  allowed: T,
+): T[number] | "" =>
+  typeof v === "string" && (allowed as readonly string[]).includes(v)
+    ? (v as T[number])
+    : "";
+
 export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   let parsed: TomlTable;
   try {
@@ -1296,6 +1371,11 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.show_progress = asBoolean(parsed.show_progress, true);
   form.cache_context = asBoolean(parsed.cache_context, false);
   form.mcp_disabled = asBoolean(parsed.mcp_disabled, false);
+  form.max_history_messages = asNumberString(parsed.max_history_messages);
+  form.max_concurrent_invocations = asNumberString(parsed.max_concurrent_invocations);
+  form.tool_exec_backend = asOptionalEnum(parsed.tool_exec_backend, TOOL_EXEC_BACKENDS);
+  form.profile = asOptionalEnum(parsed.profile, TOOL_PROFILES);
+  form.reconcile_orphans = asEnum(parsed.reconcile_orphans, ORPHAN_POLICIES, "keep");
   form.assignee_wake =
     typeof parsed.assignee_wake === "boolean"
       ? parsed.assignee_wake

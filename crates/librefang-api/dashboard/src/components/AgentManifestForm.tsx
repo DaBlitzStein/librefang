@@ -61,8 +61,11 @@ import {
   HEARTBEAT_KEEP_RECENT_LADDER,
   HEARTBEAT_TIMEOUT_LADDER,
   LLM_TOKENS_PER_HOUR_LADDER,
+  MAX_CONCURRENT_INVOCATIONS_LADDER,
+  MAX_HISTORY_MESSAGES_LADDER,
   MAX_ITERATIONS_LADDER,
   MAX_RESTARTS_LADDER,
+  MIN_HISTORY_MESSAGES,
   MEMORY_BYTES_LADDER,
   NETWORK_BYTES_PER_HOUR_LADDER,
   ROUTING_THRESHOLD_LADDER,
@@ -817,6 +820,25 @@ export function AgentManifestForm({
             ))}
           </div>
         </div>
+        <div className="grid grid-cols-2 gap-3 mt-2">
+          <Field label={t("agents.form.tool_exec_backend")} hint={t("agents.form.inherit_default")}>
+            <select
+              value={value.tool_exec_backend}
+              onChange={(e) =>
+                update({
+                  tool_exec_backend: e.target.value as ManifestFormState["tool_exec_backend"],
+                })
+              }
+              className={inputClass}
+            >
+              <option value="">{t("agents.form.inherit_default")}</option>
+              <option value="local">local</option>
+              <option value="docker">docker</option>
+              <option value="ssh">ssh</option>
+              <option value="daytona">daytona</option>
+            </select>
+          </Field>
+        </div>
       </Section>
 
       <Section when={shows("skills")} id="skills" title={t("agents.form.skills")}>
@@ -1287,6 +1309,46 @@ export function AgentManifestForm({
             </div>
           </div>
         )}
+          <div className="grid grid-cols-2 gap-3 mt-2">
+            <Field label={t("agents.form.reconcile_orphans")} hint={t("agents.form.inherit_default")}>
+              <select
+                value={value.reconcile_orphans}
+                onChange={(e) =>
+                  update({
+                    reconcile_orphans: e.target.value as ManifestFormState["reconcile_orphans"],
+                  })
+                }
+                className={inputClass}
+              >
+                <option value="">{t("agents.form.inherit_default")}</option>
+                <option value="keep">keep</option>
+                <option value="warn">warn</option>
+                <option value="delete">delete</option>
+              </select>
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-3 mt-2">
+            <Field label={t("agents.form.profile")} hint={t("agents.form.inherit_default")}>
+              <select
+                value={value.profile}
+                onChange={(e) =>
+                  update({
+                    profile: e.target.value as ManifestFormState["profile"],
+                  })
+                }
+                className={inputClass}
+              >
+                <option value="">{t("agents.form.inherit_default")}</option>
+                <option value="minimal">minimal</option>
+                <option value="coding">coding</option>
+                <option value="research">research</option>
+                <option value="messaging">messaging</option>
+                <option value="automation">automation</option>
+                <option value="full">full</option>
+                <option value="custom">custom</option>
+              </select>
+            </Field>
+          </div>
       </FormSection>
 
       <FormSection id="context_injection" title={t("agents.form.context_injection")} defaultOpen={false}>
@@ -1609,6 +1671,38 @@ export function AgentManifestForm({
               {t("agents.form.cache_context_hint")}
             </p>
           </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-2">
+          <Field label={t("agents.form.max_history_messages")}>
+            <StepLadderInput
+              label={t("agents.form.max_history_messages")}
+              value={value.max_history_messages}
+              onChange={(next) => update({ max_history_messages: next })}
+              ladder={MAX_HISTORY_MESSAGES_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={MIN_HISTORY_MESSAGES}
+            />
+            <p className="text-[10px] text-text-dim/70 mt-1">
+              {t("agents.form.max_history_messages_hint")}
+            </p>
+          </Field>
+          <Field label={t("agents.form.max_concurrent_invocations")}>
+            <StepLadderInput
+              label={t("agents.form.max_concurrent_invocations")}
+              value={value.max_concurrent_invocations}
+              onChange={(next) => update({ max_concurrent_invocations: next })}
+              ladder={MAX_CONCURRENT_INVOCATIONS_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+            <p className="text-[10px] text-text-dim/70 mt-1">
+              {t("agents.form.max_concurrent_invocations_hint")}
+            </p>
+          </Field>
         </div>
       </FormSection>
 
