@@ -47,9 +47,10 @@ export interface FieldProps {
    * The accessible name for a field with no visible label.
    *
    * Rendered as a labelled `role="group"` around the control, which is what a
-   * composite widget (the skills and MCP finders) needs: its own trigger is
-   * named generically, so without this the operator hears "Select options" and
-   * not which field they are in.
+   * composite widget (the skills and MCP finders) needs: their input carries no
+   * accessible name of its own — a placeholder is a hint, not a name, and the
+   * finder's only `aria-label` sits on the listbox it opens — so the group is
+   * what tells the operator which field they are in.
    */
   ariaLabel?: string;
   children: ReactNode;
