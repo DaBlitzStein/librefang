@@ -205,8 +205,14 @@ test("config carries all eight groups and one save", async ({ page }) => {
   // Two main tabs + eight groups.
   await expect(page.getByRole("tab")).toHaveCount(10);
   await expect(page.getByRole("checkbox", { name: "Advanced mode" })).not.toBeChecked();
-
-  await page.screenshot({ path: join(SHOTS, "03-config-general.png"), fullPage: true });
+  // Settle the main-tab underline transition before any shot, for the reason
+  // the group loop gives.
+  await expect(page.getByRole("tab", { name: "config" })).toHaveCSS(
+    "border-bottom-color",
+    "rgb(56, 189, 248)",
+  );
+  // No screenshot here: the group loop captures General as `group-01`, and
+  // two files of the same frame make a reviewer compare a picture with itself.
 });
 
 test("advanced mode opens every folded group; the switch is off by default", async ({ page }) => {
@@ -221,7 +227,7 @@ test("advanced mode opens every folded group; the switch is off by default", asy
   const after = await page.locator("details[data-advanced][open]").count();
   expect(after).toBeGreaterThan(before);
 
-  await page.screenshot({ path: join(SHOTS, "04-config-advanced.png"), fullPage: true });
+  await page.screenshot({ path: join(SHOTS, "03-config-advanced.png"), fullPage: true });
 
   await page.getByRole("checkbox", { name: "Advanced mode" }).uncheck();
   expect(await page.locator("details[data-advanced][open]").count()).toBeLessThan(after);
@@ -252,6 +258,14 @@ test("every group renders and is captured", async ({ page }) => {
     // it is the one thing a screenshot cannot be trusted to report about
     // itself.
     await expect(tab).toHaveAttribute("aria-selected", "true");
+    // …and it has to be *painted* before the screenshot. The pills carry
+    // `transition-colors`, so shooting straight after the click catches the
+    // background mid-fade: the classes are already right while the pixels are
+    // still the unselected colour, and four of these eight frames were
+    // captured that way. Asserting the computed colour is both the wait and a
+    // stronger assertion than `aria-selected` — it pins what the operator
+    // actually sees.
+    await expect(tab).toHaveCSS("background-color", "rgb(56, 189, 248)");
     // A group with nothing in it is the defect the guard exists to catch; the
     // screenshot is only trustworthy if something is on screen.
     await expect(page.locator("[data-section]").first()).toBeVisible();

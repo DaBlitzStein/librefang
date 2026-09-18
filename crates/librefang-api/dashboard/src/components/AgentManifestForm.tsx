@@ -806,138 +806,124 @@ export function AgentManifestForm({
             budget and the daily cost ceiling. The rest of the resource table
             folds behind Advanced. */}
         <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.form.tokens_per_hour")}>
-            <StepLadderInput
-              label={t("agents.form.tokens_per_hour")}
-              value={value.resources.max_llm_tokens_per_hour}
-              onChange={(next) => updateResources({ max_llm_tokens_per_hour: next })}
-              ladder={LLM_TOKENS_PER_HOUR_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              customPlaceholder={t("agents.form.inherit_default")}
-              min={0}
-            />
-          </Field>
-          <Field label={t("agents.form.cost_per_day")}>
-            <StepLadderInput
-              label={t("agents.form.cost_per_day")}
-              value={value.resources.max_cost_per_day_usd}
-              onChange={(next) => updateResources({ max_cost_per_day_usd: next })}
-              ladder={COST_PER_DAY_LADDER}
-              formatRung={formatUsd}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              customPlaceholder={t("agents.form.unlimited_placeholder")}
-              min={0}
-              // Dollars, so the custom box must accept cents: an unset step
-              // defaults to 1 and the browser marks a value like 0.50 invalid.
-              step={0.01}
-            />
-          </Field>
+          <StepLadderInput
+            label={t("agents.form.tokens_per_hour")}
+            value={value.resources.max_llm_tokens_per_hour}
+            onChange={(next) => updateResources({ max_llm_tokens_per_hour: next })}
+            ladder={LLM_TOKENS_PER_HOUR_LADDER}
+            formatRung={formatCount}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            customPlaceholder={t("agents.form.inherit_default")}
+            min={0}
+          />
+          <StepLadderInput
+            label={t("agents.form.cost_per_day")}
+            value={value.resources.max_cost_per_day_usd}
+            onChange={(next) => updateResources({ max_cost_per_day_usd: next })}
+            ladder={COST_PER_DAY_LADDER}
+            formatRung={formatUsd}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            customPlaceholder={t("agents.form.unlimited_placeholder")}
+            min={0}
+            // Dollars, so the custom box must accept cents: an unset step
+            // defaults to 1 and the browser marks a value like 0.50 invalid.
+            step={0.01}
+          />
         </div>
         <AdvancedFields>
           <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.form.tool_calls_per_minute")}>
-            <StepLadderInput
-              label={t("agents.form.tool_calls_per_minute")}
-              value={value.resources.max_tool_calls_per_minute}
-              onChange={(next) => updateResources({ max_tool_calls_per_minute: next })}
-              ladder={TOOL_CALLS_PER_MINUTE_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              customPlaceholder={t("agents.form.tool_calls_per_minute_placeholder")}
-              min={0}
-            />
-          </Field>
-          <Field label={t("agents.form.cost_per_hour")}>
-            <StepLadderInput
-              label={t("agents.form.cost_per_hour")}
-              value={value.resources.max_cost_per_hour_usd}
-              onChange={(next) => updateResources({ max_cost_per_hour_usd: next })}
-              ladder={COST_PER_HOUR_LADDER}
-              formatRung={formatUsd}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              customPlaceholder={t("agents.form.unlimited_placeholder")}
-              min={0}
-              // Dollars, so the custom box must accept cents: an unset step
-              // defaults to 1 and the browser marks a value like 0.50 invalid.
-              step={0.01}
-            />
-          </Field>
-          <Field label={t("agents.form.cost_per_month")}>
-            <StepLadderInput
-              label={t("agents.form.cost_per_month")}
-              value={value.resources.max_cost_per_month_usd}
-              onChange={(next) => updateResources({ max_cost_per_month_usd: next })}
-              ladder={COST_PER_MONTH_LADDER}
-              formatRung={formatUsd}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              customPlaceholder={t("agents.form.unlimited_placeholder")}
-              min={0}
-              // Dollars, so the custom box must accept cents: an unset step
-              // defaults to 1 and the browser marks a value like 0.50 invalid.
-              step={0.01}
-            />
-          </Field>
-          <Field label={t("agents.form.network_bytes_per_hour")}>
-            <StepLadderInput
-              label={t("agents.form.network_bytes_per_hour")}
-              value={value.resources.max_network_bytes_per_hour}
-              onChange={(next) => updateResources({ max_network_bytes_per_hour: next })}
-              ladder={NETWORK_BYTES_PER_HOUR_LADDER}
-              formatRung={formatBytes}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              customPlaceholder={t("agents.form.network_bytes_placeholder")}
-              min={0}
-            />
-          </Field>
-          <Field label={t("agents.form.memory_bytes")}>
-            <StepLadderInput
-              label={t("agents.form.memory_bytes")}
-              value={value.resources.max_memory_bytes}
-              onChange={(next) => updateResources({ max_memory_bytes: next })}
-              ladder={MEMORY_BYTES_LADDER}
-              formatRung={formatBytes}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              customPlaceholder={t("agents.form.memory_bytes_placeholder")}
-              min={0}
-            />
-          </Field>
-          <Field label={t("agents.form.cpu_time_ms")}>
-            <StepLadderInput
-              label={t("agents.form.cpu_time_ms")}
-              value={value.resources.max_cpu_time_ms}
-              onChange={(next) => updateResources({ max_cpu_time_ms: next })}
-              ladder={CPU_TIME_MS_LADDER}
-              formatRung={formatMillis}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              customPlaceholder={t("agents.form.cpu_time_placeholder")}
-              min={0}
-            />
-          </Field>
-          </div>
-        <Field label={t("agents.form.burst_ratio")} hint={t("agents.form.burst_ratio_hint")}>
           <StepLadderInput
-            label={t("agents.form.burst_ratio")}
-            value={value.resources.burst_ratio}
-            onChange={(next) => updateResources({ burst_ratio: next })}
-            ladder={BURST_RATIO_LADDER}
-            formatRung={formatPercent}
+            label={t("agents.form.tool_calls_per_minute")}
+            value={value.resources.max_tool_calls_per_minute}
+            onChange={(next) => updateResources({ max_tool_calls_per_minute: next })}
+            ladder={TOOL_CALLS_PER_MINUTE_LADDER}
+            formatRung={formatCount}
             inheritLabel={t("model_param.inherit")}
             customLabel={t("model_param.custom")}
-            customPlaceholder={t("agents.form.burst_ratio_placeholder")}
+            customPlaceholder={t("agents.form.tool_calls_per_minute_placeholder")}
             min={0}
-            max={1}
+          />
+          <StepLadderInput
+            label={t("agents.form.cost_per_hour")}
+            value={value.resources.max_cost_per_hour_usd}
+            onChange={(next) => updateResources({ max_cost_per_hour_usd: next })}
+            ladder={COST_PER_HOUR_LADDER}
+            formatRung={formatUsd}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            customPlaceholder={t("agents.form.unlimited_placeholder")}
+            min={0}
+            // Dollars, so the custom box must accept cents: an unset step
+            // defaults to 1 and the browser marks a value like 0.50 invalid.
             step={0.01}
           />
-        </Field>        </AdvancedFields>
+          <StepLadderInput
+            label={t("agents.form.cost_per_month")}
+            value={value.resources.max_cost_per_month_usd}
+            onChange={(next) => updateResources({ max_cost_per_month_usd: next })}
+            ladder={COST_PER_MONTH_LADDER}
+            formatRung={formatUsd}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            customPlaceholder={t("agents.form.unlimited_placeholder")}
+            min={0}
+            // Dollars, so the custom box must accept cents: an unset step
+            // defaults to 1 and the browser marks a value like 0.50 invalid.
+            step={0.01}
+          />
+          <StepLadderInput
+            label={t("agents.form.network_bytes_per_hour")}
+            value={value.resources.max_network_bytes_per_hour}
+            onChange={(next) => updateResources({ max_network_bytes_per_hour: next })}
+            ladder={NETWORK_BYTES_PER_HOUR_LADDER}
+            formatRung={formatBytes}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            customPlaceholder={t("agents.form.network_bytes_placeholder")}
+            min={0}
+          />
+          <StepLadderInput
+            label={t("agents.form.memory_bytes")}
+            value={value.resources.max_memory_bytes}
+            onChange={(next) => updateResources({ max_memory_bytes: next })}
+            ladder={MEMORY_BYTES_LADDER}
+            formatRung={formatBytes}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            customPlaceholder={t("agents.form.memory_bytes_placeholder")}
+            min={0}
+          />
+          <StepLadderInput
+            label={t("agents.form.cpu_time_ms")}
+            value={value.resources.max_cpu_time_ms}
+            onChange={(next) => updateResources({ max_cpu_time_ms: next })}
+            ladder={CPU_TIME_MS_LADDER}
+            formatRung={formatMillis}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            customPlaceholder={t("agents.form.cpu_time_placeholder")}
+            min={0}
+          />
+          </div>
+        <StepLadderInput
+          label={t("agents.form.burst_ratio")}
+          value={value.resources.burst_ratio}
+          onChange={(next) => updateResources({ burst_ratio: next })}
+          ladder={BURST_RATIO_LADDER}
+          formatRung={formatPercent}
+          inheritLabel={t("model_param.inherit")}
+          customLabel={t("model_param.custom")}
+          customPlaceholder={t("agents.form.burst_ratio_placeholder")}
+          min={0}
+          max={1}
+          step={0.01}
+        />
+          <p className="text-[10px] text-text-dim/70 mt-1">
+            {t("agents.form.burst_ratio_hint")}
+          </p>
+        </AdvancedFields>
       </Section>
 
       <Section when={shows("capabilities")} id="capabilities" title={t("agents.form.capabilities")}>
@@ -1355,19 +1341,17 @@ export function AgentManifestForm({
         />
         {value.thinking.enabled && (
           <div className="grid grid-cols-2 gap-3 mt-2">
-            <Field label={t("agents.form.budget_tokens")}>
-              <StepLadderInput
-                label={t("agents.form.budget_tokens")}
-                value={value.thinking.budget_tokens}
-                onChange={(next) => updateThinking({ budget_tokens: next })}
-                ladder={THINKING_BUDGET_LADDER}
-                formatRung={formatCount}
-                inheritLabel={t("model_param.inherit")}
-                customLabel={t("model_param.custom")}
-                customPlaceholder={t("agents.form.budget_tokens_placeholder")}
-                min={0}
-              />
-            </Field>
+            <StepLadderInput
+              label={t("agents.form.budget_tokens")}
+              value={value.thinking.budget_tokens}
+              onChange={(next) => updateThinking({ budget_tokens: next })}
+              ladder={THINKING_BUDGET_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.budget_tokens_placeholder")}
+              min={0}
+            />
 
             <Field label={t("agents.form.stream_thinking")}>
               <Toggle
@@ -1392,85 +1376,75 @@ export function AgentManifestForm({
             {/* BASIC: how long an autonomous run may go on. The restart cap,
                 the heartbeats and quiet hours are depth. */}
             <div className="grid grid-cols-2 gap-3 mt-2">
-              <Field label={t("agents.form.max_iterations")}>
-                <StepLadderInput
-                  label={t("agents.form.max_iterations")}
-                  value={value.autonomous.max_iterations}
-                  onChange={(next) => updateAutonomous({ max_iterations: next })}
-                  ladder={MAX_ITERATIONS_LADDER}
-                  formatRung={formatCount}
-                  inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")}
-                  customPlaceholder={t("agents.form.max_iterations_placeholder")}
-                  min={1}
-                />
-              </Field>
+              <StepLadderInput
+                label={t("agents.form.max_iterations")}
+                value={value.autonomous.max_iterations}
+                onChange={(next) => updateAutonomous({ max_iterations: next })}
+                ladder={MAX_ITERATIONS_LADDER}
+                formatRung={formatCount}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                customPlaceholder={t("agents.form.max_iterations_placeholder")}
+                min={1}
+              />
             </div>
             <AdvancedFields
           invalid={invalidFields.has("autonomous.heartbeat_timeout_secs")}
         >
               <div className="grid grid-cols-2 gap-3 mt-2">
-            <Field label={t("agents.form.max_restarts")}>
-              <StepLadderInput
-                label={t("agents.form.max_restarts")}
-                value={value.autonomous.max_restarts}
-                onChange={(next) => updateAutonomous({ max_restarts: next })}
-                ladder={MAX_RESTARTS_LADDER}
-                formatRung={formatCount}
-                inheritLabel={t("model_param.inherit")}
-                customLabel={t("model_param.custom")}
-                customPlaceholder={t("agents.form.max_restarts_placeholder")}
-                min={0}
-              />
-            </Field>
+            <StepLadderInput
+              label={t("agents.form.max_restarts")}
+              value={value.autonomous.max_restarts}
+              onChange={(next) => updateAutonomous({ max_restarts: next })}
+              ladder={MAX_RESTARTS_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.max_restarts_placeholder")}
+              min={0}
+            />
 
-            <Field label={t("agents.form.heartbeat_interval_secs")}>
-              <StepLadderInput
-                label={t("agents.form.heartbeat_interval_secs")}
-                value={value.autonomous.heartbeat_interval_secs}
-                onChange={(next) => updateAutonomous({ heartbeat_interval_secs: next })}
-                ladder={HEARTBEAT_INTERVAL_LADDER}
-                formatRung={formatSeconds}
-                inheritLabel={t("model_param.inherit")}
-                customLabel={t("model_param.custom")}
-                customPlaceholder={t("agents.form.heartbeat_interval_placeholder")}
-                min={1}
-              />
-            </Field>
+            <StepLadderInput
+              label={t("agents.form.heartbeat_interval_secs")}
+              value={value.autonomous.heartbeat_interval_secs}
+              onChange={(next) => updateAutonomous({ heartbeat_interval_secs: next })}
+              ladder={HEARTBEAT_INTERVAL_LADDER}
+              formatRung={formatSeconds}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.heartbeat_interval_placeholder")}
+              min={1}
+            />
 
-            <Field label={t("agents.form.heartbeat_timeout_secs")}>
-              <StepLadderInput
-                label={t("agents.form.heartbeat_timeout_secs")}
-                value={value.autonomous.heartbeat_timeout_secs}
-                onChange={(next) => updateAutonomous({ heartbeat_timeout_secs: next })}
-                ladder={HEARTBEAT_TIMEOUT_LADDER}
-                formatRung={formatSeconds}
-                inheritLabel={t("model_param.inherit")}
-                customLabel={t("model_param.custom")}
-                customPlaceholder={t("agents.form.auto_placeholder")}
-                min={1}
-              
-              invalid={invalidFields.has("autonomous.heartbeat_timeout_secs")}
-              error={
-                invalidFields.has("autonomous.heartbeat_timeout_secs")
-                  ? t("agents.form.u32_overflow")
-                  : undefined
-              }/>
-            </Field>
+            <StepLadderInput
+              label={t("agents.form.heartbeat_timeout_secs")}
+              value={value.autonomous.heartbeat_timeout_secs}
+              onChange={(next) => updateAutonomous({ heartbeat_timeout_secs: next })}
+              ladder={HEARTBEAT_TIMEOUT_LADDER}
+              formatRung={formatSeconds}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.auto_placeholder")}
+              min={1}
+            
+            invalid={invalidFields.has("autonomous.heartbeat_timeout_secs")}
+            error={
+              invalidFields.has("autonomous.heartbeat_timeout_secs")
+                ? t("agents.form.u32_overflow")
+                : undefined
+            }/>
 
-            <Field label={t("agents.form.heartbeat_keep_recent")}>
-              <StepLadderInput
-                label={t("agents.form.heartbeat_keep_recent")}
-                value={value.autonomous.heartbeat_keep_recent}
-                onChange={(next) => updateAutonomous({ heartbeat_keep_recent: next })}
-                ladder={HEARTBEAT_KEEP_RECENT_LADDER}
-                formatRung={formatCount}
-                inheritLabel={t("model_param.inherit")}
-                customLabel={t("model_param.custom")}
-                customPlaceholder={t("agents.form.auto_placeholder")}
-                min={0}
-              />
-            </Field>
+            <StepLadderInput
+              label={t("agents.form.heartbeat_keep_recent")}
+              value={value.autonomous.heartbeat_keep_recent}
+              onChange={(next) => updateAutonomous({ heartbeat_keep_recent: next })}
+              ladder={HEARTBEAT_KEEP_RECENT_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.auto_placeholder")}
+              min={0}
+            />
 
             <Field
               label={t("agents.form.heartbeat_channel")}
@@ -1554,21 +1528,19 @@ export function AgentManifestForm({
             />
           </Field>
           </div>
-        <Field label={t("agents.form.proactive_memory_min_similarity")}>
 
-          <StepLadderInput
-            label={t("agents.form.proactive_memory_min_similarity")}
-            value={value.proactive_memory.min_similarity}
-            onChange={(next) => updateProactiveMemory({ min_similarity: next })}
-            ladder={MIN_SIMILARITY_LADDER}
-            formatRung={formatPercent}
-            inheritLabel={t("model_param.inherit")}
-            customLabel={t("model_param.custom")}
-            min={0}
-            max={1}
-            step={0.01}
-          />
-        </Field>
+        <StepLadderInput
+          label={t("agents.form.proactive_memory_min_similarity")}
+          value={value.proactive_memory.min_similarity}
+          onChange={(next) => updateProactiveMemory({ min_similarity: next })}
+          ladder={MIN_SIMILARITY_LADDER}
+          formatRung={formatPercent}
+          inheritLabel={t("model_param.inherit")}
+          customLabel={t("model_param.custom")}
+          min={0}
+          max={1}
+          step={0.01}
+        />
         </AdvancedFields>
       </FormSection>
 
@@ -1581,36 +1553,32 @@ export function AgentManifestForm({
             never been given a threshold should not acquire one by being
             opened and saved. */}
         <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.form.auto_dream_min_hours")}>
-            <StepLadderInput
-              label={t("agents.form.auto_dream_min_hours")}
-              value={value.auto_dream_min_hours}
-              onChange={(next) => update({ auto_dream_min_hours: next })}
-              ladder={AUTO_DREAM_MIN_HOURS_LADDER}
-              formatRung={formatHours}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={0}
-            />
-          </Field>
-          <Field label={t("agents.form.auto_dream_min_sessions")}>
-            <StepLadderInput
-              label={t("agents.form.auto_dream_min_sessions")}
-              value={value.auto_dream_min_sessions}
-              onChange={(next) => update({ auto_dream_min_sessions: next })}
-              ladder={AUTO_DREAM_MIN_SESSIONS_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={0}
-            
-              invalid={invalidFields.has("auto_dream_min_sessions")}
-              error={
-                invalidFields.has("auto_dream_min_sessions")
-                  ? t("agents.form.u32_overflow")
-                  : undefined
-              }/>
-          </Field>
+          <StepLadderInput
+            label={t("agents.form.auto_dream_min_hours")}
+            value={value.auto_dream_min_hours}
+            onChange={(next) => update({ auto_dream_min_hours: next })}
+            ladder={AUTO_DREAM_MIN_HOURS_LADDER}
+            formatRung={formatHours}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={0}
+          />
+          <StepLadderInput
+            label={t("agents.form.auto_dream_min_sessions")}
+            value={value.auto_dream_min_sessions}
+            onChange={(next) => update({ auto_dream_min_sessions: next })}
+            ladder={AUTO_DREAM_MIN_SESSIONS_LADDER}
+            formatRung={formatCount}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={0}
+          
+            invalid={invalidFields.has("auto_dream_min_sessions")}
+            error={
+              invalidFields.has("auto_dream_min_sessions")
+                ? t("agents.form.u32_overflow")
+                : undefined
+            }/>
         </div>
       </FormSection>
 
@@ -1666,18 +1634,16 @@ export function AgentManifestForm({
         <AdvancedFields>
         <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim mt-3">{t("agents.form.channel_overrides_group_limits")}</p>
         <div className="grid grid-cols-2 gap-3">
-              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_rate_limit_per_minute")}>
-                  <StepLadderInput label={t("agents.form.channel_overrides_rate_limit_per_minute")} value={value.channel_overrides.rate_limit_per_minute}
-                    onChange={(next) => updateChannelOverrides({ rate_limit_per_minute: next })} ladder={CHANNEL_RATE_LIMIT_LADDER}
-                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                    customLabel={t("model_param.custom")} min={0} />
-                </Field></div>
-              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_rate_limit_per_user")}>
-                  <StepLadderInput label={t("agents.form.channel_overrides_rate_limit_per_user")} value={value.channel_overrides.rate_limit_per_user}
-                    onChange={(next) => updateChannelOverrides({ rate_limit_per_user: next })} ladder={CHANNEL_RATE_LIMIT_LADDER}
-                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                    customLabel={t("model_param.custom")} min={0} />
-                </Field></div>
+                <StepLadderInput label={t("agents.form.channel_overrides_rate_limit_per_minute")} value={value.channel_overrides.rate_limit_per_minute}
+                  onChange={(next) => updateChannelOverrides({ rate_limit_per_minute: next })} ladder={CHANNEL_RATE_LIMIT_LADDER}
+                  formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")} min={0} />
+              <div className="col-span-2"></div>
+                <StepLadderInput label={t("agents.form.channel_overrides_rate_limit_per_user")} value={value.channel_overrides.rate_limit_per_user}
+                  onChange={(next) => updateChannelOverrides({ rate_limit_per_user: next })} ladder={CHANNEL_RATE_LIMIT_LADDER}
+                  formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")} min={0} />
+              <div className="col-span-2"></div>
               <div><Toggle label={t("agents.form.channel_overrides_threading")} checked={value.channel_overrides.threading}
                   onChange={(checked) => updateChannelOverrides({ threading: checked })} /></div>
               <div className="col-span-2"><Field label={t("agents.form.channel_overrides_output_format")}>
@@ -1707,24 +1673,21 @@ export function AgentManifestForm({
         </div>
         <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim mt-3">{t("agents.form.channel_overrides_group_debounce")}</p>
         <div className="grid grid-cols-2 gap-3">
-              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_message_debounce_ms")}>
-                  <StepLadderInput label={t("agents.form.channel_overrides_message_debounce_ms")} value={value.channel_overrides.message_debounce_ms}
-                    onChange={(next) => updateChannelOverrides({ message_debounce_ms: next })} ladder={CHANNEL_DEBOUNCE_MS_LADDER}
-                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                    customLabel={t("model_param.custom")} min={0} />
-                </Field></div>
-              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_message_debounce_max_ms")}>
-                  <StepLadderInput label={t("agents.form.channel_overrides_message_debounce_max_ms")} value={value.channel_overrides.message_debounce_max_ms}
-                    onChange={(next) => updateChannelOverrides({ message_debounce_max_ms: next })} ladder={CHANNEL_DEBOUNCE_MAX_LADDER}
-                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                    customLabel={t("model_param.custom")} min={0} />
-                </Field></div>
-              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_message_debounce_max_buffer")}>
-                  <StepLadderInput label={t("agents.form.channel_overrides_message_debounce_max_buffer")} value={value.channel_overrides.message_debounce_max_buffer}
-                    onChange={(next) => updateChannelOverrides({ message_debounce_max_buffer: next })} ladder={CHANNEL_DEBOUNCE_BUFFER_LADDER}
-                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                    customLabel={t("model_param.custom")} min={0} />
-                </Field></div>
+                <StepLadderInput label={t("agents.form.channel_overrides_message_debounce_ms")} value={value.channel_overrides.message_debounce_ms}
+                  onChange={(next) => updateChannelOverrides({ message_debounce_ms: next })} ladder={CHANNEL_DEBOUNCE_MS_LADDER}
+                  formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")} min={0} />
+              <div className="col-span-2"></div>
+                <StepLadderInput label={t("agents.form.channel_overrides_message_debounce_max_ms")} value={value.channel_overrides.message_debounce_max_ms}
+                  onChange={(next) => updateChannelOverrides({ message_debounce_max_ms: next })} ladder={CHANNEL_DEBOUNCE_MAX_LADDER}
+                  formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")} min={0} />
+              <div className="col-span-2"></div>
+                <StepLadderInput label={t("agents.form.channel_overrides_message_debounce_max_buffer")} value={value.channel_overrides.message_debounce_max_buffer}
+                  onChange={(next) => updateChannelOverrides({ message_debounce_max_buffer: next })} ladder={CHANNEL_DEBOUNCE_BUFFER_LADDER}
+                  formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")} min={0} />
+              <div className="col-span-2"></div>
               <div><Toggle label={t("agents.form.channel_overrides_clear_done_reaction")} checked={value.channel_overrides.clear_done_reaction}
                   onChange={(checked) => updateChannelOverrides({ clear_done_reaction: checked })} /></div>
               <div><Toggle label={t("agents.form.channel_overrides_disable_commands")} checked={value.channel_overrides.disable_commands}
@@ -1749,30 +1712,26 @@ export function AgentManifestForm({
                     {(AUTO_ROUTE_STRATEGIES as readonly string[]).map((v) => (<option key={v} value={v}>{v}</option>))}
                   </select>
                 </Field></div>
-              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_auto_route_ttl_minutes")}>
-                  <StepLadderInput label={t("agents.form.channel_overrides_auto_route_ttl_minutes")} value={value.channel_overrides.auto_route_ttl_minutes}
-                    onChange={(next) => updateChannelOverrides({ auto_route_ttl_minutes: next })} ladder={CHANNEL_ROUTE_TTL_LADDER}
-                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                    customLabel={t("model_param.custom")} min={0} />
-                </Field></div>
-              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_auto_route_confidence_threshold")}>
-                  <StepLadderInput label={t("agents.form.channel_overrides_auto_route_confidence_threshold")} value={value.channel_overrides.auto_route_confidence_threshold}
-                    onChange={(next) => updateChannelOverrides({ auto_route_confidence_threshold: next })} ladder={CHANNEL_ROUTE_CONFIDENCE_LADDER}
-                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                    customLabel={t("model_param.custom")} min={0} />
-                </Field></div>
-              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_auto_route_sticky_bonus")}>
-                  <StepLadderInput label={t("agents.form.channel_overrides_auto_route_sticky_bonus")} value={value.channel_overrides.auto_route_sticky_bonus}
-                    onChange={(next) => updateChannelOverrides({ auto_route_sticky_bonus: next })} ladder={CHANNEL_ROUTE_BONUS_LADDER}
-                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                    customLabel={t("model_param.custom")} min={0} />
-                </Field></div>
-              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_auto_route_divergence_count")}>
-                  <StepLadderInput label={t("agents.form.channel_overrides_auto_route_divergence_count")} value={value.channel_overrides.auto_route_divergence_count}
-                    onChange={(next) => updateChannelOverrides({ auto_route_divergence_count: next })} ladder={CHANNEL_ROUTE_DIVERGENCE_LADDER}
-                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                    customLabel={t("model_param.custom")} min={0} />
-                </Field></div>
+                <StepLadderInput label={t("agents.form.channel_overrides_auto_route_ttl_minutes")} value={value.channel_overrides.auto_route_ttl_minutes}
+                  onChange={(next) => updateChannelOverrides({ auto_route_ttl_minutes: next })} ladder={CHANNEL_ROUTE_TTL_LADDER}
+                  formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")} min={0} />
+              <div className="col-span-2"></div>
+                <StepLadderInput label={t("agents.form.channel_overrides_auto_route_confidence_threshold")} value={value.channel_overrides.auto_route_confidence_threshold}
+                  onChange={(next) => updateChannelOverrides({ auto_route_confidence_threshold: next })} ladder={CHANNEL_ROUTE_CONFIDENCE_LADDER}
+                  formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")} min={0} />
+              <div className="col-span-2"></div>
+                <StepLadderInput label={t("agents.form.channel_overrides_auto_route_sticky_bonus")} value={value.channel_overrides.auto_route_sticky_bonus}
+                  onChange={(next) => updateChannelOverrides({ auto_route_sticky_bonus: next })} ladder={CHANNEL_ROUTE_BONUS_LADDER}
+                  formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")} min={0} />
+              <div className="col-span-2"></div>
+                <StepLadderInput label={t("agents.form.channel_overrides_auto_route_divergence_count")} value={value.channel_overrides.auto_route_divergence_count}
+                  onChange={(next) => updateChannelOverrides({ auto_route_divergence_count: next })} ladder={CHANNEL_ROUTE_DIVERGENCE_LADDER}
+                  formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")} min={0} />
+              <div className="col-span-2"></div>
         </div>
         <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim mt-3">{t("agents.form.channel_overrides_group_ownership")}</p>
         <div className="grid grid-cols-2 gap-3">
@@ -1785,12 +1744,11 @@ export function AgentManifestForm({
                 </Field></div>
               <div><Toggle label={t("agents.form.channel_overrides_thread_ownership_enabled")} checked={value.channel_overrides.thread_ownership_enabled}
                   onChange={(checked) => updateChannelOverrides({ thread_ownership_enabled: checked })} /></div>
-              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_conversation_ownership_ttl_seconds")}>
-                  <StepLadderInput label={t("agents.form.channel_overrides_conversation_ownership_ttl_seconds")} value={value.channel_overrides.conversation_ownership_ttl_seconds}
-                    onChange={(next) => updateChannelOverrides({ conversation_ownership_ttl_seconds: next })} ladder={CHANNEL_THREAD_OWNERSHIP_TTL_LADDER}
-                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                    customLabel={t("model_param.custom")} min={0} />
-                </Field></div>
+                <StepLadderInput label={t("agents.form.channel_overrides_conversation_ownership_ttl_seconds")} value={value.channel_overrides.conversation_ownership_ttl_seconds}
+                  onChange={(next) => updateChannelOverrides({ conversation_ownership_ttl_seconds: next })} ladder={CHANNEL_THREAD_OWNERSHIP_TTL_LADDER}
+                  formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")} min={0} />
+              <div className="col-span-2"></div>
               <div><Toggle label={t("agents.form.channel_overrides_conversation_ownership_include_dms")} checked={value.channel_overrides.conversation_ownership_include_dms}
                   onChange={(checked) => updateChannelOverrides({ conversation_ownership_include_dms: checked })} /></div>
         </div>
@@ -1855,36 +1813,32 @@ export function AgentManifestForm({
               <option value="none">none</option>
             </select>
           </Field>
-          <Field label={t("agents.form.skill_workshop_max_pending")}>
-            <StepLadderInput
-              label={t("agents.form.skill_workshop_max_pending")}
-              value={value.skill_workshop.max_pending}
-              onChange={(next) => updateSkillWorkshop({ max_pending: next })}
-              ladder={SKILL_WORKSHOP_MAX_PENDING_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={1}
-            />
-          </Field>
-          <Field label={t("agents.form.skill_workshop_max_pending_age_days")}>
-            <StepLadderInput
-              label={t("agents.form.skill_workshop_max_pending_age_days")}
-              value={value.skill_workshop.max_pending_age_days}
-              onChange={(next) => updateSkillWorkshop({ max_pending_age_days: next })}
-              ladder={SKILL_WORKSHOP_MAX_AGE_LADDER}
-              formatRung={formatHours}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={1}
-            
-              invalid={invalidFields.has("skill_workshop.max_pending_age_days")}
-              error={
-                invalidFields.has("skill_workshop.max_pending_age_days")
-                  ? t("agents.form.u32_overflow")
-                  : undefined
-              }/>
-          </Field>
+          <StepLadderInput
+            label={t("agents.form.skill_workshop_max_pending")}
+            value={value.skill_workshop.max_pending}
+            onChange={(next) => updateSkillWorkshop({ max_pending: next })}
+            ladder={SKILL_WORKSHOP_MAX_PENDING_LADDER}
+            formatRung={formatCount}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={1}
+          />
+          <StepLadderInput
+            label={t("agents.form.skill_workshop_max_pending_age_days")}
+            value={value.skill_workshop.max_pending_age_days}
+            onChange={(next) => updateSkillWorkshop({ max_pending_age_days: next })}
+            ladder={SKILL_WORKSHOP_MAX_AGE_LADDER}
+            formatRung={formatHours}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={1}
+          
+            invalid={invalidFields.has("skill_workshop.max_pending_age_days")}
+            error={
+              invalidFields.has("skill_workshop.max_pending_age_days")
+                ? t("agents.form.u32_overflow")
+                : undefined
+            }/>
           <Field label={t("agents.form.skill_workshop_evolution_mode")}>
             <select
               value={value.skill_workshop.evolution_mode}
@@ -1916,122 +1870,106 @@ export function AgentManifestForm({
           ].some((f) => invalidFields.has(f))}
         >
         <div className="grid grid-cols-2 gap-3">
-          <Field label={t("config.fld_threshold_messages")}>
-            <StepLadderInput
-              label={t("config.fld_threshold_messages")}
-              value={value.compaction.threshold_messages}
-              onChange={(next) => updateCompaction({ threshold_messages: next })}
-              ladder={COMPACTION_THRESHOLD_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={1}
-            />
-          </Field>
-          <Field label={t("config.fld_keep_recent")}>
-            <StepLadderInput
-              label={t("config.fld_keep_recent")}
-              value={value.compaction.keep_recent}
-              onChange={(next) => updateCompaction({ keep_recent: next })}
-              ladder={COMPACTION_KEEP_RECENT_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={0}
-            />
-          </Field>
-          <Field label={t("config.fld_max_summary_tokens")}>
-            <StepLadderInput
-              label={t("config.fld_max_summary_tokens")}
-              value={value.compaction.max_summary_tokens}
-              onChange={(next) => updateCompaction({ max_summary_tokens: next })}
-              ladder={COMPACTION_SUMMARY_TOKENS_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={1}
-            />
-          </Field>
-          <Field label={t("config.fld_token_threshold_ratio")}>
-            <StepLadderInput
-              label={t("config.fld_token_threshold_ratio")}
-              value={value.compaction.token_threshold_ratio}
-              onChange={(next) => updateCompaction({ token_threshold_ratio: next })}
-              ladder={COMPACTION_TOKEN_RATIO_LADDER}
-              formatRung={formatPercent}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={0}
-              max={1}
-              step={0.01}
-            />
-          </Field>
-          <Field label={t("config.fld_max_chunk_chars")}>
-            <StepLadderInput
-              label={t("config.fld_max_chunk_chars")}
-              value={value.compaction.max_chunk_chars}
-              onChange={(next) => updateCompaction({ max_chunk_chars: next })}
-              ladder={COMPACTION_CHUNK_CHARS_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={1}
-            />
-          </Field>
-          <Field label={t("config.fld_max_retries")}>
-            <StepLadderInput
-              label={t("config.fld_max_retries")}
-              value={value.compaction.max_retries}
-              onChange={(next) => updateCompaction({ max_retries: next })}
-              ladder={COMPACTION_MAX_RETRIES_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={0}
-            
-              invalid={invalidFields.has("compaction.max_retries")}
-              error={
-                invalidFields.has("compaction.max_retries")
-                  ? t("agents.form.u32_overflow")
-                  : undefined
-              }/>
-          </Field>
-          <Field label={t("agents.form.compaction_max_loop_steps_before_aggregate")}>
-            <StepLadderInput
-              label={t("agents.form.compaction_max_loop_steps_before_aggregate")}
-              value={value.compaction.max_loop_steps_before_aggregate}
-              onChange={(next) => updateCompaction({ max_loop_steps_before_aggregate: next })}
-              ladder={COMPACTION_LOOP_STEPS_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={1}
-            
-              invalid={invalidFields.has("compaction.max_loop_steps_before_aggregate")}
-              error={
-                invalidFields.has("compaction.max_loop_steps_before_aggregate")
-                  ? t("agents.form.u32_overflow")
-                  : undefined
-              }/>
-          </Field>
-          <Field label={t("agents.form.compaction_strip_reasoning_after_turns")}>
-            <StepLadderInput
-              label={t("agents.form.compaction_strip_reasoning_after_turns")}
-              value={value.compaction.strip_reasoning_after_turns}
-              onChange={(next) => updateCompaction({ strip_reasoning_after_turns: next })}
-              ladder={COMPACTION_STRIP_REASONING_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={0}
-            
-              invalid={invalidFields.has("compaction.strip_reasoning_after_turns")}
-              error={
-                invalidFields.has("compaction.strip_reasoning_after_turns")
-                  ? t("agents.form.u32_overflow")
-                  : undefined
-              }/>
-          </Field>
+          <StepLadderInput
+            label={t("config.fld_threshold_messages")}
+            value={value.compaction.threshold_messages}
+            onChange={(next) => updateCompaction({ threshold_messages: next })}
+            ladder={COMPACTION_THRESHOLD_LADDER}
+            formatRung={formatCount}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={1}
+          />
+          <StepLadderInput
+            label={t("config.fld_keep_recent")}
+            value={value.compaction.keep_recent}
+            onChange={(next) => updateCompaction({ keep_recent: next })}
+            ladder={COMPACTION_KEEP_RECENT_LADDER}
+            formatRung={formatCount}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={0}
+          />
+          <StepLadderInput
+            label={t("config.fld_max_summary_tokens")}
+            value={value.compaction.max_summary_tokens}
+            onChange={(next) => updateCompaction({ max_summary_tokens: next })}
+            ladder={COMPACTION_SUMMARY_TOKENS_LADDER}
+            formatRung={formatCount}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={1}
+          />
+          <StepLadderInput
+            label={t("config.fld_token_threshold_ratio")}
+            value={value.compaction.token_threshold_ratio}
+            onChange={(next) => updateCompaction({ token_threshold_ratio: next })}
+            ladder={COMPACTION_TOKEN_RATIO_LADDER}
+            formatRung={formatPercent}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={0}
+            max={1}
+            step={0.01}
+          />
+          <StepLadderInput
+            label={t("config.fld_max_chunk_chars")}
+            value={value.compaction.max_chunk_chars}
+            onChange={(next) => updateCompaction({ max_chunk_chars: next })}
+            ladder={COMPACTION_CHUNK_CHARS_LADDER}
+            formatRung={formatCount}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={1}
+          />
+          <StepLadderInput
+            label={t("config.fld_max_retries")}
+            value={value.compaction.max_retries}
+            onChange={(next) => updateCompaction({ max_retries: next })}
+            ladder={COMPACTION_MAX_RETRIES_LADDER}
+            formatRung={formatCount}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={0}
+          
+            invalid={invalidFields.has("compaction.max_retries")}
+            error={
+              invalidFields.has("compaction.max_retries")
+                ? t("agents.form.u32_overflow")
+                : undefined
+            }/>
+          <StepLadderInput
+            label={t("agents.form.compaction_max_loop_steps_before_aggregate")}
+            value={value.compaction.max_loop_steps_before_aggregate}
+            onChange={(next) => updateCompaction({ max_loop_steps_before_aggregate: next })}
+            ladder={COMPACTION_LOOP_STEPS_LADDER}
+            formatRung={formatCount}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={1}
+          
+            invalid={invalidFields.has("compaction.max_loop_steps_before_aggregate")}
+            error={
+              invalidFields.has("compaction.max_loop_steps_before_aggregate")
+                ? t("agents.form.u32_overflow")
+                : undefined
+            }/>
+          <StepLadderInput
+            label={t("agents.form.compaction_strip_reasoning_after_turns")}
+            value={value.compaction.strip_reasoning_after_turns}
+            onChange={(next) => updateCompaction({ strip_reasoning_after_turns: next })}
+            ladder={COMPACTION_STRIP_REASONING_LADDER}
+            formatRung={formatCount}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={0}
+          
+            invalid={invalidFields.has("compaction.strip_reasoning_after_turns")}
+            error={
+              invalidFields.has("compaction.strip_reasoning_after_turns")
+                ? t("agents.form.u32_overflow")
+                : undefined
+            }/>
         </div>
         {/* A tri-state select, not a toggle: the value is an `Option<bool>`, and
             a toggle collapses "inherit" and "false" onto the same unchecked
@@ -2052,20 +1990,18 @@ export function AgentManifestForm({
         title={t("agents.form.async_tasks")}
         defaultOpen={false}
       >
-        <Field label={t("config.fld_default_timeout_secs")}>
-          <StepLadderInput
-            label={t("config.fld_default_timeout_secs")}
-            value={value.async_tasks.default_timeout_secs}
-            onChange={(next) =>
-              update({ async_tasks: { ...value.async_tasks, default_timeout_secs: next } })
-            }
-            ladder={ASYNC_TASK_TIMEOUT_LADDER}
-            formatRung={formatSeconds}
-            inheritLabel={t("model_param.inherit")}
-            customLabel={t("model_param.custom")}
-            min={1}
-          />
-        </Field>
+        <StepLadderInput
+          label={t("config.fld_default_timeout_secs")}
+          value={value.async_tasks.default_timeout_secs}
+          onChange={(next) =>
+            update({ async_tasks: { ...value.async_tasks, default_timeout_secs: next } })
+          }
+          ladder={ASYNC_TASK_TIMEOUT_LADDER}
+          formatRung={formatSeconds}
+          inheritLabel={t("model_param.inherit")}
+          customLabel={t("model_param.custom")}
+          min={1}
+        />
         <p className="text-[10px] text-text-dim/70">{t("config.desc_default_timeout_secs")}</p>
         <Toggle
           label={t("agents.form.async_tasks_notify_on_timeout")}
@@ -2117,33 +2053,29 @@ export function AgentManifestForm({
               </Field>
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <Field label={t("agents.form.simple_threshold")}>
-                <StepLadderInput
-                  label={t("agents.form.simple_threshold")}
-                  value={value.routing.simple_threshold}
-                  onChange={(next) => updateRouting({ simple_threshold: next })}
-                  ladder={ROUTING_THRESHOLD_LADDER}
-                  formatRung={formatCount}
-                  inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")}
-                  customPlaceholder={t("agents.form.simple_threshold_placeholder")}
-                  min={0}
-                />
-              </Field>
+              <StepLadderInput
+                label={t("agents.form.simple_threshold")}
+                value={value.routing.simple_threshold}
+                onChange={(next) => updateRouting({ simple_threshold: next })}
+                ladder={ROUTING_THRESHOLD_LADDER}
+                formatRung={formatCount}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                customPlaceholder={t("agents.form.simple_threshold_placeholder")}
+                min={0}
+              />
 
-              <Field label={t("agents.form.complex_threshold")}>
-                <StepLadderInput
-                  label={t("agents.form.complex_threshold")}
-                  value={value.routing.complex_threshold}
-                  onChange={(next) => updateRouting({ complex_threshold: next })}
-                  ladder={ROUTING_THRESHOLD_LADDER}
-                  formatRung={formatCount}
-                  inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")}
-                  customPlaceholder={t("agents.form.complex_threshold_placeholder")}
-                  min={0}
-                />
-              </Field>
+              <StepLadderInput
+                label={t("agents.form.complex_threshold")}
+                value={value.routing.complex_threshold}
+                onChange={(next) => updateRouting({ complex_threshold: next })}
+                ladder={ROUTING_THRESHOLD_LADDER}
+                formatRung={formatCount}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                customPlaceholder={t("agents.form.complex_threshold_placeholder")}
+                min={0}
+              />
 
             </div>
           </div>
@@ -2542,57 +2474,47 @@ export function AgentManifestForm({
           </div>
         </div>
         <div className="grid grid-cols-2 gap-3 mt-2">
-          <Field
+          <StepLadderInput
             label={t("agents.form.max_history_messages")}
+            value={value.max_history_messages}
+            onChange={(next) => update({ max_history_messages: next })}
+            ladder={MAX_HISTORY_MESSAGES_LADDER}
+            formatRung={formatCount}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={MIN_HISTORY_MESSAGES}
             invalid={invalidFields.has("max_history_messages")}
-          >
-            <StepLadderInput
-              label={t("agents.form.max_history_messages")}
-              value={value.max_history_messages}
-              onChange={(next) => update({ max_history_messages: next })}
-              ladder={MAX_HISTORY_MESSAGES_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={MIN_HISTORY_MESSAGES}
-              invalid={invalidFields.has("max_history_messages")}
-              // `min` is not a guard: a pasted `1.5` still reaches the field.
-              // The message lives on the ladder — the control that accepted the
-              // value — and not on `Field` as well, which would announce it twice.
-              error={
-                invalidFields.has("max_history_messages")
-                  ? t("agents.form.whole_number_required")
-                  : undefined
-              }
-            />
-            <p className="text-[10px] text-text-dim/70 mt-1">
-              {t("agents.form.max_history_messages_hint")}
-            </p>
-          </Field>
-          <Field
+            // `min` is not a guard: a pasted `1.5` still reaches the field.
+            // The message lives on the ladder — the control that accepted the
+            // value — and not on `Field` as well, which would announce it twice.
+            error={
+              invalidFields.has("max_history_messages")
+                ? t("agents.form.whole_number_required")
+                : undefined
+            }
+          />
+          <p className="text-[10px] text-text-dim/70 mt-1">
+            {t("agents.form.max_history_messages_hint")}
+          </p>
+          <StepLadderInput
             label={t("agents.form.max_concurrent_invocations")}
+            value={value.max_concurrent_invocations}
+            onChange={(next) => update({ max_concurrent_invocations: next })}
+            ladder={MAX_CONCURRENT_INVOCATIONS_LADDER}
+            formatRung={formatCount}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={1}
             invalid={invalidFields.has("max_concurrent_invocations")}
-          >
-            <StepLadderInput
-              label={t("agents.form.max_concurrent_invocations")}
-              value={value.max_concurrent_invocations}
-              onChange={(next) => update({ max_concurrent_invocations: next })}
-              ladder={MAX_CONCURRENT_INVOCATIONS_LADDER}
-              formatRung={formatCount}
-              inheritLabel={t("model_param.inherit")}
-              customLabel={t("model_param.custom")}
-              min={1}
-              invalid={invalidFields.has("max_concurrent_invocations")}
-              error={
-                invalidFields.has("max_concurrent_invocations")
-                  ? t("agents.form.whole_number_required")
-                  : undefined
-              }
-            />
-            <p className="text-[10px] text-text-dim/70 mt-1">
-              {t("agents.form.max_concurrent_invocations_hint")}
-            </p>
-          </Field>
+            error={
+              invalidFields.has("max_concurrent_invocations")
+                ? t("agents.form.whole_number_required")
+                : undefined
+            }
+          />
+          <p className="text-[10px] text-text-dim/70 mt-1">
+            {t("agents.form.max_concurrent_invocations_hint")}
+          </p>
         </div>
         </AdvancedFields>
       </FormSection>
