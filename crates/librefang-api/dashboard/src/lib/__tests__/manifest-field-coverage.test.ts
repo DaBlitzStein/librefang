@@ -49,22 +49,20 @@ const AGENT_RS = join(
  * be able to type into a form.
  */
 const NO_SURFACE: Record<string, string> = {
-  owner:
-    "readonly: principal the agent acts for on unattended turns; no widget yet",
-  source_template: "readonly: provenance written by the create flow",
-  channels: "readonly: channel membership is set from the channel's own page",
+  owner: "readonly: the API stamps it from the authenticated caller (routes/agents/lifecycle.rs:652) as the principal an unattended turn acts for. A form field would let a manifest claim an owner it was not created by, and the point of the field is that it is the one the request carried.",
+  source_template: "readonly: provenance, written by the create flow to record which template the agent came from, and displayed in the drawer header. There is no value an operator could set it to that would be true.",
+  channels: "elsewhere: the drawer's own Channels section edits this allowlist (useSetAgentChannels). It is a set-membership list the channel bridge reads to decide which channels an agent may serve (channels/src/bridge.rs:3839), and a second control for one list is the redundancy requirement 2 exists to remove.",
   metadata: "preserved: arbitrary key/value table, no widget",
   exec_policy:
     "partial: only the shorthand string form has a widget; the full table is preserved",
   tools:
     "missing: per-tool `[tools.<name>.params]` override table, no widget (distinct from capabilities.tools, which lists names)",
-  is_hand: "readonly: derived from the manifest's origin",
-  auto_dream_enabled: "elsewhere: toggled from Memory > Auto Dream",
-  auto_evolve: "elsewhere: toggled from the drawer's Skills tab",
+  is_hand: "readonly: derived, not authored. memory/src/structured.rs:472 sets it while migrating a legacy hand agent, so it records what the agent is rather than what someone said about it. A form that could change it would let the label and the machinery disagree.",
+  auto_dream_enabled: "elsewhere: the Memory page's Auto Dream toggle owns it, and registry.rs:988 documents that toggle as in-memory only, with this manifest field being the persistent half of the same flag. A second control here would mean Save writes agent.toml while the toggle writes memory, and the file wins on the next reload -- reverting the toggle with nothing on screen to explain it.",
+  auto_evolve: "elsewhere: the drawer's Skills tab toggles it through PATCH /api/agents/{id}, next to the skills it evolves.",
   channel_overrides: "missing: 29-key per-channel table, no widget",
   context_engine: "missing: no widget anywhere",
-  triggers:
-    "elsewhere: the Schedule tab edits the runtime registry, not this manifest array",
+  triggers: "elsewhere: the Schedule tab edits the runtime trigger registry over /api/triggers, and the manifest's [[triggers]] array is reconciled into that registry one way (routes/workflows/triggers.rs:1217). A field here would write the array the runtime then overwrites, not the registry the operator was looking at.",
 };
 
 /**
