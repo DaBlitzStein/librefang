@@ -2,8 +2,15 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  AUTO_ROUTE_STRATEGIES,
+  DM_POLICIES,
   emptyManifestForm,
+  GROUP_POLICIES,
   ORPHAN_POLICIES,
+  OUTPUT_FORMATS,
+  PREFIX_STYLES,
+  TYPING_MODES,
+  USAGE_FOOTERS,
   SKILL_APPROVAL_POLICIES,
   SKILL_EVOLUTION_MODES,
   SKILL_REVIEW_MODES,
@@ -77,7 +84,6 @@ const NO_SURFACE: Record<string, string> = {
   is_hand: "readonly: derived, not authored. memory/src/structured.rs:472 sets it while migrating a legacy hand agent, so it records what the agent is rather than what someone said about it. A form that could change it would let the label and the machinery disagree.",
   auto_dream_enabled: "elsewhere: the Memory page's Auto Dream toggle owns it, and registry.rs:988 documents that toggle as in-memory only, with this manifest field being the persistent half of the same flag. A second control here would mean Save writes agent.toml while the toggle writes memory, and the file wins on the next reload -- reverting the toggle with nothing on screen to explain it.",
   auto_evolve: "elsewhere: the drawer's Skills tab toggles it through PATCH /api/agents/{id}, next to the skills it evolves.",
-  channel_overrides: "missing: 29-key per-channel table, no widget",
   context_engine: "missing: no widget anywhere",
   triggers: "elsewhere: the Schedule tab edits the runtime trigger registry over /api/triggers, and the manifest's [[triggers]] array is reconciled into that registry one way (routes/workflows/triggers.rs:1217). A field here would write the array the runtime then overwrites, not the registry the operator was looking at.",
 };
@@ -185,6 +191,13 @@ describe("manifest field coverage", () => {
 // renamed export is a compile error here instead of an `undefined` the test
 // would compare against and pass.
 const MANIFEST_ENUM_CONSTANTS: Record<string, readonly string[]> = {
+  DM_POLICIES,
+  GROUP_POLICIES,
+  OUTPUT_FORMATS,
+  USAGE_FOOTERS,
+  TYPING_MODES,
+  AUTO_ROUTE_STRATEGIES,
+  PREFIX_STYLES,
   TOOL_PROFILES,
   ORPHAN_POLICIES,
   TOOL_EXEC_BACKENDS,
@@ -200,6 +213,15 @@ const RUST_ENUMS: Array<{ file: string; enum: string; exported: string }> = [
   { file: "agent.rs", enum: "ApprovalPolicy", exported: "SKILL_APPROVAL_POLICIES" },
   { file: "agent.rs", enum: "ReviewMode", exported: "SKILL_REVIEW_MODES" },
   { file: "agent.rs", enum: "EvolutionMode", exported: "SKILL_EVOLUTION_MODES" },
+  // `[channel_overrides]` — all seven live in config/types.rs, and all seven
+  // are `rename_all = "snake_case"`.
+  { file: "config/types.rs", enum: "DmPolicy", exported: "DM_POLICIES" },
+  { file: "config/types.rs", enum: "GroupPolicy", exported: "GROUP_POLICIES" },
+  { file: "config/types.rs", enum: "OutputFormat", exported: "OUTPUT_FORMATS" },
+  { file: "config/types.rs", enum: "UsageFooterMode", exported: "USAGE_FOOTERS" },
+  { file: "config/types.rs", enum: "TypingMode", exported: "TYPING_MODES" },
+  { file: "config/types.rs", enum: "AutoRouteStrategy", exported: "AUTO_ROUTE_STRATEGIES" },
+  { file: "config/types.rs", enum: "PrefixStyle", exported: "PREFIX_STYLES" },
 ];
 
 /** `rename_all` → the function that turns `CamelCase` into the serialised form. */

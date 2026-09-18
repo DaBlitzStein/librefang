@@ -98,6 +98,45 @@ export interface ManifestFormState {
     max_pending_age_days: string;
     evolution_mode: "free" | "controlled";
   };
+  // `[channel_overrides]`: per-agent overrides of a channel's own config.
+  //
+  // Fields that are `Option<T>` hold `""` for "inherit the channel's value".
+  // The rest are plain, because `ChannelOverrides` carries `#[serde(default)]`
+  // and its own `Default` — and eight of those defaults come from named
+  // functions rather than the type's zero, so they are listed here rather than
+  // assumed. `thread_ownership_enabled` is the one that reads backwards:
+  // `true`, not `false`.
+  channel_overrides: {
+    model: string;
+    system_prompt: string;
+    dm_policy: "" | "respond" | "allowed_only" | "ignore";
+    group_policy: "" | "all" | "mention_only" | "commands_only" | "ignore";
+    group_trigger_patterns: string[];
+    reply_precheck: boolean;
+    reply_precheck_model: string;
+    rate_limit_per_minute: string;
+    rate_limit_per_user: string;
+    threading: boolean;
+    output_format: "" | "markdown" | "telegram_html" | "slack_mrkdwn" | "plain_text";
+    usage_footer: "" | "off" | "tokens" | "cost" | "full";
+    typing_mode: "" | "instant" | "message" | "thinking" | "never";
+    message_debounce_ms: string;
+    message_debounce_max_ms: string;
+    message_debounce_max_buffer: string;
+    clear_done_reaction: boolean;
+    disable_commands: boolean;
+    allowed_commands: string[];
+    blocked_commands: string[];
+    auto_route: "off" | "explicit_only" | "sticky_ttl" | "sticky_heuristic";
+    auto_route_ttl_minutes: string;
+    auto_route_confidence_threshold: string;
+    auto_route_sticky_bonus: string;
+    auto_route_divergence_count: string;
+    prefix_agent_name: "off" | "bracket" | "bold_bracket";
+    thread_ownership_enabled: boolean;
+    conversation_ownership_ttl_seconds: string;
+    conversation_ownership_include_dms: boolean;
+  };
   // Per-agent overrides of the kernel's `[compaction]`. Nine `Option<T>` with
   // `skip_serializing_if`, so `""` inherits and a value overrides — and the
   // table is not written at all when every field says nothing.
@@ -294,6 +333,7 @@ export interface ManifestExtras {
   async_tasks: TomlTable;
   compaction: TomlTable;
   skill_workshop: TomlTable;
+  channel_overrides: TomlTable;
 }
 
 export const emptyManifestExtras = (): ManifestExtras => ({
@@ -308,6 +348,7 @@ export const emptyManifestExtras = (): ManifestExtras => ({
   async_tasks: {},
   compaction: {},
   skill_workshop: {},
+  channel_overrides: {},
 });
 
 /**
@@ -368,6 +409,38 @@ export const emptyManifestForm = (): ManifestFormState => ({
   async_tasks: {
     default_timeout_secs: "",
     notify_on_timeout: false,
+  },
+  channel_overrides: {
+    model: "",
+    system_prompt: "",
+    dm_policy: "",
+    group_policy: "",
+    group_trigger_patterns: [],
+    reply_precheck: false,
+    reply_precheck_model: "",
+    rate_limit_per_minute: "",
+    rate_limit_per_user: "",
+    threading: false,
+    output_format: "",
+    usage_footer: "",
+    typing_mode: "",
+    message_debounce_ms: "",
+    message_debounce_max_ms: "",
+    message_debounce_max_buffer: "",
+    clear_done_reaction: false,
+    disable_commands: false,
+    allowed_commands: [],
+    blocked_commands: [],
+    auto_route: "off",
+    auto_route_ttl_minutes: "",
+    auto_route_confidence_threshold: "",
+    auto_route_sticky_bonus: "",
+    auto_route_divergence_count: "",
+    prefix_agent_name: "off",
+    // `default_thread_ownership_enabled` returns `true`.
+    thread_ownership_enabled: true,
+    conversation_ownership_ttl_seconds: "",
+    conversation_ownership_include_dms: false,
   },
   skill_workshop: {
     enabled: false,
@@ -546,6 +619,7 @@ const FORM_TOP_LEVEL_KEYS = new Set([
   "async_tasks",
   "compaction",
   "skill_workshop",
+  "channel_overrides",
   "pinned_model",
   "workspace",
   "skills_disabled",
@@ -622,6 +696,38 @@ const FORM_CAPABILITY_KEYS = new Set([
   "speech",
 ]);
 const FORM_THINKING_KEYS = new Set(["budget_tokens", "stream_thinking"]);
+const FORM_CHANNEL_OVERRIDE_KEYS = new Set([
+  "model",
+  "system_prompt",
+  "dm_policy",
+  "group_policy",
+  "group_trigger_patterns",
+  "reply_precheck",
+  "reply_precheck_model",
+  "rate_limit_per_minute",
+  "rate_limit_per_user",
+  "threading",
+  "output_format",
+  "usage_footer",
+  "typing_mode",
+  "message_debounce_ms",
+  "message_debounce_max_ms",
+  "message_debounce_max_buffer",
+  "clear_done_reaction",
+  "disable_commands",
+  "allowed_commands",
+  "blocked_commands",
+  "auto_route",
+  "auto_route_ttl_minutes",
+  "auto_route_confidence_threshold",
+  "auto_route_sticky_bonus",
+  "auto_route_divergence_count",
+  "prefix_agent_name",
+  "thread_ownership_enabled",
+  "conversation_ownership_ttl_seconds",
+  "conversation_ownership_include_dms",
+]);
+
 const FORM_SKILL_WORKSHOP_KEYS = new Set([
   "enabled",
   "auto_capture",
@@ -696,6 +802,26 @@ export const ORPHAN_POLICIES = ["keep", "warn", "delete"] as const;
 // `ReviewMode` is `"snake_case"`. The form speaks the serialised spelling
 // because that is what lands in the TOML.
 export const SKILL_APPROVAL_POLICIES = ["pending", "auto"] as const;
+// All seven of these are `rename_all = "snake_case"` on the Rust enum.
+export const DM_POLICIES = ["respond", "allowed_only", "ignore"] as const;
+export const GROUP_POLICIES = ["all", "mention_only", "commands_only", "ignore"] as const;
+export const OUTPUT_FORMATS = ["markdown", "telegram_html", "slack_mrkdwn", "plain_text"] as const;
+export const USAGE_FOOTERS = ["off", "tokens", "cost", "full"] as const;
+export const TYPING_MODES = ["instant", "message", "thinking", "never"] as const;
+export const AUTO_ROUTE_STRATEGIES = ["off", "explicit_only", "sticky_ttl", "sticky_heuristic"] as const;
+export const PREFIX_STYLES = ["off", "bracket", "bold_bracket"] as const;
+
+// Keyed by the manifest field, so the parse side can look one up by name and
+// the guard test can compare each against the Rust enum it came from.
+export const CHANNEL_ENUMS = {
+  dm_policy: DM_POLICIES,
+  group_policy: GROUP_POLICIES,
+  output_format: OUTPUT_FORMATS,
+  usage_footer: USAGE_FOOTERS,
+  typing_mode: TYPING_MODES,
+  auto_route: AUTO_ROUTE_STRATEGIES,
+  prefix_agent_name: PREFIX_STYLES,
+} as const;
 export const SKILL_REVIEW_MODES = ["heuristic", "threshold_llm", "none"] as const;
 export const SKILL_EVOLUTION_MODES = ["free", "controlled"] as const;
 
@@ -1013,6 +1139,11 @@ export const serializeManifestForm = (
   const safeAutonomousExtras = form.autonomous.enabled
     ? pluckSafeExtras(extras.autonomous, deferredSectionExtras, "autonomous")
     : {};
+  const safeChannelOverrideExtras = pluckSafeExtras(
+    extras.channel_overrides,
+    deferredSectionExtras,
+    "channel_overrides",
+  );
   const safeSkillWorkshopExtras = pluckSafeExtras(
     extras.skill_workshop,
     deferredSectionExtras,
@@ -1217,6 +1348,51 @@ export const serializeManifestForm = (
     );
     if (body.length) {
       lines.push("", "[compaction]", ...body, ...renderExtraScalars(safeCompactionExtras));
+    }
+  }
+
+  // [channel_overrides]
+  {
+    const body: string[] = [];
+    const c = form.channel_overrides;
+    writeStringScalar(body, "model", c.model.trim());
+    writeStringScalar(body, "system_prompt", c.system_prompt.trim());
+    if (c.dm_policy !== "") writeStringScalar(body, "dm_policy", c.dm_policy);
+    if (c.group_policy !== "") writeStringScalar(body, "group_policy", c.group_policy);
+    if (c.group_trigger_patterns.length) body.push(`group_trigger_patterns = ${tomlArray(c.group_trigger_patterns)}`);
+    if (c.reply_precheck) writeBoolScalar(body, "reply_precheck", true);
+    writeStringScalar(body, "reply_precheck_model", c.reply_precheck_model.trim());
+    writeNumberScalar(body, "rate_limit_per_minute", parseInteger(c.rate_limit_per_minute));
+    writeNumberScalar(body, "rate_limit_per_user", parseInteger(c.rate_limit_per_user));
+    if (c.threading) writeBoolScalar(body, "threading", true);
+    if (c.output_format !== "") writeStringScalar(body, "output_format", c.output_format);
+    if (c.usage_footer !== "") writeStringScalar(body, "usage_footer", c.usage_footer);
+    if (c.typing_mode !== "") writeStringScalar(body, "typing_mode", c.typing_mode);
+    writeNumberScalar(body, "message_debounce_ms", parseInteger(c.message_debounce_ms));
+    writeNumberScalar(body, "message_debounce_max_ms", parseInteger(c.message_debounce_max_ms));
+    writeNumberScalar(body, "message_debounce_max_buffer", parseInteger(c.message_debounce_max_buffer));
+    if (c.clear_done_reaction) writeBoolScalar(body, "clear_done_reaction", true);
+    if (c.disable_commands) writeBoolScalar(body, "disable_commands", true);
+    if (c.allowed_commands.length) body.push(`allowed_commands = ${tomlArray(c.allowed_commands)}`);
+    if (c.blocked_commands.length) body.push(`blocked_commands = ${tomlArray(c.blocked_commands)}`);
+    if (c.auto_route !== "off") writeStringScalar(body, "auto_route", c.auto_route);
+    writeNumberScalar(body, "auto_route_ttl_minutes", parseInteger(c.auto_route_ttl_minutes));
+    writeNumberScalar(body, "auto_route_confidence_threshold", parseInteger(c.auto_route_confidence_threshold));
+    writeNumberScalar(body, "auto_route_sticky_bonus", parseInteger(c.auto_route_sticky_bonus));
+    writeNumberScalar(body, "auto_route_divergence_count", parseInteger(c.auto_route_divergence_count));
+    if (c.prefix_agent_name !== "off") writeStringScalar(body, "prefix_agent_name", c.prefix_agent_name);
+    // `default_thread_ownership_enabled` returns true, so `false` is the value
+    // worth writing.
+    if (!c.thread_ownership_enabled) writeBoolScalar(body, "thread_ownership_enabled", false);
+    writeNumberScalar(body, "conversation_ownership_ttl_seconds", parseInteger(c.conversation_ownership_ttl_seconds));
+    if (c.conversation_ownership_include_dms) writeBoolScalar(body, "conversation_ownership_include_dms", true);
+    if (body.length) {
+      lines.push(
+        "",
+        "[channel_overrides]",
+        ...body,
+        ...renderExtraScalars(safeChannelOverrideExtras),
+      );
     }
   }
 
@@ -1856,6 +2032,41 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
       at,
       new Set(["default_timeout_secs", "notify_on_timeout"]),
     );
+  }
+
+  // [channel_overrides]
+  if (isTomlTable(parsed.channel_overrides)) {
+    const c = parsed.channel_overrides;
+    form.channel_overrides.model = asString(c.model);
+    form.channel_overrides.system_prompt = asString(c.system_prompt);
+    form.channel_overrides.dm_policy = asOptionalEnum(c.dm_policy, CHANNEL_ENUMS.dm_policy);
+    form.channel_overrides.group_policy = asOptionalEnum(c.group_policy, CHANNEL_ENUMS.group_policy);
+    form.channel_overrides.group_trigger_patterns = asStringArray(c.group_trigger_patterns);
+    form.channel_overrides.reply_precheck = asBoolean(c.reply_precheck, false);
+    form.channel_overrides.reply_precheck_model = asString(c.reply_precheck_model);
+    form.channel_overrides.rate_limit_per_minute = asNumberString(c.rate_limit_per_minute);
+    form.channel_overrides.rate_limit_per_user = asNumberString(c.rate_limit_per_user);
+    form.channel_overrides.threading = asBoolean(c.threading, false);
+    form.channel_overrides.output_format = asOptionalEnum(c.output_format, CHANNEL_ENUMS.output_format);
+    form.channel_overrides.usage_footer = asOptionalEnum(c.usage_footer, CHANNEL_ENUMS.usage_footer);
+    form.channel_overrides.typing_mode = asOptionalEnum(c.typing_mode, CHANNEL_ENUMS.typing_mode);
+    form.channel_overrides.message_debounce_ms = asNumberString(c.message_debounce_ms);
+    form.channel_overrides.message_debounce_max_ms = asNumberString(c.message_debounce_max_ms);
+    form.channel_overrides.message_debounce_max_buffer = asNumberString(c.message_debounce_max_buffer);
+    form.channel_overrides.clear_done_reaction = asBoolean(c.clear_done_reaction, false);
+    form.channel_overrides.disable_commands = asBoolean(c.disable_commands, false);
+    form.channel_overrides.allowed_commands = asStringArray(c.allowed_commands);
+    form.channel_overrides.blocked_commands = asStringArray(c.blocked_commands);
+    form.channel_overrides.auto_route = asEnum(c.auto_route, CHANNEL_ENUMS.auto_route, "off");
+    form.channel_overrides.auto_route_ttl_minutes = asNumberString(c.auto_route_ttl_minutes);
+    form.channel_overrides.auto_route_confidence_threshold = asNumberString(c.auto_route_confidence_threshold);
+    form.channel_overrides.auto_route_sticky_bonus = asNumberString(c.auto_route_sticky_bonus);
+    form.channel_overrides.auto_route_divergence_count = asNumberString(c.auto_route_divergence_count);
+    form.channel_overrides.prefix_agent_name = asEnum(c.prefix_agent_name, CHANNEL_ENUMS.prefix_agent_name, "off");
+    form.channel_overrides.thread_ownership_enabled = asBoolean(c.thread_ownership_enabled, true);
+    form.channel_overrides.conversation_ownership_ttl_seconds = asNumberString(c.conversation_ownership_ttl_seconds);
+    form.channel_overrides.conversation_ownership_include_dms = asBoolean(c.conversation_ownership_include_dms, false);
+    extras.channel_overrides = stripKnown(c, FORM_CHANNEL_OVERRIDE_KEYS);
   }
 
   // [skill_workshop]

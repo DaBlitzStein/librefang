@@ -849,6 +849,11 @@ export const TAB_SECTIONS: Partial<Record<AgentDrawerTab, ManifestSectionId[]>> 
     "response_format",
     "context_injection",
     "shared_folders",
+    // How the agent behaves on the channels it serves. Conversation, because
+    // that is what these settings are about — not Tools, which is about what
+    // it can do, and not a tab of their own, which would put 29 controls one
+    // click away from the thing they modify.
+    "channel_overrides",
   ],
   // Memory was the empty tab: every knob the manifest exposes for it is a
   // per-agent override of a kernel default, and none of them had a widget.
