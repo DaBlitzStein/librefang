@@ -2134,10 +2134,15 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.allowed_plugins = asStringArray(parsed.allowed_plugins);
   form.schedule = parseScheduleField(parsed.schedule);
   // The chosen variant's unmatched keys are preserved rather than consumed —
-  // the same treatment every other table the form owns gets. The `[schedule]`
-  // root is the one level with nothing to preserve: `ScheduleMode` is an
-  // externally-tagged enum, so an unknown key there is a document the daemon
-  // rejects outright rather than a field it would read later.
+  // the same treatment every other table the form owns gets, and for the same
+  // underlying reason: forward compatibility. The daemon rejects an unknown
+  // key anywhere inside schedule today (measured against the parse the PATCH
+  // runs, `toml::from_str::<AgentManifest>`), so a preserved key is never a
+  // field it was reading — what preservation buys is a field a future
+  // manifest carries surviving an old editor's save. The `[schedule]` root is
+  // the one level with nothing to preserve: `ScheduleMode` is an
+  // externally-tagged enum, so even a sibling key beside the variant is a
+  // document the daemon rejects outright.
   if (isTomlTable(parsed.schedule) && form.schedule.mode !== "reactive") {
     const variantTable = parsed.schedule[form.schedule.mode];
     const knownKeys = SCHEDULE_VARIANT_KEYS[form.schedule.mode];

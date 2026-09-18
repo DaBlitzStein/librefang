@@ -2365,17 +2365,25 @@ describe("the per-agent counters are whole numbers or nothing", () => {
 //
 // The `[schedule]` *root* is a closed enum (`ScheduleMode` in
 // crates/librefang-types/src/agent.rs), so an unknown key there is rejected by
-// the daemon and there is nothing to preserve. Inside a variant it is a struct
-// without `deny_unknown_fields`, so the daemon ignores an unknown field today —
-// and a field the manifest gains tomorrow is exactly the one the editor would
-// have deleted on the next save.
+// the daemon and there is nothing to preserve. Inside a variant the daemon
+// rejects an unknown key too — measured against the parse the PATCH runs
+// (`toml::from_str::<AgentManifest>`), for the root, the inline form, the
+// variant content and a nested table alike — so what this slot preserves is
+// never a document the daemon accepts today. Its reason to exist is forward
+// compatibility: when a future manifest gains a schedule field, an old
+// editor's round-trip must hand it back instead of deleting it, and the
+// editor is also a faithful TOML round-trip tool for drafts the daemon has
+// not accepted yet. That is why every test here works on a fixture the
+// current daemon would reject with a 400: the guard is the editor not
+// deleting content it does not render, not the daemon losing config it was
+// reading.
 describe("the schedule variants keep the keys the form does not render", () => {
   for (const [variant, known] of [
     ["periodic", 'cron = "0 9 * * *"'],
     ["continuous", "check_interval_secs = 600"],
     ["proactive", 'conditions = ["nightly"]'],
   ] as const) {
-    it(`[schedule.${variant}] keeps an unknown key`, () => {
+    it(`[schedule.${variant}] keeps a key a future manifest may carry`, () => {
       const source = `name = "x"\n\n[schedule.${variant}]\n${known}\nfuture_knob = 7\n`;
 
       const parsed = parseManifestToml(source);
@@ -2384,8 +2392,13 @@ describe("the schedule variants keep the keys the form does not render", () => {
 
       const round = serializeManifestForm(parsed.form, parsed.extras);
       expect(round).toContain("future_knob = 7");
-      // The key the form owns still round-trips through the same pass.
-      expect(round).toContain(variant);
+      // And the file a save produces still preserves it for the editor after
+      // this one — a save from the old editor must not be the step that
+      // finally deletes the field.
+      const again = parseManifestToml(round);
+      expect(again.ok).toBe(true);
+      if (!again.ok) return;
+      expect(again.extras.schedule?.[variant]).toEqual({ future_knob: 7 });
     });
 
     it(`[schedule.${variant}] keeps the form's own key alongside it`, () => {
