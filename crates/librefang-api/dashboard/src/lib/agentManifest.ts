@@ -1805,6 +1805,12 @@ const jsonValueToInlineToml = (value: unknown): string => {
   if (value === null || value === undefined) return '""'; // TOML has no null
   if (typeof value === "string") return escapeTomlString(value);
   if (typeof value === "boolean") return String(value);
+  // smol-toml parses integers past JavaScript's safe range as BigInt, and
+  // the preserved stashes carry it whole. Without this arm the value fell
+  // through to the object branch and rendered as an empty string — the
+  // preserved path CORRUPTING instead of losing. The digits are valid TOML:
+  // the format places no bound on integer magnitude.
+  if (typeof value === "bigint") return value.toString();
   if (typeof value === "number") {
     return Number.isFinite(value) ? String(value) : "0";
   }

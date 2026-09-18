@@ -823,6 +823,18 @@ custom = "x"
       expect(toml).toContain("strict = true");
     });
 
+    it("a BigInt-valued unknown key emits its digits, not an empty string", () => {
+      const parsed = parseManifestToml(
+        `name = "x"\n\nresponse_format = { type = "json", zz_big = 18446744073709551616 }\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      const toml = serializeManifestForm(parsed.form, parsed.extras);
+      expect(toml).toContain("zz_big = 18446744073709551616");
+      expect(toml).not.toContain('zz_big = ""');
+    });
+
     it("a nested-table unknown key renders as an inline table", () => {
       const parsed = parseManifestToml(
         `name = "x"\n\nresponse_format = { type = "json", custom = { depth = 2 } }\n`,
@@ -2439,6 +2451,20 @@ describe("the schedule variants keep the keys the form does not render", () => {
 
     const round = serializeManifestForm(parsed.form, parsed.extras);
     expect(round).toContain("future_table = { depth = 2 }");
+  });
+
+  // smol-toml parses integers past JavaScript's safe range as BigInt, and
+  // the preserved stash carries it whole — the inline emitter must emit the
+  // digits, not collapse the value to an empty string.
+  it("[schedule.periodic] round-trips a BigInt-valued unknown key", () => {
+    const parsed = parseManifestToml(
+      `name = "x"\n\n[schedule.periodic]\ncron = "0 9 * * *"\nzz_big = 18446744073709551616\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain("zz_big = 18446744073709551616");
   });
 
   it("[schedule.periodic] keeps an unknown array-of-tables key", () => {
