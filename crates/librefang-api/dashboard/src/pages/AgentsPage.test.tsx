@@ -443,6 +443,8 @@ describe("tabForFirstInvalidField", () => {
     ["a missing name", (f: ReturnType<typeof valid>) => { f.name = ""; }, "conversation"],
     ["a blank cron", (f: ReturnType<typeof valid>) => { f.schedule = { mode: "periodic", cron: "" }; }, "schedule"],
     ["a zero check interval", (f: ReturnType<typeof valid>) => { f.schedule = { mode: "continuous", check_interval_secs: "0" }; }, "schedule"],
+    ["an out-of-range temperature", (f: ReturnType<typeof valid>) => { f.model.temperature = "9"; }, "routing"],
+    ["an out-of-range top_p", (f: ReturnType<typeof valid>) => { f.model.top_p = "7"; }, "routing"],
     ["an unparseable JSON schema", (f: ReturnType<typeof valid>) => {
       f.response_format = { mode: "json_schema", name: "s", schema: "{not json", strict: false };
     }, "conversation"],
@@ -459,12 +461,12 @@ describe("tabForFirstInvalidField", () => {
   it("follows the first error when several are present", () => {
     const form = valid();
     form.name = "";
-    form.schedule = { mode: "periodic", cron: "" };
+    form.model.temperature = "9";
     const errors = validateManifestForm(form);
     expect(errors.length).toBeGreaterThan(1);
 
-    // `name` is checked before the schedule rules, and identity lives on
-    // Conversation while the schedule lives on Schedule.
+    // `name` is checked before the model ranges, and identity lives on
+    // Conversation while the model lives on Routing.
     expect(tabForFirstInvalidField(errors)).toBe("conversation");
   });
 

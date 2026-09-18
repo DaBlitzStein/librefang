@@ -1089,6 +1089,11 @@ const parseFloatish = (raw: string): number | null => {
   return n;
 };
 
+const isInRange = (raw: string, min: number, max: number): boolean => {
+  const v = parseSignedFloat(raw);
+  return v === null || (v >= min && v <= max);
+};
+
 const writeStringScalar = (lines: string[], key: string, value: string): void => {
   if (!value) return;
   lines.push(`${key} = ${escapeTomlString(value)}`);
@@ -2073,6 +2078,17 @@ export const validateManifestForm = (
   }
   if (!isBlankOrU32TomlInteger(form.skill_workshop.max_pending_age_days)) {
     errors.push("skill_workshop.max_pending_age_days");
+  }
+  // The sampling ranges read from MODEL_PARAM_RANGES, not a second number
+  // beside it: the table is the same source the widget's own min/max and the
+  // PATCH route's ceiling come from, so a range edit lands everywhere at
+  // once instead of the validator quietly keeping yesterday's bounds.
+  for (const param of ["temperature", "top_p", "frequency_penalty", "presence_penalty"] as const) {
+    const { min, max } = MODEL_PARAM_RANGES[param];
+    // A parameter without a table max is unbound above — the table is the
+    // source, and the validator follows it rather than inventing a bound.
+    if (max === undefined) continue;
+    if (!isInRange(form.model[param], min, max)) errors.push(`model.${param}`);
   }
   // Folder rows: duplicate names produce a duplicate TOML key (hard parse
   // failure on the daemon), and `path` mirrors the kernel's rule — relative
