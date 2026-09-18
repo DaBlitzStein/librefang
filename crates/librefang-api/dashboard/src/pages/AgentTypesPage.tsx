@@ -14,6 +14,7 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useMcpServers } from "../lib/queries/mcp";
 import { useModelRoutingInertReason } from "../lib/queries/config";
+import { useModelRouterProfiles } from "../lib/queries/modelRouter";
 import {
   useCreateAgentTypeFromToml,
   useDeleteAgentType,
@@ -96,6 +97,7 @@ function AgentTypeEditor({
   // #8446: a template has no running agent to carry `routing_inert_reason`, so the Routing section reads the kernel-wide mode off the shared config cache, as the agent create form does.
   // The editor is mounted only while open, so this fetches nothing until then.
   const routingInertReasonQuery = useModelRoutingInertReason();
+  const routerProfilesQuery = useModelRouterProfiles();
 
   const [newName, setNewName] = useState("");
   const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
@@ -153,6 +155,15 @@ function AgentTypeEditor({
         ? mcpServersQuery.data.configured.map((s: { name: string }) => ({ name: s.name }))
         : [],
     [mcpServersQuery.data],
+  );
+
+  const routerProfileCatalog = useMemo<ManifestCatalogEntry[]>(
+    () =>
+      (routerProfilesQuery.data?.profiles ?? []).map((p) => ({
+        name: p.name,
+        description: [`${p.provider}/${p.model}`, p.cost_tier].join(" · "),
+      })),
+    [routerProfilesQuery.data],
   );
 
   const saving = createMutation.isPending || updateTomlMutation.isPending;
@@ -241,6 +252,8 @@ function AgentTypeEditor({
             skillCatalog={skillCatalog}
             toolCatalog={toolCatalog}
             mcpCatalog={mcpCatalog}
+            routerProfileCatalog={routerProfileCatalog}
+            routerProfilesEnabled={routerProfilesQuery.data?.enabled}
             nameField={isCreate ? "hidden" : "readonly"}
             routingInertReason={routingInertReasonQuery.data}
           />
