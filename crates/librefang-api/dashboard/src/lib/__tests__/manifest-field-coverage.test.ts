@@ -4,6 +4,9 @@ import { join } from "node:path";
 import {
   emptyManifestForm,
   ORPHAN_POLICIES,
+  SKILL_APPROVAL_POLICIES,
+  SKILL_EVOLUTION_MODES,
+  SKILL_REVIEW_MODES,
   TOOL_EXEC_BACKENDS,
   TOOL_PROFILES,
 } from "../agentManifest";
@@ -171,12 +174,18 @@ const MANIFEST_ENUM_CONSTANTS: Record<string, readonly string[]> = {
   TOOL_PROFILES,
   ORPHAN_POLICIES,
   TOOL_EXEC_BACKENDS,
+  SKILL_APPROVAL_POLICIES,
+  SKILL_REVIEW_MODES,
+  SKILL_EVOLUTION_MODES,
 };
 
 const RUST_ENUMS: Array<{ file: string; enum: string; exported: string }> = [
   { file: "agent.rs", enum: "ToolProfile", exported: "TOOL_PROFILES" },
   { file: "agent.rs", enum: "OrphanPolicy", exported: "ORPHAN_POLICIES" },
   { file: "tool_exec.rs", enum: "BackendKind", exported: "TOOL_EXEC_BACKENDS" },
+  { file: "agent.rs", enum: "ApprovalPolicy", exported: "SKILL_APPROVAL_POLICIES" },
+  { file: "agent.rs", enum: "ReviewMode", exported: "SKILL_REVIEW_MODES" },
+  { file: "agent.rs", enum: "EvolutionMode", exported: "SKILL_EVOLUTION_MODES" },
 ];
 
 /** `rename_all` → the function that turns `CamelCase` into the serialised form. */
