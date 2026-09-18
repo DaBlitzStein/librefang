@@ -1143,7 +1143,10 @@ describe("AgentManifestForm — a validation error opens its folded section", ()
 
     const details = document.querySelector('[data-section="shared_folders"]');
     expect(details).toBeTruthy();
-    // `.open` is the property React drives; see the note on the table above.
+    // `.open` is the element's own view of itself, which is what decides
+    // whether the row is on screen. `toHaveAttribute("open")` answers the same
+    // question here — React writes the attribute and the DOM reflects it — so
+    // either spelling is fine; this one is the property the browser reads.
     expect((details as HTMLDetailsElement).open).toBe(true);
   });
 
