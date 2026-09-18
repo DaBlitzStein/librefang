@@ -66,6 +66,19 @@ export interface ManifestFormState {
     min_similarity: string;
     allow_self_consolidation: "" | "true" | "false";
   };
+  // Idle thresholds before an agent may dream. `Option<f64>` / `Option<u32>`,
+  // so `""` inherits and a number overrides.
+  auto_dream_min_hours: string;
+  auto_dream_min_sessions: string;
+  // A single `Option<bool>` on its own struct — tri-state for the same reason
+  // as the rest: absent inherits the kernel's `[rl_export] enabled`.
+  rl_export: "" | "true" | "false";
+  // `[async_tasks]`: a timeout that is `Option<u64>`, and a bool that is not —
+  // `#[serde(default)]`, so `false` is the value that must not be written.
+  async_tasks: {
+    default_timeout_secs: string;
+    notify_on_timeout: boolean;
+  };
   pinned_model: string;
   workspace: string;
 
@@ -245,6 +258,7 @@ export interface ManifestExtras {
   // Same reasoning as the `thinking` and `autonomous` slots above; this is the
   // bug that was deleting keys before those existed.
   proactive_memory: TomlTable;
+  async_tasks: TomlTable;
 }
 
 export const emptyManifestExtras = (): ManifestExtras => ({
@@ -256,6 +270,7 @@ export const emptyManifestExtras = (): ManifestExtras => ({
   autonomous: {},
   routing: {},
   proactive_memory: {},
+  async_tasks: {},
 });
 
 export const emptyManifestForm = (): ManifestFormState => ({
@@ -284,6 +299,13 @@ export const emptyManifestForm = (): ManifestFormState => ({
     session_scoped_recall: "",
     min_similarity: "",
     allow_self_consolidation: "",
+  },
+  auto_dream_min_hours: "",
+  auto_dream_min_sessions: "",
+  rl_export: "",
+  async_tasks: {
+    default_timeout_secs: "",
+    notify_on_timeout: false,
   },
   pinned_model: "",
   workspace: "",
@@ -436,6 +458,10 @@ const FORM_TOP_LEVEL_KEYS = new Set([
   "profile",
   "reconcile_orphans",
   "proactive_memory",
+  "auto_dream_min_hours",
+  "auto_dream_min_sessions",
+  "rl_export",
+  "async_tasks",
   "pinned_model",
   "workspace",
   "skills_disabled",
@@ -752,6 +778,22 @@ export const serializeManifestForm = (
   if (form.reconcile_orphans !== "keep") {
     writeStringScalar(lines, "reconcile_orphans", form.reconcile_orphans);
   }
+  // Top-level, so they belong here: emitted after the first `[section]` header
+  // they would be scoped into that table and silently dropped by the daemon.
+  if (form.auto_dream_min_hours.trim() !== "") {
+    writeNumberScalar(
+      lines,
+      "auto_dream_min_hours",
+      parseFloatish(form.auto_dream_min_hours),
+    );
+  }
+  if (form.auto_dream_min_sessions.trim() !== "") {
+    writeNumberScalar(
+      lines,
+      "auto_dream_min_sessions",
+      parseInteger(form.auto_dream_min_sessions),
+    );
+  }
   if (form.assignee_wake !== "") {
     writeBoolScalar(lines, "assignee_wake", form.assignee_wake === "true");
   }
@@ -859,6 +901,11 @@ export const serializeManifestForm = (
   const safeAutonomousExtras = form.autonomous.enabled
     ? pluckSafeExtras(extras.autonomous, deferredSectionExtras, "autonomous")
     : {};
+  const safeAsyncTaskExtras = pluckSafeExtras(
+    extras.async_tasks,
+    deferredSectionExtras,
+    "async_tasks",
+  );
   const safeProactiveMemoryExtras = pluckSafeExtras(
     extras.proactive_memory,
     deferredSectionExtras,
@@ -998,6 +1045,30 @@ export const serializeManifestForm = (
         ...body,
         ...renderExtraScalars(safeProactiveMemoryExtras),
       );
+    }
+  }
+
+  // [rl_export]
+  if (form.rl_export !== "") {
+    lines.push("", "[rl_export]", `enabled = ${form.rl_export}`);
+  }
+
+  // [async_tasks]
+  {
+    const body: string[] = [];
+    writeNumberScalar(
+      body,
+      "default_timeout_secs",
+      parseInteger(form.async_tasks.default_timeout_secs),
+    );
+    // `notify_on_timeout` is `#[serde(default)]`, so `false` is the value that
+    // must not be written: emitting it would pin the agent against a later
+    // change to the compiled default.
+    if (form.async_tasks.notify_on_timeout) {
+      writeBoolScalar(body, "notify_on_timeout", true);
+    }
+    if (body.length) {
+      lines.push("", "[async_tasks]", ...body, ...renderExtraScalars(safeAsyncTaskExtras));
     }
   }
 
@@ -1591,6 +1662,21 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     form.autonomous.heartbeat_channel = asString(a.heartbeat_channel);
     form.autonomous.quiet_hours = asString(a.quiet_hours);
     extras.autonomous = stripKnown(a, FORM_AUTONOMOUS_KEYS);
+  }
+
+  form.auto_dream_min_hours = asNumberString(parsed.auto_dream_min_hours);
+  form.auto_dream_min_sessions = asNumberString(parsed.auto_dream_min_sessions);
+  form.rl_export = asTriStateBool(
+    isTomlTable(parsed.rl_export) ? parsed.rl_export.enabled : undefined,
+  );
+  if (isTomlTable(parsed.async_tasks)) {
+    const at = parsed.async_tasks;
+    form.async_tasks.default_timeout_secs = asNumberString(at.default_timeout_secs);
+    form.async_tasks.notify_on_timeout = asBoolean(at.notify_on_timeout, false);
+    extras.async_tasks = stripKnown(
+      at,
+      new Set(["default_timeout_secs", "notify_on_timeout"]),
+    );
   }
 
   // [proactive_memory]

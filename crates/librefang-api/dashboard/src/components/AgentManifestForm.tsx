@@ -53,6 +53,9 @@ import { Field } from "./ui/Field";
 import { ModelPicker } from "./ui/ModelPicker";
 import { StepLadderInput } from "./ui/StepLadderInput";
 import {
+  ASYNC_TASK_TIMEOUT_LADDER,
+  AUTO_DREAM_MIN_HOURS_LADDER,
+  AUTO_DREAM_MIN_SESSIONS_LADDER,
   COST_PER_DAY_LADDER,
   COST_PER_HOUR_LADDER,
   COST_PER_MONTH_LADDER,
@@ -74,6 +77,7 @@ import {
   TOOL_CALLS_PER_MINUTE_LADDER,
   formatBytes,
   formatCount,
+  formatHours,
   formatMillis,
   formatPercent,
   formatSeconds,
@@ -216,6 +220,8 @@ export const MANIFEST_SECTION_IDS = [
   "thinking",
   "autonomous",
   "proactive_memory",
+  "auto_dream",
+  "async_tasks",
   "routing",
   "context_injection",
   "response_format",
@@ -1336,6 +1342,71 @@ export function AgentManifestForm({
         </Field>
       </FormSection>
 
+      <FormSection
+        id="auto_dream"
+        title={t("memory.tab_dreams")}
+        defaultOpen={false}
+      >
+        {/* Both are `Option`, so both lead with inherit: an agent that has
+            never been given a threshold should not acquire one by being
+            opened and saved. */}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label={t("agents.form.auto_dream_min_hours")}>
+            <StepLadderInput
+              label={t("agents.form.auto_dream_min_hours")}
+              value={value.auto_dream_min_hours}
+              onChange={(next) => update({ auto_dream_min_hours: next })}
+              ladder={AUTO_DREAM_MIN_HOURS_LADDER}
+              formatRung={formatHours}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+            />
+          </Field>
+          <Field label={t("agents.form.auto_dream_min_sessions")}>
+            <StepLadderInput
+              label={t("agents.form.auto_dream_min_sessions")}
+              value={value.auto_dream_min_sessions}
+              onChange={(next) => update({ auto_dream_min_sessions: next })}
+              ladder={AUTO_DREAM_MIN_SESSIONS_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+            />
+          </Field>
+        </div>
+      </FormSection>
+
+      <FormSection
+        id="async_tasks"
+        title={t("agents.form.async_tasks")}
+        defaultOpen={false}
+      >
+        <Field label={t("config.fld_default_timeout_secs")}>
+          <StepLadderInput
+            label={t("config.fld_default_timeout_secs")}
+            value={value.async_tasks.default_timeout_secs}
+            onChange={(next) =>
+              update({ async_tasks: { ...value.async_tasks, default_timeout_secs: next } })
+            }
+            ladder={ASYNC_TASK_TIMEOUT_LADDER}
+            formatRung={formatSeconds}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={1}
+          />
+        </Field>
+        <p className="text-[10px] text-text-dim/70">{t("config.desc_default_timeout_secs")}</p>
+        <Toggle
+          label={t("agents.form.async_tasks_notify_on_timeout")}
+          checked={value.async_tasks.notify_on_timeout}
+          onChange={(checked) =>
+            update({ async_tasks: { ...value.async_tasks, notify_on_timeout: checked } })
+          }
+        />
+      </FormSection>
+
       <FormSection id="routing" title={t("agents.form.routing")} defaultOpen={false}>
         <Toggle
           label={t("agents.form.routing_enabled")}
@@ -1632,6 +1703,19 @@ export function AgentManifestForm({
             >
               <option value="persistent">{t("agents.form.session_persistent")}</option>
               <option value="new">{t("agents.form.session_new")}</option>
+            </select>
+          </Field>
+          <Field label={t("agents.form.rl_export")}>
+            <select
+              value={value.rl_export}
+              onChange={(e) =>
+                update({ rl_export: e.target.value as ManifestFormState["rl_export"] })
+              }
+              className={inputClass}
+            >
+              <option value="">{t("agents.form.inherit_default")}</option>
+              <option value="true">{t("common.yes")}</option>
+              <option value="false">{t("common.no")}</option>
             </select>
           </Field>
           <Field label={t("agents.form.web_search_aug")}>

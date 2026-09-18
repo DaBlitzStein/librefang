@@ -567,7 +567,12 @@
       "profile": "Tool profile",
       "reconcile_orphans": "Orphaned triggers",
       "proactive_memory_min_similarity": "Minimum similarity",
-      "proactive_memory_allow_self_consolidation": "Allow self-consolidation"
+      "proactive_memory_allow_self_consolidation": "Allow self-consolidation",
+      "rl_export": "RL export",
+      "auto_dream_min_hours": "Idle hours before dreaming",
+      "auto_dream_min_sessions": "Sessions before dreaming",
+      "async_tasks": "Async tasks",
+      "async_tasks_notify_on_timeout": "Notify on timeout"
     },
     "delete_confirm": "Ви впевнені, що хочете видалити агента \"{{name}}\"?",
     "prompts": "Промпти",

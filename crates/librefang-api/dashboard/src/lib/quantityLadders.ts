@@ -129,10 +129,33 @@ export const MAX_CONCURRENT_INVOCATIONS_LADDER = [1, 2, 4, 8, 16, 32] as const;
 /** Cosine similarity floor. A fraction, so the rungs are fractions. */
 export const MIN_SIMILARITY_LADDER = [0.3, 0.5, 0.6, 0.7, 0.8, 0.9] as const;
 
+/** Durations held in hours — "6 h", "1 day". */
+export function formatHours(value: number): string {
+  if (value >= 24 && value % 24 === 0) return `${value / 24} d`;
+  return `${value} h`;
+}
+
 /** Fractions as percentages — "70%", which is how a floor is talked about. */
 export function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
 }
+
+// -------------------------------------------------------------- memory
+
+/**
+ * How long an agent must have been idle before it may dream.
+ *
+ * Hours, and coarse: the value exists to stop an agent consolidating on every
+ * turn, so the useful range is "a few hours" to "a few days" and nothing in
+ * between means anything.
+ */
+export const AUTO_DREAM_MIN_HOURS_LADDER = [1, 6, 12, 24, 48, 72] as const;
+
+/** How many sessions must have accumulated before it may dream. */
+export const AUTO_DREAM_MIN_SESSIONS_LADDER = [1, 5, 10, 25, 50, 100] as const;
+
+/** Wall-clock timeout for the async tasks an agent spawns. */
+export const ASYNC_TASK_TIMEOUT_LADDER = [30, 60, 300, 900, 1800, 3600] as const;
 
 // ------------------------------------------------------------ autonomous
 

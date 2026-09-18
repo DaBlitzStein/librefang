@@ -2018,3 +2018,112 @@ describe("proactive_memory overrides", () => {
     expect(round).toContain("auto_retrieve = false");
   });
 });
+
+// `auto_dream_min_hours` and `auto_dream_min_sessions` are top-level scalars,
+// and the manifest format has no way to say "the table is over" — a bare key
+// after the first `[section]` header belongs to that section. Emitting them
+// with the tables would scope them into whichever one came last, where the
+// daemon would never look; that is the bug `fallback_models = []` hit before,
+// in the other direction.
+describe("top-level scalars stay above the first table header", () => {
+  it("emits the auto-dream thresholds before any section", () => {
+    const form = emptyManifestForm();
+    form.auto_dream_min_hours = "12";
+    form.auto_dream_min_sessions = "25";
+    // Force at least one table so there is a header to be scoped into.
+    form.thinking.enabled = true;
+
+    const toml = serializeManifestForm(form);
+    const firstHeader = toml.indexOf("\n[");
+
+    expect(firstHeader).toBeGreaterThan(-1);
+    for (const key of ["auto_dream_min_hours = 12", "auto_dream_min_sessions = 25"]) {
+      const at = toml.indexOf(key);
+      expect(at, `${key} missing`).toBeGreaterThan(-1);
+      expect(
+        at,
+        `${key} was emitted after the first table header, so it would be read ` +
+          `as a key of that table and never reach the manifest field it names.`,
+      ).toBeLessThan(firstHeader);
+    }
+  });
+
+  it("round-trips both thresholds", () => {
+    const form = emptyManifestForm();
+    form.auto_dream_min_hours = "12.5";
+    form.auto_dream_min_sessions = "25";
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.auto_dream_min_hours).toBe("12.5");
+    expect(parsed.form.auto_dream_min_sessions).toBe("25");
+  });
+});
+
+describe("rl_export and async_tasks", () => {
+  it("omits rl_export while it inherits, and writes the table when set", () => {
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("rl_export");
+
+    const form = emptyManifestForm();
+    form.rl_export = "false";
+    const toml = serializeManifestForm(form);
+
+    expect(toml).toContain("[rl_export]");
+    // An explicit `false` is an override of the kernel switch and must be
+    // written; that is the whole difference the tri-state exists to keep.
+    expect(toml).toContain("enabled = false");
+  });
+
+  it("round-trips rl_export in all three states", () => {
+    for (const value of ["", "true", "false"] as const) {
+      const form = emptyManifestForm();
+      form.rl_export = value;
+      const parsed = parseManifestToml(serializeManifestForm(form));
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.form.rl_export).toBe(value);
+    }
+  });
+
+  it("omits async_tasks when nothing is overridden", () => {
+    const toml = serializeManifestForm(emptyManifestForm());
+    expect(toml).not.toContain("[async_tasks]");
+    expect(toml).not.toContain("notify_on_timeout");
+  });
+
+  it("writes notify_on_timeout only when true, and round-trips the pair", () => {
+    const quiet = emptyManifestForm();
+    quiet.async_tasks.default_timeout_secs = "300";
+    // `notify_on_timeout` is `#[serde(default)]`, so `false` is the state that
+    // must not be written: emitting it would pin the agent against a later
+    // change to the compiled default.
+    expect(serializeManifestForm(quiet)).not.toContain("notify_on_timeout");
+
+    const loud = emptyManifestForm();
+    loud.async_tasks = { default_timeout_secs: "300", notify_on_timeout: true };
+    const toml = serializeManifestForm(loud);
+    expect(toml).toContain("[async_tasks]");
+    expect(toml).toContain("notify_on_timeout = true");
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.async_tasks).toEqual(loud.async_tasks);
+  });
+
+  it("preserves keys inside [async_tasks] the form does not render", () => {
+    const source = [
+      'name = "x"',
+      "",
+      "[async_tasks]",
+      "default_timeout_secs = 300",
+      "max_concurrent = 8",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(serializeManifestForm(parsed.form, parsed.extras)).toContain("max_concurrent = 8");
+  });
+});
