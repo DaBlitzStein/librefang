@@ -27,6 +27,11 @@ export interface ManifestFormState {
   // global default — writing `false` where the operator meant "inherit" would
   // silently pin the agent against a later deployment-wide change.
   assignee_wake: "" | "true" | "false";
+  // Plain booleans whose serde default is `true`, so the form carries the same
+  // default and only writes the key when it differs. See `emptyManifestForm`.
+  show_progress: boolean;
+  cache_context: boolean;
+  mcp_disabled: boolean;
   pinned_model: string;
   workspace: string;
 
@@ -222,6 +227,9 @@ export const emptyManifestForm = (): ManifestFormState => ({
   session_mode: "persistent",
   web_search_augmentation: "auto",
   assignee_wake: "",
+  show_progress: true,
+  cache_context: false,
+  mcp_disabled: false,
   pinned_model: "",
   workspace: "",
   schedule: { mode: "reactive" },
@@ -364,6 +372,9 @@ const FORM_TOP_LEVEL_KEYS = new Set([
   "session_mode",
   "web_search_augmentation",
   "assignee_wake",
+  "show_progress",
+  "cache_context",
+  "mcp_disabled",
   "pinned_model",
   "workspace",
   "skills_disabled",
@@ -622,6 +633,9 @@ export const serializeManifestForm = (
   if (form.web_search_augmentation !== "auto") {
     writeStringScalar(lines, "web_search_augmentation", form.web_search_augmentation);
   }
+  if (!form.show_progress) writeBoolScalar(lines, "show_progress", false);
+  if (form.cache_context) writeBoolScalar(lines, "cache_context", true);
+  if (form.mcp_disabled) writeBoolScalar(lines, "mcp_disabled", true);
   if (form.assignee_wake !== "") {
     writeBoolScalar(lines, "assignee_wake", form.assignee_wake === "true");
   }
@@ -1279,6 +1293,9 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     WEB_SEARCH_MODES,
     "auto",
   );
+  form.show_progress = asBoolean(parsed.show_progress, true);
+  form.cache_context = asBoolean(parsed.cache_context, false);
+  form.mcp_disabled = asBoolean(parsed.mcp_disabled, false);
   form.assignee_wake =
     typeof parsed.assignee_wake === "boolean"
       ? parsed.assignee_wake

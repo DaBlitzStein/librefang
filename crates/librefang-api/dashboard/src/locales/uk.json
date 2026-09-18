@@ -553,7 +553,12 @@
       "remove_fallback": "видалити fallback",
       "remove_context_injection": "видалити інʼєкцію контексту",
       "name_required": "Enter a name.",
-      "param_range_error": "Enter a number between {{min}} and {{max}}."
+      "param_range_error": "Enter a number between {{min}} and {{max}}.",
+      "show_progress": "Show progress",
+      "show_progress_hint": "Stream the agent's steps to the session instead of only the final reply.",
+      "cache_context": "Cache context",
+      "cache_context_hint": "Reuse the cached prompt prefix across turns. Cheaper, but a changed system prompt can serve a stale prefix.",
+      "mcp_disabled": "Disable MCP servers"
     },
     "delete_confirm": "Ви впевнені, що хочете видалити агента \"{{name}}\"?",
     "prompts": "Промпти",

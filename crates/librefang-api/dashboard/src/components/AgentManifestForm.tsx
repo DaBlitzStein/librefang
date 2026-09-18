@@ -871,6 +871,13 @@ export function AgentManifestForm({
             />
           )}
         </Field>
+        <div className="mt-2">
+          <Toggle
+            label={t("agents.form.mcp_disabled")}
+            checked={value.mcp_disabled}
+            onChange={(checked) => update({ mcp_disabled: checked })}
+          />
+        </div>
       </Section>
 
       <FormSection id="scheduling"
@@ -1579,6 +1586,29 @@ export function AgentManifestForm({
             checked={value.generate_identity_files}
             onChange={(checked) => update({ generate_identity_files: checked })}
           />
+          {/* The hint sits beside the toggle rather than inside it: `Toggle`
+              renders one inline row, and teaching it to wrap would move the
+              five toggles above that do not have one. */}
+          <div>
+            <Toggle
+              label={t("agents.form.show_progress")}
+              checked={value.show_progress}
+              onChange={(checked) => update({ show_progress: checked })}
+            />
+            <p className="text-[10px] text-text-dim/70 mt-0.5 ml-6">
+              {t("agents.form.show_progress_hint")}
+            </p>
+          </div>
+          <div>
+            <Toggle
+              label={t("agents.form.cache_context")}
+              checked={value.cache_context}
+              onChange={(checked) => update({ cache_context: checked })}
+            />
+            <p className="text-[10px] text-text-dim/70 mt-0.5 ml-6">
+              {t("agents.form.cache_context_hint")}
+            </p>
+          </div>
         </div>
       </FormSection>
 

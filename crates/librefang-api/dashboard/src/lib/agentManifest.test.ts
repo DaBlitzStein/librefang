@@ -1795,3 +1795,64 @@ describe("assignee_wake tri-state", () => {
     }
   });
 });
+
+// Booleans whose serde default is not `false`.
+//
+// `show_progress` is declared `#[serde(default = "default_true")]` in
+// `AgentManifest`, so omitting the key means the agent *shows* progress. A
+// form that defaulted it to `false` and emitted the key would turn the
+// progress indicator off for every agent opened and saved without anyone
+// asking — a silent behaviour change on a value the operator never touched.
+// The two defaults have to agree in both directions: what the form writes when
+// the operator says nothing, and what it reads back when the file says nothing.
+describe("booleans whose default is true", () => {
+  it("agrees with serde on the default for an absent key", () => {
+    const parsed = parseManifestToml('name = "x"\n');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    // The Rust side fills this with `default_true`.
+    expect(parsed.form.show_progress).toBe(true);
+    // And this one with `#[serde(default)]`, i.e. false.
+    expect(parsed.form.cache_context).toBe(false);
+    expect(parsed.form.mcp_disabled).toBe(false);
+  });
+
+  it("omits show_progress while it holds the default", () => {
+    const form = emptyManifestForm();
+    expect(form.show_progress).toBe(true);
+    expect(serializeManifestForm(form)).not.toContain("show_progress");
+  });
+
+  it("emits show_progress only when it is turned off", () => {
+    const form = emptyManifestForm();
+    form.show_progress = false;
+    expect(serializeManifestForm(form)).toContain("show_progress = false");
+  });
+
+  it("omits the false-by-default flags while they are false", () => {
+    const form = emptyManifestForm();
+    const toml = serializeManifestForm(form);
+    expect(toml).not.toContain("cache_context");
+    expect(toml).not.toContain("mcp_disabled");
+  });
+
+  it("round-trips every state of all three", () => {
+    for (const show of [true, false]) {
+      for (const cache of [true, false]) {
+        for (const mcp of [true, false]) {
+          const form = emptyManifestForm();
+          form.show_progress = show;
+          form.cache_context = cache;
+          form.mcp_disabled = mcp;
+
+          const parsed = parseManifestToml(serializeManifestForm(form));
+          expect(parsed.ok).toBe(true);
+          if (!parsed.ok) return;
+          expect(parsed.form.show_progress).toBe(show);
+          expect(parsed.form.cache_context).toBe(cache);
+          expect(parsed.form.mcp_disabled).toBe(mcp);
+        }
+      }
+    }
+  });
+});
