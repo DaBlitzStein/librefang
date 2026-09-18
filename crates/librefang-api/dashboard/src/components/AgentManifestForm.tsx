@@ -267,8 +267,8 @@ export const MANIFEST_SECTION_IDS = [
   "proactive_memory",
   "auto_dream",
   "channel_overrides",
-  "compaction",
   "skill_workshop",
+  "compaction",
   "async_tasks",
   "routing",
   "context_injection",
@@ -1806,7 +1806,6 @@ export function AgentManifestForm({
         </AdvancedFields>
       </FormSection>
 
-      <FormSection id="compaction" shows={shows} title={t("config.sec_compaction")} defaultOpen={false}>
       <FormSection
         id="skill_workshop" shows={shows}
         title={t("agents.form.skill_workshop")}
@@ -1914,6 +1913,7 @@ export function AgentManifestForm({
         </AdvancedFields>
       </FormSection>
 
+      <FormSection id="compaction" shows={shows} title={t("config.sec_compaction")} defaultOpen={false}>
         {/* Nine overrides of the kernel's compaction defaults, all `Option`, so
             every one of them leads with inherit and an untouched table is not
             written at all. */}
