@@ -15,6 +15,18 @@ interface StepLadderInputProps {
    * (#7780), and capping against a placeholder would hide rungs that may well work.
    */
   cap?: number;
+  /**
+   * How a rung is written on its button. Defaults to `formatTokens`.
+   *
+   * A rung is a number and the number is not the whole answer: 268435456
+   * bytes is a memory quota nobody reads, and 1048576 as the fifth rung of a
+   * budget ladder reads as neither "1M tokens" nor "1 MB per hour". The
+   * default suits token counts because that is what the control was built
+   * for; a caller whose unit is bytes, seconds, milliseconds or dollars
+   * passes the formatter that says so, rather than dropping a bare integer in
+   * front of the operator and calling it a preset.
+   */
+  formatRung?: (value: number) => string;
   /** Label for the "let the model / system decide" rung. */
   inheritLabel: string;
   /** Label for the rung that opens the free-entry field. */
@@ -60,6 +72,7 @@ export function StepLadderInput({
   onChange,
   ladder,
   cap,
+  formatRung = formatTokens,
   inheritLabel,
   customLabel,
   customPlaceholder,
@@ -145,7 +158,7 @@ export function StepLadderInput({
             className={rungClass(!isCustom && numeric === rung)}
             onClick={() => pick(String(rung))}
           >
-            {formatTokens(rung)}
+            {formatRung(rung)}
           </button>
         ))}
         <button

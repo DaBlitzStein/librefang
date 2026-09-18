@@ -668,3 +668,45 @@ describe("AgentManifestForm — validation paths are routable", () => {
     ).toEqual([]);
   });
 });
+
+describe("AgentManifestForm — quantity ladders", () => {
+  // The ladders replaced bare number boxes, and a number box carries
+  // constraints the ladder's custom rung has to keep carrying.
+  //
+  // The dollar fields are the ones where dropping them is invisible: an unset
+  // `step` defaults to 1, so `min={0}` alone makes 0.50 a step mismatch and the
+  // browser marks the input invalid — a legitimate half-dollar cap that the
+  // form would refuse to submit, with the reason visible only to the browser.
+  it("keeps the custom cost box able to accept cents", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    const group = screen.getByRole("group", { name: "agents.form.cost_per_hour" });
+    await user.click(within(group).getByRole("button", { name: "model_param.custom" }));
+
+    // The custom box is a sibling of the `role="group"` div, not a child of
+    // it, so it is reached by its own label rather than through `within`.
+    const input = screen.getByRole("spinbutton", {
+      name: "agents.form.cost_per_hour — model_param.custom",
+    });
+    expect(input).toHaveAttribute("step", "0.01");
+    expect(input).toHaveAttribute("min", "0");
+  });
+
+  // Each converted field must still offer the inherit state, which is what an
+  // empty value means and what the manifest writes when the agent has no
+  // opinion. A ladder without it would force every agent to state a number.
+  it("offers the inherit rung on a converted quantity", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    // Two gates: the fields live in a collapsed section, and they only render
+    // once autonomy is on — a disabled feature's tuning knobs are not shown.
+    await user.click(screen.getByText("agents.form.autonomous"));
+    await user.click(screen.getByLabelText("agents.form.autonomous_enabled"));
+
+    const group = screen.getByRole("group", { name: "agents.form.max_iterations" });
+    expect(
+      within(group).getByRole("button", { name: "model_param.inherit" }),
+    ).toBeInTheDocument();
+  });
+});
