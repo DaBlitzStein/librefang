@@ -185,10 +185,10 @@ export interface ManifestFormState {
     api_key_env: string;
     base_url: string;
     // `[model] mode` and `[model] router_override` — the profile router's
-    // per-agent settings. They were the only manifest fields edited by a panel
-    // rather than by this form (#…): `GET/PUT /api/agents/{id}/model_routing`
-    // reads and writes exactly these, inside the agent's own manifest, so
-    // leaving them out of the form would have made the panel irreplaceable.
+    // per-agent settings, read and written inside the agent's own manifest
+    // (#8424). They are manifest fields, so this form is where they are
+    // edited; the routing panel that shared them was removed rather than
+    // kept as a second writer.
     mode: "fixed" | "flexible";
     // `AgentRouterOverride` is `Option` in Rust: every field below is only
     // meaningful once at least one of them is set, and the table is left out
@@ -235,7 +235,7 @@ export interface ManifestFormState {
     max_network_bytes_per_hour: string;
     /**
      * `Option<f32>`, clamped to 0.01..=1.0 at enforcement time, not at write
-     * time — so the form neither clamps it nor refuses it, it reports it.
+     * time — so the form just carries what the operator wrote.
      * `""` is the absent key, which means the compiled default of 0.2 applies.
      */
     burst_ratio: string;

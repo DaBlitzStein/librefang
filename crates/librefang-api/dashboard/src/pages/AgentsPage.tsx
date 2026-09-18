@@ -3345,14 +3345,14 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Schedule tab — editable triggers / cron / continuous-mode panel
-  // (issue #4924). The read-only summary that lived here previously is now
-  // owned by AgentSchedulePanel, which talks to the existing CRUD endpoints
-  // (POST/PATCH/DELETE /api/triggers and /api/cron/jobs, PATCH /api/agents/{id}
-  // for `schedule`). The synthetic "Last 14 runs" bar chart was a placeholder
-  // (no real per-fire telemetry endpoint yet) and was dropped in favour of
-  // real editing affordances — restore it once a per-agent run-history feed
-  // exists.
+  // ---------- Schedule tab — runtime registries only (issue #4924).
+  // AgentSchedulePanel owns the CRUD endpoints (POST/PATCH/DELETE
+  // /api/triggers and /api/cron/jobs). The manifest's [schedule] — mode,
+  // cron, conditions — is edited by the manifest form the same tab hosts,
+  // not by a second surface here. The synthetic "Last 14 runs" bar chart was
+  // a placeholder (no real per-fire telemetry endpoint yet) and was dropped
+  // in favour of real editing affordances — restore it once a per-agent
+  // run-history feed exists.
   // ---------- Routing tab — the manifest form is the tab's whole body now.
   // Model routing (fixed vs router-chosen, profile allowlist, cost budget)
   // lives in the model section it hosts; there is no second writer to it.
