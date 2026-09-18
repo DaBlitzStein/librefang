@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  FORM_TOP_LEVEL_KEYS,
   emptyManifestExtras,
   emptyManifestForm,
   parseManifestToml,
@@ -2279,4 +2280,76 @@ describe("the schedule variants keep the keys the form does not render", () => {
       expect(again.form.schedule.mode).toBe(variant);
     });
   }
+});
+
+// The class this phase spent its time on: a table the form claims as its own
+// stops reaching `topLevel`, so every key it has no widget for is consumed on
+// parse and never re-emitted.
+// `[thinking] reasoning_mode`, `[autonomous] block_stall_degrade_after`,
+// `[rl_export]` and the `[schedule.<variant>]` tables were all this, and each
+// was found separately — one at a time, each by a measurement taken for
+// something else.
+//
+// Fixing instances one at a time is how a class survives, so this asks the
+// question of every table instead of the one that last broke.
+describe("every table the form owns keeps the keys it does not render", () => {
+  // Table-shaped by construction. A scalar has nowhere to hide a second key,
+  // and a row-shaped `[[array]]` carries its extras inside the row object.
+  // The `[schedule]` root is a closed enum, so its unknown key has to sit one
+  // level down — which is exactly why its slot is one level deep too.
+  const TABLES: ReadonlyArray<readonly [string, string]> = [
+    ["model", "[model]\nzz_unknown = 7"],
+    ["resources", "[resources]\nzz_unknown = 7"],
+    ["capabilities", "[capabilities]\nzz_unknown = 7"],
+    ["thinking", "[thinking]\nzz_unknown = 7"],
+    ["autonomous", "[autonomous]\nzz_unknown = 7"],
+    ["routing", "[routing]\nzz_unknown = 7"],
+    ["proactive_memory", "[proactive_memory]\nzz_unknown = 7"],
+    ["async_tasks", "[async_tasks]\nzz_unknown = 7"],
+    ["rl_export", "[rl_export]\nzz_unknown = 7"],
+    ["exec_policy", "[exec_policy]\nzz_unknown = 7"],
+    ["response_format", "[response_format]\nzz_unknown = 7"],
+    ["schedule", '[schedule.periodic]\ncron = "0 9 * * *"\nzz_unknown = 7'],
+  ];
+
+  for (const [table, body] of TABLES) {
+    it(`[${table}]`, () => {
+      const parsed = parseManifestToml(`name = "x"\n\n${body}\n`);
+      expect(parsed.ok, `[${table}] did not parse`).toBe(true);
+      if (!parsed.ok) return;
+
+      const round = serializeManifestForm(parsed.form, parsed.extras);
+      expect(
+        round,
+        `[${table}] dropped a key the form has no widget for, so opening an ` +
+          `agent in this editor and saving removes it from the manifest.`,
+      ).toContain("zz_unknown = 7");
+    });
+  }
+
+  it("sweeps every table the form claims, not a hand-kept list", () => {
+    // A table added to the form without an entry above would be swept by
+    // nothing — which is the state `[rl_export]` was in when it was found.
+    const objectValued = Object.entries(emptyManifestForm())
+      .filter(([, v]) => v !== null && typeof v === "object" && !Array.isArray(v))
+      .map(([k]) => k);
+    const swept = TABLES.map(([t]) => t);
+    const unswept = objectValued.filter(
+      (k) => FORM_TOP_LEVEL_KEYS.has(k) && !swept.includes(k),
+    );
+
+    expect(
+      unswept,
+      `these form-owned tables are swept by nothing: ${unswept.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("never names a table the form does not actually own", () => {
+    // A rename that misses this list would leave the sweep green and wrong.
+    const stale = TABLES.map(([t]) => t).filter((t) => !FORM_TOP_LEVEL_KEYS.has(t));
+    expect(
+      stale,
+      `the sweep lists tables the form does not claim: ${stale.join(", ")}`,
+    ).toEqual([]);
+  });
 });

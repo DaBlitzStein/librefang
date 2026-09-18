@@ -453,7 +453,9 @@ function readCapabilityRouting(capTable: TomlTable, key: CapabilityRoutingKey): 
 
 // Keys the form fully owns within each scope. Anything else is preserved
 // as `extras` and re-emitted on serialize.
-const FORM_TOP_LEVEL_KEYS = new Set([
+// Exported so the sweep test can assert that every table the form claims is
+// actually swept for unknown-key loss, rather than trusting a hand-kept list.
+export const FORM_TOP_LEVEL_KEYS = new Set([
   "name",
   "version",
   "description",
