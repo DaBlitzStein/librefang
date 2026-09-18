@@ -6,6 +6,10 @@
 // survives a round-trip back through the form.
 
 import { parse, stringify, TomlError, type TomlTable } from "smol-toml";
+// The parameter range table is the single source of truth for a model
+// parameter's ceiling (#8332); the validator reads it rather than restating
+// a number beside it. agentModelPatch already imports from the same module.
+import { MODEL_PARAM_RANGES } from "../components/ui/ModelParamField";
 
 let _nextUid = 1;
 export const generateUid = (): string => String(_nextUid++);
@@ -998,21 +1002,36 @@ const isBlankOrUnsignedTomlInteger = (raw: string): boolean =>
 const U32_TOML_MAX = 4294967295n;
 
 /**
- * The blank-or-unsigned check, plus the field's real ceiling.
+ * The blank-or-unsigned check at an explicit ceiling.
  *
  * The whole-number check above accepts anything up to `TOML_INTEGER_MAX`
  * (2^63-1), which is the `usize`/`u64` half of the manifest's counts. A field
  * whose Rust side is `Option<u32>` stops one power of two lower: serde
  * rejects `4294967296` with the same 400 the whole-number check was written
  * to close, so the ceiling belongs to the field's type, not to the shared
- * parser. `max_concurrent_invocations` is the u32 field this form carries
- * (`crates/librefang-types/src/agent.rs:1480`); `max_history_messages`
- * beside it is `Option<usize>` (agent.rs:1452) and takes larger values.
+ * parser. Where a field carries a ceiling in `MODEL_PARAM_RANGES` (#8332),
+ * the table's number is the one used — one source of truth.
  */
-const isBlankOrU32TomlInteger = (raw: string): boolean => {
+const isBlankOrUnsignedTomlIntegerAtMost = (raw: string, ceiling: bigint): boolean => {
   const value = parseUnsignedTomlInteger(raw);
-  return raw.trim() === "" || (value !== null && BigInt(value) <= U32_TOML_MAX);
+  return raw.trim() === "" || (value !== null && BigInt(value) <= ceiling);
 };
+
+/** Every `Option<u32>` count the form edits (`crates/librefang-types/src/agent.rs`). */
+const isBlankOrU32TomlInteger = (raw: string): boolean =>
+  isBlankOrUnsignedTomlIntegerAtMost(raw, U32_TOML_MAX);
+
+/**
+ * max_tokens's ceiling comes from the range table (#8332), not a second
+ * number beside this one. The table's max for the parameter IS `u32::MAX`,
+ * so table and type agree today — the fallback only names what still applies
+ * if the table entry ever loses its max: the Rust field is `Option<u32>`
+ * (agent.rs:949), and that bound outlives any table edit.
+ */
+const MODEL_MAX_TOKENS_CEILING =
+  MODEL_PARAM_RANGES.max_tokens.max !== undefined
+    ? BigInt(MODEL_PARAM_RANGES.max_tokens.max)
+    : U32_TOML_MAX;
 
 /**
  * Parse a float that may legitimately be negative.
@@ -1316,8 +1335,13 @@ export const serializeManifestForm = (
   writeNumberScalar(modelBody, "top_p", parseSignedFloat(form.model.top_p));
   writeNumberScalar(modelBody, "frequency_penalty", parseSignedFloat(form.model.frequency_penalty));
   writeNumberScalar(modelBody, "presence_penalty", parseSignedFloat(form.model.presence_penalty));
-  writeNumberScalar(modelBody, "context_window", parseInteger(form.model.context_window));
-  writeNumberScalar(modelBody, "max_output_tokens", parseInteger(form.model.max_output_tokens));
+  // The two u64 token counts carry as strings, the way the resource quotas
+  // already do: their type reaches past JavaScript's safe integer range
+  // (TOML's signed-64-bit bound is u64's practical wire ceiling), and the
+  // Number-based parseInteger dropped anything past 2^53-1 on the floor —
+  // a value the validator now accepts because the file format can carry it.
+  writeIntegerScalar(modelBody, "context_window", parseUnsignedTomlInteger(form.model.context_window));
+  writeIntegerScalar(modelBody, "max_output_tokens", parseUnsignedTomlInteger(form.model.max_output_tokens));
   writeStringScalar(modelBody, "api_key_env", form.model.api_key_env.trim());
   writeStringScalar(modelBody, "base_url", form.model.base_url.trim());
   // `fixed` is `ModelMode`'s default, so it is the value that must not be
@@ -1966,6 +1990,42 @@ export const validateManifestForm = (
   }
   if (!isBlankOrU32TomlInteger(form.max_concurrent_invocations)) {
     errors.push("max_concurrent_invocations");
+  }
+  // The model's three integer parameters. max_tokens is `Option<u32>` and its
+  // ceiling lives in MODEL_PARAM_RANGES (#8332) — the table's number, not a
+  // second one here. The two token counts beside it are `Option<u64>`: no
+  // typo reaches their ceiling through TOML, so what the validator owes them
+  // is the shape — a negative or a non-integer used to pass and parseInteger
+  // dropped the key from the file without a word.
+  if (
+    !isBlankOrUnsignedTomlIntegerAtMost(form.model.max_tokens, MODEL_MAX_TOKENS_CEILING)
+  ) {
+    errors.push("model.max_tokens");
+  }
+  if (!isBlankOrUnsignedTomlInteger(form.model.context_window)) {
+    errors.push("model.context_window");
+  }
+  if (!isBlankOrUnsignedTomlInteger(form.model.max_output_tokens)) {
+    errors.push("model.max_output_tokens");
+  }
+  // The rest of the `Option<u32>` inventory — same ceiling, same shape.
+  if (!isBlankOrU32TomlInteger(form.autonomous.heartbeat_timeout_secs)) {
+    errors.push("autonomous.heartbeat_timeout_secs");
+  }
+  if (!isBlankOrU32TomlInteger(form.auto_dream_min_sessions)) {
+    errors.push("auto_dream_min_sessions");
+  }
+  if (!isBlankOrU32TomlInteger(form.compaction.max_retries)) {
+    errors.push("compaction.max_retries");
+  }
+  if (!isBlankOrU32TomlInteger(form.compaction.max_loop_steps_before_aggregate)) {
+    errors.push("compaction.max_loop_steps_before_aggregate");
+  }
+  if (!isBlankOrU32TomlInteger(form.compaction.strip_reasoning_after_turns)) {
+    errors.push("compaction.strip_reasoning_after_turns");
+  }
+  if (!isBlankOrU32TomlInteger(form.skill_workshop.max_pending_age_days)) {
+    errors.push("skill_workshop.max_pending_age_days");
   }
   if (!isInRange(form.model.temperature, 0, 2)) errors.push("model.temperature");
   if (!isInRange(form.model.top_p, 0, 1)) errors.push("model.top_p");

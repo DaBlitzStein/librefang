@@ -7,6 +7,7 @@ import {
   preservedWorkspaceNamesFromExtras,
   serializeManifestForm,
   validateManifestForm,
+  type ManifestFormState,
 } from "./agentManifest";
 
 describe("agentManifest serializer", () => {
@@ -2966,4 +2967,102 @@ describe("resources burst_ratio round-trips through the form", () => {
     // "" is the absent key, which means the compiled default of 0.2 applies.
     expect(toml).not.toContain("burst_ratio");
   });
+});
+
+// The u32 ceiling the concurrency counter got is the shape of a family, not a
+// one-off: seven more fields the form carries deserialize into `Option<u32>`
+// (crates/librefang-types/src/agent.rs — heartbeat_timeout_secs :118,
+// max_tokens :949, auto_dream_min_sessions :1423, compaction's max_retries
+// :1649, max_loop_steps_before_aggregate :1655, strip_reasoning_after_turns
+// :1658, skill_workshop's max_pending_age_days :2040), and the two token
+// counts beside max_tokens are `Option<u64>`. None of them validated anything:
+// a value past a field's real ceiling reached the TOML and came back as a 400
+// with no field named — or, for the shapes parseInteger refuses, silently
+// vanished from the file. The ceiling belongs to the field's type; where
+// MODEL_PARAM_RANGES carries one for a parameter (#8332), the table is the
+// source of truth.
+describe("every integer count validates against its Rust type", () => {
+  const U32_FIELDS: ReadonlyArray<{
+    path: string;
+    set: (form: ManifestFormState, v: string) => void;
+  }> = [
+    { path: "model.max_tokens", set: (f, v) => { f.model.max_tokens = v; } },
+    {
+      path: "autonomous.heartbeat_timeout_secs",
+      set: (f, v) => { f.autonomous.heartbeat_timeout_secs = v; },
+    },
+    { path: "auto_dream_min_sessions", set: (f, v) => { f.auto_dream_min_sessions = v; } },
+    { path: "compaction.max_retries", set: (f, v) => { f.compaction.max_retries = v; } },
+    {
+      path: "compaction.max_loop_steps_before_aggregate",
+      set: (f, v) => { f.compaction.max_loop_steps_before_aggregate = v; },
+    },
+    {
+      path: "compaction.strip_reasoning_after_turns",
+      set: (f, v) => { f.compaction.strip_reasoning_after_turns = v; },
+    },
+    {
+      path: "skill_workshop.max_pending_age_days",
+      set: (f, v) => { f.skill_workshop.max_pending_age_days = v; },
+    },
+  ];
+
+  for (const { path, set } of U32_FIELDS) {
+    it(`${path} rejects a value past u32::MAX`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      set(form, "4294967296");
+      expect(validateManifestForm(form)).toContain(path);
+    });
+
+    it(`${path} accepts u32::MAX itself`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      set(form, "4294967295");
+      expect(validateManifestForm(form)).not.toContain(path);
+    });
+  }
+
+  // `context_window` and `max_output_tokens` are `Option<u64>` — no typo
+  // reaches their ceiling through TOML, whose integers stop at the signed
+  // 64-bit bound. Their defect is the silent drop instead: a negative or a
+  // non-integer passed the validator and parseInteger made the key vanish.
+  for (const [param, key] of [
+    ["context_window", "model.context_window"],
+    ["max_output_tokens", "model.max_output_tokens"],
+  ] as const) {
+    it(`${key} reports a negative instead of dropping it`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      form.model[param] = "-5";
+      expect(validateManifestForm(form)).toContain(key);
+    });
+
+    it(`${key} reports a non-integer instead of dropping it`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      form.model[param] = "1.5";
+      expect(validateManifestForm(form)).toContain(key);
+    });
+
+    // The ceiling is not global: the u64 field takes the value that caps its
+    // u32 sibling without complaint.
+    it(`${key} stays valid at u32::MAX + 1`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      form.model[param] = "4294967296";
+      expect(validateManifestForm(form)).not.toContain(key);
+    });
+
+    it(`${key} round-trips past JavaScript's safe integer range`, () => {
+      const parsed = parseManifestToml(
+        `name = "a"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\ncontext_window = 9223372036854775806\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      const round = serializeManifestForm(parsed.form, parsed.extras);
+      expect(round).toContain("context_window = 9223372036854775806");
+    });
+  }
 });
