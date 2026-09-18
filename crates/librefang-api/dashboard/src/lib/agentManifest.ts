@@ -51,6 +51,21 @@ export interface ManifestFormState {
     | "full"
     | "custom";
   reconcile_orphans: "keep" | "warn" | "delete";
+  // Per-agent overrides of the kernel's `[proactive_memory]`. Every switch is
+  // tri-state for the same reason as `assignee_wake`: `memory.rs` declares them
+  // `Option<bool>` with `skip_serializing_if`, so "inherit the global value"
+  // and "explicitly off" are different keys on disk, and writing `false` where
+  // the operator meant inherit pins the agent against a later change to the
+  // deployment's setting.
+  proactive_memory: {
+    enabled: "" | "true" | "false";
+    auto_memorize: "" | "true" | "false";
+    auto_retrieve: "" | "true" | "false";
+    extraction_model: string;
+    session_scoped_recall: "" | "true" | "false";
+    min_similarity: string;
+    allow_self_consolidation: "" | "true" | "false";
+  };
   pinned_model: string;
   workspace: string;
 
@@ -224,6 +239,12 @@ export interface ManifestExtras {
   // that slot exists above.
   autonomous: TomlTable;
   routing: TomlTable;
+  // `[proactive_memory]` is about to join `FORM_TOP_LEVEL_KEYS`, which means
+  // its table never reaches `topLevel` — so without a slot of its own, every
+  // key the form has no widget for is consumed on parse and never re-emitted.
+  // Same reasoning as the `thinking` and `autonomous` slots above; this is the
+  // bug that was deleting keys before those existed.
+  proactive_memory: TomlTable;
 }
 
 export const emptyManifestExtras = (): ManifestExtras => ({
@@ -234,6 +255,7 @@ export const emptyManifestExtras = (): ManifestExtras => ({
   thinking: {},
   autonomous: {},
   routing: {},
+  proactive_memory: {},
 });
 
 export const emptyManifestForm = (): ManifestFormState => ({
@@ -254,6 +276,15 @@ export const emptyManifestForm = (): ManifestFormState => ({
   tool_exec_backend: "",
   profile: "",
   reconcile_orphans: "keep",
+  proactive_memory: {
+    enabled: "",
+    auto_memorize: "",
+    auto_retrieve: "",
+    extraction_model: "",
+    session_scoped_recall: "",
+    min_similarity: "",
+    allow_self_consolidation: "",
+  },
   pinned_model: "",
   workspace: "",
   schedule: { mode: "reactive" },
@@ -404,6 +435,7 @@ const FORM_TOP_LEVEL_KEYS = new Set([
   "tool_exec_backend",
   "profile",
   "reconcile_orphans",
+  "proactive_memory",
   "pinned_model",
   "workspace",
   "skills_disabled",
@@ -480,6 +512,16 @@ const FORM_CAPABILITY_KEYS = new Set([
   "speech",
 ]);
 const FORM_THINKING_KEYS = new Set(["budget_tokens", "stream_thinking"]);
+const FORM_PROACTIVE_MEMORY_KEYS = new Set([
+  "enabled",
+  "auto_memorize",
+  "auto_retrieve",
+  "extraction_model",
+  "session_scoped_recall",
+  "min_similarity",
+  "allow_self_consolidation",
+]);
+
 const FORM_AUTONOMOUS_KEYS = new Set([
   "max_iterations",
   "max_restarts",
@@ -653,6 +695,21 @@ const writeIntegerScalar = (lines: string[], key: string, value: string | null):
   if (value === null) return;
   lines.push(`${key} = ${value}`);
 };
+/**
+ * Writes a tri-state boolean, and writes nothing for `""`.
+ *
+ * The absent case is the point: `""` means "inherit the global value", and
+ * emitting `= false` for it would turn a decision the operator did not make
+ * into one they did, pinned in the file where nobody looks for it.
+ */
+const writeTriStateBool = (
+  lines: string[],
+  key: string,
+  value: "" | "true" | "false",
+): void => {
+  if (value !== "") writeBoolScalar(lines, key, value === "true");
+};
+
 const writeBoolScalar = (lines: string[], key: string, value: boolean): void => {
   lines.push(`${key} = ${value}`);
 };
@@ -802,6 +859,11 @@ export const serializeManifestForm = (
   const safeAutonomousExtras = form.autonomous.enabled
     ? pluckSafeExtras(extras.autonomous, deferredSectionExtras, "autonomous")
     : {};
+  const safeProactiveMemoryExtras = pluckSafeExtras(
+    extras.proactive_memory,
+    deferredSectionExtras,
+    "proactive_memory",
+  );
   const safeRoutingExtras = form.routing.enabled
     ? pluckSafeExtras(extras.routing, deferredSectionExtras, "routing")
     : {};
@@ -913,6 +975,30 @@ export const serializeManifestForm = (
     writeNumberScalar(body, "simple_threshold", parseInteger(form.routing.simple_threshold));
     writeNumberScalar(body, "complex_threshold", parseInteger(form.routing.complex_threshold));
     lines.push("", "[routing]", ...body, ...renderExtraScalars(safeRoutingExtras));
+  }
+
+  // [proactive_memory]
+  {
+    const body: string[] = [];
+    const pm = form.proactive_memory;
+    writeTriStateBool(body, "enabled", pm.enabled);
+    writeTriStateBool(body, "auto_memorize", pm.auto_memorize);
+    writeTriStateBool(body, "auto_retrieve", pm.auto_retrieve);
+    writeStringScalar(body, "extraction_model", pm.extraction_model.trim());
+    writeTriStateBool(body, "session_scoped_recall", pm.session_scoped_recall);
+    writeNumberScalar(body, "min_similarity", parseFloatish(pm.min_similarity));
+    writeTriStateBool(body, "allow_self_consolidation", pm.allow_self_consolidation);
+    // Emitted only when it says something: an all-inherit table would be a
+    // `[proactive_memory]` header that overrides nothing, which reads as a
+    // configured section and is not one.
+    if (body.length) {
+      lines.push(
+        "",
+        "[proactive_memory]",
+        ...body,
+        ...renderExtraScalars(safeProactiveMemoryExtras),
+      );
+    }
   }
 
   // [[fallback_models]]
@@ -1320,6 +1406,14 @@ const asEnum = <T extends readonly string[]>(
  * fallback must be one of `allowed`) cannot express. Widening `asEnum` instead
  * would make every one of its callers handle a `""` their field cannot hold.
  */
+/**
+ * A Rust `Option<bool>` as the form holds it: `""` inherits, the two strings
+ * are an explicit override. An explicit `false` is a statement and has to
+ * survive, which is why this is not a plain boolean with a default.
+ */
+const asTriStateBool = (v: unknown): "" | "true" | "false" =>
+  typeof v === "boolean" ? (v ? "true" : "false") : "";
+
 const asOptionalEnum = <T extends readonly string[]>(
   v: unknown,
   allowed: T,
@@ -1376,12 +1470,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.tool_exec_backend = asOptionalEnum(parsed.tool_exec_backend, TOOL_EXEC_BACKENDS);
   form.profile = asOptionalEnum(parsed.profile, TOOL_PROFILES);
   form.reconcile_orphans = asEnum(parsed.reconcile_orphans, ORPHAN_POLICIES, "keep");
-  form.assignee_wake =
-    typeof parsed.assignee_wake === "boolean"
-      ? parsed.assignee_wake
-        ? "true"
-        : "false"
-      : "";
+  form.assignee_wake = asTriStateBool(parsed.assignee_wake);
   form.pinned_model = asString(parsed.pinned_model);
   form.workspace = asString(parsed.workspace);
   form.skills_disabled = asBoolean(parsed.skills_disabled, false);
@@ -1502,6 +1591,21 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     form.autonomous.heartbeat_channel = asString(a.heartbeat_channel);
     form.autonomous.quiet_hours = asString(a.quiet_hours);
     extras.autonomous = stripKnown(a, FORM_AUTONOMOUS_KEYS);
+  }
+
+  // [proactive_memory]
+  if (isTomlTable(parsed.proactive_memory)) {
+    const pm = parsed.proactive_memory;
+    form.proactive_memory.enabled = asTriStateBool(pm.enabled);
+    form.proactive_memory.auto_memorize = asTriStateBool(pm.auto_memorize);
+    form.proactive_memory.auto_retrieve = asTriStateBool(pm.auto_retrieve);
+    form.proactive_memory.extraction_model = asString(pm.extraction_model);
+    form.proactive_memory.session_scoped_recall = asTriStateBool(pm.session_scoped_recall);
+    form.proactive_memory.min_similarity = asNumberString(pm.min_similarity);
+    form.proactive_memory.allow_self_consolidation = asTriStateBool(
+      pm.allow_self_consolidation,
+    );
+    extras.proactive_memory = stripKnown(pm, FORM_PROACTIVE_MEMORY_KEYS);
   }
 
   // [routing]

@@ -126,6 +126,14 @@ export const MIN_HISTORY_MESSAGES = 4;
  */
 export const MAX_CONCURRENT_INVOCATIONS_LADDER = [1, 2, 4, 8, 16, 32] as const;
 
+/** Cosine similarity floor. A fraction, so the rungs are fractions. */
+export const MIN_SIMILARITY_LADDER = [0.3, 0.5, 0.6, 0.7, 0.8, 0.9] as const;
+
+/** Fractions as percentages — "70%", which is how a floor is talked about. */
+export function formatPercent(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
 // ------------------------------------------------------------ autonomous
 
 /** Iterations per invocation. */

@@ -67,6 +67,7 @@ import {
   MAX_RESTARTS_LADDER,
   MIN_HISTORY_MESSAGES,
   MEMORY_BYTES_LADDER,
+  MIN_SIMILARITY_LADDER,
   NETWORK_BYTES_PER_HOUR_LADDER,
   ROUTING_THRESHOLD_LADDER,
   THINKING_BUDGET_LADDER,
@@ -74,6 +75,7 @@ import {
   formatBytes,
   formatCount,
   formatMillis,
+  formatPercent,
   formatSeconds,
   formatUsd,
 } from "../lib/quantityLadders";
@@ -213,6 +215,7 @@ export const MANIFEST_SECTION_IDS = [
   "fallback_models",
   "thinking",
   "autonomous",
+  "proactive_memory",
   "routing",
   "context_injection",
   "response_format",
@@ -279,6 +282,32 @@ export function AgentManifestForm({
   // than being repeated at every call site. An unshown section renders
   // nothing at all rather than a collapsed shell: a heading the operator
   // cannot open is still a heading they will look for.
+  // Five of the seven keys in `[proactive_memory]` are `Option<bool>`, and
+  // they are the same control three times over: inherit, on, off. One helper
+  // rather than five copies, so the absent option cannot be dropped from one
+  // of them.
+  const TriStateField = ({
+    label,
+    value,
+    onChange,
+  }: {
+    label: string;
+    value: "" | "true" | "false";
+    onChange: (next: "" | "true" | "false") => void;
+  }) => (
+    <Field label={label}>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as "" | "true" | "false")}
+        className={inputClass}
+      >
+        <option value="">{t("agents.form.inherit_default")}</option>
+        <option value="true">{t("common.yes")}</option>
+        <option value="false">{t("common.no")}</option>
+      </select>
+    </Field>
+  );
+
   const FormSection = ({
     id,
     ...props
@@ -305,6 +334,11 @@ export function AgentManifestForm({
     onChange({ ...value, thinking: { ...value.thinking, ...patch } });
   const updateAutonomous = (patch: Partial<ManifestFormState["autonomous"]>): void =>
     onChange({ ...value, autonomous: { ...value.autonomous, ...patch } });
+  const updateProactiveMemory = (
+    patch: Partial<ManifestFormState["proactive_memory"]>,
+  ): void =>
+    onChange({ ...value, proactive_memory: { ...value.proactive_memory, ...patch } });
+
   const updateRouting = (patch: Partial<ManifestFormState["routing"]>): void =>
     onChange({ ...value, routing: { ...value.routing, ...patch } });
 
@@ -1235,6 +1269,71 @@ export function AgentManifestForm({
             </Field>
           </div>
         )}
+      </FormSection>
+
+      <FormSection
+        id="proactive_memory"
+        title={t("config.sec_proactive_memory")}
+        defaultOpen={false}
+      >
+        {/* Every field is an override of a kernel default, so every one of them
+            leads with "inherit" — an agent that configures nothing here is the
+            normal case, and the table is not written at all when that is what
+            it says. */}
+        <div className="grid grid-cols-2 gap-3">
+          <TriStateField
+            label={t("memory.proactive_enabled")}
+            value={value.proactive_memory.enabled}
+            onChange={(next) => updateProactiveMemory({ enabled: next })}
+          />
+          <TriStateField
+            label={t("config.fld_auto_memorize")}
+            value={value.proactive_memory.auto_memorize}
+            onChange={(next) => updateProactiveMemory({ auto_memorize: next })}
+          />
+          <TriStateField
+            label={t("config.fld_auto_retrieve")}
+            value={value.proactive_memory.auto_retrieve}
+            onChange={(next) => updateProactiveMemory({ auto_retrieve: next })}
+          />
+          <TriStateField
+            label={t("memory.session_scoped_recall")}
+            value={value.proactive_memory.session_scoped_recall}
+            onChange={(next) => updateProactiveMemory({ session_scoped_recall: next })}
+          />
+          <TriStateField
+            label={t("agents.form.proactive_memory_allow_self_consolidation")}
+            value={value.proactive_memory.allow_self_consolidation}
+            onChange={(next) =>
+              updateProactiveMemory({ allow_self_consolidation: next })
+            }
+          />
+          <Field label={t("config.fld_extraction_model")} hint={t("config.desc_extraction_model")}>
+            <input
+              type="text"
+              value={value.proactive_memory.extraction_model}
+              onChange={(e) =>
+                updateProactiveMemory({ extraction_model: e.target.value })
+              }
+              placeholder={t("agents.form.inherit_default")}
+              className={inputClass}
+            />
+          </Field>
+        </div>
+        <Field label={t("agents.form.proactive_memory_min_similarity")}>
+          <StepLadderInput
+            label={t("agents.form.proactive_memory_min_similarity")}
+            value={value.proactive_memory.min_similarity}
+            onChange={(next) => updateProactiveMemory({ min_similarity: next })}
+            ladder={MIN_SIMILARITY_LADDER}
+            formatRung={formatPercent}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={0}
+            max={1}
+            step={0.01}
+          />
+        </Field>
       </FormSection>
 
       <FormSection id="routing" title={t("agents.form.routing")} defaultOpen={false}>

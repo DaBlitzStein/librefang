@@ -1944,3 +1944,77 @@ describe("optional manifest overrides", () => {
     }
   });
 });
+
+// `[proactive_memory]` is a per-agent override table: every field is
+// `Option<T>` on the Rust side with `skip_serializing_if`, so "inherit" and
+// "explicitly off" are different keys on disk.
+describe("proactive_memory overrides", () => {
+  it("writes no table at all when every field inherits", () => {
+    // A `[proactive_memory]` header that overrides nothing reads as a
+    // configured section and is not one.
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("[proactive_memory]");
+  });
+
+  it("writes the table as soon as one field is set", () => {
+    const form = emptyManifestForm();
+    form.proactive_memory.auto_retrieve = "false";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[proactive_memory]");
+    // An explicit `false` is an override and must be written; omitting it here
+    // is the bug that turns "this agent does not retrieve" into "this agent
+    // does whatever the deployment says".
+    expect(toml).toContain("auto_retrieve = false");
+  });
+
+  it("round-trips every field", () => {
+    const form = emptyManifestForm();
+    form.proactive_memory = {
+      enabled: "true",
+      auto_memorize: "false",
+      auto_retrieve: "true",
+      extraction_model: "ollama/llama3",
+      session_scoped_recall: "false",
+      min_similarity: "0.7",
+      allow_self_consolidation: "true",
+    };
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.proactive_memory).toEqual(form.proactive_memory);
+  });
+
+  // The reason this table has its own slot in `ManifestExtras`.
+  //
+  // The form knows seven keys. Adding the table to `FORM_TOP_LEVEL_KEYS` means
+  // its contents stop reaching `topLevel`, so without a slot of its own every
+  // key the form has no widget for is consumed on parse and never re-emitted —
+  // which is how `[thinking] reasoning_mode` and `[autonomous]
+  // block_stall_degrade_after` were being deleted before those slots existed.
+  // Opening an agent in the editor and saving must not remove a key upstream
+  // added.
+  it("preserves keys inside the table that the form does not render", () => {
+    const source = [
+      'name = "x"',
+      "",
+      "[proactive_memory]",
+      "auto_retrieve = false",
+      "consolidation_interval_turns = 42",
+      "",
+      "[proactive_memory.tuning]",
+      'mode = "eager"',
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("consolidation_interval_turns = 42");
+    expect(round).toContain("[proactive_memory.tuning]");
+    expect(round).toContain('mode = "eager"');
+    // And the key the form does own still round-trips through the same pass.
+    expect(round).toContain("auto_retrieve = false");
+  });
+});

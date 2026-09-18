@@ -565,7 +565,9 @@
       "max_concurrent_invocations_hint": "How many runs of this agent may overlap. A persistent session clamps this to 1, because two writers to one history are undefined.",
       "tool_exec_backend": "Tool execution backend",
       "profile": "Tool profile",
-      "reconcile_orphans": "Orphaned triggers"
+      "reconcile_orphans": "Orphaned triggers",
+      "proactive_memory_min_similarity": "Minimum similarity",
+      "proactive_memory_allow_self_consolidation": "Allow self-consolidation"
     },
     "delete_confirm": "Are you sure you want to delete agent \"{{name}}\"?",
     "prompts": "Prompts",

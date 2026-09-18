@@ -65,7 +65,6 @@ const NO_SURFACE: Record<string, string> = {
   auto_evolve: "elsewhere: toggled from the drawer's Skills tab",
   channel_overrides: "missing: 29-key per-channel table, no widget",
   skill_workshop: "missing: no widget anywhere",
-  proactive_memory: "missing: per-agent override has no widget (the global key does)",
   compaction: "missing: no widget anywhere",
   context_engine: "missing: no widget anywhere",
   rl_export: "missing: no widget anywhere",
