@@ -299,23 +299,7 @@
       "avatar_type_rejected": "Awatar musi być obrazem PNG, JPEG, GIF lub WebP. SVG nie jest akceptowany.",
       "avatar_too_large": "Ten obraz ma {{size}} MB, a limit to {{limit}} MB."
     },
-    "model": "Model",
-    "provider": "Dostawca",
-    "max_tokens": "Maks. tokenów",
-    "temperature": "Temperatura",
     "no_matching": "Brak agentów pasujących do wyszukiwania.",
-    "system_prompt": "Prompt systemowy",
-    "system_prompt_placeholder": "Ten agent nie ma jeszcze promptu systemowego.",
-    "system_prompt_saved": "Zapisano prompt systemowy",
-    "bind_from_library": "Powiąż z biblioteki",
-    "bind": "Powiąż",
-    "prompt_bound": "Prompt powiązany z biblioteki",
-    "prompt_active": "aktywny",
-    "prompt_versions_load_err": "Nie udało się załadować wersji promptu",
-    "no_prompt_versions": "Brak zapisanych wersji promptu dla tego agenta.",
-    "web_search": "Wyszukiwanie w sieci",
-    "web_search_augmentation": "Rozszerzenie wyszukiwania",
-    "web_search_augmentation_hint": "Automatycznie przeszukuj sieć i wstrzykuj wyniki do kontekstu przed wywołaniem LLM",
     "capabilities": "Możliwości",
     "skills": "Umiejętności",
     "tags": "Tagi",
@@ -533,7 +517,6 @@
       "name_placeholder": "np. mój-agent",
       "name_locked_hint": "Identyfikowane przez adres URL, nie przez to pole — zmiana nazwy tutaj nie ma żadnego efektu. Zmień nazwę w nagłówku agenta — to pole jest tutaj zablokowane.",
       "module_placeholder": "np. default",
-      "model_id_placeholder": "np. gpt-4o",
       "preferences_hint": "Ustawienia tego agenta mają pierwszeństwo przed ustawieniami modelu. Pozostaw pole na „dziedzicz domyślne”, aby użyć ustawienia modelu.",
       "limits_hint": "Limity opisują, co akceptuje ten endpoint. Wartość powyżej limitu modelu jest tu oznaczana, ale wysyłana bez zmian — decyduje dostawca.",
       "over_limit_warning": "Powyżej limitu tego modelu ({{limit}}). Zapisano i wysłano tak, jak wpisano; dostawca może to odrzucić.",
@@ -644,7 +627,6 @@
       "channel_overrides_group_ownership": "Ownership"
     },
     "delete_confirm": "Czy na pewno chcesz usunąć agenta \"{{name}}\"?",
-    "prompts": "Prompty",
     "prompts_experiments": {
       "title": "Prompty i eksperymenty",
       "versions_tab": "Wersje",
@@ -870,9 +852,6 @@
     "delete_success": "Agent usunięty",
     "delete_title": "Usunąć agenta?",
     "edit_name": "Nazwa agenta",
-    "model_save_failed": "Nie udało się zaktualizować modelu",
-    "model_saved": "Zaktualizowano model",
-    "use_global_default": "Użyj globalnego ustawienia domyślnego",
     "rename_failed": "Nie udało się zmienić nazwy agenta",
     "rename_hand_disabled": "Agenci zarządzani przez hands nie mogą mieć zmienianych nazw",
     "rename_hint": "Kliknij, aby zmienić nazwę",
@@ -997,9 +976,6 @@
       "manifest_history": "Historia manifestu",
       "manifest_history_load_err": "Nie udało się wczytać historii manifestu.",
       "no_history": "Nie zarejestrowano jeszcze żadnych zmian konfiguracji.",
-      "description": "Opis",
-      "description_placeholder": "Nie ustawiono opisu.",
-      "description_saved": "Opis zapisany",
       "channels": "Kanały",
       "channels_hint": "Puste oznacza dostępność ze wszystkich skonfigurowanych kanałów.",
       "channels_search_placeholder": "Szukaj kanałów…",
@@ -1010,28 +986,49 @@
       "mcp_pending_title": "Serwery MCP niepodłączone",
       "mcp_pending_desc": "Przyznane w agent.toml, ale brak aktywnego połączenia — nie dostarczają narzędzi. Sprawdź serwer na stronie MCP; uprawnienie aktywuje się po połączeniu."
     },
-    "tab": {
-      "conversation": "Rozmowa",
-      "memory": "Pamięć",
-      "skills": "Umiejętności",
-      "tools": "Narzędzia",
-      "schedule": "Harmonogram",
-      "logs": "Logi",
-      "history": "Historia",
-      "routing": "Routing"
+    "brief": {
+      "last_activity": "Ostatnia aktywność",
+      "never": "nigdy",
+      "no_model": "brak modelu"
     },
-    "configure": "Konfiguruj",
+    "group": {
+      "general": "Ogólne",
+      "model": "Model i routing",
+      "tools": "Narzędzia i umiejętności",
+      "memory": "Pamięć",
+      "limits": "Limity i koszty",
+      "channels": "Kanały",
+      "planning": "Planowanie",
+      "conversation": "Rozmowa"
+    },
+    "info": {
+      "logs": "Logi",
+      "memory": "Pamięć",
+      "prompts": "Prompty i eksperymenty",
+      "history": "Historia"
+    },
+    "config": {
+      "advanced_mode": "Tryb zaawansowany",
+      "advanced_hint": "pokaż wszystkie pola, nie tylko codzienne"
+    },
+    "tabs": {
+      "main": "Widok agenta",
+      "info": "Informacje o agencie",
+      "config_groups": "Grupy konfiguracji"
+    },
+    "tab": {
+      "logs_info": "logi i informacje",
+      "config": "konfiguracja"
+    },
     "select_an_agent": "Wybierz agenta",
     "select_an_agent_hint": "Wybierz agenta po lewej stronie, aby sprawdzić jego sesje, pamięć, umiejętności i logi na żywo.",
     "tools_declared_count": "zadeklarowane",
     "tools_declared_title": "Zadeklarowane narzędzia",
     "tools_declared_desc": "Narzędzia, których ten agent może używać. Pozostaw puste, aby uzyskać nieograniczony dostęp do wszystkich narzędzi.",
-    "providers_error_loading": "Błąd ładowania",
-    "no_providers": "Brak dostawców",
-    "select_provider_first": "Najpierw wybierz dostawcę",
     "token_usage_title": "Zużycie tokenów",
     "token_injected_total": "Wstrzykiwane na żądanie",
-    "token_recent": "Ostatnie wywołania"
+    "token_recent": "Ostatnie wywołania",
+    "use_global_default": "Użyj globalnego ustawienia domyślnego"
   },
   "providers": {
     "title": "Dostawcy",

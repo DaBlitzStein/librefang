@@ -1050,3 +1050,113 @@ describe("AgentManifestForm — the workshop is not nested inside compaction", (
     expect(document.querySelector('[data-section="skill_workshop"]')).toBeNull();
   });
 });
+
+// The inherit-the-deployment-default capability, which the unified editor lost
+// when the drawer's model editor went: it used to send `provider = "default"`
+// and the daemon resolves that (and an empty provider) to whatever the kernel
+// boots with (`kernel/llm_drivers.rs:178`). Without a way back, an agent pinned
+// to one model could never be unpinned — the picker cannot emit an empty
+// commit, so the only route was hand-editing `agent.toml`.
+//
+// Driven through the serializer as well as the control: `provider = "default"`
+// is what the daemon reads, and a control that set the state without the
+// serializer carrying it would be a capability that looks restored and is not.
+describe("AgentManifestForm — inheriting the deployment default model", () => {
+  const pinned = () => {
+    const form = emptyManifestForm();
+    form.name = "pinned-agent";
+    form.model.provider = "anthropic";
+    form.model.model = "claude-sonnet-5";
+    return form;
+  };
+
+  // Matched by its English label, not the key: this file's i18n mock resolves
+  // `defaultValue`, which is what the control ships to an operator.
+  const resetControl = () =>
+    screen.getByRole("button", { name: /use global default/i });
+
+  it("offers a way back to the global default from a pinned model", () => {
+    render(<Harness initialState={pinned()} />);
+    expect(resetControl()).toBeInTheDocument();
+  });
+
+  it("resets the pair to the sentinel the daemon resolves", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | null = null;
+    render(<Harness initialState={pinned()} onState={(next) => { latest = next; }} />);
+
+    await user.click(resetControl());
+
+    expect(latest).not.toBeNull();
+    expect(latest!.model.provider).toBe("default");
+    expect(latest!.model.model).toBe("default");
+
+    // And the file the daemon reads carries it.
+    const toml = serializeManifestForm(latest!, emptyManifestExtras());
+    expect(toml).toContain('provider = "default"');
+    expect(toml).toContain('model = "default"');
+  });
+});
+
+// A validation error inside a folded section has to open that section. The
+// inner `AdvancedFields` opens its own fold and `Field` marks the control, but
+// the section's outer `<details>` is the one the operator has to see through:
+// with it closed the marked field is `aria-invalid=1` and invisible, which is
+// the same failure the group jump in AgentsPage exists to prevent one level up.
+//
+// Every section that can host one of the validator's paths is listed, not just
+// the five that were broken — the three that worked would have caught a
+// regression here, and they are the shape the others had to copy.
+describe("AgentManifestForm — a validation error opens its folded section", () => {
+  const cases: Array<[string, string[]]> = [
+    ["scheduling", ["schedule.cron"]],
+    ["response_format", ["response_format.schema"]],
+    ["autonomous", ["autonomous.heartbeat_timeout_secs"]],
+    ["compaction", ["compaction.max_retries"]],
+    ["compaction", ["compaction.max_loop_steps_before_aggregate"]],
+    ["compaction", ["compaction.strip_reasoning_after_turns"]],
+    ["lifecycle", ["max_history_messages"]],
+    ["lifecycle", ["max_concurrent_invocations"]],
+    ["auto_dream", ["auto_dream_min_sessions"]],
+    ["skill_workshop", ["skill_workshop.max_pending_age_days"]],
+  ];
+
+  it.each(cases)("opens %s for %s", (section, path) => {
+    // `new Set(path)`, not `new Set([path])`: the case's second element is
+    // already the list of paths, and wrapping it again puts an array in the
+    // set, which `has()` then answers false for — every section reads closed
+    // and the test looks like it is finding a real defect.
+    render(<Harness invalidFields={new Set(path)} />);
+
+    const details = document.querySelector(`[data-section="${section}"]`);
+    expect(details, `no section rendered for ${section}`).toBeTruthy();
+    expect((details as HTMLDetailsElement).open).toBe(true);
+  });
+
+  // `shared_folders` keys its errors by row, so the section opens when any of
+  // its rendered workspaces is the one complained about.
+  it("opens shared_folders for the row the error names", () => {
+    const form = emptyManifestForm();
+    form.name = "an-agent";
+    form.workspaces = [{ _uid: "u1", name: "docs", path: "", mode: "rw" }];
+    render(<Harness initialState={form} invalidFields={new Set(["workspaces.u1.path"])} />);
+
+    const details = document.querySelector('[data-section="shared_folders"]');
+    expect(details).toBeTruthy();
+    // `.open` is the element's own view of itself, which is what decides
+    // whether the row is on screen. `toHaveAttribute("open")` answers the same
+    // question here — React writes the attribute and the DOM reflects it — so
+    // either spelling is fine; this one is the property the browser reads.
+    expect((details as HTMLDetailsElement).open).toBe(true);
+  });
+
+  // And it does not open a section the error is not about: an always-open
+  // section would defeat the point of folding the rest.
+  it("leaves a section the error does not name closed", () => {
+    render(<Harness invalidFields={new Set(["compaction.max_retries"])} />);
+
+    expect(
+      (document.querySelector('[data-section="skill_workshop"]') as HTMLDetailsElement).open,
+    ).toBe(false);
+  });
+});

@@ -1,7 +1,7 @@
 // `AgentAppearanceSection` — the emoji / avatar editor in the agent detail
 // drawer (#8339). Tested directly rather than through `AgentsPage`, which has
-// ~20 hooks and no render harness; that is the same reason `SystemPromptSection`
-// is exported.
+// ~20 hooks and no render harness; that is the same reason `AgentBrief` and
+// `ChannelsSection` are exported.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";

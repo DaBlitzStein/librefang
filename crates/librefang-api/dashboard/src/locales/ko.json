@@ -299,23 +299,7 @@
       "avatar_type_rejected": "아바타는 PNG, JPEG, GIF 또는 WebP 이미지여야 합니다. SVG는 허용되지 않습니다.",
       "avatar_too_large": "이 이미지는 {{size}}MB이며, 한도는 {{limit}}MB입니다."
     },
-    "model": "모델",
-    "provider": "공급자",
-    "max_tokens": "최대 토큰",
-    "temperature": "온도",
     "no_matching": "검색어와 일치하는 에이전트가 없습니다.",
-    "system_prompt": "시스템 프롬프트",
-    "system_prompt_placeholder": "이 에이전트에는 아직 시스템 메시지가 없습니다.",
-    "system_prompt_saved": "시스템 프롬프트가 저장되었습니다.",
-    "bind_from_library": "라이브러리에서 바인딩",
-    "bind": "바인딩",
-    "prompt_bound": "라이브러리에서 바인딩된 프롬프트",
-    "prompt_active": "활성",
-    "prompt_versions_load_err": "프롬프트 버전을 로드하지 못했습니다.",
-    "no_prompt_versions": "아직 이 에이전트에 대해 저장된 프롬프트 버전이 없습니다.",
-    "web_search": "웹 검색",
-    "web_search_augmentation": "검색 강화",
-    "web_search_augmentation_hint": "LLM 호출 전에 웹을 자동 검색하고 결과를 컨텍스트에 삽입합니다.",
     "capabilities": "기능",
     "skills": "기술",
     "tags": "태그",
@@ -533,7 +517,6 @@
       "name_placeholder": "예를 들어 내 에이전트",
       "name_locked_hint": "URL로 식별되며 이 필드가 아닙니다 — 여기서 이름을 바꿔도 적용되지 않습니다. 이름 변경은 에이전트 헤더에서 해주세요 — 이 필드는 잠겨 있습니다.",
       "module_placeholder": "예를 들어 기본",
-      "model_id_placeholder": "예를 들어 gpt-4o",
       "preferences_hint": "이 에이전트의 설정이 모델 설정보다 우선합니다. “기본값 상속”으로 두면 모델 설정이 적용됩니다.",
       "limits_hint": "한도는 이 엔드포인트가 허용하는 범위를 나타냅니다. 모델 한도를 초과하면 여기에 표시되지만 값은 그대로 전송되며, 수락 여부는 공급자가 결정합니다.",
       "over_limit_warning": "이 모델의 한도 {{limit}}을(를) 초과합니다. 입력한 값 그대로 저장·전송되며 공급자가 거부할 수 있습니다.",
@@ -644,7 +627,6 @@
       "channel_overrides_group_ownership": "Ownership"
     },
     "delete_confirm": "\"{{name}}\" 에이전트를 삭제하시겠습니까?",
-    "prompts": "프롬프트",
     "prompts_experiments": {
       "title": "프롬프트 및 실험",
       "versions_tab": "버전",
@@ -867,9 +849,6 @@
     "delete_success": "에이전트가 삭제되었습니다.",
     "delete_title": "에이전트를 삭제하시겠습니까?",
     "edit_name": "에이전트 이름",
-    "model_save_failed": "모델을 업데이트하지 못했습니다.",
-    "model_saved": "모델이 업데이트되었습니다.",
-    "use_global_default": "전역 기본 모델 사용",
     "rename_failed": "에이전트 이름을 바꾸지 못했습니다.",
     "rename_hand_disabled": "핸드가 관리하는 에이전트는 이름을 바꿀 수 없습니다.",
     "rename_hint": "이름을 바꾸려면 클릭하세요.",
@@ -994,9 +973,6 @@
       "manifest_history": "매니페스트 기록",
       "manifest_history_load_err": "매니페스트 기록을 불러오지 못했습니다.",
       "no_history": "아직 기록된 구성 변경 사항이 없습니다.",
-      "description": "설명",
-      "description_placeholder": "설명이 설정되지 않았습니다.",
-      "description_saved": "설명이 저장되었습니다",
       "channels": "채널",
       "channels_hint": "비어 있으면 설정된 모든 채널에서 접근 가능합니다.",
       "channels_search_placeholder": "채널 검색…",
@@ -1007,28 +983,49 @@
       "mcp_pending_title": "MCP 서버 미연결",
       "mcp_pending_desc": "agent.toml에 부여되었지만 라이브 연결이 없어 도구를 제공하지 않습니다. MCP 페이지에서 서버를 확인하세요. 연결되면 부여가 활성화됩니다."
     },
-    "tab": {
-      "conversation": "대화",
-      "memory": "메모리",
-      "skills": "기술",
-      "tools": "도구",
-      "schedule": "일정",
-      "logs": "로그",
-      "history": "기록",
-      "routing": "라우팅"
+    "brief": {
+      "last_activity": "최근 활동",
+      "never": "없음",
+      "no_model": "모델 없음"
     },
-    "configure": "구성",
+    "group": {
+      "general": "일반",
+      "model": "모델 및 라우팅",
+      "tools": "도구 및 기술",
+      "memory": "메모리",
+      "limits": "한도 및 비용",
+      "channels": "채널",
+      "planning": "계획",
+      "conversation": "대화"
+    },
+    "info": {
+      "logs": "로그",
+      "memory": "메모리",
+      "prompts": "프롬프트 및 실험",
+      "history": "기록"
+    },
+    "config": {
+      "advanced_mode": "고급 모드",
+      "advanced_hint": "일상적인 필드뿐 아니라 모든 필드를 표시합니다"
+    },
+    "tabs": {
+      "main": "에이전트 보기",
+      "info": "에이전트 정보",
+      "config_groups": "구성 그룹"
+    },
+    "tab": {
+      "logs_info": "로그 및 정보",
+      "config": "설정"
+    },
     "select_an_agent": "에이전트를 선택하세요",
     "select_an_agent_hint": "세션, 메모리, 스킬, 라이브 로그를 검사하려면 왼쪽에서 에이전트를 선택하세요.",
     "tools_declared_count": "선언하다",
     "tools_declared_title": "선언된 도구",
     "tools_declared_desc": "이 에이전트가 사용할 수 있는 도구입니다. 모든 도구에 제한 없이 액세스하려면 비워 두세요.",
-    "providers_error_loading": "로드 중 오류 발생",
-    "no_providers": "제공업체 없음",
-    "select_provider_first": "먼저 제공업체를 선택하세요.",
     "token_usage_title": "토큰 사용량",
     "token_injected_total": "요청당 주입량",
-    "token_recent": "최근 호출"
+    "token_recent": "최근 호출",
+    "use_global_default": "전역 기본 모델 사용"
   },
   "providers": {
     "title": "공급자",

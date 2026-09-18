@@ -299,23 +299,7 @@
       "avatar_type_rejected": "An avatar must be a PNG, JPEG, GIF or WebP image. SVG is not accepted.",
       "avatar_too_large": "That image is {{size}} MB; the limit is {{limit}} MB."
     },
-    "model": "Model",
-    "provider": "Provider",
-    "max_tokens": "Max Tokens",
-    "temperature": "Temperature",
     "no_matching": "No agents matching your search.",
-    "system_prompt": "System Prompt",
-    "system_prompt_placeholder": "This agent has no system prompt yet.",
-    "system_prompt_saved": "System prompt saved",
-    "bind_from_library": "Bind from library",
-    "bind": "Bind",
-    "prompt_bound": "Prompt bound from library",
-    "prompt_active": "active",
-    "prompt_versions_load_err": "Failed to load prompt versions",
-    "no_prompt_versions": "No saved prompt versions for this agent yet.",
-    "web_search": "Web Search",
-    "web_search_augmentation": "Search Augmentation",
-    "web_search_augmentation_hint": "Auto-search the web and inject results into context before LLM call",
     "capabilities": "Capabilities",
     "skills": "Skills",
     "tags": "Tags",
@@ -533,7 +517,6 @@
       "name_placeholder": "e.g. my-agent",
       "name_locked_hint": "Identified by the URL, not this field — renaming here has no effect. Rename from the agent header instead — this field is locked here.",
       "module_placeholder": "e.g. default",
-      "model_id_placeholder": "e.g. gpt-4o",
       "preferences_hint": "This agent's settings win over the model's. Leave a field on “inherit default” to use the model's setting instead.",
       "limits_hint": "Limits describe what this endpoint accepts. Asking for more than the model allows is flagged here but sent unchanged — the provider decides.",
       "over_limit_warning": "Above this model's limit of {{limit}}. Saved and sent as entered; the provider may reject it.",
@@ -644,7 +627,6 @@
       "channel_overrides_group_ownership": "Ownership"
     },
     "delete_confirm": "Are you sure you want to delete agent \"{{name}}\"?",
-    "prompts": "Prompts",
     "prompts_experiments": {
       "title": "Prompts & Experiments",
       "versions_tab": "Versions",
@@ -868,9 +850,6 @@
     "delete_success": "Agent deleted",
     "delete_title": "Delete agent?",
     "edit_name": "Agent name",
-    "model_save_failed": "Failed to update model",
-    "model_saved": "Model updated",
-    "use_global_default": "Use global default",
     "rename_failed": "Failed to rename agent",
     "rename_hand_disabled": "Hand-managed agents cannot be renamed",
     "rename_hint": "Click to rename",
@@ -995,9 +974,6 @@
       "manifest_history": "Manifest history",
       "manifest_history_load_err": "Failed to load manifest history.",
       "no_history": "No config changes recorded yet.",
-      "description": "Description",
-      "description_placeholder": "No description set.",
-      "description_saved": "Description saved",
       "channels": "Channels",
       "channels_hint": "Empty means reachable from every configured channel.",
       "channels_search_placeholder": "Search channels…",
@@ -1008,28 +984,49 @@
       "mcp_pending_title": "MCP servers not connected",
       "mcp_pending_desc": "Granted in agent.toml but no live connection, so they contribute no tools. Check the server on the MCP page; the grant activates as soon as it connects."
     },
-    "tab": {
-      "conversation": "Conversation",
-      "memory": "Memory",
-      "skills": "Skills",
-      "tools": "Tools",
-      "schedule": "Schedule",
-      "logs": "Logs",
-      "history": "History",
-      "routing": "Routing"
+    "brief": {
+      "last_activity": "Last activity",
+      "never": "never",
+      "no_model": "no model"
     },
-    "configure": "Configure",
+    "group": {
+      "general": "General",
+      "model": "Model & routing",
+      "tools": "Tools & skills",
+      "memory": "Memory",
+      "limits": "Limits & cost",
+      "channels": "Channels",
+      "planning": "Planning",
+      "conversation": "Conversation"
+    },
+    "info": {
+      "logs": "Logs",
+      "memory": "Memory",
+      "prompts": "Prompts & experiments",
+      "history": "History"
+    },
+    "config": {
+      "advanced_mode": "Advanced mode",
+      "advanced_hint": "show every field, not just the everyday ones"
+    },
+    "tabs": {
+      "main": "Agent view",
+      "info": "Agent information",
+      "config_groups": "Configuration groups"
+    },
+    "tab": {
+      "logs_info": "logs & info",
+      "config": "config"
+    },
     "select_an_agent": "Select an agent",
     "select_an_agent_hint": "Choose an agent on the left to inspect its sessions, memory, skills, and live logs.",
     "tools_declared_count": "declared",
     "tools_declared_title": "Declared Tools",
     "tools_declared_desc": "Tools this agent can use. Leave empty for unrestricted access to all tools.",
-    "providers_error_loading": "Error loading",
-    "no_providers": "No providers",
-    "select_provider_first": "Select provider first",
     "token_usage_title": "Token footprint",
     "token_injected_total": "Injected per request",
-    "token_recent": "Recent calls"
+    "token_recent": "Recent calls",
+    "use_global_default": "Use global default"
   },
   "providers": {
     "title": "Providers",

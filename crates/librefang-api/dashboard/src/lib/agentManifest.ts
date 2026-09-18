@@ -8,7 +8,7 @@
 import { parse, stringify, TomlError, type TomlTable } from "smol-toml";
 // The parameter range table is the single source of truth for a model
 // parameter's ceiling (#8332); the validator reads it rather than restating
-// a number beside it. agentModelPatch already imports from the same module.
+// a number beside it, the same table the controls render from.
 import { MODEL_PARAM_RANGES } from "../components/ui/ModelParamField";
 
 let _nextUid = 1;
