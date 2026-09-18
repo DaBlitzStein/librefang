@@ -1019,3 +1019,34 @@ describe("AgentManifestForm — the router's profile picker", () => {
     expect(screen.getByText("agents.form.router_kernel_off")).toBeInTheDocument();
   });
 });
+
+// The skill workshop's FormSection sat nested inside compaction's — a rebase
+// artifact, not a design. The drawer's tabs made it worse than cosmetic: the
+// memory tab hosts compaction without workshop and the skills tab hosts
+// workshop without compaction, so the shows guard zeroed the outer section
+// on both tabs and the workshop rendered NOWHERE. Unnested, each section
+// appears on the tab that hosts it and nowhere else.
+describe("AgentManifestForm — the workshop is not nested inside compaction", () => {
+  it("renders skill_workshop on the skills tab, which hosts it", () => {
+    render(<Harness sections={["skills", "skill_workshop"]} />);
+
+    const section = document.querySelector('[data-section="skill_workshop"]');
+    expect(section, "the skills tab hosts skill_workshop, so it renders").toBeTruthy();
+    expect(
+      within(section as HTMLElement).getByText("agents.form.skill_workshop_enabled"),
+    ).toBeInTheDocument();
+    // And compaction stays off the tab that does not host it.
+    expect(document.querySelector('[data-section="compaction"]')).toBeNull();
+  });
+
+  it("renders compaction on the memory tab without carrying the workshop in it", () => {
+    render(<Harness sections={["proactive_memory", "auto_dream", "compaction"]} />);
+
+    const section = document.querySelector('[data-section="compaction"]');
+    expect(section).toBeTruthy();
+    expect(
+      within(section as HTMLElement).queryByText("agents.form.skill_workshop_enabled"),
+    ).toBeNull();
+    expect(document.querySelector('[data-section="skill_workshop"]')).toBeNull();
+  });
+});
