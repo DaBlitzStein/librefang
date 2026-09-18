@@ -57,6 +57,64 @@ function doubledLabels(source: string): string[] {
   return found;
 }
 
+/**
+ * Index just past the `>` that closes the tag beginning at `start`.
+ *
+ * Brace- and quote-aware, so a `>` inside `{a > b}` or a string does not end
+ * the tag early.
+ */
+function findTagEnd(source: string, start: number): number {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = start; i < source.length; i++) {
+    const c = source[i];
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = null;
+    } else if (c === '"' || c === "'" || c === "`") quote = c;
+    else if (c === "{") depth++;
+    else if (c === "}") depth--;
+    else if (c === ">" && depth === 0) return i + 1;
+  }
+  throw new Error("unterminated tag");
+}
+
+/**
+ * Sections whose own title is repeated by a `Field` inside them.
+ *
+ * The same defect as the doubled control label, in the other shape: the card
+ * header says `SYSTEM PROMPT` and the first field inside it says `SYSTEM
+ * PROMPT` again, one line lower. A section is a *category* — the sections that
+ * read correctly (identity, limits, capabilities) name the card after the
+ * subject and each field after itself, and they only coincide when a section
+ * holds one field that is the whole subject.
+ *
+ * Scoped per section: a field labelled `Skills` inside a section about skills
+ * is the defect; a field with that text in some other section is a coincidence
+ * the operator never sees together.
+ */
+function titleRepeatedInField(source: string): string[] {
+  const found: string[] = [];
+  const opener = /<(Section|FormSection)\b/g;
+  for (const match of source.matchAll(opener)) {
+    const kind = match[1];
+    const tagEnd = findTagEnd(source, match.index);
+    const title = /title=\{([^}]*)\}/.exec(source.slice(match.index, tagEnd))?.[1];
+    if (!title) continue;
+
+    const close = source.indexOf(`</${kind}>`, tagEnd);
+    if (close < 0) continue;
+    const body = source.slice(tagEnd, close);
+
+    const field = /<Field\s+([^>]*?)>/.exec(body);
+    const label = field && /label=\{([^}]*)\}/.exec(field[1])?.[1];
+    if (label && label === title) {
+      found.push(`${kind} ${title} → Field ${label}`);
+    }
+  }
+  return found;
+}
+
 describe("form control labels", () => {
   // The list above is a claim about someone else's source, and a stale claim
   // fails open: if `StepLadderInput` stopped drawing its label, every hit this
@@ -74,6 +132,24 @@ describe("form control labels", () => {
         `remove it from DRAWS_ITS_OWN_LABEL and the hits below are false — or ` +
         `it moved, and the scan needs to follow it.`,
     ).toBe(true);
+  });
+
+  it("never repeats a section title in a field inside it", () => {
+    const offenders = sourceFiles("").flatMap((file) =>
+      titleRepeatedInField(readFileSync(file, "utf8")).map(
+        (hit) => `${relative(SRC, file)}: ${hit}`,
+      ),
+    );
+
+    expect(
+      offenders,
+      `A section's card header and a field label inside it carry the same ` +
+        `text, so the operator reads the field name twice, one line apart. ` +
+        `Name the card after the subject and the field after itself, or — when ` +
+        `the section holds a single field that is the whole subject — drop the ` +
+        `field's visible label and keep its accessible name.\n\n` +
+        `Repeated (${offenders.length}):\n${offenders.join("\n")}`,
+    ).toEqual([]);
   });
 
   it("never wraps a self-labelling control in a Field with the same label", () => {
