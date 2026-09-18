@@ -3007,15 +3007,6 @@ describe("model router fields round-trip through the form", () => {
     expect(toml).not.toContain("router_override");
   });
 
-  // The two surfaces this field used to have disagreed about fixed mode: the
-  // routing panel cleared allowed_profiles and cost_budget on a fixed write —
-  // mirroring `set_agent_model_routing`, which rebuilds the override wholesale
-  // for flexible and `None` for fixed (routes/agents/config.rs), a
-  // body-shape normalisation of that route, not a file-format constraint.
-  // The form writes the manifest file, where fixed alongside constraints is
-  // legal (no deny_unknown_fields) and the daemon keeps it on disk, inert
-  // until fixed is cleared. Deleting keys the operator did not touch is the
-  // silent-deletion class, so the form preserves.
   // AgentRouterOverride carries no deny_unknown_fields
   // (crates/librefang-types/src/model_profile.rs), so a key the form has no
   // widget for is a legal manifest member the daemon keeps on disk. The
@@ -3056,7 +3047,20 @@ describe("model router fields round-trip through the form", () => {
     expect(toml).not.toContain("router_override");
   });
 
-  it("keeps the constraints beside a fixed override, as the file format allows", () => {
+  // The two surfaces this field used to have disagreed about fixed mode: the
+  // routing panel cleared allowed_profiles and cost_budget on a fixed write —
+  // mirroring `set_agent_model_routing`, which rebuilds the override wholesale
+  // for flexible and `None` for fixed (routes/agents/config.rs), a
+  // body-shape normalisation of that route, not a file-format constraint.
+  // The form writes the manifest file, where fixed alongside constraints is
+  // legal and the daemon keeps it on disk. And the constraints are NOT inert
+  // beside a fixed flag: a spawned child inherits the parent's
+  // router_override verbatim and ungated (librefang-runtime's
+  // tool_runner/agent.rs serializes parent_override into the child's model
+  // block whatever the mode), so a flexible child inheriting fixed = true
+  // bypasses the router with it. Preserving is the only correct choice, and
+  // it matters beyond the file's own shape.
+  it("keeps the constraints beside a fixed override, which children inherit ungated", () => {
     const parsed = parseManifestToml(
       `${BASE}\nrouter_override = { fixed = true, allowed_profiles = ["coding"], cost_budget = "cheap" }\n`,
     );
