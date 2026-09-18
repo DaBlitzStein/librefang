@@ -575,7 +575,15 @@
       "async_tasks_notify_on_timeout": "Notify on timeout",
       "compaction_aggregate_developer_loops": "Aggregate developer loops",
       "compaction_max_loop_steps_before_aggregate": "Loop steps before aggregating",
-      "compaction_strip_reasoning_after_turns": "Strip reasoning after turns"
+      "compaction_strip_reasoning_after_turns": "Strip reasoning after turns",
+      "skill_workshop": "Skill workshop",
+      "skill_workshop_enabled": "Enabled",
+      "skill_workshop_auto_capture": "Auto capture",
+      "skill_workshop_approval_policy": "Approval policy",
+      "skill_workshop_review_mode": "Review mode",
+      "skill_workshop_max_pending": "Max pending",
+      "skill_workshop_max_pending_age_days": "Max pending age (days)",
+      "skill_workshop_evolution_mode": "Evolution mode"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",

@@ -853,7 +853,7 @@ export const TAB_SECTIONS: Partial<Record<AgentDrawerTab, ManifestSectionId[]>> 
   // Memory was the empty tab: every knob the manifest exposes for it is a
   // per-agent override of a kernel default, and none of them had a widget.
   memory: ["proactive_memory", "auto_dream", "compaction"],
-  skills: ["skills"],
+  skills: ["skills", "skill_workshop"],
   tools: ["capabilities", "mcp_servers"],
   routing: ["model", "fallback_models", "thinking", "routing"],
   schedule: ["scheduling", "autonomous", "async_tasks"],

@@ -81,6 +81,8 @@ import {
   MIN_SIMILARITY_LADDER,
   NETWORK_BYTES_PER_HOUR_LADDER,
   ROUTING_THRESHOLD_LADDER,
+  SKILL_WORKSHOP_MAX_AGE_LADDER,
+  SKILL_WORKSHOP_MAX_PENDING_LADDER,
   THINKING_BUDGET_LADDER,
   TOOL_CALLS_PER_MINUTE_LADDER,
   formatBytes,
@@ -230,6 +232,7 @@ export const MANIFEST_SECTION_IDS = [
   "proactive_memory",
   "auto_dream",
   "compaction",
+  "skill_workshop",
   "async_tasks",
   "routing",
   "context_injection",
@@ -349,6 +352,11 @@ export function AgentManifestForm({
     onChange({ ...value, thinking: { ...value.thinking, ...patch } });
   const updateAutonomous = (patch: Partial<ManifestFormState["autonomous"]>): void =>
     onChange({ ...value, autonomous: { ...value.autonomous, ...patch } });
+  const updateSkillWorkshop = (
+    patch: Partial<ManifestFormState["skill_workshop"]>,
+  ): void =>
+    onChange({ ...value, skill_workshop: { ...value.skill_workshop, ...patch } });
+
   const updateCompaction = (
     patch: Partial<ManifestFormState["compaction"]>,
   ): void =>
@@ -1393,6 +1401,101 @@ export function AgentManifestForm({
       </FormSection>
 
       <FormSection id="compaction" title={t("config.sec_compaction")} defaultOpen={false}>
+      <FormSection
+        id="skill_workshop"
+        title={t("agents.form.skill_workshop")}
+        defaultOpen={false}
+      >
+        {/* The two switches are plain booleans, not tri-states: the Rust struct
+            supplies them from its `Default`, so "absent" and "the default" are
+            the same state and rendering a third one would invent a distinction
+            the manifest does not have. */}
+        <div className="flex flex-wrap gap-4">
+          <Toggle
+            label={t("agents.form.skill_workshop_enabled")}
+            checked={value.skill_workshop.enabled}
+            onChange={(checked) => updateSkillWorkshop({ enabled: checked })}
+          />
+          <Toggle
+            label={t("agents.form.skill_workshop_auto_capture")}
+            checked={value.skill_workshop.auto_capture}
+            onChange={(checked) => updateSkillWorkshop({ auto_capture: checked })}
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-2">
+          <Field label={t("agents.form.skill_workshop_approval_policy")}>
+            <select
+              value={value.skill_workshop.approval_policy}
+              onChange={(e) =>
+                updateSkillWorkshop({
+                  approval_policy: e.target
+                    .value as ManifestFormState["skill_workshop"]["approval_policy"],
+                })
+              }
+              className={inputClass}
+            >
+              <option value="pending">pending</option>
+              <option value="auto">auto</option>
+            </select>
+          </Field>
+          <Field label={t("agents.form.skill_workshop_review_mode")}>
+            <select
+              value={value.skill_workshop.review_mode}
+              onChange={(e) =>
+                updateSkillWorkshop({
+                  review_mode: e.target
+                    .value as ManifestFormState["skill_workshop"]["review_mode"],
+                })
+              }
+              className={inputClass}
+            >
+              <option value="heuristic">heuristic</option>
+              <option value="threshold_llm">threshold_llm</option>
+              <option value="none">none</option>
+            </select>
+          </Field>
+          <Field label={t("agents.form.skill_workshop_max_pending")}>
+            <StepLadderInput
+              label={t("agents.form.skill_workshop_max_pending")}
+              value={value.skill_workshop.max_pending}
+              onChange={(next) => updateSkillWorkshop({ max_pending: next })}
+              ladder={SKILL_WORKSHOP_MAX_PENDING_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </Field>
+          <Field label={t("agents.form.skill_workshop_max_pending_age_days")}>
+            <StepLadderInput
+              label={t("agents.form.skill_workshop_max_pending_age_days")}
+              value={value.skill_workshop.max_pending_age_days}
+              onChange={(next) => updateSkillWorkshop({ max_pending_age_days: next })}
+              ladder={SKILL_WORKSHOP_MAX_AGE_LADDER}
+              formatRung={formatHours}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </Field>
+          <Field label={t("agents.form.skill_workshop_evolution_mode")}>
+            <select
+              value={value.skill_workshop.evolution_mode}
+              onChange={(e) =>
+                updateSkillWorkshop({
+                  evolution_mode: e.target
+                    .value as ManifestFormState["skill_workshop"]["evolution_mode"],
+                })
+              }
+              className={inputClass}
+            >
+              <option value="free">free</option>
+              <option value="controlled">controlled</option>
+            </select>
+          </Field>
+        </div>
+      </FormSection>
+
         {/* Nine overrides of the kernel's compaction defaults, all `Option`, so
             every one of them leads with inherit and an untouched table is not
             written at all. */}

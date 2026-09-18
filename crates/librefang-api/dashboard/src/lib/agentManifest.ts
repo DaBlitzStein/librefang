@@ -79,6 +79,25 @@ export interface ManifestFormState {
     default_timeout_secs: string;
     notify_on_timeout: boolean;
   };
+  // `[skill_workshop]`. `enabled` and `auto_capture` are plain `bool`s, not
+  // `Option<bool>`: the struct's `Default` supplies them, so "absent" and
+  // "the default" are the same state and a plain boolean says it exactly.
+  //
+  // The defaults are read from `impl Default for SkillWorkshopConfig`, not
+  // assumed. `auto_capture` is **true** — the workshop is off, but its capture
+  // pass is on by default, so that turning the master switch on gives a
+  // workshop that does something. Writing `false` for an agent that never
+  // touched it would silently disable capture the moment anyone opened and
+  // saved the agent.
+  skill_workshop: {
+    enabled: boolean;
+    auto_capture: boolean;
+    approval_policy: "pending" | "auto";
+    review_mode: "heuristic" | "threshold_llm" | "none";
+    max_pending: string;
+    max_pending_age_days: string;
+    evolution_mode: "free" | "controlled";
+  };
   // Per-agent overrides of the kernel's `[compaction]`. Nine `Option<T>` with
   // `skip_serializing_if`, so `""` inherits and a value overrides — and the
   // table is not written at all when every field says nothing.
@@ -274,6 +293,7 @@ export interface ManifestExtras {
   proactive_memory: TomlTable;
   async_tasks: TomlTable;
   compaction: TomlTable;
+  skill_workshop: TomlTable;
 }
 
 export const emptyManifestExtras = (): ManifestExtras => ({
@@ -287,6 +307,7 @@ export const emptyManifestExtras = (): ManifestExtras => ({
   proactive_memory: {},
   async_tasks: {},
   compaction: {},
+  skill_workshop: {},
 });
 
 export const emptyManifestForm = (): ManifestFormState => ({
@@ -322,6 +343,15 @@ export const emptyManifestForm = (): ManifestFormState => ({
   async_tasks: {
     default_timeout_secs: "",
     notify_on_timeout: false,
+  },
+  skill_workshop: {
+    enabled: false,
+    auto_capture: true,
+    approval_policy: "pending",
+    review_mode: "heuristic",
+    max_pending: "",
+    max_pending_age_days: "",
+    evolution_mode: "free",
   },
   compaction: {
     threshold_messages: "",
@@ -490,6 +520,7 @@ const FORM_TOP_LEVEL_KEYS = new Set([
   "rl_export",
   "async_tasks",
   "compaction",
+  "skill_workshop",
   "pinned_model",
   "workspace",
   "skills_disabled",
@@ -566,6 +597,16 @@ const FORM_CAPABILITY_KEYS = new Set([
   "speech",
 ]);
 const FORM_THINKING_KEYS = new Set(["budget_tokens", "stream_thinking"]);
+const FORM_SKILL_WORKSHOP_KEYS = new Set([
+  "enabled",
+  "auto_capture",
+  "approval_policy",
+  "review_mode",
+  "max_pending",
+  "max_pending_age_days",
+  "evolution_mode",
+]);
+
 const FORM_COMPACTION_KEYS = new Set([
   "threshold_messages",
   "keep_recent",
@@ -626,6 +667,12 @@ export const TOOL_PROFILES = [
   "custom",
 ] as const;
 export const ORPHAN_POLICIES = ["keep", "warn", "delete"] as const;
+// `ApprovalPolicy` and `EvolutionMode` are `rename_all = "lowercase"`,
+// `ReviewMode` is `"snake_case"`. The form speaks the serialised spelling
+// because that is what lands in the TOML.
+const SKILL_APPROVAL_POLICIES = ["pending", "auto"] as const;
+const SKILL_REVIEW_MODES = ["heuristic", "threshold_llm", "none"] as const;
+const SKILL_EVOLUTION_MODES = ["free", "controlled"] as const;
 
 const escapeTomlString = (value: string): string => {
   let escaped = "";
@@ -941,6 +988,11 @@ export const serializeManifestForm = (
   const safeAutonomousExtras = form.autonomous.enabled
     ? pluckSafeExtras(extras.autonomous, deferredSectionExtras, "autonomous")
     : {};
+  const safeSkillWorkshopExtras = pluckSafeExtras(
+    extras.skill_workshop,
+    deferredSectionExtras,
+    "skill_workshop",
+  );
   const safeCompactionExtras = pluckSafeExtras(
     extras.compaction,
     deferredSectionExtras,
@@ -1140,6 +1192,37 @@ export const serializeManifestForm = (
     );
     if (body.length) {
       lines.push("", "[compaction]", ...body, ...renderExtraScalars(safeCompactionExtras));
+    }
+  }
+
+  // [skill_workshop]
+  {
+    const body: string[] = [];
+    const w = form.skill_workshop;
+    // Each field is written only when it differs from the Rust `Default`, so an
+    // agent that has never been configured for the workshop produces no table
+    // at all. `auto_capture` is the one that reads backwards: its default is
+    // `true`, so `false` is the value worth writing.
+    if (w.enabled) writeBoolScalar(body, "enabled", true);
+    if (!w.auto_capture) writeBoolScalar(body, "auto_capture", false);
+    if (w.approval_policy !== "pending") {
+      writeStringScalar(body, "approval_policy", w.approval_policy);
+    }
+    if (w.review_mode !== "heuristic") {
+      writeStringScalar(body, "review_mode", w.review_mode);
+    }
+    writeNumberScalar(body, "max_pending", parseInteger(w.max_pending));
+    writeNumberScalar(body, "max_pending_age_days", parseInteger(w.max_pending_age_days));
+    if (w.evolution_mode !== "free") {
+      writeStringScalar(body, "evolution_mode", w.evolution_mode);
+    }
+    if (body.length) {
+      lines.push(
+        "",
+        "[skill_workshop]",
+        ...body,
+        ...renderExtraScalars(safeSkillWorkshopExtras),
+      );
     }
   }
 
@@ -1748,6 +1831,28 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
       at,
       new Set(["default_timeout_secs", "notify_on_timeout"]),
     );
+  }
+
+  // [skill_workshop]
+  if (isTomlTable(parsed.skill_workshop)) {
+    const w = parsed.skill_workshop;
+    form.skill_workshop.enabled = asBoolean(w.enabled, false);
+    // `true` is the Rust default, so an absent key means capture is ON.
+    form.skill_workshop.auto_capture = asBoolean(w.auto_capture, true);
+    form.skill_workshop.approval_policy = asEnum(
+      w.approval_policy,
+      SKILL_APPROVAL_POLICIES,
+      "pending",
+    );
+    form.skill_workshop.review_mode = asEnum(w.review_mode, SKILL_REVIEW_MODES, "heuristic");
+    form.skill_workshop.max_pending = asNumberString(w.max_pending);
+    form.skill_workshop.max_pending_age_days = asNumberString(w.max_pending_age_days);
+    form.skill_workshop.evolution_mode = asEnum(
+      w.evolution_mode,
+      SKILL_EVOLUTION_MODES,
+      "free",
+    );
+    extras.skill_workshop = stripKnown(w, FORM_SKILL_WORKSHOP_KEYS);
   }
 
   // [compaction]
