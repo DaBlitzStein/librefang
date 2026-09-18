@@ -64,7 +64,6 @@ const NO_SURFACE: Record<string, string> = {
   channel_overrides: "missing: 29-key per-channel table, no widget",
   max_history_messages: "missing: no widget anywhere",
   max_concurrent_invocations: "missing: no widget anywhere",
-  assignee_wake: "missing: per-agent override has no widget (the global key does)",
   cache_context: "missing: no widget anywhere",
   tool_exec_backend: "missing: no widget anywhere",
   skill_workshop: "missing: no widget anywhere",
