@@ -306,6 +306,8 @@ export interface ManifestFormState {
     content: string;
     position: "system" | "before_user" | "after_reset";
     condition: string;
+    /** Keys inside the row the form has no widget for. */
+    preserved?: TomlTable;
   }>;
 
   response_format:
@@ -343,6 +345,8 @@ export interface ManifestFormState {
     name: string;
     path: string;
     mode: "rw" | "r";
+    /** Keys inside the row the form has no widget for. */
+    preserved?: TomlTable;
   }>;
 }
 
@@ -881,6 +885,10 @@ const ROUTER_OVERRIDE_KEYS = new Set([
   "cost_budget",
   "default_profile",
 ]);
+/** The members of a [[context_injection]] row the form renders. */
+const CONTEXT_INJECTION_KEYS = new Set(["name", "content", "position", "condition"]);
+/** The members of a [workspaces] path-form row the form renders. */
+const WORKSPACE_ROW_KEYS = new Set(["path", "mode"]);
 const EXEC_SHORTHANDS = ["allow", "deny", "full", "allowlist"] as const;
 // These three mirror `rename_all` on the Rust enums, not the variant names:
 // `ToolProfile` and `OrphanPolicy` are `snake_case`, `BackendKind` is
@@ -1335,6 +1343,10 @@ export const serializeManifestForm = (
       if (!n || !p) continue;
       const parts = [`path = ${escapeTomlString(p)}`];
       if (ws.mode === "r") parts.push(`mode = "r"`);
+      for (const [key, value] of Object.entries(ws.preserved ?? {})) {
+        if (value === null || value === undefined) continue;
+        parts.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+      }
       wsBody.push(`${tomlBareKeyOrQuoted(n)} = { ${parts.join(", ")} }`);
     }
     if (wsBody.length) lines.push("", "[workspaces]", ...wsBody);
@@ -1630,6 +1642,14 @@ export const serializeManifestForm = (
     writeStringScalar(body, "content", ci.content);
     if (ci.position !== "system") writeStringScalar(body, "position", ci.position);
     writeStringScalar(body, "condition", ci.condition.trim());
+    // The un-widgeted keys ride along as inline values — the same merge the
+    // preserved stashes get, and the only legal one here: `[[context_injection]]`
+    // is an array of tables, so a nested header could not be addressed to this
+    // row instead of whichever row the parser would anchor it to.
+    for (const [key, value] of Object.entries(ci.preserved ?? {})) {
+      if (value === null || value === undefined) continue;
+      body.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+    }
     if (body.length) lines.push("", "[[context_injection]]", ...body);
   }
 
@@ -2500,13 +2520,18 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   if (Array.isArray(parsed.context_injection)) {
     form.context_injection = parsed.context_injection
       .filter(isTomlTable)
-      .map((ci) => ({
-        _uid: generateParsedUid(),
-        name: asString(ci.name),
-        content: asString(ci.content),
-        position: asEnum(ci.position, INJECTION_POSITIONS, "system"),
-        condition: asString(ci.condition),
-      }));
+      .map((ci) => {
+        const row: ManifestFormState["context_injection"][number] = {
+          _uid: generateParsedUid(),
+          name: asString(ci.name),
+          content: asString(ci.content),
+          position: asEnum(ci.position, INJECTION_POSITIONS, "system"),
+          condition: asString(ci.condition),
+        };
+        const preserved = stripKnown(ci, CONTEXT_INJECTION_KEYS);
+        if (Object.keys(preserved).length) row.preserved = preserved;
+        return row;
+      });
   }
 
   // Only `path`-based declarations become rows. A `mount` entry points at an
@@ -2518,14 +2543,17 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     const preservedWorkspaces: TomlTable = {};
     for (const [name, v] of Object.entries(parsed.workspaces)) {
       if (isTomlTable(v) && typeof (v as TomlTable).path === "string") {
-        form.workspaces.push({
+        const row: ManifestFormState["workspaces"][number] = {
           _uid: generateParsedUid(),
           name,
           path: (v as TomlTable).path as string,
           mode: READONLY_MODE_ALIASES.has(asString((v as TomlTable).mode))
             ? ("r" as const)
             : ("rw" as const),
-        });
+        };
+        const preserved = stripKnown(v, WORKSPACE_ROW_KEYS);
+        if (Object.keys(preserved).length) row.preserved = preserved;
+        form.workspaces.push(row);
       } else {
         preservedWorkspaces[name] = v;
       }

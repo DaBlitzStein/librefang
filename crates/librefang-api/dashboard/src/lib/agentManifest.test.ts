@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   FORM_TOP_LEVEL_KEYS,
   emptyManifestExtras,
@@ -2553,6 +2555,58 @@ describe("every table the form owns keeps the keys it does not render", () => {
 
     const round = serializeManifestForm(parsed.form, parsed.extras);
     expect(round).toContain("zz_unknown = 7");
+  });
+
+  // The form appropriates two levels beyond a first-key probe: row
+  // collections (arrays of objects the form re-renders from four known
+  // fields) and inline tables nested inside them. ContextInjection and
+  // WorkspaceDecl carry no deny_unknown_fields, so an unknown key inside a
+  // row is a legal manifest member the daemon keeps on disk — the same
+  // silent deletion the section sweep exists to catch, one row down.
+  const ROWS: ReadonlyArray<readonly [string, string]> = [
+    [
+      "fallback_models",
+      "[[fallback_models]]\nprovider = \"p\"\nmodel = \"m\"\nzz_unknown = 7",
+    ],
+    [
+      "context_injection",
+      '[[context_injection]]\nname = "n"\ncontent = "c"\ncondition = "always"\nzz_unknown = 7',
+    ],
+    ["workspaces", '[workspaces]\nmine = { path = "sub", zz_unknown = 7 }'],
+  ];
+
+  for (const [row, body] of ROWS) {
+    it(`[${row}] keeps the keys a row does not render`, () => {
+      const parsed = parseManifestToml(`name = "x"\n\n${body}\n`);
+      expect(parsed.ok, `[${row}] did not parse`).toBe(true);
+      if (!parsed.ok) return;
+
+      const round = serializeManifestForm(parsed.form, parsed.extras);
+      expect(
+        round,
+        `[${row}] dropped a key the form has no widget for, so opening an ` +
+          `agent in this editor and saving removes it from the manifest.`,
+      ).toContain("zz_unknown = 7");
+    });
+  }
+
+  // The sweep's first-level probe cannot see rows or nesting: an empty
+  // manifest's arrays are empty, indistinguishable from the scalar lists.
+  // The interface declares every row collection as `Array<{`, so the guard
+  // reads the declaration — the same source-reading style the routability
+  // guard uses — and fails when a row collection is added to the form
+  // without a sweep entry.
+  it("sweeps every row collection the interface declares", () => {
+    const libSource = readFileSync(join(__dirname, "agentManifest.ts"), "utf8");
+    const declared = [...libSource.matchAll(/(\w+): Array<\{/g)].map((m) => m[1]);
+    expect(declared.length).toBeGreaterThan(0);
+
+    const swept = ROWS.map(([row]) => row);
+    const unswept = declared.filter((k) => !swept.includes(k));
+    expect(
+      unswept,
+      `these row collections are swept by nothing: ${unswept.join(", ")}`,
+    ).toEqual([]);
   });
 
   it("sweeps every table the form claims, not a hand-kept list", () => {
