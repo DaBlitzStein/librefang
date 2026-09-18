@@ -1396,7 +1396,7 @@ export function AgentManifestForm({
         </div>
       </FormSection>
 
-      <FormSection id="channel_overrides"
+      <FormSection id="channel_overrides" shows={shows}
         title={t("agents.form.channel_overrides")}
         defaultOpen={false}
       >
@@ -1573,9 +1573,9 @@ export function AgentManifestForm({
         </div>
       </FormSection>
 
-      <FormSection id="compaction" title={t("config.sec_compaction")} defaultOpen={false}>
+      <FormSection id="compaction" shows={shows} title={t("config.sec_compaction")} defaultOpen={false}>
       <FormSection
-        id="skill_workshop"
+        id="skill_workshop" shows={shows}
         title={t("agents.form.skill_workshop")}
         defaultOpen={false}
       >

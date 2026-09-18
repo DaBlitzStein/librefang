@@ -1454,13 +1454,12 @@ export const serializeManifestForm = (
     if (!c.thread_ownership_enabled) writeBoolScalar(body, "thread_ownership_enabled", false);
     writeNumberScalar(body, "conversation_ownership_ttl_seconds", parseInteger(c.conversation_ownership_ttl_seconds));
     if (c.conversation_ownership_include_dms) writeBoolScalar(body, "conversation_ownership_include_dms", true);
-    if (body.length) {
-      lines.push(
-        "",
-        "[channel_overrides]",
-        ...body,
-        ...renderExtraScalars(safeChannelOverrideExtras),
-      );
+    // The guard covers the extras as well as the body: a table whose keys the
+    // form has no widget for would otherwise be dropped whole, preserved keys
+    // included. Same form as the `[model]` and `[resources]` guards above.
+    const channelOverrideExtras = renderExtraScalars(safeChannelOverrideExtras);
+    if (body.length || channelOverrideExtras.length) {
+      lines.push("", "[channel_overrides]", ...body, ...channelOverrideExtras);
     }
   }
 
@@ -1485,13 +1484,10 @@ export const serializeManifestForm = (
     if (w.evolution_mode !== "free") {
       writeStringScalar(body, "evolution_mode", w.evolution_mode);
     }
-    if (body.length) {
-      lines.push(
-        "",
-        "[skill_workshop]",
-        ...body,
-        ...renderExtraScalars(safeSkillWorkshopExtras),
-      );
+    // Same guard shape as `[compaction]` and `[channel_overrides]`.
+    const skillWorkshopExtras = renderExtraScalars(safeSkillWorkshopExtras);
+    if (body.length || skillWorkshopExtras.length) {
+      lines.push("", "[skill_workshop]", ...body, ...skillWorkshopExtras);
     }
   }
 

@@ -2316,6 +2316,9 @@ describe("every table the form owns keeps the keys it does not render", () => {
     ["exec_policy", "[exec_policy]\nzz_unknown = 7"],
     ["response_format", "[response_format]\nzz_unknown = 7"],
     ["schedule", '[schedule.periodic]\ncron = "0 9 * * *"\nzz_unknown = 7'],
+    ["compaction", "[compaction]\nzz_unknown = 7"],
+    ["skill_workshop", "[skill_workshop]\nzz_unknown = 7"],
+    ["channel_overrides", "[channel_overrides]\nzz_unknown = 7"],
   ];
 
   for (const [table, body] of TABLES) {
@@ -2416,11 +2419,13 @@ describe("compaction overrides", () => {
   });
 
   it("preserves keys inside [compaction] the form does not render", () => {
+    // One key the form does not render, and no key it does — with a rendered
+    // key present the body is never empty, the guard that drops a body-less
+    // table never runs, and this test passes over the bug it is named for.
     const source = [
       'name = "x"',
       "",
       "[compaction]",
-      "threshold_messages = 40",
       "summariser_model = \"cheap/model\"",
     ].join("\n");
 
@@ -2428,8 +2433,8 @@ describe("compaction overrides", () => {
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("[compaction]");
     expect(round).toContain('summariser_model = "cheap/model"');
-    expect(round).toContain("threshold_messages = 40");
   });
 });
 
