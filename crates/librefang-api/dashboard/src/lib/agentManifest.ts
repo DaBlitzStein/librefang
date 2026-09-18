@@ -727,9 +727,9 @@ export const ORPHAN_POLICIES = ["keep", "warn", "delete"] as const;
 // `ApprovalPolicy` and `EvolutionMode` are `rename_all = "lowercase"`,
 // `ReviewMode` is `"snake_case"`. The form speaks the serialised spelling
 // because that is what lands in the TOML.
-const SKILL_APPROVAL_POLICIES = ["pending", "auto"] as const;
-const SKILL_REVIEW_MODES = ["heuristic", "threshold_llm", "none"] as const;
-const SKILL_EVOLUTION_MODES = ["free", "controlled"] as const;
+export const SKILL_APPROVAL_POLICIES = ["pending", "auto"] as const;
+export const SKILL_REVIEW_MODES = ["heuristic", "threshold_llm", "none"] as const;
+export const SKILL_EVOLUTION_MODES = ["free", "controlled"] as const;
 
 const escapeTomlString = (value: string): string => {
   let escaped = "";
