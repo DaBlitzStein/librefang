@@ -73,8 +73,9 @@ export interface ManifestFormState {
   // A single `Option<bool>` on its own struct — tri-state for the same reason
   // as the rest: absent inherits the kernel's `[rl_export] enabled`.
   rl_export: "" | "true" | "false";
-  // `[async_tasks]`: a timeout that is `Option<u64>`, and a bool that is not —
-  // `#[serde(default)]`, so `false` is the value that must not be written.
+  // `[async_tasks]`: a timeout that is `Option<u64>`, and a bool that is not.
+  // `notify_on_timeout`'s compiled default is `true` — `AsyncTasksConfig` has a manual `Default` impl saying so, and its doc explains why: a timeout is user-visible so the agent can react to it.
+  // That makes `true` the value that must not be written, and `false` the decision worth recording.
   async_tasks: {
     default_timeout_secs: string;
     notify_on_timeout: boolean;
@@ -259,6 +260,17 @@ export interface ManifestExtras {
   // bug that was deleting keys before those existed.
   proactive_memory: TomlTable;
   async_tasks: TomlTable;
+  // `[rl_export]` is in `FORM_TOP_LEVEL_KEYS` too, so without this slot every
+  // key of the table but `enabled` is consumed on parse and never re-emitted.
+  // It needs no "body is empty" trigger to lose data, which is what made it the
+  // worse half of the pair: any agent carrying an `[rl_export]` key the form
+  // does not render lost it on the next save, unconditionally.
+  rl_export: TomlTable;
+  // The chosen `[schedule.<variant>]` table's keys the form does not render.
+  // Shaped `{ <variant>: { … } }`, because that is the depth the form owns: the
+  // `[schedule]` root is a closed enum, so only a variant's contents can carry
+  // a key this editor has no widget for.
+  schedule: TomlTable;
 }
 
 export const emptyManifestExtras = (): ManifestExtras => ({
@@ -271,6 +283,8 @@ export const emptyManifestExtras = (): ManifestExtras => ({
   routing: {},
   proactive_memory: {},
   async_tasks: {},
+  rl_export: {},
+  schedule: {},
 });
 
 export const emptyManifestForm = (): ManifestFormState => ({
@@ -305,7 +319,8 @@ export const emptyManifestForm = (): ManifestFormState => ({
   rl_export: "",
   async_tasks: {
     default_timeout_secs: "",
-    notify_on_timeout: false,
+    // The daemon's own default, not "off": see the interface comment above.
+    notify_on_timeout: true,
   },
   pinned_model: "",
   workspace: "",
@@ -566,6 +581,21 @@ const FORM_ROUTING_KEYS = new Set([
 ]);
 
 const SCHEDULE_DEFAULT_INTERVAL = "300";
+
+/**
+ * The keys the form renders inside each `[schedule.<variant>]` table, so the
+ * ones it does not render can be carried through untouched.
+ *
+ * Keyed by the same snake_case spellings `ScheduleMode` serializes to
+ * (crates/librefang-types/src/agent.rs), which is also what the form's `mode`
+ * holds — one vocabulary, so a variant cannot be spelled one way in the parse
+ * and another in the emit.
+ */
+const SCHEDULE_VARIANT_KEYS: Record<string, Set<string>> = {
+  periodic: new Set(["cron"]),
+  proactive: new Set(["conditions"]),
+  continuous: new Set(["check_interval_secs"]),
+};
 const PRIORITIES = ["Low", "Normal", "High", "Critical"] as const;
 const SESSION_MODES = ["persistent", "new"] as const;
 const WEB_SEARCH_MODES = ["off", "auto", "always"] as const;
@@ -662,6 +692,19 @@ const isPositiveUnsignedTomlInteger = (raw: string): boolean => {
   const value = parseUnsignedTomlInteger(raw);
   return value !== null && BigInt(value) > 0n;
 };
+
+/**
+ * Blank means "this agent makes no override", which every optional count allows.
+ *
+ * Anything else has to be a TOML integer: the daemon deserializes these into
+ * `Option<usize>`, and one that is not a whole number rejects the whole
+ * document. Unlike `isPositiveUnsignedTomlInteger`, zero is not an error here —
+ * what a zero means for a concurrency cap is the kernel's business, and this
+ * check exists to keep the form from producing a document the server it feeds
+ * will refuse.
+ */
+const isBlankOrUnsignedTomlInteger = (raw: string): boolean =>
+  raw.trim() === "" || parseUnsignedTomlInteger(raw) !== null;
 
 /**
  * Parse a float that may legitimately be negative.
@@ -765,12 +808,19 @@ export const serializeManifestForm = (
   if (form.mcp_disabled) writeBoolScalar(lines, "mcp_disabled", true);
   // Counts are `Option<usize>` / `Option<u32>`: `""` omits the key rather than
   // writing a zero, which would be a limit of nothing.
-  if (form.max_history_messages.trim() !== "") {
-    lines.push(`max_history_messages = ${form.max_history_messages.trim()}`);
-  }
-  if (form.max_concurrent_invocations.trim() !== "") {
-    lines.push(`max_concurrent_invocations = ${form.max_concurrent_invocations.trim()}`);
-  }
+  // Parsed like the other numeric fields rather than interpolated raw: `-5`,
+  // `1.5` and `1e3` are all reachable from the ladder's custom box, and each one
+  // made `PATCH /api/agents/{id}` reject the whole document with a 400.
+  writeIntegerScalar(
+    lines,
+    "max_history_messages",
+    parseUnsignedTomlInteger(form.max_history_messages),
+  );
+  writeIntegerScalar(
+    lines,
+    "max_concurrent_invocations",
+    parseUnsignedTomlInteger(form.max_concurrent_invocations),
+  );
   if (form.tool_exec_backend !== "") {
     writeStringScalar(lines, "tool_exec_backend", form.tool_exec_backend);
   }
@@ -833,7 +883,7 @@ export const serializeManifestForm = (
 
   // Schedule — Reactive is the default and emits nothing; tagged variants
   // serialize as the externally-tagged TOML form `schedule = { variant = { … } }`.
-  const scheduleLine = renderSchedule(form.schedule);
+  const scheduleLine = renderSchedule(form.schedule, extras.schedule);
   if (scheduleLine) lines.push(scheduleLine);
 
   if (form.exec_policy_shorthand) {
@@ -911,6 +961,7 @@ export const serializeManifestForm = (
     deferredSectionExtras,
     "proactive_memory",
   );
+  const safeRlExportExtras = pluckSafeExtras(extras.rl_export, deferredSectionExtras, "rl_export");
   const safeRoutingExtras = form.routing.enabled
     ? pluckSafeExtras(extras.routing, deferredSectionExtras, "routing")
     : {};
@@ -1035,22 +1086,30 @@ export const serializeManifestForm = (
     writeTriStateBool(body, "session_scoped_recall", pm.session_scoped_recall);
     writeNumberScalar(body, "min_similarity", parseFloatish(pm.min_similarity));
     writeTriStateBool(body, "allow_self_consolidation", pm.allow_self_consolidation);
-    // Emitted only when it says something: an all-inherit table would be a
-    // `[proactive_memory]` header that overrides nothing, which reads as a
-    // configured section and is not one.
-    if (body.length) {
-      lines.push(
-        "",
-        "[proactive_memory]",
-        ...body,
-        ...renderExtraScalars(safeProactiveMemoryExtras),
-      );
+    // Emitted when it says something: an all-inherit table with nothing
+    // preserved would be a `[proactive_memory]` header that overrides nothing,
+    // which reads as a configured section and is not one.
+    //
+    // The guard covers the extras as well as the body, and that is the
+    // invariant this whole family of sections shares: a section's preserved
+    // extras are emitted whenever they are non-empty, whatever the form's own
+    // body did. Guarding on the body alone silently deleted every key the form
+    // has no widget for — the bug the `thinking` and `autonomous` slots were
+    // added to fix, reintroduced here by the slot's own guard.
+    const proactiveMemoryExtras = renderExtraScalars(safeProactiveMemoryExtras);
+    if (body.length || proactiveMemoryExtras.length) {
+      lines.push("", "[proactive_memory]", ...body, ...proactiveMemoryExtras);
     }
   }
 
   // [rl_export]
-  if (form.rl_export !== "") {
-    lines.push("", "[rl_export]", `enabled = ${form.rl_export}`);
+  {
+    const body: string[] = [];
+    writeTriStateBool(body, "enabled", form.rl_export);
+    const rlExportExtras = renderExtraScalars(safeRlExportExtras);
+    if (body.length || rlExportExtras.length) {
+      lines.push("", "[rl_export]", ...body, ...rlExportExtras);
+    }
   }
 
   // [async_tasks]
@@ -1061,14 +1120,16 @@ export const serializeManifestForm = (
       "default_timeout_secs",
       parseInteger(form.async_tasks.default_timeout_secs),
     );
-    // `notify_on_timeout` is `#[serde(default)]`, so `false` is the value that
-    // must not be written: emitting it would pin the agent against a later
-    // change to the compiled default.
-    if (form.async_tasks.notify_on_timeout) {
-      writeBoolScalar(body, "notify_on_timeout", true);
+    // The compiled default is `true`, so `true` is the value that must not be
+    // written: emitting it would pin the agent against a later change to that
+    // default, and would record a decision the operator never made. `false` is
+    // a decision, and the only one worth the key.
+    if (!form.async_tasks.notify_on_timeout) {
+      writeBoolScalar(body, "notify_on_timeout", false);
     }
-    if (body.length) {
-      lines.push("", "[async_tasks]", ...body, ...renderExtraScalars(safeAsyncTaskExtras));
+    const asyncTaskExtras = renderExtraScalars(safeAsyncTaskExtras);
+    if (body.length || asyncTaskExtras.length) {
+      lines.push("", "[async_tasks]", ...body, ...asyncTaskExtras);
     }
   }
 
@@ -1155,19 +1216,40 @@ const pluckSafeExtras = (
   return safe;
 };
 
-const renderSchedule = (s: ManifestFormState["schedule"]): string => {
+const renderSchedule = (
+  s: ManifestFormState["schedule"],
+  preserved: TomlTable,
+): string => {
+  // The variant's own keys, as inline `key = value` pairs. The preserved keys
+  // are spliced into the same inline table rather than emitted under a
+  // `[schedule.<variant>]` header: a header here would land after this bare
+  // `schedule = …` key and re-scope every line that follows it.
+  const inner: string[] = [];
   switch (s.mode) {
     case "reactive":
+      // `Reactive` is a unit variant, so serde reads it back as the bare string
+      // `schedule = "reactive"` — there is no inner table to splice into.
+      // Nothing is lost by that: the parse only preserves out of a variant
+      // table, and a variant table is what sets every mode but this one.
       return ""; // default
     case "periodic":
-      return `schedule = { periodic = { cron = ${escapeTomlString(s.cron)} } }`;
+      inner.push(`cron = ${escapeTomlString(s.cron)}`);
+      break;
     case "proactive":
-      return `schedule = { proactive = { conditions = ${tomlArray(s.conditions)} } }`;
+      inner.push(`conditions = ${tomlArray(s.conditions)}`);
+      break;
     case "continuous": {
-      const interval = parseUnsignedTomlInteger(s.check_interval_secs) ?? SCHEDULE_DEFAULT_INTERVAL;
-      return `schedule = { continuous = { check_interval_secs = ${interval} } }`;
+      const interval =
+        parseUnsignedTomlInteger(s.check_interval_secs) ?? SCHEDULE_DEFAULT_INTERVAL;
+      inner.push(`check_interval_secs = ${interval}`);
+      break;
     }
   }
+  const preservedVariant = preserved[s.mode];
+  if (isTomlTable(preservedVariant)) {
+    inner.push(...renderExtraScalars(preservedVariant));
+  }
+  return `schedule = { ${s.mode} = { ${inner.join(", ")} } }`;
 };
 
 const renderResponseFormat = (rf: ManifestFormState["response_format"]): string => {
@@ -1389,6 +1471,15 @@ export const validateManifestForm = (
   // Sampling preferences — same ranges `PATCH /api/agents/{id}/model` enforces
   // (crates/librefang-api/src/routes/agents/config.rs), so an out-of-range
   // value is reported here too instead of reaching the TOML at all (#8112).
+  // The two per-agent counts. Blank inherits, anything else must be a whole
+  // number the daemon can read into `Option<usize>`; without this the form let
+  // `-5` through to the TOML and the operator learned about it as a 400.
+  if (!isBlankOrUnsignedTomlInteger(form.max_history_messages)) {
+    errors.push("max_history_messages");
+  }
+  if (!isBlankOrUnsignedTomlInteger(form.max_concurrent_invocations)) {
+    errors.push("max_concurrent_invocations");
+  }
   if (!isInRange(form.model.temperature, 0, 2)) errors.push("model.temperature");
   if (!isInRange(form.model.top_p, 0, 1)) errors.push("model.top_p");
   if (!isInRange(form.model.frequency_penalty, -2, 2)) errors.push("model.frequency_penalty");
@@ -1555,6 +1646,21 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.tool_blocklist = asStringArray(parsed.tool_blocklist);
   form.allowed_plugins = asStringArray(parsed.allowed_plugins);
   form.schedule = parseScheduleField(parsed.schedule);
+  // The chosen variant's unmatched keys are preserved rather than consumed —
+  // the same treatment every other table the form owns gets. The `[schedule]`
+  // root is the one level with nothing to preserve: `ScheduleMode` is an
+  // externally-tagged enum, so an unknown key there is a document the daemon
+  // rejects outright rather than a field it would read later.
+  if (isTomlTable(parsed.schedule) && form.schedule.mode !== "reactive") {
+    const variantTable = parsed.schedule[form.schedule.mode];
+    const knownKeys = SCHEDULE_VARIANT_KEYS[form.schedule.mode];
+    if (knownKeys && isTomlTable(variantTable)) {
+      const preserved = stripKnown(variantTable, knownKeys);
+      if (Object.keys(preserved).length) {
+        extras.schedule = { [form.schedule.mode]: preserved };
+      }
+    }
+  }
   form.exec_policy_shorthand = parseExecPolicyShorthand(parsed.exec_policy);
   form.response_format = parseResponseFormatField(parsed.response_format);
 
@@ -1666,13 +1772,17 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
 
   form.auto_dream_min_hours = asNumberString(parsed.auto_dream_min_hours);
   form.auto_dream_min_sessions = asNumberString(parsed.auto_dream_min_sessions);
-  form.rl_export = asTriStateBool(
-    isTomlTable(parsed.rl_export) ? parsed.rl_export.enabled : undefined,
-  );
+  if (isTomlTable(parsed.rl_export)) {
+    form.rl_export = asTriStateBool(parsed.rl_export.enabled);
+    extras.rl_export = stripKnown(parsed.rl_export, new Set(["enabled"]));
+  }
   if (isTomlTable(parsed.async_tasks)) {
     const at = parsed.async_tasks;
     form.async_tasks.default_timeout_secs = asNumberString(at.default_timeout_secs);
-    form.async_tasks.notify_on_timeout = asBoolean(at.notify_on_timeout, false);
+    // An absent key reads as the daemon's default, not as `false`: the daemon
+    // notifies, and showing that as "off" invited the operator to turn on
+    // something that was already on.
+    form.async_tasks.notify_on_timeout = asBoolean(at.notify_on_timeout, true);
     extras.async_tasks = stripKnown(
       at,
       new Set(["default_timeout_secs", "notify_on_timeout"]),

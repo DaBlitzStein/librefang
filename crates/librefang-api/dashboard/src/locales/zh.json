@@ -561,6 +561,7 @@
       "mcp_disabled": "Disable MCP servers",
       "max_history_messages": "History messages",
       "max_history_messages_hint": "How many recent messages the agent keeps in context. Compiles to 60 by default, and anything under 4 is raised to 4.",
+      "whole_number_required": "Enter a whole number, or leave it blank to inherit.",
       "max_concurrent_invocations": "Concurrent invocations",
       "max_concurrent_invocations_hint": "How many runs of this agent may overlap. A persistent session clamps this to 1, because two writers to one history are undefined.",
       "tool_exec_backend": "Tool execution backend",

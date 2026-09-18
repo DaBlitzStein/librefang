@@ -1995,11 +1995,14 @@ describe("proactive_memory overrides", () => {
   // Opening an agent in the editor and saving must not remove a key upstream
   // added.
   it("preserves keys inside the table that the form does not render", () => {
+    // The fixture carries no key the form renders, and that is load-bearing.
+    // With one present the body is never empty, the guard that drops a
+    // body-less table never runs, and the test passes over the very bug it is
+    // named for — measured, it did, until the fixture was cut to unknown keys.
     const source = [
       'name = "x"',
       "",
       "[proactive_memory]",
-      "auto_retrieve = false",
       "consolidation_interval_turns = 42",
       "",
       "[proactive_memory.tuning]",
@@ -2011,11 +2014,31 @@ describe("proactive_memory overrides", () => {
     if (!parsed.ok) return;
 
     const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("[proactive_memory]");
     expect(round).toContain("consolidation_interval_turns = 42");
     expect(round).toContain("[proactive_memory.tuning]");
     expect(round).toContain('mode = "eager"');
-    // And the key the form does own still round-trips through the same pass.
-    expect(round).toContain("auto_retrieve = false");
+  });
+
+  it("keeps the table when every key the form knows serializes to nothing", () => {
+    // A table can be present, non-empty, and still produce an empty body: the
+    // form owns `extraction_model`, but an empty value writes no line. The same
+    // guard then dropped the whole table, preserved keys included.
+    const source = [
+      'name = "x"',
+      "",
+      "[proactive_memory]",
+      'extraction_model = ""',
+      "consolidation_interval_turns = 42",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("[proactive_memory]");
+    expect(round).toContain("consolidation_interval_turns = 42");
   });
 });
 
@@ -2092,38 +2115,168 @@ describe("rl_export and async_tasks", () => {
     expect(toml).not.toContain("notify_on_timeout");
   });
 
-  it("writes notify_on_timeout only when true, and round-trips the pair", () => {
-    const quiet = emptyManifestForm();
-    quiet.async_tasks.default_timeout_secs = "300";
-    // `notify_on_timeout` is `#[serde(default)]`, so `false` is the state that
-    // must not be written: emitting it would pin the agent against a later
-    // change to the compiled default.
-    expect(serializeManifestForm(quiet)).not.toContain("notify_on_timeout");
-
+  // `AsyncTasksConfig` has a manual `Default` impl with `notify_on_timeout:
+  // true` (crates/librefang-types/src/agent.rs), and its doc says why: a
+  // timeout is user-visible by default so the agent can react. So `true` is the
+  // state that must not be written — emitting it pins the agent against a later
+  // change to that default *and* records a decision the operator never made.
+  // Only `false` is one.
+  it("writes notify_on_timeout only when false, and round-trips the pair", () => {
     const loud = emptyManifestForm();
-    loud.async_tasks = { default_timeout_secs: "300", notify_on_timeout: true };
-    const toml = serializeManifestForm(loud);
+    loud.async_tasks.default_timeout_secs = "300";
+    expect(serializeManifestForm(loud)).not.toContain("notify_on_timeout");
+
+    const quiet = emptyManifestForm();
+    quiet.async_tasks = { default_timeout_secs: "300", notify_on_timeout: false };
+    const toml = serializeManifestForm(quiet);
     expect(toml).toContain("[async_tasks]");
-    expect(toml).toContain("notify_on_timeout = true");
+    expect(toml).toContain("notify_on_timeout = false");
 
     const parsed = parseManifestToml(toml);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.form.async_tasks).toEqual(loud.async_tasks);
+    expect(parsed.form.async_tasks).toEqual(quiet.async_tasks);
+  });
+
+  it("reads an omitted notify_on_timeout as the compiled default, not as off", () => {
+    // The daemon notifies when the key is absent. The editor read that as "off",
+    // so the operator turned the switch on and the form wrote `true` — the
+    // value the daemon was already using. Neither the display nor the write
+    // changed anything, and `false`, the one value that does change behaviour,
+    // could not be expressed at all.
+    const parsed = parseManifestToml("[async_tasks]\ndefault_timeout_secs = 300\n");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.async_tasks.notify_on_timeout).toBe(true);
+  });
+
+  it("keeps an explicit false across a round trip instead of deleting the key", () => {
+    const parsed = parseManifestToml("[async_tasks]\nnotify_on_timeout = false\n");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("[async_tasks]");
+    expect(round).toContain("notify_on_timeout = false");
   });
 
   it("preserves keys inside [async_tasks] the form does not render", () => {
-    const source = [
-      'name = "x"',
-      "",
-      "[async_tasks]",
-      "default_timeout_secs = 300",
-      "max_concurrent = 8",
-    ].join("\n");
+    // Unknown keys only — see the note on the [proactive_memory] case above.
+    const source = ['name = "x"', "", "[async_tasks]", "max_concurrent = 8"].join("\n");
 
     const parsed = parseManifestToml(source);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(serializeManifestForm(parsed.form, parsed.extras)).toContain("max_concurrent = 8");
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("[async_tasks]");
+    expect(round).toContain("max_concurrent = 8");
   });
+
+  it("preserves keys inside [rl_export] the form does not render", () => {
+    // `rl_export` is in `FORM_TOP_LEVEL_KEYS`, so its table never reaches
+    // `topLevel`; without a slot of its own in `ManifestExtras` every key but
+    // `enabled` was consumed on parse and never re-emitted.
+    const source = ['name = "x"', "", "[rl_export]", "sample_rate = 0.5"].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("[rl_export]");
+    expect(round).toContain("sample_rate = 0.5");
+  });
+});
+
+// These two counters were interpolated into the TOML as raw text while the
+// other nine numeric fields went through a parser, so `-5`, `1.5` and `1e3`
+// were emitted verbatim. `PATCH /api/agents/{id}` parses the document before it
+// writes, so the result was a 400 — noisy rather than corrupting, but the
+// editor feeds that server and must not produce a document it will reject.
+describe("the per-agent counters are whole numbers or nothing", () => {
+  it("omits a counter that is not a whole number", () => {
+    for (const bad of ["-5", "1.5", "1e3", "1,000", "99999999999999999999"]) {
+      const form = emptyManifestForm();
+      form.max_history_messages = bad;
+      form.max_concurrent_invocations = bad;
+      const toml = serializeManifestForm(form);
+      expect(toml, `${bad} reached the TOML`).not.toContain("max_history_messages");
+      expect(toml, `${bad} reached the TOML`).not.toContain("max_concurrent_invocations");
+    }
+  });
+
+  it("writes both counters when they are whole numbers", () => {
+    const form = emptyManifestForm();
+    form.max_history_messages = "40";
+    form.max_concurrent_invocations = "4";
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("max_history_messages = 40");
+    expect(toml).toContain("max_concurrent_invocations = 4");
+  });
+
+  it("reports both counters before the save, not after the server rejects it", () => {
+    for (const bad of ["-5", "1.5", "1e3", "99999999999999999999"]) {
+      const form = emptyManifestForm();
+      form.name = "x";
+      form.max_history_messages = bad;
+      expect(validateManifestForm(form), bad).toContain("max_history_messages");
+    }
+
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.max_concurrent_invocations = "-1";
+    expect(validateManifestForm(form)).toContain("max_concurrent_invocations");
+  });
+
+  it("treats a blank counter as an override the agent does not make", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.max_history_messages = "";
+    form.max_concurrent_invocations = "   ";
+    expect(validateManifestForm(form)).toEqual([]);
+  });
+});
+
+// A fifth member of the same class, found by measuring rather than by reading
+// the list: `[schedule]`'s variant tables are where the form's schedule editor
+// keeps its state, and they are the one place the `stripKnown` + extras
+// treatment was never applied.
+//
+// The `[schedule]` *root* is a closed enum (`ScheduleMode` in
+// crates/librefang-types/src/agent.rs), so an unknown key there is rejected by
+// the daemon and there is nothing to preserve. Inside a variant it is a struct
+// without `deny_unknown_fields`, so the daemon ignores an unknown field today —
+// and a field the manifest gains tomorrow is exactly the one the editor would
+// have deleted on the next save.
+describe("the schedule variants keep the keys the form does not render", () => {
+  for (const [variant, known] of [
+    ["periodic", 'cron = "0 9 * * *"'],
+    ["continuous", "check_interval_secs = 600"],
+    ["proactive", 'conditions = ["nightly"]'],
+  ] as const) {
+    it(`[schedule.${variant}] keeps an unknown key`, () => {
+      const source = `name = "x"\n\n[schedule.${variant}]\n${known}\nfuture_knob = 7\n`;
+
+      const parsed = parseManifestToml(source);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      const round = serializeManifestForm(parsed.form, parsed.extras);
+      expect(round).toContain("future_knob = 7");
+      // The key the form owns still round-trips through the same pass.
+      expect(round).toContain(variant);
+    });
+
+    it(`[schedule.${variant}] keeps the form's own key alongside it`, () => {
+      const source = `name = "x"\n\n[schedule.${variant}]\n${known}\nfuture_knob = 7\n`;
+
+      const parsed = parseManifestToml(source);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      const again = parseManifestToml(serializeManifestForm(parsed.form, parsed.extras));
+      expect(again.ok).toBe(true);
+      if (!again.ok) return;
+      expect(again.form.schedule.mode).toBe(variant);
+    });
+  }
 });

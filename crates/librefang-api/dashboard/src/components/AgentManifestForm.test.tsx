@@ -789,3 +789,74 @@ describe("AgentManifestForm — a marked field says why", () => {
     expect(alert).toHaveTextContent(/between/);
   });
 });
+
+// A component declared inside a render body is a new function on every render,
+// and React compares element types by reference — so it unmounts and remounts
+// its whole subtree on every keystroke.
+//
+// The two cases below are a pair on purpose: the module-scope `Section` and the
+// section wrapper must both survive a re-render, so a regression in either is
+// visible. A test on one alone cannot tell a wrapper-wide defect from a
+// field-specific one — and that is precisely how this one read, because the
+// seven sections using the module-scope `Section` never had it.
+//
+// What it cost: a controlled input inside one of the twelve wrapper sections
+// kept only the first character typed into it (the element the second keystroke
+// was headed for had already been destroyed), and an open `<select>` was
+// dismissed under the operator by any re-render.
+describe("AgentManifestForm — a re-render must not remount the fields", () => {
+  it("keeps every character typed into a section field", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | null = null;
+    render(
+      <Harness
+        sections={["proactive_memory"]}
+        onState={(n) => {
+          latest = n;
+        }}
+      />,
+    );
+
+    await user.click(screen.getByText("config.sec_proactive_memory"));
+    await user.type(screen.getByRole("textbox"), "abc");
+
+    // `"a"` is what a remount produces: the remaining keystrokes go to a node
+    // that is no longer in the document.
+    expect(
+      (latest as unknown as ManifestFormState | null)?.proactive_memory.extraction_model,
+    ).toBe("abc");
+  });
+
+  it("keeps a select's DOM node across a re-render, so an open dropdown is not dismissed", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["proactive_memory"]} onState={() => {}} />);
+
+    await user.click(screen.getByText("config.sec_proactive_memory"));
+    const before = screen.getAllByRole("combobox")[0];
+
+    await user.type(screen.getByRole("textbox"), "x");
+
+    expect(screen.getAllByRole("combobox")[0]).toBe(before);
+  });
+});
+
+describe("AgentManifestForm — the counters report before the server does", () => {
+  it("names the rule on a counter that is not a whole number", () => {
+    const state = emptyManifestForm();
+    state.max_history_messages = "1.5";
+
+    render(
+      <Harness
+        initialState={state}
+        invalidFields={new Set(["max_history_messages"])}
+        sections={["lifecycle"]}
+      />,
+    );
+
+    // A red label with no text is the shape review already rejected once: it
+    // tells the operator a field is wrong and not what would make it right.
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "agents.form.whole_number_required",
+    );
+  });
+});

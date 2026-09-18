@@ -252,6 +252,13 @@ const FIELD_PREFIX_TO_SECTION: ReadonlyArray<readonly [RegExp, ManifestSectionId
   [/^schedule\./, "scheduling"],
   [/^response_format\./, "response_format"],
   [/^workspaces\./, "shared_folders"],
+  // The two per-agent counts render inside the "Lifecycle" section, not the
+  // resource "Limits" one, so they are matched exactly rather than by prefix: a
+  // loose prefix would claim any future field that starts the same way, and the
+  // routability guard only checks that *some* section claims a path, not that it
+  // is the one that renders it.
+  [/^max_history_messages$/, "lifecycle"],
+  [/^max_concurrent_invocations$/, "lifecycle"],
 ];
 
 /** The section that renders `path`, or `undefined` when no entry covers it. */
@@ -283,42 +290,6 @@ export function AgentManifestForm({
   // passes a list gets exactly that list.
   const shows = (id: ManifestSectionId): boolean =>
     sections === undefined || sections.includes(id);
-
-  // Folding a section is this caller's choice, so the guard lives here rather
-  // than being repeated at every call site. An unshown section renders
-  // nothing at all rather than a collapsed shell: a heading the operator
-  // cannot open is still a heading they will look for.
-  // Five of the seven keys in `[proactive_memory]` are `Option<bool>`, and
-  // they are the same control three times over: inherit, on, off. One helper
-  // rather than five copies, so the absent option cannot be dropped from one
-  // of them.
-  const TriStateField = ({
-    label,
-    value,
-    onChange,
-  }: {
-    label: string;
-    value: "" | "true" | "false";
-    onChange: (next: "" | "true" | "false") => void;
-  }) => (
-    <Field label={label}>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value as "" | "true" | "false")}
-        className={inputClass}
-      >
-        <option value="">{t("agents.form.inherit_default")}</option>
-        <option value="true">{t("common.yes")}</option>
-        <option value="false">{t("common.no")}</option>
-      </select>
-    </Field>
-  );
-
-  const FormSection = ({
-    id,
-    ...props
-  }: { id: ManifestSectionId } & CollapsibleSectionProps) =>
-    shows(id) ? <CollapsibleSection sectionId={id} {...props} /> : null;
 
   // The provider the agent already runs on stays selectable even when the
   // caller filtered it out of `providers` (rejected key, local service down).
@@ -942,7 +913,7 @@ export function AgentManifestForm({
         </div>
       </Section>
 
-      <FormSection id="scheduling"
+      <FormSection id="scheduling" shows={shows}
         title={t("agents.form.scheduling")}
         defaultOpen={false}
         invalid={
@@ -1039,7 +1010,7 @@ export function AgentManifestForm({
         )}
       </FormSection>
 
-      <FormSection id="fallback_models" title={t("agents.form.fallback_models")} defaultOpen={false}>
+      <FormSection id="fallback_models" shows={shows} title={t("agents.form.fallback_models")} defaultOpen={false}>
         <p className="text-[10px] text-text-dim/70 mb-2">{t("agents.form.fallback_models_hint")}</p>
         {(value.fallback_models ?? []).map((fb, idx) => (
           <div
@@ -1140,7 +1111,7 @@ export function AgentManifestForm({
           ))}
       </FormSection>
 
-      <FormSection id="thinking" title={t("agents.form.thinking")} defaultOpen={false}>
+      <FormSection id="thinking" shows={shows} title={t("agents.form.thinking")} defaultOpen={false}>
         <Toggle
           label={t("agents.form.thinking_enabled")}
           checked={value.thinking.enabled}
@@ -1174,7 +1145,7 @@ export function AgentManifestForm({
         )}
       </FormSection>
 
-      <FormSection id="autonomous" title={t("agents.form.autonomous")} defaultOpen={false}>
+      <FormSection id="autonomous" shows={shows} title={t("agents.form.autonomous")} defaultOpen={false}>
         <Toggle
           label={t("agents.form.autonomous_enabled")}
           checked={value.autonomous.enabled}
@@ -1278,7 +1249,7 @@ export function AgentManifestForm({
       </FormSection>
 
       <FormSection
-        id="proactive_memory"
+        id="proactive_memory" shows={shows}
         title={t("config.sec_proactive_memory")}
         defaultOpen={false}
       >
@@ -1343,7 +1314,7 @@ export function AgentManifestForm({
       </FormSection>
 
       <FormSection
-        id="auto_dream"
+        id="auto_dream" shows={shows}
         title={t("memory.tab_dreams")}
         defaultOpen={false}
       >
@@ -1379,7 +1350,7 @@ export function AgentManifestForm({
       </FormSection>
 
       <FormSection
-        id="async_tasks"
+        id="async_tasks" shows={shows}
         title={t("agents.form.async_tasks")}
         defaultOpen={false}
       >
@@ -1407,7 +1378,7 @@ export function AgentManifestForm({
         />
       </FormSection>
 
-      <FormSection id="routing" title={t("agents.form.routing")} defaultOpen={false}>
+      <FormSection id="routing" shows={shows} title={t("agents.form.routing")} defaultOpen={false}>
         <Toggle
           label={t("agents.form.routing_enabled")}
           checked={value.routing.enabled}
@@ -1521,7 +1492,7 @@ export function AgentManifestForm({
           </div>
       </FormSection>
 
-      <FormSection id="context_injection" title={t("agents.form.context_injection")} defaultOpen={false}>
+      <FormSection id="context_injection" shows={shows} title={t("agents.form.context_injection")} defaultOpen={false}>
         <p className="text-[10px] text-text-dim/70 mb-2">
           {t("agents.form.context_injection_hint")}
         </p>
@@ -1597,7 +1568,7 @@ export function AgentManifestForm({
         </button>
       </FormSection>
 
-      <FormSection id="response_format"
+      <FormSection id="response_format" shows={shows}
         title={t("agents.form.response_format")}
         defaultOpen={false}
         invalid={invalidFields.has("response_format.schema")}
@@ -1691,7 +1662,7 @@ export function AgentManifestForm({
         )}
       </FormSection>
 
-      <FormSection id="lifecycle" title={t("agents.form.lifecycle")} defaultOpen={false}>
+      <FormSection id="lifecycle" shows={shows} title={t("agents.form.lifecycle")} defaultOpen={false}>
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.session_mode")}>
             <select
@@ -1856,7 +1827,10 @@ export function AgentManifestForm({
           </div>
         </div>
         <div className="grid grid-cols-2 gap-3 mt-2">
-          <Field label={t("agents.form.max_history_messages")}>
+          <Field
+            label={t("agents.form.max_history_messages")}
+            invalid={invalidFields.has("max_history_messages")}
+          >
             <StepLadderInput
               label={t("agents.form.max_history_messages")}
               value={value.max_history_messages}
@@ -1866,12 +1840,24 @@ export function AgentManifestForm({
               inheritLabel={t("model_param.inherit")}
               customLabel={t("model_param.custom")}
               min={MIN_HISTORY_MESSAGES}
+              invalid={invalidFields.has("max_history_messages")}
+              // `min` is not a guard: a pasted `1.5` still reaches the field.
+              // The message lives on the ladder — the control that accepted the
+              // value — and not on `Field` as well, which would announce it twice.
+              error={
+                invalidFields.has("max_history_messages")
+                  ? t("agents.form.whole_number_required")
+                  : undefined
+              }
             />
             <p className="text-[10px] text-text-dim/70 mt-1">
               {t("agents.form.max_history_messages_hint")}
             </p>
           </Field>
-          <Field label={t("agents.form.max_concurrent_invocations")}>
+          <Field
+            label={t("agents.form.max_concurrent_invocations")}
+            invalid={invalidFields.has("max_concurrent_invocations")}
+          >
             <StepLadderInput
               label={t("agents.form.max_concurrent_invocations")}
               value={value.max_concurrent_invocations}
@@ -1881,6 +1867,12 @@ export function AgentManifestForm({
               inheritLabel={t("model_param.inherit")}
               customLabel={t("model_param.custom")}
               min={1}
+              invalid={invalidFields.has("max_concurrent_invocations")}
+              error={
+                invalidFields.has("max_concurrent_invocations")
+                  ? t("agents.form.whole_number_required")
+                  : undefined
+              }
             />
             <p className="text-[10px] text-text-dim/70 mt-1">
               {t("agents.form.max_concurrent_invocations_hint")}
@@ -1889,7 +1881,7 @@ export function AgentManifestForm({
         </div>
       </FormSection>
 
-      <FormSection id="shared_folders"
+      <FormSection id="shared_folders" shows={shows}
         title={t("agents.form.shared_folders")}
         defaultOpen={false}
         invalid={value.workspaces.some(
@@ -2047,6 +2039,59 @@ function Section({
       <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">{title}</p>
       {children}
     </div>
+  );
+}
+
+/**
+ * Folding a section is this caller's choice, so the guard lives here rather than being repeated at every call site.
+ * An unshown section renders nothing at all rather than a collapsed shell: a heading the operator cannot open is still a heading they will look for.
+ * `shows` stays a prop so the caller keeps one definition of what "shown" means.
+ *
+ * Declared at module scope on purpose.
+ * A component declared inside the render body is a new function on every render, and React compares element types by reference — so it unmounts and remounts its whole subtree on every keystroke.
+ * Here that subtree is a form section, so every controlled input inside the twelve sections using this wrapper kept only the first character typed into it: the element the second keystroke was headed for had already been destroyed, and the change event went to a detached node.
+ * The seven sections that use the module-scope `Section` never had it, which is what made a wrapper-wide defect read as a per-field oddity.
+ */
+function FormSection({
+  id,
+  shows,
+  ...props
+}: {
+  id: ManifestSectionId;
+  shows: (id: ManifestSectionId) => boolean;
+} & CollapsibleSectionProps) {
+  return shows(id) ? <CollapsibleSection sectionId={id} {...props} /> : null;
+}
+
+/**
+ * Inherit / yes / no — the three states an `Option<bool>` manifest key can be in.
+ * Five of the seven keys in `[proactive_memory]` are `Option<bool>` and they are the same control three times over; one helper rather than five copies means the absent option cannot be dropped from one of them.
+ *
+ * Module scope for the same reason as `FormSection` above.
+ * This was also the control whose open `<select>` was destroyed under the operator on every re-render — the symptom that led to finding the wrapper.
+ */
+function TriStateField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: "" | "true" | "false";
+  onChange: (next: "" | "true" | "false") => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Field label={label}>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as "" | "true" | "false")}
+        className={inputClass}
+      >
+        <option value="">{t("agents.form.inherit_default")}</option>
+        <option value="true">{t("common.yes")}</option>
+        <option value="false">{t("common.no")}</option>
+      </select>
+    </Field>
   );
 }
 
