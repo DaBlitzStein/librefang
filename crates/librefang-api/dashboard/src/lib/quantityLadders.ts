@@ -98,6 +98,34 @@ export const MEMORY_BYTES_LADDER = [
 /** CPU time per invocation, in milliseconds. */
 export const CPU_TIME_MS_LADDER = [1000, 5000, 10_000, 30_000, 60_000, 300_000] as const;
 
+// ------------------------------------------------------------- lifecycle
+
+/**
+ * Messages kept in the trimmed history.
+ *
+ * The kernel's compiled default is 60 and it clamps anything below 4, so the
+ * ladder starts above the point where the value stops meaning what the
+ * operator expects and stops being applied.
+ */
+export const MAX_HISTORY_MESSAGES_LADDER = [20, 40, 60, 100, 200, 500] as const;
+
+/**
+ * The floor the runtime raises a lower value to
+ * (`agent_loop::history::MIN_HISTORY_MESSAGES`). Bound to the custom field so
+ * the control cannot offer a number the runtime will silently change, and
+ * named here rather than typed as a literal so the two stay findable together.
+ */
+export const MIN_HISTORY_MESSAGES = 4;
+
+/**
+ * Concurrent invocations of one agent.
+ *
+ * Deliberately small: a `persistent` session clamps this to 1 whatever is
+ * stored, so the useful range is single digits and a ladder that suggested 64
+ * would be offering a number the runtime refuses in the common case.
+ */
+export const MAX_CONCURRENT_INVOCATIONS_LADDER = [1, 2, 4, 8, 16, 32] as const;
+
 // ------------------------------------------------------------ autonomous
 
 /** Iterations per invocation. */
