@@ -1690,7 +1690,18 @@ const renderSchedule = (
   }
   const preservedVariant = preserved[s.mode];
   if (isTomlTable(preservedVariant)) {
-    inner.push(...renderExtraScalars(preservedVariant));
+    // `jsonValueToInlineToml`, not `renderExtraScalars`: the preserved slot
+    // stores every value shape the variant table carried, and the two halves
+    // of this field must agree about what survives. `renderExtraScalars`
+    // refuses multi-line output — which is every table-typed value — so a
+    // preserved key holding a table or an array of tables was stashed by the
+    // parse half and dropped by this one. A `[schedule.<key>]` header is not
+    // an alternative here: it would land after this bare `schedule = …` key
+    // and TOML forbids extending an already-assigned inline table.
+    for (const [key, value] of Object.entries(preservedVariant)) {
+      if (value === null || value === undefined) continue;
+      inner.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+    }
   }
   return `schedule = { ${s.mode} = { ${inner.join(", ")} } }`;
 };

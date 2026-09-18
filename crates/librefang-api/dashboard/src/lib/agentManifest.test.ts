@@ -2373,6 +2373,50 @@ describe("the schedule variants keep the keys the form does not render", () => {
       expect(again.form.schedule.mode).toBe(variant);
     });
   }
+
+  // A future manifest field is not necessarily a scalar. The preserved slot
+  // stores whatever value shape the variant table carried, and the emit half
+  // must return every shape it stores — a table-valued key, or an array of
+  // tables, dies the same death a scalar would have died before the slot
+  // existed. `schedule` renders as ONE inline table (a `[schedule.x]` header
+  // after the bare `schedule = …` key would re-anchor TOML scoping), so the
+  // only legal home for these values is inline inside it.
+  it("[schedule.periodic] keeps an unknown TABLE-valued key", () => {
+    const source = [
+      'name = "x"',
+      "",
+      "[schedule.periodic]",
+      'cron = "0 9 * * *"',
+      "future_table = { depth = 2 }",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.extras.schedule?.periodic).toEqual({ future_table: { depth: 2 } });
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("future_table = { depth = 2 }");
+  });
+
+  it("[schedule.periodic] keeps an unknown array-of-tables key", () => {
+    const source = [
+      'name = "x"',
+      "",
+      "[schedule.periodic]",
+      'cron = "0 9 * * *"',
+      "",
+      "[[schedule.periodic.future_rows]]",
+      "weight = 1",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("future_rows = [{ weight = 1 }]");
+  });
 });
 
 // The class this phase spent its time on: a table the form claims as its own
