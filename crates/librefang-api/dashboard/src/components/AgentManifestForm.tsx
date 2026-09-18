@@ -549,8 +549,10 @@ export function AgentManifestForm({
       </Section>
 
       <Section when={shows("model")} id="model" title={t("agents.form.model")}>
+        {/* No visible label: the card above is titled "Model" and the field
+            would repeat the word one line lower. The picker keeps its own
+            accessible name through its `label` prop. */}
         <Field
-          label={t("agents.form.model")}
           hint={t("agents.form.inherit_default")}
           invalid={
             invalidFields.has("model.provider") || invalidFields.has("model.model")
@@ -832,8 +834,11 @@ export function AgentManifestForm({
       </Section>
 
       <Section when={shows("prompt")} id="prompt" title={t("agents.form.system_prompt")}>
-        <Field label={t("agents.form.system_prompt")}>
+        {/* Labelled on the control, not above it: the card says "System
+            Prompt" and a second copy one line down reads as a stutter. */}
+        <Field>
           <textarea
+            aria-label={t("agents.form.system_prompt")}
             value={value.model.system_prompt}
             onChange={(e) => updateModel({ system_prompt: e.target.value })}
             placeholder={t("agents.form.system_prompt_placeholder")}
@@ -1117,7 +1122,7 @@ export function AgentManifestForm({
       </Section>
 
       <Section when={shows("skills")} id="skills" title={t("agents.form.skills")}>
-        <Field label={t("agents.form.skills")} hint={t("agents.form.skills_hint")}>
+        <Field hint={t("agents.form.skills_hint")} ariaLabel={t("agents.form.skills")}>
           {skillFinder ? (
             <MultiSelectCmdk
               options={skillFinder.options}
@@ -1144,7 +1149,7 @@ export function AgentManifestForm({
       </Section>
 
       <Section when={shows("mcp_servers")} id="mcp_servers" title={t("agents.form.mcp_servers")}>
-        <Field label={t("agents.form.mcp_servers")} hint={t("agents.form.mcp_servers_hint")}>
+        <Field hint={t("agents.form.mcp_servers_hint")} ariaLabel={t("agents.form.mcp_servers")}>
           {mcpFinder ? (
             <MultiSelectCmdk
               options={mcpFinder.options}
