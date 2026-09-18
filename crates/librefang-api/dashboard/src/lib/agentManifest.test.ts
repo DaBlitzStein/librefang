@@ -2328,6 +2328,34 @@ describe("the per-agent counters are whole numbers or nothing", () => {
     form.max_concurrent_invocations = "   ";
     expect(validateManifestForm(form)).toEqual([]);
   });
+
+  // `max_concurrent_invocations` deserializes into `Option<u32>`
+  // (crates/librefang-types/src/agent.rs:1480), so one power of two above the
+  // whole-number check the form used to apply, `4294967296`, passed the
+  // validator, reached the TOML, and came back as a 400 the report had
+  // already claimed closed once. The ceiling is per field, not global:
+  // `max_history_messages` is `Option<usize>` (agent.rs:1452) and takes the
+  // same value without complaint.
+  it("reports a concurrency cap above u32::MAX, the field's real ceiling", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.max_concurrent_invocations = "4294967296";
+    expect(validateManifestForm(form)).toContain("max_concurrent_invocations");
+  });
+
+  it("accepts u32::MAX itself for the concurrency cap", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.max_concurrent_invocations = "4294967295";
+    expect(validateManifestForm(form)).not.toContain("max_concurrent_invocations");
+  });
+
+  it("does not impose the u32 ceiling on the usize counter beside it", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.max_history_messages = "4294967296";
+    expect(validateManifestForm(form)).not.toContain("max_history_messages");
+  });
 });
 
 // A fifth member of the same class, found by measuring rather than by reading

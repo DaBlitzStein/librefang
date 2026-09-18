@@ -994,6 +994,26 @@ const isPositiveUnsignedTomlInteger = (raw: string): boolean => {
 const isBlankOrUnsignedTomlInteger = (raw: string): boolean =>
   raw.trim() === "" || parseUnsignedTomlInteger(raw) !== null;
 
+/** `u32::MAX` — the largest value an `Option<u32>` manifest count can carry. */
+const U32_TOML_MAX = 4294967295n;
+
+/**
+ * The blank-or-unsigned check, plus the field's real ceiling.
+ *
+ * The whole-number check above accepts anything up to `TOML_INTEGER_MAX`
+ * (2^63-1), which is the `usize`/`u64` half of the manifest's counts. A field
+ * whose Rust side is `Option<u32>` stops one power of two lower: serde
+ * rejects `4294967296` with the same 400 the whole-number check was written
+ * to close, so the ceiling belongs to the field's type, not to the shared
+ * parser. `max_concurrent_invocations` is the u32 field this form carries
+ * (`crates/librefang-types/src/agent.rs:1480`); `max_history_messages`
+ * beside it is `Option<usize>` (agent.rs:1452) and takes larger values.
+ */
+const isBlankOrU32TomlInteger = (raw: string): boolean => {
+  const value = parseUnsignedTomlInteger(raw);
+  return raw.trim() === "" || (value !== null && BigInt(value) <= U32_TOML_MAX);
+};
+
 /**
  * Parse a float that may legitimately be negative.
  *
@@ -1939,10 +1959,12 @@ export const validateManifestForm = (
   // The two per-agent counts. Blank inherits, anything else must be a whole
   // number the daemon can read into `Option<usize>`; without this the form let
   // `-5` through to the TOML and the operator learned about it as a 400.
+  // Each is checked against its own Rust ceiling — the whole-number floor
+  // they share is `usize`-shaped, and `max_concurrent_invocations` is `u32`.
   if (!isBlankOrUnsignedTomlInteger(form.max_history_messages)) {
     errors.push("max_history_messages");
   }
-  if (!isBlankOrUnsignedTomlInteger(form.max_concurrent_invocations)) {
+  if (!isBlankOrU32TomlInteger(form.max_concurrent_invocations)) {
     errors.push("max_concurrent_invocations");
   }
   if (!isInRange(form.model.temperature, 0, 2)) errors.push("model.temperature");
