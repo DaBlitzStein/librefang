@@ -14,6 +14,8 @@ import {
 import {
   emptyManifestExtras,
   emptyManifestForm,
+  parseManifestToml,
+  serializeManifestForm,
   type ManifestFormState,
 } from "../lib/agentManifest";
 
@@ -46,6 +48,7 @@ function Harness({
   providers = [{ name: "openai" }],
   nameField,
   sections,
+  onState,
 }: {
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
@@ -56,12 +59,17 @@ function Harness({
   providers?: { name: string }[];
   nameField?: "editable" | "readonly" | "hidden";
   sections?: ManifestSectionId[];
+  /** Receives every state the form produces, so a test can read what would be saved. */
+  onState?: (next: ManifestFormState) => void;
 }) {
   const [state, setState] = useState<ManifestFormState>(() => initialState ?? emptyManifestForm());
   return (
     <AgentManifestForm
       value={state}
-      onChange={setState}
+      onChange={(next) => {
+        setState(next);
+        onState?.(next);
+      }}
       providers={providers}
       models={models}
       invalidFields={invalidFields}
@@ -708,5 +716,43 @@ describe("AgentManifestForm — quantity ladders", () => {
     expect(
       within(group).getByRole("button", { name: "model_param.inherit" }),
     ).toBeInTheDocument();
+  });
+});
+
+// Swapping a control is only safe if the thing it writes is unchanged. The
+// provider+model `<select>` pair stored `[model] provider` and `[model] model`
+// as two keys; the picker hands back a pair. That they agree is not something
+// the DOM can show — the trigger renders the pair either way — so this asserts
+// what would actually be saved, and then reads it back.
+//
+// This is deliberately a write-then-read rather than a check of the captured
+// state alone: a control that writes the right value to the wrong path passes
+// any assertion made against the control's own output.
+describe("AgentManifestForm — the model picker persists the pair it replaced", () => {
+  it("writes provider and model where the selects wrote them, and reads them back", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | null = null;
+    render(<Harness onState={(next) => { latest = next; }} />);
+
+    await user.click(screen.getByRole("button", { name: /^agents\.form\.model:/ }));
+    await user.click(screen.getByRole("button", { name: "openai" }));
+    await user.click(screen.getByRole("button", { name: "openai/gpt-4o" }));
+
+    expect(latest).not.toBeNull();
+    const form = latest as unknown as ManifestFormState;
+    expect(form.model.provider).toBe("openai");
+    expect(form.model.model).toBe("gpt-4o");
+
+    // What the daemon reads.
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("provider = \"openai\"");
+    expect(toml).toContain("model = \"gpt-4o\"");
+
+    // And what comes back when the same manifest is opened again.
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.provider).toBe("openai");
+    expect(parsed.form.model.model).toBe("gpt-4o");
   });
 });
