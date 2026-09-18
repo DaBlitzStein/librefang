@@ -2322,14 +2322,32 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
     }
 
-    async fn check_auto_reply(&self, agent_id: AgentId, message: &str) -> Option<String> {
+    async fn check_auto_reply(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> Option<String> {
         // Check if auto-reply should fire for this message
         let channel_type = "bridge"; // Generic; the bridge layer handles specifics
         self.kernel
             .auto_reply()
             .should_reply(message, channel_type, agent_id)?;
-        // Fire auto-reply synchronously (bridge already runs in background task)
-        match self.kernel.send_message(agent_id, message).await {
+        // Fire auto-reply synchronously (bridge already runs in background task).
+        //
+        // Sent with the sender context rather than through the bare
+        // `send_message`: an auto-reply runs a full agent turn, tools included,
+        // and the tool authorization gate derives its (channel, sender) pair
+        // from this context. Without it every tool outside the guest read-only
+        // allowlist is forced into the approval queue.
+        //
+        // `thinking_override: None` leaves the turn on the agent / global
+        // default, which is what the previous `send_message` call did.
+        match self
+            .kernel
+            .send_message_with_sender_context(agent_id, message, sender.clone(), None)
+            .await
+        {
             Ok(result) => {
                 // If the agent chose NO_REPLY (silent), don't send the literal text
                 if result.silent {
