@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   FORM_TOP_LEVEL_KEYS,
   emptyManifestExtras,
@@ -7,6 +9,7 @@ import {
   preservedWorkspaceNamesFromExtras,
   serializeManifestForm,
   validateManifestForm,
+  type ManifestFormState,
 } from "./agentManifest";
 
 describe("agentManifest serializer", () => {
@@ -777,6 +780,105 @@ custom = "x"
     expect(reparsed.form.response_format.mode).toBe("json");
     // Old preserved table must not have followed along.
     expect(reparsed.extras.topLevel.response_format).toBeUndefined();
+  });
+
+  // The keys inside a response_format table the form has no widget for must
+  // survive a round-trip, mapped type or not. The mode picker is the source
+  // of truth from the moment the operator touches it: edits within a mode
+  // keep the unknown keys, picking a different mode replaces them — the same
+  // semantics the unmappable-type test above pins.
+  describe("keys the form does not render", () => {
+    it("survive alongside a mapped type = json", () => {
+      const parsed = parseManifestToml(
+        `name = "x"\n\nresponse_format = { type = "json", custom_flag = true }\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.form.response_format.mode).toBe("json");
+
+      const toml = serializeManifestForm(parsed.form, parsed.extras);
+      expect(toml).toContain('response_format = { type = "json", custom_flag = true }');
+
+      const reparsed = parseManifestToml(toml);
+      expect(reparsed.ok).toBe(true);
+      if (!reparsed.ok) return;
+      expect(reparsed.form.response_format.mode).toBe("json");
+      const again = serializeManifestForm(reparsed.form, reparsed.extras);
+      expect(again).toContain('custom_flag = true');
+    });
+
+    it("survive inside a mapped json_schema table", () => {
+      const parsed = parseManifestToml(
+        `name = "x"\n\nresponse_format = { type = "json_schema", name = "user", schema = { type = "object" }, strict = true, custom_flag = true }\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      if (parsed.form.response_format.mode !== "json_schema") {
+        throw new Error("json_schema table did not map to the json_schema mode");
+      }
+      expect(parsed.form.response_format.name).toBe("user");
+
+      const toml = serializeManifestForm(parsed.form, parsed.extras);
+      expect(toml).toContain('type = "json_schema"');
+      expect(toml).toContain('name = "user"');
+      expect(toml).toContain("custom_flag = true");
+      expect(toml).toContain("strict = true");
+    });
+
+    it("a BigInt-valued unknown key emits its digits, not an empty string", () => {
+      const parsed = parseManifestToml(
+        `name = "x"\n\nresponse_format = { type = "json", zz_big = 18446744073709551616 }\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      const toml = serializeManifestForm(parsed.form, parsed.extras);
+      expect(toml).toContain("zz_big = 18446744073709551616");
+      expect(toml).not.toContain('zz_big = ""');
+    });
+
+    it("a nested-table unknown key renders as an inline table", () => {
+      const parsed = parseManifestToml(
+        `name = "x"\n\nresponse_format = { type = "json", custom = { depth = 2 } }\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      const toml = serializeManifestForm(parsed.form, parsed.extras);
+      // A `[custom]` header inside the value would be multi-line and would
+      // re-anchor TOML scoping; only inline syntax is legal here.
+      expect(toml).toMatch(/response_format = \{ type = "json", custom = \{ depth = 2 \} \}/);
+    });
+
+    it("a type = text table keeps its keys through the extras", () => {
+      const parsed = parseManifestToml(
+        `name = "x"\n\nresponse_format = { type = "text", custom_flag = true }\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      // `type = "text"` maps to the text mode, which renders nothing — so the
+      // table has no form-emitted half to merge with and survives whole.
+      const toml = serializeManifestForm(parsed.form, parsed.extras);
+      expect(toml).toContain("custom_flag = true");
+    });
+
+    it("are replaced when the operator picks a different mode", () => {
+      const parsed = parseManifestToml(
+        `name = "x"\n\nresponse_format = { type = "json", custom_flag = true }\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      parsed.form.response_format = {
+        mode: "json_schema",
+        name: "user",
+        schema: "{}",
+        strict: false,
+      };
+      const toml = serializeManifestForm(parsed.form, parsed.extras);
+      expect(toml).toContain('type = "json_schema"');
+      expect(toml).not.toContain("custom_flag");
+    });
   });
 
   it("parseResponseFormatField always yields a string schema", () => {
@@ -2241,6 +2343,34 @@ describe("the per-agent counters are whole numbers or nothing", () => {
     form.max_concurrent_invocations = "   ";
     expect(validateManifestForm(form)).toEqual([]);
   });
+
+  // `max_concurrent_invocations` deserializes into `Option<u32>`
+  // (crates/librefang-types/src/agent.rs:1480), so one power of two above the
+  // whole-number check the form used to apply, `4294967296`, passed the
+  // validator, reached the TOML, and came back as a 400 the report had
+  // already claimed closed once. The ceiling is per field, not global:
+  // `max_history_messages` is `Option<usize>` (agent.rs:1452) and takes the
+  // same value without complaint.
+  it("reports a concurrency cap above u32::MAX, the field's real ceiling", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.max_concurrent_invocations = "4294967296";
+    expect(validateManifestForm(form)).toContain("max_concurrent_invocations");
+  });
+
+  it("accepts u32::MAX itself for the concurrency cap", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.max_concurrent_invocations = "4294967295";
+    expect(validateManifestForm(form)).not.toContain("max_concurrent_invocations");
+  });
+
+  it("does not impose the u32 ceiling on the usize counter beside it", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.max_history_messages = "4294967296";
+    expect(validateManifestForm(form)).not.toContain("max_history_messages");
+  });
 });
 
 // A fifth member of the same class, found by measuring rather than by reading
@@ -2250,17 +2380,25 @@ describe("the per-agent counters are whole numbers or nothing", () => {
 //
 // The `[schedule]` *root* is a closed enum (`ScheduleMode` in
 // crates/librefang-types/src/agent.rs), so an unknown key there is rejected by
-// the daemon and there is nothing to preserve. Inside a variant it is a struct
-// without `deny_unknown_fields`, so the daemon ignores an unknown field today —
-// and a field the manifest gains tomorrow is exactly the one the editor would
-// have deleted on the next save.
+// the daemon and there is nothing to preserve. Inside a variant the daemon
+// rejects an unknown key too — measured against the parse the PATCH runs
+// (`toml::from_str::<AgentManifest>`), for the root, the inline form, the
+// variant content and a nested table alike — so what this slot preserves is
+// never a document the daemon accepts today. Its reason to exist is forward
+// compatibility: when a future manifest gains a schedule field, an old
+// editor's round-trip must hand it back instead of deleting it, and the
+// editor is also a faithful TOML round-trip tool for drafts the daemon has
+// not accepted yet. That is why every test here works on a fixture the
+// current daemon would reject with a 400: the guard is the editor not
+// deleting content it does not render, not the daemon losing config it was
+// reading.
 describe("the schedule variants keep the keys the form does not render", () => {
   for (const [variant, known] of [
     ["periodic", 'cron = "0 9 * * *"'],
     ["continuous", "check_interval_secs = 600"],
     ["proactive", 'conditions = ["nightly"]'],
   ] as const) {
-    it(`[schedule.${variant}] keeps an unknown key`, () => {
+    it(`[schedule.${variant}] keeps a key a future manifest may carry`, () => {
       const source = `name = "x"\n\n[schedule.${variant}]\n${known}\nfuture_knob = 7\n`;
 
       const parsed = parseManifestToml(source);
@@ -2269,8 +2407,13 @@ describe("the schedule variants keep the keys the form does not render", () => {
 
       const round = serializeManifestForm(parsed.form, parsed.extras);
       expect(round).toContain("future_knob = 7");
-      // The key the form owns still round-trips through the same pass.
-      expect(round).toContain(variant);
+      // And the file a save produces still preserves it for the editor after
+      // this one — a save from the old editor must not be the step that
+      // finally deletes the field.
+      const again = parseManifestToml(round);
+      expect(again.ok).toBe(true);
+      if (!again.ok) return;
+      expect(again.extras.schedule?.[variant]).toEqual({ future_knob: 7 });
     });
 
     it(`[schedule.${variant}] keeps the form's own key alongside it`, () => {
@@ -2286,6 +2429,64 @@ describe("the schedule variants keep the keys the form does not render", () => {
       expect(again.form.schedule.mode).toBe(variant);
     });
   }
+
+  // A future manifest field is not necessarily a scalar. The preserved slot
+  // stores whatever value shape the variant table carried, and the emit half
+  // must return every shape it stores — a table-valued key, or an array of
+  // tables, dies the same death a scalar would have died before the slot
+  // existed. `schedule` renders as ONE inline table (a `[schedule.x]` header
+  // after the bare `schedule = …` key would re-anchor TOML scoping), so the
+  // only legal home for these values is inline inside it.
+  it("[schedule.periodic] keeps an unknown TABLE-valued key", () => {
+    const source = [
+      'name = "x"',
+      "",
+      "[schedule.periodic]",
+      'cron = "0 9 * * *"',
+      "future_table = { depth = 2 }",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.extras.schedule?.periodic).toEqual({ future_table: { depth: 2 } });
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("future_table = { depth = 2 }");
+  });
+
+  // smol-toml parses integers past JavaScript's safe range as BigInt, and
+  // the preserved stash carries it whole — the inline emitter must emit the
+  // digits, not collapse the value to an empty string.
+  it("[schedule.periodic] round-trips a BigInt-valued unknown key", () => {
+    const parsed = parseManifestToml(
+      `name = "x"\n\n[schedule.periodic]\ncron = "0 9 * * *"\nzz_big = 18446744073709551616\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain("zz_big = 18446744073709551616");
+  });
+
+  it("[schedule.periodic] keeps an unknown array-of-tables key", () => {
+    const source = [
+      'name = "x"',
+      "",
+      "[schedule.periodic]",
+      'cron = "0 9 * * *"',
+      "",
+      "[[schedule.periodic.future_rows]]",
+      "weight = 1",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("future_rows = [{ weight = 1 }]");
+  });
 });
 
 // The class this phase spent its time on: a table the form claims as its own
@@ -2314,7 +2515,12 @@ describe("every table the form owns keeps the keys it does not render", () => {
     ["async_tasks", "[async_tasks]\nzz_unknown = 7"],
     ["rl_export", "[rl_export]\nzz_unknown = 7"],
     ["exec_policy", "[exec_policy]\nzz_unknown = 7"],
-    ["response_format", "[response_format]\nzz_unknown = 7"],
+    // `type = "json"` is deliberate: the fixture must carry a type the form
+    // maps, because an unknown-key table with NO type falls into the branch
+    // that preserves the whole table — the same fixture defect the sweep
+    // itself documents on the compaction test. Without a mapped type this
+    // entry passes over the one response_format loss it exists to catch.
+    ["response_format", '[response_format]\ntype = "json"\nzz_unknown = 7'],
     ["schedule", '[schedule.periodic]\ncron = "0 9 * * *"\nzz_unknown = 7'],
     ["compaction", "[compaction]\nzz_unknown = 7"],
     ["skill_workshop", "[skill_workshop]\nzz_unknown = 7"],
@@ -2335,6 +2541,73 @@ describe("every table the form owns keeps the keys it does not render", () => {
       ).toContain("zz_unknown = 7");
     });
   }
+
+  // The [model] fixture above is top-level only, and the form appropriates
+  // one level deeper than it: router_override is an inline table inside
+  // [model] whose unknown members the form re-emits or drops whole. A guard
+  // that never looks one level down swept this instance by nothing.
+  it("[model.router_override] keeps an unknown key nested inside", () => {
+    const parsed = parseManifestToml(
+      `name = "x"\n\n[model]\nrouter_override = { zz_unknown = 7 }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("zz_unknown = 7");
+  });
+
+  // The form appropriates two levels beyond a first-key probe: row
+  // collections (arrays of objects the form re-renders from four known
+  // fields) and inline tables nested inside them. ContextInjection and
+  // WorkspaceDecl carry no deny_unknown_fields, so an unknown key inside a
+  // row is a legal manifest member the daemon keeps on disk — the same
+  // silent deletion the section sweep exists to catch, one row down.
+  const ROWS: ReadonlyArray<readonly [string, string]> = [
+    [
+      "fallback_models",
+      "[[fallback_models]]\nprovider = \"p\"\nmodel = \"m\"\nzz_unknown = 7",
+    ],
+    [
+      "context_injection",
+      '[[context_injection]]\nname = "n"\ncontent = "c"\ncondition = "always"\nzz_unknown = 7',
+    ],
+    ["workspaces", '[workspaces]\nmine = { path = "sub", zz_unknown = 7 }'],
+  ];
+
+  for (const [row, body] of ROWS) {
+    it(`[${row}] keeps the keys a row does not render`, () => {
+      const parsed = parseManifestToml(`name = "x"\n\n${body}\n`);
+      expect(parsed.ok, `[${row}] did not parse`).toBe(true);
+      if (!parsed.ok) return;
+
+      const round = serializeManifestForm(parsed.form, parsed.extras);
+      expect(
+        round,
+        `[${row}] dropped a key the form has no widget for, so opening an ` +
+          `agent in this editor and saving removes it from the manifest.`,
+      ).toContain("zz_unknown = 7");
+    });
+  }
+
+  // The sweep's first-level probe cannot see rows or nesting: an empty
+  // manifest's arrays are empty, indistinguishable from the scalar lists.
+  // The interface declares every row collection as `Array<{`, so the guard
+  // reads the declaration — the same source-reading style the routability
+  // guard uses — and fails when a row collection is added to the form
+  // without a sweep entry.
+  it("sweeps every row collection the interface declares", () => {
+    const libSource = readFileSync(join(__dirname, "agentManifest.ts"), "utf8");
+    const declared = [...libSource.matchAll(/(\w+): Array<\{/g)].map((m) => m[1]);
+    expect(declared.length).toBeGreaterThan(0);
+
+    const swept = ROWS.map(([row]) => row);
+    const unswept = declared.filter((k) => !swept.includes(k));
+    expect(
+      unswept,
+      `these row collections are swept by nothing: ${unswept.join(", ")}`,
+    ).toEqual([]);
+  });
 
   it("sweeps every table the form claims, not a hand-kept list", () => {
     // A table added to the form without an entry above would be swept by
@@ -2626,4 +2899,332 @@ describe("channel_overrides", () => {
     expect(round).toContain("future_toggle = true");
     expect(round).toContain("threading = true");
   });
+});
+
+// The five manifest fields the profile router edits — `[model] mode` plus
+// `router_override` — and `[resources] burst_ratio` round-trip through the
+// form like every other field. These are the fields
+// `GET/PUT /api/agents/{id}/model_routing` reads and writes, so a form that
+// drops one would let the routing panel and this editor disagree about the
+// same manifest.
+describe("model router fields round-trip through the form", () => {
+  const BASE = ['name = "x"', "", "[model]", 'provider = "openai"', 'model = "gpt-4o"'].join(
+    "\n",
+  );
+
+  it("mode = flexible round-trips", () => {
+    const parsed = parseManifestToml(`${BASE}\nmode = "flexible"\n`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.mode).toBe("flexible");
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain('mode = "flexible"');
+
+    const reparsed = parseManifestToml(toml);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.model.mode).toBe("flexible");
+  });
+
+  it("mode = fixed is the default that is not written", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+
+    const toml = serializeManifestForm(form);
+    // `fixed` is `ModelMode`'s `#[default]` variant; writing it would record a
+    // decision nobody made and pin the agent if that default ever changes.
+    expect(toml).not.toMatch(/^mode = /m);
+  });
+
+  it("router_override round-trips all four members", () => {
+    const parsed = parseManifestToml(
+      `${BASE}\nrouter_override = { fixed = true, allowed_profiles = ["coding", "research"], cost_budget = "cheap", default_profile = "research" }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.router_fixed).toBe(true);
+    expect(parsed.form.model.router_allowed_profiles).toEqual(["coding", "research"]);
+    expect(parsed.form.model.router_cost_budget).toBe("cheap");
+    expect(parsed.form.model.router_default_profile).toBe("research");
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain(
+      'router_override = { fixed = true, allowed_profiles = ["coding", "research"], cost_budget = "cheap", default_profile = "research" }',
+    );
+
+    const reparsed = parseManifestToml(toml);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.model.router_fixed).toBe(true);
+    expect(reparsed.form.model.router_allowed_profiles).toEqual(["coding", "research"]);
+    expect(reparsed.form.model.router_cost_budget).toBe("cheap");
+    expect(reparsed.form.model.router_default_profile).toBe("research");
+  });
+
+  it("a router_override with one member set writes only that member", () => {
+    const parsed = parseManifestToml(
+      `${BASE}\nrouter_override = { cost_budget = "expensive" }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain('router_override = { cost_budget = "expensive" }');
+    // The members with "no opinion" defaults must not re-appear: `fixed = false`
+    // is what the absent key already means, and an empty allowlist means "any
+    // profile is allowed" — writing them would turn silence into a decision.
+    expect(toml).not.toContain("fixed =");
+    expect(toml).not.toContain("allowed_profiles");
+    expect(toml).not.toContain("default_profile");
+  });
+
+  it("an unset router_override is not written at all", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+
+    const toml = serializeManifestForm(form);
+    // The Rust field is `Option<AgentRouterOverride>`; an empty table would
+    // configure nothing and still look configured.
+    expect(toml).not.toContain("router_override");
+  });
+
+  it("an empty allowed_profiles keeps meaning every profile", () => {
+    const parsed = parseManifestToml(
+      `${BASE}\nrouter_override = { allowed_profiles = [] }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.router_allowed_profiles).toEqual([]);
+
+    // The empty list carries no information the daemon does not already have,
+    // so the empty override collapses to nothing on save.
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).not.toContain("router_override");
+  });
+
+  // AgentRouterOverride carries no deny_unknown_fields
+  // (crates/librefang-types/src/model_profile.rs), so a key the form has no
+  // widget for is a legal manifest member the daemon keeps on disk. The
+  // form re-emits only the four members it renders — the same silent
+  // deletion response_format's preserved stash fixed, one level down.
+  it("keeps an unknown key nested inside the override", () => {
+    const parsed = parseManifestToml(
+      `${BASE}\nrouter_override = { cost_budget = "cheap", zz_unknown = 7 }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain(
+      'router_override = { cost_budget = "cheap", zz_unknown = 7 }',
+    );
+  });
+
+  // And the stash is the whole table when nothing else is set: an unknown
+  // key alone is still content the file carried.
+  it("emits the override for a preserved-only table", () => {
+    const parsed = parseManifestToml(`${BASE}\nrouter_override = { zz_unknown = 7 }\n`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.router_fixed).toBe(false);
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain("router_override = { zz_unknown = 7 }");
+  });
+
+  it("an empty override stays unwritten", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).not.toContain("router_override");
+  });
+
+  // The two surfaces this field used to have disagreed about fixed mode: the
+  // routing panel cleared allowed_profiles and cost_budget on a fixed write —
+  // mirroring `set_agent_model_routing`, which rebuilds the override wholesale
+  // for flexible and `None` for fixed (routes/agents/config.rs), a
+  // body-shape normalisation of that route, not a file-format constraint.
+  // The form writes the manifest file, where fixed alongside constraints is
+  // legal and the daemon keeps it on disk. And the constraints are NOT inert
+  // beside a fixed flag: a spawned child inherits the parent's
+  // router_override verbatim and ungated (librefang-runtime's
+  // tool_runner/agent.rs serializes parent_override into the child's model
+  // block whatever the mode), so a flexible child inheriting fixed = true
+  // bypasses the router with it. Preserving is the only correct choice, and
+  // it matters beyond the file's own shape.
+  it("keeps the constraints beside a fixed override, which children inherit ungated", () => {
+    const parsed = parseManifestToml(
+      `${BASE}\nrouter_override = { fixed = true, allowed_profiles = ["coding"], cost_budget = "cheap" }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.router_fixed).toBe(true);
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain("fixed = true");
+    expect(toml).toContain('allowed_profiles = ["coding"]');
+    expect(toml).toContain('cost_budget = "cheap"');
+  });
+
+  it("unknown mode and cost_budget spellings fall back to the defaults", () => {
+    const parsed = parseManifestToml(
+      `${BASE}\nmode = "yolo"\nrouter_override = { cost_budget = "bargain" }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.mode).toBe("fixed");
+    expect(parsed.form.model.router_cost_budget).toBe("");
+  });
+});
+
+// `[resources] burst_ratio` is `Option<f32>` clamped to 0.01..=1.0 at
+// enforcement time, not at write time — so the form neither clamps a value
+// nor refuses one, it just carries what the operator wrote.
+describe("resources burst_ratio round-trips through the form", () => {
+  const BASE = ['name = "x"', "", "[resources]", "max_llm_tokens_per_hour = 100000"].join(
+    "\n",
+  );
+
+  it("round-trips a ladder rung", () => {
+    const parsed = parseManifestToml(`${BASE}\nburst_ratio = 0.5\n`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.resources.burst_ratio).toBe("0.5");
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain("burst_ratio = 0.5");
+
+    const reparsed = parseManifestToml(toml);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.resources.burst_ratio).toBe("0.5");
+  });
+
+  it("round-trips a custom fraction the ladder does not carry", () => {
+    // Below the smallest rung (0.05) but above the enforcement floor (0.01):
+    // the operator's number is written back byte-identical, not snapped to a
+    // preset they did not choose.
+    const parsed = parseManifestToml(`${BASE}\nburst_ratio = 0.03\n`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.resources.burst_ratio).toBe("0.03");
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain("burst_ratio = 0.03");
+  });
+
+  it("writes no key when unset", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+
+    const toml = serializeManifestForm(form);
+    // "" is the absent key, which means the compiled default of 0.2 applies.
+    expect(toml).not.toContain("burst_ratio");
+  });
+});
+
+// The u32 ceiling the concurrency counter got is the shape of a family, not a
+// one-off: seven more fields the form carries deserialize into `Option<u32>`
+// (crates/librefang-types/src/agent.rs — heartbeat_timeout_secs :118,
+// max_tokens :949, auto_dream_min_sessions :1423, compaction's max_retries
+// :1649, max_loop_steps_before_aggregate :1655, strip_reasoning_after_turns
+// :1658, skill_workshop's max_pending_age_days :2040), and the two token
+// counts beside max_tokens are `Option<u64>`. None of them validated anything:
+// a value past a field's real ceiling reached the TOML and came back as a 400
+// with no field named — or, for the shapes parseInteger refuses, silently
+// vanished from the file. The ceiling belongs to the field's type; where
+// MODEL_PARAM_RANGES carries one for a parameter (#8332), the table is the
+// source of truth.
+describe("every integer count validates against its Rust type", () => {
+  const U32_FIELDS: ReadonlyArray<{
+    path: string;
+    set: (form: ManifestFormState, v: string) => void;
+  }> = [
+    { path: "model.max_tokens", set: (f, v) => { f.model.max_tokens = v; } },
+    {
+      path: "autonomous.heartbeat_timeout_secs",
+      set: (f, v) => { f.autonomous.heartbeat_timeout_secs = v; },
+    },
+    { path: "auto_dream_min_sessions", set: (f, v) => { f.auto_dream_min_sessions = v; } },
+    { path: "compaction.max_retries", set: (f, v) => { f.compaction.max_retries = v; } },
+    {
+      path: "compaction.max_loop_steps_before_aggregate",
+      set: (f, v) => { f.compaction.max_loop_steps_before_aggregate = v; },
+    },
+    {
+      path: "compaction.strip_reasoning_after_turns",
+      set: (f, v) => { f.compaction.strip_reasoning_after_turns = v; },
+    },
+    {
+      path: "skill_workshop.max_pending_age_days",
+      set: (f, v) => { f.skill_workshop.max_pending_age_days = v; },
+    },
+  ];
+
+  for (const { path, set } of U32_FIELDS) {
+    it(`${path} rejects a value past u32::MAX`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      set(form, "4294967296");
+      expect(validateManifestForm(form)).toContain(path);
+    });
+
+    it(`${path} accepts u32::MAX itself`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      set(form, "4294967295");
+      expect(validateManifestForm(form)).not.toContain(path);
+    });
+  }
+
+  // `context_window` and `max_output_tokens` are `Option<u64>` — no typo
+  // reaches their ceiling through TOML, whose integers stop at the signed
+  // 64-bit bound. Their defect is the silent drop instead: a negative or a
+  // non-integer passed the validator and parseInteger made the key vanish.
+  for (const [param, key] of [
+    ["context_window", "model.context_window"],
+    ["max_output_tokens", "model.max_output_tokens"],
+  ] as const) {
+    it(`${key} reports a negative instead of dropping it`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      form.model[param] = "-5";
+      expect(validateManifestForm(form)).toContain(key);
+    });
+
+    it(`${key} reports a non-integer instead of dropping it`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      form.model[param] = "1.5";
+      expect(validateManifestForm(form)).toContain(key);
+    });
+
+    // The ceiling is not global: the u64 field takes the value that caps its
+    // u32 sibling without complaint.
+    it(`${key} stays valid at u32::MAX + 1`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      form.model[param] = "4294967296";
+      expect(validateManifestForm(form)).not.toContain(key);
+    });
+
+    it(`${key} round-trips past JavaScript's safe integer range`, () => {
+      const parsed = parseManifestToml(
+        `name = "a"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\ncontext_window = 9223372036854775806\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      const round = serializeManifestForm(parsed.form, parsed.extras);
+      expect(round).toContain("context_window = 9223372036854775806");
+    });
+  }
 });

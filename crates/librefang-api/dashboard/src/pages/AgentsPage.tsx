@@ -69,10 +69,8 @@ import { useWhoami } from "../lib/queries/authz";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import type { ManifestSectionId } from "../components/AgentManifestForm";
 import { sectionForInvalidField } from "../components/AgentManifestForm";
-import { AgentModelParamFields } from "../components/AgentModelParamFields";
-import { selectModelLimits } from "../lib/modelLimits";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
-import { AgentModelRoutingPanel } from "../components/AgentModelRoutingPanel";
+import { useModelRouterProfiles } from "../lib/queries/modelRouter";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
   emptyManifestExtras,
@@ -1315,7 +1313,19 @@ export function AgentsPage() {
   // the design's stderr-style log feed wants. The previous source
   // (global audit) only had admin lifecycle entries, leaving the tab
   // blank for almost every agent.
+  // The model router's profile catalog backs the manifest form's
+  // allowed_profiles finder — the capability the routing panel used to own
+  // exclusively, ported when the panel died.
+  const routerProfilesQuery = useModelRouterProfiles();
   const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
+  const routerProfileCatalog = useMemo(
+    () =>
+      (routerProfilesQuery.data?.profiles ?? []).map((p) => ({
+        name: p.name,
+        description: [`${p.provider}/${p.model}`, p.cost_tier].join(" · "),
+      })),
+    [routerProfilesQuery.data],
+  );
   const tabAgentToolsQuery = useAgentTools(detailAgent?.id ?? "", {
     enabled: !!detailAgent && agentTab === "tools",
   });
@@ -1784,13 +1794,6 @@ export function AgentsPage() {
   // Both facts are read off `buildModelConfigPatch`, the same strict builder Save itself calls: a null patch means the draft is invalid, an empty patch means nothing changed.
   // Sharing the builder also keeps trailing garbage ("4096abc") from enabling a button that then no-ops, because the parse that rejects it is the parse that would have built the request.
   const currentModel = detailAgent?.model;
-  // The declared capacities for the model being edited, so the drawer trims rungs the endpoint
-  // cannot honour and warns on an over-limit value — the same two things the create form does with
-  // the same helper, instead of the drawer silently offering both.
-  const drawerModelLimits = useMemo(
-    () => selectModelLimits(visibleModels, modelDraft.model, modelDraft.provider),
-    [visibleModels, modelDraft.model, modelDraft.provider],
-  );
   const modelPatchPreview = buildModelConfigPatch(modelDraft, currentModel).patch;
   const modelValid = modelPatchPreview !== null;
   const modelDirty = modelPatchPreview !== null && Object.keys(modelPatchPreview).length > 0;
@@ -2190,7 +2193,6 @@ export function AgentsPage() {
       case "memory":            return renderMemoryTab(agent);
       case "skills":            return renderSkillsTab(agent);
       case "tools":             return renderToolsTab(agent);
-      case "routing":           return renderRoutingTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
       case "history":           return renderHistoryTab(agent);
@@ -2241,6 +2243,8 @@ export function AgentsPage() {
           skillCatalog={skillCatalogForForm}
           toolCatalog={toolCatalogForForm}
           mcpCatalog={mcpCatalogForForm}
+          routerProfileCatalog={routerProfileCatalog}
+          routerProfilesEnabled={routerProfilesQuery.data?.enabled}
           // Identity is decided by the drawer header's rename control; a
           // second editable Name field here would be a second answer to the
           // same question.
@@ -3341,22 +3345,17 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Schedule tab — editable triggers / cron / continuous-mode panel
-  // (issue #4924). The read-only summary that lived here previously is now
-  // owned by AgentSchedulePanel, which talks to the existing CRUD endpoints
-  // (POST/PATCH/DELETE /api/triggers and /api/cron/jobs, PATCH /api/agents/{id}
-  // for `schedule`). The synthetic "Last 14 runs" bar chart was a placeholder
-  // (no real per-fire telemetry endpoint yet) and was dropped in favour of
-  // real editing affordances — restore it once a per-agent run-history feed
-  // exists.
-  // ---------- Routing tab — per-agent model routing (fixed vs router-chosen,
-  // profile allowlist, cost budget). Owned by AgentModelRoutingPanel, which
-  // talks to GET/PUT /api/agents/{id}/model_routing and
-  // GET /api/model-router/profiles.
-  const renderRoutingTab = (agent: AgentDetail) => (
-    <AgentModelRoutingPanel agent={agent} />
-  );
-
+  // ---------- Schedule tab — runtime registries only (issue #4924).
+  // AgentSchedulePanel owns the CRUD endpoints (POST/PATCH/DELETE
+  // /api/triggers and /api/cron/jobs). The manifest's [schedule] — mode,
+  // cron, conditions — is edited by the manifest form the same tab hosts,
+  // not by a second surface here. The synthetic "Last 14 runs" bar chart was
+  // a placeholder (no real per-fire telemetry endpoint yet) and was dropped
+  // in favour of real editing affordances — restore it once a per-agent
+  // run-history feed exists.
+  // ---------- Routing tab — the manifest form is the tab's whole body now.
+  // Model routing (fixed vs router-chosen, profile allowlist, cost budget)
+  // lives in the model section it hosts; there is no second writer to it.
   const renderScheduleTab = (agent: AgentDetail) => (
     <AgentSchedulePanel agent={agent} />
   );
@@ -3865,26 +3864,15 @@ export function AgentsPage() {
                           </datalist>
                         </DetailRow>
                         {/*
-                          The same step ladders the create form and the model
-                          settings use, rather than a second set of hand-rolled
-                          number boxes. One parameter, one control: a bare
-                          `<input type="number">` stated neither the usual value
-                          nor the ceiling, so setting a temperature meant knowing
-                          that 0.7 is typical and 2 is the limit, while the
-                          identical parameter elsewhere in the app was a labelled
-                          ladder.
-
-                          Every field is tri-state, and `""` is the third state:
-                          it means the agent has no opinion and the model's own
-                          setting applies. That is why an untouched row must stay
-                          empty (#5917).
+                          Provider and model only. The seven sampling and
+                          endpoint parameters used to render here too, but they
+                          are manifest fields with widgets in the manifest form
+                          the Routing tab hosts — a second surface for the same
+                          seven values was the redundancy the unified editor
+                          exists to remove. They stay in the draft so a save
+                          that changes nothing but the provider carries no
+                          numeric patch at all (#5917).
                         */}
-                        <AgentModelParamFields
-                          draft={modelDraft}
-                          onChange={(field, next) => setModelDraft(d => ({ ...d, [field]: next }))}
-                          isHand={detailAgent.is_hand === true}
-                          limits={drawerModelLimits}
-                        />
                         <div className="flex justify-end gap-2 pt-1">
                           <button
                             onClick={cancelModelEdit}
@@ -4537,6 +4525,8 @@ export function AgentsPage() {
                 skillCatalog={skillCatalogForForm}
                 toolCatalog={toolCatalogForForm}
                 mcpCatalog={mcpCatalogForForm}
+                routerProfileCatalog={routerProfileCatalog}
+                routerProfilesEnabled={routerProfilesQuery.data?.enabled}
               />
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">

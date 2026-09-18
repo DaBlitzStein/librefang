@@ -6,6 +6,10 @@
 // survives a round-trip back through the form.
 
 import { parse, stringify, TomlError, type TomlTable } from "smol-toml";
+// The parameter range table is the single source of truth for a model
+// parameter's ceiling (#8332); the validator reads it rather than restating
+// a number beside it. agentModelPatch already imports from the same module.
+import { MODEL_PARAM_RANGES } from "../components/ui/ModelParamField";
 
 let _nextUid = 1;
 export const generateUid = (): string => String(_nextUid++);
@@ -180,6 +184,28 @@ export interface ManifestFormState {
     max_output_tokens: string;
     api_key_env: string;
     base_url: string;
+    // `[model] mode` and `[model] router_override` — the profile router's
+    // per-agent settings, read and written inside the agent's own manifest
+    // (#8424). They are manifest fields, so this form is where they are
+    // edited; the routing panel that shared them was removed rather than
+    // kept as a second writer.
+    mode: "fixed" | "flexible";
+    // `AgentRouterOverride` is `Option` in Rust: every field below is only
+    // meaningful once at least one of them is set, and the table is left out
+    // entirely when none is.
+    router_fixed: boolean;
+    /** Empty means "any profile is allowed", which is also what the daemon reads. */
+    router_allowed_profiles: string[];
+    router_cost_budget: "" | "cheap" | "medium" | "expensive";
+    router_default_profile: string;
+    /**
+     * Keys inside `router_override` the form has no widget for.
+     * `AgentRouterOverride` carries no `deny_unknown_fields`
+     * (crates/librefang-types/src/model_profile.rs), so such a key is a legal
+     * manifest member the daemon keeps on disk — the stash is what lets the
+     * re-emitted inline table carry it back instead of dropping it.
+     */
+    router_override_preserved?: TomlTable;
   };
 
   /** Tri-state: `null` = key absent (inherit global fallback_providers),
@@ -207,6 +233,12 @@ export interface ManifestFormState {
     max_memory_bytes: string;
     max_cpu_time_ms: string;
     max_network_bytes_per_hour: string;
+    /**
+     * `Option<f32>`, clamped to 0.01..=1.0 at enforcement time, not at write
+     * time — so the form just carries what the operator wrote.
+     * `""` is the absent key, which means the compiled default of 0.2 applies.
+     */
+    burst_ratio: string;
   };
 
   capabilities: {
@@ -274,12 +306,21 @@ export interface ManifestFormState {
     content: string;
     position: "system" | "before_user" | "after_reset";
     condition: string;
+    /** Keys inside the row the form has no widget for. */
+    preserved?: TomlTable;
   }>;
 
   response_format:
     | { mode: "text" }
-    | { mode: "json" }
-    | { mode: "json_schema"; name: string; schema: string; strict: boolean };
+    | { mode: "json"; preserved?: TomlTable }
+    | {
+        mode: "json_schema";
+        name: string;
+        schema: string;
+        strict: boolean;
+        /** Keys inside the table the form has no widget for. */
+        preserved?: TomlTable;
+      };
 
   // Only the shorthand string variants are exposed here. Full ExecPolicy
   // tables (`[exec_policy]` with mode/safe_bins/timeout_secs/…) stay in
@@ -304,6 +345,8 @@ export interface ManifestFormState {
     name: string;
     path: string;
     mode: "rw" | "r";
+    /** Keys inside the row the form has no widget for. */
+    preserved?: TomlTable;
   }>;
 }
 
@@ -493,6 +536,13 @@ export const emptyManifestForm = (): ManifestFormState => ({
     max_output_tokens: "",
     api_key_env: "",
     base_url: "",
+    // `ModelMode::Fixed` is the `#[default]` variant, and it is also what every
+    // manifest written before the profile router existed means.
+    mode: "fixed",
+    router_fixed: false,
+    router_allowed_profiles: [],
+    router_cost_budget: "",
+    router_default_profile: "",
   },
   fallback_models: null,
   resources: {
@@ -504,6 +554,9 @@ export const emptyManifestForm = (): ManifestFormState => ({
     max_memory_bytes: "",
     max_cpu_time_ms: "",
     max_network_bytes_per_hour: "",
+    // "" is the absent key: the compiled default of 0.2 applies (see the
+    // field's doc in ManifestFormState.resources).
+    burst_ratio: "",
   },
   capabilities: {
     network: [],
@@ -675,6 +728,10 @@ const FORM_MODEL_KEYS = new Set([
   "max_output_tokens",
   "api_key_env",
   "base_url",
+  // Both now have widgets, so both are the form's to emit: leaving them out of
+  // this set would put them in the extras as well and emit each one twice.
+  "mode",
+  "router_override",
 ]);
 const FORM_RESOURCE_KEYS = new Set([
   "max_llm_tokens_per_hour",
@@ -685,6 +742,9 @@ const FORM_RESOURCE_KEYS = new Set([
   "max_memory_bytes",
   "max_cpu_time_ms",
   "max_network_bytes_per_hour",
+  // Has a widget too, so it is the form's to emit: leaving it out of this set
+  // would put it in the extras as well and emit it twice.
+  "burst_ratio",
 ]);
 const FALLBACK_MODEL_KEYS = new Set([
   "provider",
@@ -814,6 +874,21 @@ const PRIORITIES = ["Low", "Normal", "High", "Critical"] as const;
 const SESSION_MODES = ["persistent", "new"] as const;
 const WEB_SEARCH_MODES = ["off", "auto", "always"] as const;
 const INJECTION_POSITIONS = ["system", "before_user", "after_reset"] as const;
+/** `ModelMode`'s `#[serde(rename_all = "snake_case")]` spellings. */
+const MODEL_MODES = ["fixed", "flexible"] as const;
+/** `CostTier`'s spellings, which the router API echoes byte for byte. */
+const COST_TIERS = ["cheap", "medium", "expensive"] as const;
+/** The members of `AgentRouterOverride` the form renders. */
+const ROUTER_OVERRIDE_KEYS = new Set([
+  "fixed",
+  "allowed_profiles",
+  "cost_budget",
+  "default_profile",
+]);
+/** The members of a [[context_injection]] row the form renders. */
+const CONTEXT_INJECTION_KEYS = new Set(["name", "content", "position", "condition"]);
+/** The members of a [workspaces] path-form row the form renders. */
+const WORKSPACE_ROW_KEYS = new Set(["path", "mode"]);
 const EXEC_SHORTHANDS = ["allow", "deny", "full", "allowlist"] as const;
 // These three mirror `rename_all` on the Rust enums, not the variant names:
 // `ToolProfile` and `OrphanPolicy` are `snake_case`, `BackendKind` is
@@ -945,6 +1020,41 @@ const isPositiveUnsignedTomlInteger = (raw: string): boolean => {
  */
 const isBlankOrUnsignedTomlInteger = (raw: string): boolean =>
   raw.trim() === "" || parseUnsignedTomlInteger(raw) !== null;
+
+/** `u32::MAX` — the largest value an `Option<u32>` manifest count can carry. */
+const U32_TOML_MAX = 4294967295n;
+
+/**
+ * The blank-or-unsigned check at an explicit ceiling.
+ *
+ * The whole-number check above accepts anything up to `TOML_INTEGER_MAX`
+ * (2^63-1), which is the `usize`/`u64` half of the manifest's counts. A field
+ * whose Rust side is `Option<u32>` stops one power of two lower: serde
+ * rejects `4294967296` with the same 400 the whole-number check was written
+ * to close, so the ceiling belongs to the field's type, not to the shared
+ * parser. Where a field carries a ceiling in `MODEL_PARAM_RANGES` (#8332),
+ * the table's number is the one used — one source of truth.
+ */
+const isBlankOrUnsignedTomlIntegerAtMost = (raw: string, ceiling: bigint): boolean => {
+  const value = parseUnsignedTomlInteger(raw);
+  return raw.trim() === "" || (value !== null && BigInt(value) <= ceiling);
+};
+
+/** Every `Option<u32>` count the form edits (`crates/librefang-types/src/agent.rs`). */
+const isBlankOrU32TomlInteger = (raw: string): boolean =>
+  isBlankOrUnsignedTomlIntegerAtMost(raw, U32_TOML_MAX);
+
+/**
+ * max_tokens's ceiling comes from the range table (#8332), not a second
+ * number beside this one. The table's max for the parameter IS `u32::MAX`,
+ * so table and type agree today — the fallback only names what still applies
+ * if the table entry ever loses its max: the Rust field is `Option<u32>`
+ * (agent.rs:949), and that bound outlives any table edit.
+ */
+const MODEL_MAX_TOKENS_CEILING =
+  MODEL_PARAM_RANGES.max_tokens.max !== undefined
+    ? BigInt(MODEL_PARAM_RANGES.max_tokens.max)
+    : U32_TOML_MAX;
 
 /**
  * Parse a float that may legitimately be negative.
@@ -1233,6 +1343,10 @@ export const serializeManifestForm = (
       if (!n || !p) continue;
       const parts = [`path = ${escapeTomlString(p)}`];
       if (ws.mode === "r") parts.push(`mode = "r"`);
+      for (const [key, value] of Object.entries(ws.preserved ?? {})) {
+        if (value === null || value === undefined) continue;
+        parts.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+      }
       wsBody.push(`${tomlBareKeyOrQuoted(n)} = { ${parts.join(", ")} }`);
     }
     if (wsBody.length) lines.push("", "[workspaces]", ...wsBody);
@@ -1248,10 +1362,20 @@ export const serializeManifestForm = (
   writeNumberScalar(modelBody, "top_p", parseSignedFloat(form.model.top_p));
   writeNumberScalar(modelBody, "frequency_penalty", parseSignedFloat(form.model.frequency_penalty));
   writeNumberScalar(modelBody, "presence_penalty", parseSignedFloat(form.model.presence_penalty));
-  writeNumberScalar(modelBody, "context_window", parseInteger(form.model.context_window));
-  writeNumberScalar(modelBody, "max_output_tokens", parseInteger(form.model.max_output_tokens));
+  // The two u64 token counts carry as strings, the way the resource quotas
+  // already do: their type reaches past JavaScript's safe integer range
+  // (TOML's signed-64-bit bound is u64's practical wire ceiling), and the
+  // Number-based parseInteger dropped anything past 2^53-1 on the floor —
+  // a value the validator now accepts because the file format can carry it.
+  writeIntegerScalar(modelBody, "context_window", parseUnsignedTomlInteger(form.model.context_window));
+  writeIntegerScalar(modelBody, "max_output_tokens", parseUnsignedTomlInteger(form.model.max_output_tokens));
   writeStringScalar(modelBody, "api_key_env", form.model.api_key_env.trim());
   writeStringScalar(modelBody, "base_url", form.model.base_url.trim());
+  // `fixed` is `ModelMode`'s default, so it is the value that must not be
+  // written — writing it would record a decision nobody made and pin the agent
+  // if that default ever changes.
+  if (form.model.mode !== "fixed") writeStringScalar(modelBody, "mode", form.model.mode);
+  modelBody.push(...renderRouterOverride(form.model));
   const modelExtras = renderExtraScalars(safeModelExtras);
   if (modelBody.length || modelExtras.length) {
     lines.push("", "[model]", ...modelBody, ...modelExtras);
@@ -1267,6 +1391,11 @@ export const serializeManifestForm = (
   writeIntegerScalar(resourceBody, "max_memory_bytes", parseUnsignedTomlInteger(form.resources.max_memory_bytes));
   writeIntegerScalar(resourceBody, "max_cpu_time_ms", parseUnsignedTomlInteger(form.resources.max_cpu_time_ms));
   writeIntegerScalar(resourceBody, "max_network_bytes_per_hour", parseUnsignedTomlInteger(form.resources.max_network_bytes_per_hour));
+  // A fraction of the hourly budget one minute may spend. `parseFloatish`
+  // returns null for the absent key and for garbage, so neither is written;
+  // in-range values the form does not recognise as a rung pass through
+  // unclamped — the runtime does the clamping, at enforcement time.
+  writeNumberScalar(resourceBody, "burst_ratio", parseFloatish(form.resources.burst_ratio));
   const resourceExtras = renderExtraScalars(safeResourceExtras);
   if (resourceBody.length || resourceExtras.length) {
     lines.push("", "[resources]", ...resourceBody, ...resourceExtras);
@@ -1513,6 +1642,14 @@ export const serializeManifestForm = (
     writeStringScalar(body, "content", ci.content);
     if (ci.position !== "system") writeStringScalar(body, "position", ci.position);
     writeStringScalar(body, "condition", ci.condition.trim());
+    // The un-widgeted keys ride along as inline values — the same merge the
+    // preserved stashes get, and the only legal one here: `[[context_injection]]`
+    // is an array of tables, so a nested header could not be addressed to this
+    // row instead of whichever row the parser would anchor it to.
+    for (const [key, value] of Object.entries(ci.preserved ?? {})) {
+      if (value === null || value === undefined) continue;
+      body.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+    }
     if (body.length) lines.push("", "[[context_injection]]", ...body);
   }
 
@@ -1574,6 +1711,41 @@ const pluckSafeExtras = (
   return safe;
 };
 
+/**
+ * `[model] router_override`, as an inline table.
+ *
+ * Inline rather than a `[model.router_override]` header: that header would land
+ * inside the `[model]` block and re-scope every bare key written after it.
+ *
+ * Nothing is emitted when nothing is set. The Rust field is
+ * `Option<AgentRouterOverride>` and every one of its members defaults to "no
+ * opinion", so an empty table would be a configured section that configures
+ * nothing — and, unlike the tri-state scalars, there is no absent-versus-false
+ * distinction to preserve: `fixed = false` is what the absent key already means.
+ */
+const renderRouterOverride = (m: ManifestFormState["model"]): string[] => {
+  const parts: string[] = [];
+  if (m.router_fixed) parts.push("fixed = true");
+  // Empty is the daemon's "any profile allowed", so it needs no key either.
+  if (m.router_allowed_profiles.length) {
+    parts.push(`allowed_profiles = ${tomlArray(m.router_allowed_profiles)}`);
+  }
+  if (m.router_cost_budget) {
+    parts.push(`cost_budget = ${escapeTomlString(m.router_cost_budget)}`);
+  }
+  const fallback = m.router_default_profile.trim();
+  if (fallback) parts.push(`default_profile = ${escapeTomlString(fallback)}`);
+  // The un-widgeted keys merge back into the single inline table — the same
+  // merge response_format's preserved stash gets, and for the same reason:
+  // a `[model.router_override.<key>]` header after this bare assignment
+  // would re-anchor TOML scoping, so inline is the only legal home.
+  for (const [key, value] of Object.entries(m.router_override_preserved ?? {})) {
+    if (value === null || value === undefined) continue;
+    parts.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+  }
+  return parts.length ? [`router_override = { ${parts.join(", ")} }`] : [];
+};
+
 const renderSchedule = (
   s: ManifestFormState["schedule"],
   preserved: TomlTable,
@@ -1605,14 +1777,35 @@ const renderSchedule = (
   }
   const preservedVariant = preserved[s.mode];
   if (isTomlTable(preservedVariant)) {
-    inner.push(...renderExtraScalars(preservedVariant));
+    // `jsonValueToInlineToml`, not `renderExtraScalars`: the preserved slot
+    // stores every value shape the variant table carried, and the two halves
+    // of this field must agree about what survives. `renderExtraScalars`
+    // refuses multi-line output — which is every table-typed value — so a
+    // preserved key holding a table or an array of tables was stashed by the
+    // parse half and dropped by this one. A `[schedule.<key>]` header is not
+    // an alternative here: it would land after this bare `schedule = …` key
+    // and TOML forbids extending an already-assigned inline table.
+    for (const [key, value] of Object.entries(preservedVariant)) {
+      if (value === null || value === undefined) continue;
+      inner.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+    }
   }
   return `schedule = { ${s.mode} = { ${inner.join(", ")} } }`;
 };
 
 const renderResponseFormat = (rf: ManifestFormState["response_format"]): string => {
   if (rf.mode === "text") return "";
-  if (rf.mode === "json") return 'response_format = { type = "json" }';
+  // Keys the form does not render merge back into the single inline table
+  // here, after the form's own parts. `jsonValueToInlineToml` is the renderer
+  // for them because `renderExtraScalars` refuses table-typed values — and a
+  // `[custom]` header inside this value would re-anchor TOML scoping anyway.
+  const preservedParts = Object.entries(rf.preserved ?? {}).map(
+    ([key, value]) => `${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`,
+  );
+  if (rf.mode === "json") {
+    const parts = ['type = "json"', ...preservedParts];
+    return `response_format = { ${parts.join(", ")} }`;
+  }
   // json_schema — schemas can be deeply nested, which makes inline-table
   // syntax brittle. Build the value once via JSON, then convert to TOML
   // using a small recursive emitter that always produces inline syntax.
@@ -1622,6 +1815,7 @@ const renderResponseFormat = (rf: ManifestFormState["response_format"]): string 
   const parts: string[] = [`type = "json_schema"`, `name = ${escapeTomlString(rf.name || "response")}`];
   parts.push(`schema = ${jsonValueToInlineToml(schemaValue)}`);
   if (rf.strict) parts.push("strict = true");
+  parts.push(...preservedParts);
   return `response_format = { ${parts.join(", ")} }`;
 };
 
@@ -1631,6 +1825,12 @@ const jsonValueToInlineToml = (value: unknown): string => {
   if (value === null || value === undefined) return '""'; // TOML has no null
   if (typeof value === "string") return escapeTomlString(value);
   if (typeof value === "boolean") return String(value);
+  // smol-toml parses integers past JavaScript's safe range as BigInt, and
+  // the preserved stashes carry it whole. Without this arm the value fell
+  // through to the object branch and rendered as an empty string — the
+  // preserved path CORRUPTING instead of losing. The digits are valid TOML:
+  // the format places no bound on integer magnitude.
+  if (typeof value === "bigint") return value.toString();
   if (typeof value === "number") {
     return Number.isFinite(value) ? String(value) : "0";
   }
@@ -1832,16 +2032,61 @@ export const validateManifestForm = (
   // The two per-agent counts. Blank inherits, anything else must be a whole
   // number the daemon can read into `Option<usize>`; without this the form let
   // `-5` through to the TOML and the operator learned about it as a 400.
+  // Each is checked against its own Rust ceiling — the whole-number floor
+  // they share is `usize`-shaped, and `max_concurrent_invocations` is `u32`.
   if (!isBlankOrUnsignedTomlInteger(form.max_history_messages)) {
     errors.push("max_history_messages");
   }
-  if (!isBlankOrUnsignedTomlInteger(form.max_concurrent_invocations)) {
+  if (!isBlankOrU32TomlInteger(form.max_concurrent_invocations)) {
     errors.push("max_concurrent_invocations");
   }
-  if (!isInRange(form.model.temperature, 0, 2)) errors.push("model.temperature");
-  if (!isInRange(form.model.top_p, 0, 1)) errors.push("model.top_p");
-  if (!isInRange(form.model.frequency_penalty, -2, 2)) errors.push("model.frequency_penalty");
-  if (!isInRange(form.model.presence_penalty, -2, 2)) errors.push("model.presence_penalty");
+  // The model's three integer parameters. max_tokens is `Option<u32>` and its
+  // ceiling lives in MODEL_PARAM_RANGES (#8332) — the table's number, not a
+  // second one here. The two token counts beside it are `Option<u64>`: no
+  // typo reaches their ceiling through TOML, so what the validator owes them
+  // is the shape — a negative or a non-integer used to pass and parseInteger
+  // dropped the key from the file without a word.
+  if (
+    !isBlankOrUnsignedTomlIntegerAtMost(form.model.max_tokens, MODEL_MAX_TOKENS_CEILING)
+  ) {
+    errors.push("model.max_tokens");
+  }
+  if (!isBlankOrUnsignedTomlInteger(form.model.context_window)) {
+    errors.push("model.context_window");
+  }
+  if (!isBlankOrUnsignedTomlInteger(form.model.max_output_tokens)) {
+    errors.push("model.max_output_tokens");
+  }
+  // The rest of the `Option<u32>` inventory — same ceiling, same shape.
+  if (!isBlankOrU32TomlInteger(form.autonomous.heartbeat_timeout_secs)) {
+    errors.push("autonomous.heartbeat_timeout_secs");
+  }
+  if (!isBlankOrU32TomlInteger(form.auto_dream_min_sessions)) {
+    errors.push("auto_dream_min_sessions");
+  }
+  if (!isBlankOrU32TomlInteger(form.compaction.max_retries)) {
+    errors.push("compaction.max_retries");
+  }
+  if (!isBlankOrU32TomlInteger(form.compaction.max_loop_steps_before_aggregate)) {
+    errors.push("compaction.max_loop_steps_before_aggregate");
+  }
+  if (!isBlankOrU32TomlInteger(form.compaction.strip_reasoning_after_turns)) {
+    errors.push("compaction.strip_reasoning_after_turns");
+  }
+  if (!isBlankOrU32TomlInteger(form.skill_workshop.max_pending_age_days)) {
+    errors.push("skill_workshop.max_pending_age_days");
+  }
+  // The sampling ranges read from MODEL_PARAM_RANGES, not a second number
+  // beside it: the table is the same source the widget's own min/max and the
+  // PATCH route's ceiling come from, so a range edit lands everywhere at
+  // once instead of the validator quietly keeping yesterday's bounds.
+  for (const param of ["temperature", "top_p", "frequency_penalty", "presence_penalty"] as const) {
+    const { min, max } = MODEL_PARAM_RANGES[param];
+    // A parameter without a table max is unbound above — the table is the
+    // source, and the validator follows it rather than inventing a bound.
+    if (max === undefined) continue;
+    if (!isInRange(form.model[param], min, max)) errors.push(`model.${param}`);
+  }
   // Folder rows: duplicate names produce a duplicate TOML key (hard parse
   // failure on the daemon), and `path` mirrors the kernel's rule — relative
   // to workspaces_dir, no `..`. A mount row carries an absolute host path
@@ -2005,10 +2250,17 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.allowed_plugins = asStringArray(parsed.allowed_plugins);
   form.schedule = parseScheduleField(parsed.schedule);
   // The chosen variant's unmatched keys are preserved rather than consumed —
-  // the same treatment every other table the form owns gets. The `[schedule]`
-  // root is the one level with nothing to preserve: `ScheduleMode` is an
-  // externally-tagged enum, so an unknown key there is a document the daemon
-  // rejects outright rather than a field it would read later.
+  // the same treatment every other table the form owns gets, and for the same
+  // underlying reason: forward compatibility. The daemon rejects an unknown
+  // key anywhere inside schedule today — measured against the parse the PATCH
+  // runs, `toml::from_str::<AgentManifest>`: a key inside the variant comes
+  // back as `unexpected keys in table: zz, available keys: cron` — so a
+  // preserved key is never a field it was reading — what preservation buys
+  // is a field a future
+  // manifest carries surviving an old editor's save. The `[schedule]` root is
+  // the one level with nothing to preserve: `ScheduleMode` is an
+  // externally-tagged enum, so even a sibling key beside the variant is a
+  // document the daemon rejects outright.
   if (isTomlTable(parsed.schedule) && form.schedule.mode !== "reactive") {
     const variantTable = parsed.schedule[form.schedule.mode];
     const knownKeys = SCHEDULE_VARIANT_KEYS[form.schedule.mode];
@@ -2031,13 +2283,16 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   }
   // exec_policy as a full table (not a shorthand string) is preserved in extras.
   if (isTomlTable(parsed.exec_policy)) topExtras.exec_policy = parsed.exec_policy;
-  // response_format that we couldn't fully map to the form's enum (e.g.
-  // unknown `type`) goes back into extras to avoid silent loss.
-  if (
-    isTomlTable(parsed.response_format) &&
-    form.response_format.mode === "text" &&
-    asString((parsed.response_format as TomlTable).type) !== "text"
-  ) {
+  // response_format the form cannot re-emit goes back into extras to avoid
+  // silent loss. Mapped tables (`type = "json"` / `"json_schema"`) instead
+  // stash their un-owned keys on the form state — parseResponseFormatField —
+  // because the form re-emits the whole table as one inline assignment, and
+  // an extras copy alongside it would be the double-emission the
+  // mutual-exclusion filter below exists to prevent. Text mode renders
+  // nothing, so there any table present survives only through extras; the
+  // old guard's `type !== "text"` carve-out dropped `{ type = "text", … }`
+  // tables whole, unknown keys included.
+  if (isTomlTable(parsed.response_format) && form.response_format.mode === "text") {
     topExtras.response_format = parsed.response_format;
   }
   extras.topLevel = topExtras;
@@ -2056,6 +2311,21 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.model.max_output_tokens = asNumberString(modelTable.max_output_tokens);
   form.model.api_key_env = asString(modelTable.api_key_env);
   form.model.base_url = asString(modelTable.base_url);
+  // The profile router's per-agent settings live in `[model]` — which is why
+  // this form had to grow them: they are manifest fields, and the routing
+  // panel was the only surface that could write them.
+  form.model.mode = asEnum(modelTable.mode, MODEL_MODES, "fixed");
+  const routerOverride = isTomlTable(modelTable.router_override)
+    ? modelTable.router_override
+    : {};
+  form.model.router_fixed = asBoolean(routerOverride.fixed, false);
+  form.model.router_allowed_profiles = asStringArray(routerOverride.allowed_profiles);
+  form.model.router_cost_budget = asOptionalEnum(routerOverride.cost_budget, COST_TIERS);
+  form.model.router_default_profile = asString(routerOverride.default_profile);
+  const routerPreserved = stripKnown(routerOverride, ROUTER_OVERRIDE_KEYS);
+  if (Object.keys(routerPreserved).length) {
+    form.model.router_override_preserved = routerPreserved;
+  }
   extras.model = stripKnown(modelTable, FORM_MODEL_KEYS);
 
   // [[fallback_models]] — capture provider-specific flatten extras too,
@@ -2086,6 +2356,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.resources.max_memory_bytes = asNumberString(resourceTable.max_memory_bytes);
   form.resources.max_cpu_time_ms = asNumberString(resourceTable.max_cpu_time_ms);
   form.resources.max_network_bytes_per_hour = asNumberString(resourceTable.max_network_bytes_per_hour);
+  form.resources.burst_ratio = asNumberString(resourceTable.burst_ratio);
   extras.resources = stripKnown(resourceTable, FORM_RESOURCE_KEYS);
 
   // [capabilities]
@@ -2256,13 +2527,18 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   if (Array.isArray(parsed.context_injection)) {
     form.context_injection = parsed.context_injection
       .filter(isTomlTable)
-      .map((ci) => ({
-        _uid: generateParsedUid(),
-        name: asString(ci.name),
-        content: asString(ci.content),
-        position: asEnum(ci.position, INJECTION_POSITIONS, "system"),
-        condition: asString(ci.condition),
-      }));
+      .map((ci) => {
+        const row: ManifestFormState["context_injection"][number] = {
+          _uid: generateParsedUid(),
+          name: asString(ci.name),
+          content: asString(ci.content),
+          position: asEnum(ci.position, INJECTION_POSITIONS, "system"),
+          condition: asString(ci.condition),
+        };
+        const preserved = stripKnown(ci, CONTEXT_INJECTION_KEYS);
+        if (Object.keys(preserved).length) row.preserved = preserved;
+        return row;
+      });
   }
 
   // Only `path`-based declarations become rows. A `mount` entry points at an
@@ -2274,14 +2550,17 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     const preservedWorkspaces: TomlTable = {};
     for (const [name, v] of Object.entries(parsed.workspaces)) {
       if (isTomlTable(v) && typeof (v as TomlTable).path === "string") {
-        form.workspaces.push({
+        const row: ManifestFormState["workspaces"][number] = {
           _uid: generateParsedUid(),
           name,
           path: (v as TomlTable).path as string,
           mode: READONLY_MODE_ALIASES.has(asString((v as TomlTable).mode))
             ? ("r" as const)
             : ("rw" as const),
-        });
+        };
+        const preserved = stripKnown(v, WORKSPACE_ROW_KEYS);
+        if (Object.keys(preserved).length) row.preserved = preserved;
+        form.workspaces.push(row);
       } else {
         preservedWorkspaces[name] = v;
       }
@@ -2357,22 +2636,53 @@ const parseExecPolicyShorthand = (
   return EXEC_POLICY_ALIASES[spelling] ?? "";
 };
 
+// The keys the form re-emits for each mapped mode. Everything else inside a
+// mapped table is stashed on the form state and merged back when the field
+// renders, so an unknown key alongside `type = "json"` no longer vanishes on
+// save — the same preservation every section table gets, adapted to a field
+// whose whole value is one inline table.
+const RESPONSE_FORMAT_JSON_KEYS = new Set(["type"]);
+const RESPONSE_FORMAT_JSON_SCHEMA_KEYS = new Set(["type", "name", "schema", "strict"]);
+
+/**
+ * Attach the un-owned keys of the parsed table to the mapped form state.
+ *
+ * Empty means nothing to stash, and the returned object stays exactly the
+ * mapped one — so a table the form fully understands carries no hidden
+ * payload around.
+ */
+const withResponseFormatPreserved = (
+  mapped: { mode: "json" } | { mode: "json_schema"; name: string; schema: string; strict: boolean },
+  raw: TomlTable,
+  owned: Set<string>,
+): ManifestFormState["response_format"] => {
+  const preserved = stripKnown(raw, owned);
+  if (!Object.keys(preserved).length) return mapped;
+  return { ...mapped, preserved };
+};
+
 const parseResponseFormatField = (raw: unknown): ManifestFormState["response_format"] => {
   if (!isTomlTable(raw)) return { mode: "text" };
   const type = asString(raw.type);
-  if (type === "json") return { mode: "json" };
+  if (type === "json") {
+    return withResponseFormatPreserved({ mode: "json" }, raw, RESPONSE_FORMAT_JSON_KEYS);
+  }
   if (type === "json_schema") {
-    return {
-      mode: "json_schema",
-      name: asString(raw.name),
-      // JSON.stringify(undefined) returns undefined (not a string!), which
-      // would break the `schema: string` type and trigger React's
-      // uncontrolled→controlled warning when fed to <textarea value={…}>.
-      // Default to `{}` whenever the source schema is missing or
-      // unrenderable.
-      schema: stringifyOrEmpty(raw.schema),
-      strict: asBoolean(raw.strict, false),
-    };
+    return withResponseFormatPreserved(
+      {
+        mode: "json_schema",
+        name: asString(raw.name),
+        // JSON.stringify(undefined) returns undefined (not a string!), which
+        // would break the `schema: string` type and trigger React's
+        // uncontrolled→controlled warning when fed to <textarea value={…}>.
+        // Default to `{}` whenever the source schema is missing or
+        // unrenderable.
+        schema: stringifyOrEmpty(raw.schema),
+        strict: asBoolean(raw.strict, false),
+      },
+      raw,
+      RESPONSE_FORMAT_JSON_SCHEMA_KEYS,
+    );
   }
   return { mode: "text" };
 };
