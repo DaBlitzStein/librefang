@@ -129,6 +129,16 @@ export const MAX_CONCURRENT_INVOCATIONS_LADDER = [1, 2, 4, 8, 16, 32] as const;
 /** Cosine similarity floor. A fraction, so the rungs are fractions. */
 export const MIN_SIMILARITY_LADDER = [0.3, 0.5, 0.6, 0.7, 0.8, 0.9] as const;
 
+/**
+ * Fraction of the hourly token budget an agent may spend in any single minute.
+ *
+ * Not `MIN_SIMILARITY_LADDER`: the compiled default is 0.2 and the runtime
+ * clamps to 0.01..=1.0, so the rungs are the ones an operator is choosing
+ * between — a fifth, a quarter, half, or the whole hourly budget in one minute,
+ * which is the "no burst restriction" end.
+ */
+export const BURST_RATIO_LADDER = [0.05, 0.1, 0.2, 0.25, 0.5, 1] as const;
+
 /** Durations held in hours — "6 h", "1 day". */
 export function formatHours(value: number): string {
   if (value >= 24 && value % 24 === 0) return `${value / 24} d`;

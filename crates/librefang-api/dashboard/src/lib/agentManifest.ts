@@ -180,6 +180,20 @@ export interface ManifestFormState {
     max_output_tokens: string;
     api_key_env: string;
     base_url: string;
+    // `[model] mode` and `[model] router_override` — the profile router's
+    // per-agent settings. They were the only manifest fields edited by a panel
+    // rather than by this form (#…): `GET/PUT /api/agents/{id}/model_routing`
+    // reads and writes exactly these, inside the agent's own manifest, so
+    // leaving them out of the form would have made the panel irreplaceable.
+    mode: "fixed" | "flexible";
+    // `AgentRouterOverride` is `Option` in Rust: every field below is only
+    // meaningful once at least one of them is set, and the table is left out
+    // entirely when none is.
+    router_fixed: boolean;
+    /** Empty means "any profile is allowed", which is also what the daemon reads. */
+    router_allowed_profiles: string[];
+    router_cost_budget: "" | "cheap" | "medium" | "expensive";
+    router_default_profile: string;
   };
 
   /** Tri-state: `null` = key absent (inherit global fallback_providers),
@@ -207,6 +221,12 @@ export interface ManifestFormState {
     max_memory_bytes: string;
     max_cpu_time_ms: string;
     max_network_bytes_per_hour: string;
+    /**
+     * `Option<f32>`, clamped to 0.01..=1.0 at enforcement time, not at write
+     * time — so the form neither clamps it nor refuses it, it reports it.
+     * `""` is the absent key, which means the compiled default of 0.2 applies.
+     */
+    burst_ratio: string;
   };
 
   capabilities: {
@@ -493,6 +513,13 @@ export const emptyManifestForm = (): ManifestFormState => ({
     max_output_tokens: "",
     api_key_env: "",
     base_url: "",
+    // `ModelMode::Fixed` is the `#[default]` variant, and it is also what every
+    // manifest written before the profile router existed means.
+    mode: "fixed",
+    router_fixed: false,
+    router_allowed_profiles: [],
+    router_cost_budget: "",
+    router_default_profile: "",
   },
   fallback_models: null,
   resources: {
@@ -504,6 +531,9 @@ export const emptyManifestForm = (): ManifestFormState => ({
     max_memory_bytes: "",
     max_cpu_time_ms: "",
     max_network_bytes_per_hour: "",
+    // "" is the absent key: the compiled default of 0.2 applies (see the
+    // field's doc in ManifestFormState.resources).
+    burst_ratio: "",
   },
   capabilities: {
     network: [],
@@ -675,6 +705,10 @@ const FORM_MODEL_KEYS = new Set([
   "max_output_tokens",
   "api_key_env",
   "base_url",
+  // Both now have widgets, so both are the form's to emit: leaving them out of
+  // this set would put them in the extras as well and emit each one twice.
+  "mode",
+  "router_override",
 ]);
 const FORM_RESOURCE_KEYS = new Set([
   "max_llm_tokens_per_hour",
@@ -814,6 +848,10 @@ const PRIORITIES = ["Low", "Normal", "High", "Critical"] as const;
 const SESSION_MODES = ["persistent", "new"] as const;
 const WEB_SEARCH_MODES = ["off", "auto", "always"] as const;
 const INJECTION_POSITIONS = ["system", "before_user", "after_reset"] as const;
+/** `ModelMode`'s `#[serde(rename_all = "snake_case")]` spellings. */
+const MODEL_MODES = ["fixed", "flexible"] as const;
+/** `CostTier`'s spellings, which the router API echoes byte for byte. */
+const COST_TIERS = ["cheap", "medium", "expensive"] as const;
 const EXEC_SHORTHANDS = ["allow", "deny", "full", "allowlist"] as const;
 // These three mirror `rename_all` on the Rust enums, not the variant names:
 // `ToolProfile` and `OrphanPolicy` are `snake_case`, `BackendKind` is
@@ -1252,6 +1290,11 @@ export const serializeManifestForm = (
   writeNumberScalar(modelBody, "max_output_tokens", parseInteger(form.model.max_output_tokens));
   writeStringScalar(modelBody, "api_key_env", form.model.api_key_env.trim());
   writeStringScalar(modelBody, "base_url", form.model.base_url.trim());
+  // `fixed` is `ModelMode`'s default, so it is the value that must not be
+  // written — writing it would record a decision nobody made and pin the agent
+  // if that default ever changes.
+  if (form.model.mode !== "fixed") writeStringScalar(modelBody, "mode", form.model.mode);
+  modelBody.push(...renderRouterOverride(form.model));
   const modelExtras = renderExtraScalars(safeModelExtras);
   if (modelBody.length || modelExtras.length) {
     lines.push("", "[model]", ...modelBody, ...modelExtras);
@@ -1572,6 +1615,33 @@ const pluckSafeExtras = (
     }
   }
   return safe;
+};
+
+/**
+ * `[model] router_override`, as an inline table.
+ *
+ * Inline rather than a `[model.router_override]` header: that header would land
+ * inside the `[model]` block and re-scope every bare key written after it.
+ *
+ * Nothing is emitted when nothing is set. The Rust field is
+ * `Option<AgentRouterOverride>` and every one of its members defaults to "no
+ * opinion", so an empty table would be a configured section that configures
+ * nothing — and, unlike the tri-state scalars, there is no absent-versus-false
+ * distinction to preserve: `fixed = false` is what the absent key already means.
+ */
+const renderRouterOverride = (m: ManifestFormState["model"]): string[] => {
+  const parts: string[] = [];
+  if (m.router_fixed) parts.push("fixed = true");
+  // Empty is the daemon's "any profile allowed", so it needs no key either.
+  if (m.router_allowed_profiles.length) {
+    parts.push(`allowed_profiles = ${tomlArray(m.router_allowed_profiles)}`);
+  }
+  if (m.router_cost_budget) {
+    parts.push(`cost_budget = ${escapeTomlString(m.router_cost_budget)}`);
+  }
+  const fallback = m.router_default_profile.trim();
+  if (fallback) parts.push(`default_profile = ${escapeTomlString(fallback)}`);
+  return parts.length ? [`router_override = { ${parts.join(", ")} }`] : [];
 };
 
 const renderSchedule = (
@@ -2056,6 +2126,17 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.model.max_output_tokens = asNumberString(modelTable.max_output_tokens);
   form.model.api_key_env = asString(modelTable.api_key_env);
   form.model.base_url = asString(modelTable.base_url);
+  // The profile router's per-agent settings live in `[model]` — which is why
+  // this form had to grow them: they are manifest fields, and the routing
+  // panel was the only surface that could write them.
+  form.model.mode = asEnum(modelTable.mode, MODEL_MODES, "fixed");
+  const routerOverride = isTomlTable(modelTable.router_override)
+    ? modelTable.router_override
+    : {};
+  form.model.router_fixed = asBoolean(routerOverride.fixed, false);
+  form.model.router_allowed_profiles = asStringArray(routerOverride.allowed_profiles);
+  form.model.router_cost_budget = asOptionalEnum(routerOverride.cost_budget, COST_TIERS);
+  form.model.router_default_profile = asString(routerOverride.default_profile);
   extras.model = stripKnown(modelTable, FORM_MODEL_KEYS);
 
   // [[fallback_models]] — capture provider-specific flatten extras too,
