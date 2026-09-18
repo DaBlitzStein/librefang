@@ -1334,7 +1334,13 @@ prompt_template = "on push"
     expect(reparsed.form.mcp_servers).toEqual(["github"]);
     expect(reparsed.form.tool_allowlist).toEqual(["file_read"]);
     expect(reparsed.extras.topLevel["future_field"]).toBe("unknown to this daemon");
-    expect(reparsed.extras.topLevel["compaction"]).toEqual({ threshold_messages: 7 });
+    // `[compaction]` became a first-class form table in this branch, so the
+    // value round-trips through `form.compaction` instead of surviving as an
+    // unknown top-level key — the same change of address `[workspaces]` went
+    // through below, in #8013. Where it survives changed; that it survives has
+    // not, and the assertion is stronger for it: it now checks the value
+    // reaches the field the daemon reads, not just that the table was kept.
+    expect(reparsed.form.compaction.threshold_messages).toBe("7");
     // `[workspaces]` is a first-class form field since #8013, so a path-based row round-trips through `form.workspaces` instead of surviving as an unknown top-level key.
     // Where it survives changed; that it survives has not.
     expect(reparsed.form.workspaces).toHaveLength(1);
@@ -2351,5 +2357,78 @@ describe("every table the form owns keeps the keys it does not render", () => {
       stale,
       `the sweep lists tables the form does not claim: ${stale.join(", ")}`,
     ).toEqual([]);
+  });
+});
+
+// `[compaction]` is the same shape as `[proactive_memory]`: nine `Option<T>`
+// overrides, so "inherit" and "explicitly set" are different keys on disk and
+// an untouched table must not be written at all.
+describe("compaction overrides", () => {
+  it("writes no table when every field inherits", () => {
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("[compaction]");
+  });
+
+  it("writes the table as soon as one field is set", () => {
+    const form = emptyManifestForm();
+    form.compaction.threshold_messages = "40";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[compaction]");
+    expect(toml).toContain("threshold_messages = 40");
+  });
+
+  it("round-trips every field", () => {
+    const form = emptyManifestForm();
+    form.compaction = {
+      threshold_messages: "40",
+      keep_recent: "10",
+      max_summary_tokens: "4096",
+      token_threshold_ratio: "0.7",
+      max_chunk_chars: "8000",
+      max_retries: "2",
+      aggregate_developer_loops: "false",
+      max_loop_steps_before_aggregate: "5",
+      strip_reasoning_after_turns: "2",
+    };
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.compaction).toEqual(form.compaction);
+  });
+
+  // An explicit `false` here is a real override — "do not aggregate these
+  // loops" — and the whole reason this one field is a tri-state select rather
+  // than a toggle. A toggle renders "inherit" and "false" identically, so
+  // touching it would write a decision nobody made.
+  it("keeps an explicit false distinct from inherit", () => {
+    const inherited = emptyManifestForm();
+    const explicit = emptyManifestForm();
+    explicit.compaction.aggregate_developer_loops = "false";
+
+    expect(serializeManifestForm(inherited)).not.toContain("aggregate_developer_loops");
+    expect(serializeManifestForm(explicit)).toContain("aggregate_developer_loops = false");
+
+    const parsed = parseManifestToml(serializeManifestForm(explicit));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.compaction.aggregate_developer_loops).toBe("false");
+  });
+
+  it("preserves keys inside [compaction] the form does not render", () => {
+    const source = [
+      'name = "x"',
+      "",
+      "[compaction]",
+      "threshold_messages = 40",
+      "summariser_model = \"cheap/model\"",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain('summariser_model = "cheap/model"');
+    expect(round).toContain("threshold_messages = 40");
   });
 });
