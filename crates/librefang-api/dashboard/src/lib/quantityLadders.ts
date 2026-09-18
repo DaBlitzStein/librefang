@@ -140,6 +140,12 @@ export function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
 }
 
+/** Pending skill candidates retained before the oldest is dropped. */
+export const SKILL_WORKSHOP_MAX_PENDING_LADDER = [5, 10, 25, 50, 100] as const;
+
+/** Age, in days, past which an unapproved candidate expires. */
+export const SKILL_WORKSHOP_MAX_AGE_LADDER = [1, 7, 14, 30, 90] as const;
+
 // ------------------------------------------------------------ compaction
 
 /** Message count that triggers compaction. */
