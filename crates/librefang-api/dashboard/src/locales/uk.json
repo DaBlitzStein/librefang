@@ -551,7 +551,9 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "видалити fallback",
-      "remove_context_injection": "видалити інʼєкцію контексту"
+      "remove_context_injection": "видалити інʼєкцію контексту",
+      "name_required": "Enter a name.",
+      "param_range_error": "Enter a number between {{min}} and {{max}}."
     },
     "delete_confirm": "Ви впевнені, що хочете видалити агента \"{{name}}\"?",
     "prompts": "Промпти",

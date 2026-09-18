@@ -189,6 +189,18 @@ export function ModelParamField({
         max={MODEL_PARAM_RANGES[param].max}
         step={STEPS[param]}
         invalid={invalid}
+        // The range is already here, so the message can state it. A red
+        // control with no reason tells the operator something is wrong and
+        // not what, which is the half that does not help.
+        error={
+          invalid
+            ? t("agents.form.param_range_error", {
+                defaultValue: "Enter a number between {{min}} and {{max}}.",
+                min: MODEL_PARAM_RANGES[param].min,
+                max: MODEL_PARAM_RANGES[param].max,
+              })
+            : undefined
+        }
       />
       {hint && <p className="mt-1 text-[10px] text-text-dim/70 leading-snug">{hint}</p>}
     </div>

@@ -551,7 +551,9 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "移除 fallback",
-      "remove_context_injection": "移除上下文注入"
+      "remove_context_injection": "移除上下文注入",
+      "name_required": "Enter a name.",
+      "param_range_error": "Enter a number between {{min}} and {{max}}."
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",

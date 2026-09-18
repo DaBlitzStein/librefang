@@ -551,7 +551,9 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "대체 제거",
-      "remove_context_injection": "컨텍스트 주입 제거"
+      "remove_context_injection": "컨텍스트 주입 제거",
+      "name_required": "Enter a name.",
+      "param_range_error": "Enter a number between {{min}} and {{max}}."
     },
     "delete_confirm": "\"{{name}}\" 에이전트를 삭제하시겠습니까?",
     "prompts": "프롬프트",

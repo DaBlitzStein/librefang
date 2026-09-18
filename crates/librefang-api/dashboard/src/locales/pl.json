@@ -551,7 +551,9 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "mój_schemat",
       "remove_fallback": "usuń opcję awaryjną",
-      "remove_context_injection": "usuń wstrzykiwanie kontekstu"
+      "remove_context_injection": "usuń wstrzykiwanie kontekstu",
+      "name_required": "Enter a name.",
+      "param_range_error": "Enter a number between {{min}} and {{max}}."
     },
     "delete_confirm": "Czy na pewno chcesz usunąć agenta \"{{name}}\"?",
     "prompts": "Prompty",

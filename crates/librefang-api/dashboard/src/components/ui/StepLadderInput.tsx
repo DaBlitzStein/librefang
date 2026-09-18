@@ -45,6 +45,16 @@ interface StepLadderInputProps {
   /** Optional advisory shown under the control, e.g. an over-limit warning. */
   warning?: string;
   /**
+   * Why the control is marked. Rendered under it with `role="alert"`, the same
+   * slot `Field` uses.
+   *
+   * `invalid` alone tells the operator that something is wrong and not what,
+   * which is the half of a validation message that does not help: a red
+   * control with no reason reads as a broken control rather than as a value
+   * that needs changing.
+   */
+  error?: string;
+  /**
    * The stored value is one the editor refuses to save.
    *
    * Distinct from `warning`, which is advisory and still saves: this marks the
@@ -77,6 +87,7 @@ export function StepLadderInput({
   customLabel,
   customPlaceholder,
   warning,
+  error,
   min,
   max,
   step,
@@ -204,6 +215,13 @@ export function StepLadderInput({
           <span aria-hidden="true">⚠</span>
           <span>{warning}</span>
         </p>
+      ) : null}
+      {error ? (
+        // Same slot and role as `Field`'s error node, so a control marked by
+        // either wrapper explains itself the same way to a screen reader.
+        <span id={`${id}-error`} className="mt-1 block text-[10px] text-error" role="alert">
+          {error}
+        </span>
       ) : null}
     </div>
   );

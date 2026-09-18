@@ -856,6 +856,39 @@ export const TAB_SECTIONS: Partial<Record<AgentDrawerTab, ManifestSectionId[]>> 
   schedule: ["scheduling", "autonomous"],
 };
 
+/**
+ * The tab that owns the first field a validation run complained about.
+ *
+ * A failed save has to send the operator somewhere they can act. With the
+ * sections split across tabs the offending field is usually on a tab they are
+ * not looking at, and an error nobody can see is indistinguishable from no
+ * error — so this resolves the first reported field path to its section, and
+ * that section to the one tab that hosts it.
+ *
+ * Pulled out of `saveManifestEditor` so it can be tested without rendering the
+ * page: `AgentsPage` has some twenty hooks and no render harness, so anything
+ * left inline there is untestable by construction. The decision is the part
+ * with behaviour in it; the caller is one `setAgentTab`.
+ *
+ * Returns `undefined` when nothing maps — an unrecognised path (in which case
+ * `sectionForInvalidField` has no entry and its guard test fails), or a
+ * section no tab hosts (in which case the layout guard fails). Every path
+ * `validateManifestForm` can produce is covered by one of those two, which is
+ * what makes the fallback safe rather than silent.
+ */
+export function tabForFirstInvalidField(
+  errors: readonly string[],
+): AgentDrawerTab | undefined {
+  const firstBadSection = errors
+    .map(sectionForInvalidField)
+    .find((section): section is ManifestSectionId => section !== undefined);
+  if (!firstBadSection) return undefined;
+
+  return (Object.keys(TAB_SECTIONS) as AgentDrawerTab[]).find((tab) =>
+    TAB_SECTIONS[tab]?.includes(firstBadSection),
+  );
+}
+
 export function AgentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -1641,14 +1674,7 @@ export function AgentsPage() {
       // `Field` and the section's own `invalid` flag then highlight it and
       // force its section open, so the switch lands on something that reads as
       // an explanation rather than as a stray navigation.
-      const firstBadSection = errors
-        .map(sectionForInvalidField)
-        .find((section): section is ManifestSectionId => section !== undefined);
-      const owningTab = firstBadSection
-        ? (Object.keys(TAB_SECTIONS) as AgentDrawerTab[]).find((tab) =>
-            TAB_SECTIONS[tab]?.includes(firstBadSection),
-          )
-        : undefined;
+      const owningTab = tabForFirstInvalidField(errors);
       if (owningTab) setAgentTab(owningTab);
       return;
     }

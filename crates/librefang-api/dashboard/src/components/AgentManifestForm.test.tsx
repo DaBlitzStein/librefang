@@ -756,3 +756,36 @@ describe("AgentManifestForm — the model picker persists the pair it replaced",
     expect(parsed.form.model.model).toBe("gpt-4o");
   });
 });
+
+// A field marked invalid without a reason tells the operator that something is
+// wrong and not what — which is the half of the message that does not help, and
+// it is what makes the tab jump land on something that still does not explain
+// itself. The cron and JSON-schema paths already carried `error=`; these are the
+// ones that did not.
+describe("AgentManifestForm — a marked field says why", () => {
+  it("explains a missing name, and associates it with the input", () => {
+    const state = emptyManifestForm();
+    state.name = "";
+
+    render(<Harness initialState={state} invalidFields={new Set(["name"])} />);
+
+    const input = screen.getByRole("textbox", { name: "agents.form.name" });
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input).toHaveAccessibleDescription("agents.form.name_required");
+  });
+
+  it("names the range when a sampling parameter is out of it", () => {
+    const state = emptyManifestForm();
+    state.model.temperature = "9";
+
+    render(
+      <Harness initialState={state} invalidFields={new Set(["model.temperature"])} />,
+    );
+
+    // The message states the bounds rather than only marking the control, and
+    // the bounds come from the same table the ladder uses, so the two cannot
+    // disagree about what is allowed.
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/between/);
+  });
+});

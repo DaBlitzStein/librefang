@@ -359,6 +359,8 @@ export function AgentManifestForm({
             label={t("agents.form.name")}
             required
             invalid={invalidFields.has("name")}
+            error={invalidFields.has("name") ? t("agents.form.name_required") : undefined}
+            errorId="agent-manifest-name-error"
             hint={nameField === "readonly" ? t("agents.form.name_locked_hint") : undefined}
           >
             <input
@@ -373,6 +375,10 @@ export function AgentManifestForm({
               // visible label is not associated with the control. Without this
               // the input has no accessible name.
               aria-label={t("agents.form.name")}
+              aria-invalid={invalidFields.has("name") || undefined}
+              aria-describedby={
+                invalidFields.has("name") ? "agent-manifest-name-error" : undefined
+              }
             />
           </Field>
         )}

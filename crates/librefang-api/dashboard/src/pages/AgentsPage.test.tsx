@@ -14,8 +14,10 @@ import {
   DescriptionSection,
   ChannelsSection,
   TAB_SECTIONS,
+  tabForFirstInvalidField,
 } from "./AgentsPage";
 import { MANIFEST_SECTION_IDS } from "../components/AgentManifestForm";
+import { emptyManifestForm, validateManifestForm } from "../lib/agentManifest";
 import { usePatchAgent, useSetAgentChannels } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
 import { usePromptVersions, useAgentChannels } from "../lib/queries/agents";
@@ -381,6 +383,31 @@ describe("agent drawer — manifest section layout", () => {
     ).toEqual([]);
   });
 
+  // The other direction, and the one that was missing.
+  //
+  // Everything above asks whether each *real* section is hosted somewhere. None
+  // of it asks whether each hosted id is real, so a tab naming a section the
+  // editor does not implement passed every assertion while rendering a hole:
+  // `sections={["skils"]}` finds no match in the form and draws nothing, and
+  // the drawer looks like it loaded an empty tab rather than like it is wrong.
+  //
+  // The ids are a join between two files — the form implements them, the page
+  // arranges them — and a join is exactly where a name has to be checked from
+  // both sides.
+  it("hosts no section the editor does not implement", () => {
+    const known = new Set<string>(MANIFEST_SECTION_IDS);
+    const imaginary = hosted.filter((entry) => !known.has(entry.id));
+
+    expect(
+      imaginary,
+      `TAB_SECTIONS names sections the editor does not implement, so those ` +
+        `tabs render nothing where a section should be. Check the id against ` +
+        `MANIFEST_SECTION_IDS in AgentManifestForm.tsx.\n\n` +
+        `Unknown (${imaginary.length}):\n` +
+        imaginary.map((e) => `${e.id} (${e.tab})`).join("\n"),
+    ).toEqual([]);
+  });
+
   // A section hosted twice is the redundancy the single-surface design exists
   // to remove: two controls writing one field from two places, which is how the
   // complexity router ended up split between a tab and a drawer two levels
@@ -398,5 +425,76 @@ describe("agent drawer — manifest section layout", () => {
       `A section rendered by two tabs means two controls for one field.\n\n` +
         `Duplicated: ${clashes.join(", ")}`,
     ).toEqual([]);
+  });
+});
+
+// The tab jump on a failed save. With the sections split across tabs, the
+// field that failed validation is usually on a tab the operator is not looking
+// at — an error nobody can see is indistinguishable from no error, and this is
+// the half of the layout change that keeps it visible.
+//
+// Driven by the real validator rather than by hand-written field paths: what
+// matters is the pair (validator says X) -> (drawer goes there), and asserting
+// on paths I chose myself would only confirm my idea of what the validator
+// emits. Each case trips exactly one rule in an otherwise valid form.
+describe("tabForFirstInvalidField", () => {
+  const valid = () => {
+    const form = emptyManifestForm();
+    form.name = "an-agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    return form;
+  };
+
+  /** Trips one rule, asserts the validator agrees, and returns the tab. */
+  function tabFor(mutate: (form: ReturnType<typeof valid>) => void) {
+    const form = valid();
+    mutate(form);
+    const errors = validateManifestForm(form);
+    expect(errors.length, `the fixture should trip exactly one rule`).toBeGreaterThan(0);
+    return { errors, tab: tabForFirstInvalidField(errors) };
+  }
+
+  it.each([
+    ["a missing name", (f: ReturnType<typeof valid>) => { f.name = ""; }, "conversation"],
+    ["a blank cron", (f: ReturnType<typeof valid>) => { f.schedule = { mode: "periodic", cron: "" }; }, "schedule"],
+    ["a zero check interval", (f: ReturnType<typeof valid>) => { f.schedule = { mode: "continuous", check_interval_secs: "0" }; }, "schedule"],
+    ["an out-of-range temperature", (f: ReturnType<typeof valid>) => { f.model.temperature = "9"; }, "routing"],
+    ["an out-of-range top_p", (f: ReturnType<typeof valid>) => { f.model.top_p = "7"; }, "routing"],
+    ["an unparseable JSON schema", (f: ReturnType<typeof valid>) => {
+      f.response_format = { mode: "json_schema", name: "s", schema: "{not json", strict: false };
+    }, "conversation"],
+    ["a shared folder with no path", (f: ReturnType<typeof valid>) => {
+      f.workspaces = [{ _uid: "u1", name: "docs", path: "", mode: "rw" }];
+    }, "conversation"],
+  ])("sends %s to the tab that owns the field", (_label, mutate, expected) => {
+    const { tab } = tabFor(mutate as (form: ReturnType<typeof valid>) => void);
+    expect(tab).toBe(expected);
+  });
+
+  // The first message wins, because the operator is sent to exactly one tab and
+  // the validator's order is the order the rules are written in.
+  it("follows the first error when several are present", () => {
+    const form = valid();
+    form.name = "";
+    form.model.temperature = "9";
+    const errors = validateManifestForm(form);
+    expect(errors.length).toBeGreaterThan(1);
+
+    // `name` is checked before the model ranges, and identity lives on
+    // Conversation while the model lives on Routing.
+    expect(tabForFirstInvalidField(errors)).toBe("conversation");
+  });
+
+  it("returns nothing when there is nothing to report", () => {
+    expect(tabForFirstInvalidField([])).toBeUndefined();
+    expect(tabForFirstInvalidField(validateManifestForm(valid()))).toBeUndefined();
+  });
+
+  // A path no section claims is already a failure of the coverage guard in
+  // AgentManifestForm.test.tsx; this pins the behaviour here so the caller's
+  // `if (owningTab)` fallback is a no-op rather than a crash.
+  it("returns nothing for a field path no section claims", () => {
+    expect(tabForFirstInvalidField(["campo.inventado"])).toBeUndefined();
   });
 });
