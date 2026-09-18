@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { createContext, useContext, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
 import {
@@ -218,23 +218,33 @@ interface AgentManifestFormProps {
    * Omitted (the default) renders every section, which is what the
    * create-agent modal wants: one scrolling page with the whole manifest.
    *
-   * The agent drawer passes a subset per tab so the same editor backs
-   * "Conversation", "Routing", "Tools" … instead of living in a second
-   * drawer behind an "Edit full configuration" button. Splitting the
-   * manifest across tabs rather than stacking a second surface on top of
-   * the first is the point: advanced fields reveal in place, and there is
-   * no second place to look.
+   * The agent view passes one config group at a time so the same editor backs
+   * every group instead of living in a second drawer behind an "Edit full
+   * configuration" button. Splitting the manifest across groups rather than
+   * stacking a second surface on top of the first is the point: advanced
+   * fields reveal in place, and there is no second place to look.
    *
-   * Ids name a *section*, not a field, because a section is the unit a
-   * tab can host. Where two tabs need part of a former section the
-   * section was split rather than duplicated — `model` became `prompt`
-   * (Conversation) plus `model` (Routing), `discovery` became `skills`
-   * and `mcp_servers`, and `tags` moved into `identity`.
+   * Ids name a *section*, not a field, because a section is the unit a group
+   * can host. Where two groups need part of a former section the section was
+   * split rather than duplicated — `model` became `prompt` (General) plus
+   * `model` (Model), `discovery` became `skills` and `mcp_servers`, and `tags`
+   * moved into `identity`.
    *
    * An empty array is a caller error and renders nothing; pass
    * `undefined` to mean "all".
    */
   sections?: ManifestSectionId[];
+  /**
+   * Whether the folded halves of every section open on render.
+   *
+   * One switch for the whole form, not one per section: the agent view's
+   * config tab carries a single "advanced mode" toggle, and a per-section
+   * disclosure that remembered its own state would be a second answer to the
+   * question the toggle asks. `invalid` still forces a folded group open in
+   * basic mode, because a validation error the operator cannot see is
+   * indistinguishable from no error.
+   */
+  advanced?: boolean;
 }
 
 /**
@@ -334,6 +344,7 @@ export function AgentManifestForm({
   routerProfilesEnabled,
   nameField = "editable",
   sections,
+  advanced = false,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -436,6 +447,7 @@ export function AgentManifestForm({
     value.response_format.mode === "json_schema" ? value.response_format : null;
 
   return (
+    <AdvancedModeContext.Provider value={advanced}>
     <div className="space-y-4">
       <Section when={shows("identity")} id="identity" title={t("agents.form.basics")}>
         {nameField !== "hidden" && (
@@ -2669,6 +2681,7 @@ export function AgentManifestForm({
         </button>
       </FormSection>
     </div>
+    </AdvancedModeContext.Provider>
   );
 }
 
@@ -2761,8 +2774,15 @@ function Section({
  * `invalid` forces the group open: a validation error the operator cannot
  * see is indistinguishable from no error at all. One level down, the same
  * rule the section fold itself applies.
+ *
+ * `advanced` comes from the form-level switch by context rather than by prop:
+ * there are fifteen call sites, and a prop would be fifteen chances to forget
+ * one — with the failure invisible, since a forgotten site simply folds in
+ * advanced mode where the operator expects everything open.
  */
-function AdvancedFields({
+const AdvancedModeContext = createContext(false);
+
+export function AdvancedFields({
   children,
   invalid,
 }: {
@@ -2770,11 +2790,12 @@ function AdvancedFields({
   invalid?: boolean;
 }) {
   const { t } = useTranslation();
+  const advanced = useContext(AdvancedModeContext);
   return (
     <details
       data-advanced
       className="group rounded-lg border border-border-subtle/40 bg-main/30"
-      open={invalid}
+      open={advanced || invalid}
     >
       <summary className="flex cursor-pointer list-none items-center justify-between px-2.5 py-1.5 select-none">
         <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim group-open:text-text-main">
@@ -2805,7 +2826,17 @@ function FormSection({
   id: ManifestSectionId;
   shows: (id: ManifestSectionId) => boolean;
 } & CollapsibleSectionProps) {
-  return shows(id) ? <CollapsibleSection sectionId={id} {...props} /> : null;
+  // The whole section opens in advanced mode too, not only its inner folds:
+  // "advanced shows everything" has to mean the fold the operator would
+  // otherwise click, or the switch leaves most of the group still closed.
+  const advanced = useContext(AdvancedModeContext);
+  return shows(id) ? (
+    <CollapsibleSection
+      sectionId={id}
+      {...props}
+      defaultOpen={props.defaultOpen || advanced}
+    />
+  ) : null;
 }
 
 /**

@@ -299,23 +299,7 @@
       "avatar_type_rejected": "头像必须是 PNG、JPEG、GIF 或 WebP 图片。不接受 SVG。",
       "avatar_too_large": "该图片为 {{size}} MB，上限为 {{limit}} MB。"
     },
-    "model": "模型",
-    "provider": "供应商",
-    "max_tokens": "最大令牌数",
-    "temperature": "温度",
     "no_matching": "没有匹配的智能体。",
-    "system_prompt": "系统提示词",
-    "system_prompt_placeholder": "该智能体尚无系统提示词。",
-    "system_prompt_saved": "系统提示词已保存",
-    "bind_from_library": "从提示词库绑定",
-    "bind": "绑定",
-    "prompt_bound": "已从提示词库绑定",
-    "prompt_active": "当前",
-    "prompt_versions_load_err": "加载提示词版本失败",
-    "no_prompt_versions": "该智能体尚无已保存的提示词版本。",
-    "web_search": "网络搜索",
-    "web_search_augmentation": "搜索增强",
-    "web_search_augmentation_hint": "自动搜索网络并将结果注入上下文，在调用 LLM 之前完成",
     "capabilities": "能力",
     "skills": "技能",
     "tags": "标签",
@@ -533,7 +517,6 @@
       "name_placeholder": "例如 my-agent",
       "name_locked_hint": "由 URL 决定，而非此字段——在此重命名不会生效。请在智能体标题处重命名——此字段在此处已锁定。",
       "module_placeholder": "例如 default",
-      "model_id_placeholder": "例如 gpt-4o",
       "preferences_hint": "该代理的设置优先于模型设置。保持“继承默认值”则使用模型的设置。",
       "limits_hint": "限制描述该 endpoint 能接受的范围。超过模型限制会在此提示，但仍按原值发送 —— 由提供方决定是否接受。",
       "over_limit_warning": "超过该模型的限制 {{limit}}。已按输入的值保存并发送；提供方可能会拒绝。",
@@ -644,7 +627,6 @@
       "channel_overrides_group_ownership": "Ownership"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
-    "prompts": "提示词管理",
     "prompts_experiments": {
       "title": "提示词与实验",
       "versions_tab": "版本",
@@ -868,9 +850,6 @@
     "delete_success": "智能体已删除",
     "delete_title": "删除智能体？",
     "edit_name": "智能体名称",
-    "model_save_failed": "更新模型失败",
-    "model_saved": "模型已更新",
-    "use_global_default": "使用全局默认模型",
     "rename_failed": "重命名智能体失败",
     "rename_hand_disabled": "Hand 管理的智能体不能重命名",
     "rename_hint": "点击重命名",
@@ -995,9 +974,6 @@
       "manifest_history": "清单历史",
       "manifest_history_load_err": "加载清单历史失败。",
       "no_history": "尚未记录配置更改。",
-      "description": "描述",
-      "description_placeholder": "尚未设置描述。",
-      "description_saved": "描述已保存",
       "channels": "频道",
       "channels_hint": "留空表示可从所有已配置的频道访问。",
       "channels_search_placeholder": "搜索频道…",
@@ -1008,25 +984,45 @@
       "mcp_pending_title": "MCP 服务器未连接",
       "mcp_pending_desc": "在 agent.toml 中已授权但无活跃连接，因此不提供工具。请在 MCP 页面检查服务器；授权将在连接后激活。"
     },
-    "tab": {
-      "conversation": "对话",
-      "memory": "记忆",
-      "skills": "技能",
-      "tools": "工具",
-      "schedule": "计划",
-      "logs": "日志",
-      "history": "历史",
-      "routing": "路由"
+    "brief": {
+      "last_activity": "最近活动",
+      "never": "从未",
+      "no_model": "无模型"
     },
-    "configure": "配置",
+    "group": {
+      "general": "通用",
+      "model": "模型与路由",
+      "tools": "工具与技能",
+      "memory": "记忆",
+      "limits": "限额与成本",
+      "channels": "通道",
+      "planning": "计划",
+      "conversation": "对话"
+    },
+    "info": {
+      "logs": "日志",
+      "memory": "记忆",
+      "prompts": "提示词与实验",
+      "history": "历史"
+    },
+    "config": {
+      "advanced_mode": "高级模式",
+      "advanced_hint": "显示所有字段，而不仅是常用字段"
+    },
+    "tabs": {
+      "main": "智能体视图",
+      "info": "智能体信息",
+      "config_groups": "配置分组"
+    },
+    "tab": {
+      "logs_info": "日志与信息",
+      "config": "配置"
+    },
     "select_an_agent": "选择智能体",
     "select_an_agent_hint": "在左侧选择智能体以查看其会话、记忆、技能和实时日志。",
     "tools_declared_count": "已声明",
     "tools_declared_title": "已声明工具",
     "tools_declared_desc": "此智能体可使用的工具。留空则可不受限制地访问所有工具。",
-    "providers_error_loading": "加载错误",
-    "no_providers": "没有供应商",
-    "select_provider_first": "请先选择供应商",
     "token_usage_title": "令牌占用",
     "token_injected_total": "每次请求注入",
     "token_recent": "最近调用"
