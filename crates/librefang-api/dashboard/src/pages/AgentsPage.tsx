@@ -804,11 +804,10 @@ export function AgentsPage() {
   const suspendMutation = useSuspendAgent();
   const resumeMutation = useResumeAgent();
   const patchAgentMutation = usePatchAgent();
-  // #7749 review: the manifest editor's drawer must not read the rename
-  // flow's mutation state — a failed rename (duplicate name → 400) would
-  // render its error inside the editor drawer and an in-flight rename would
-  // disable its Save. Its own instance, like DescriptionSection and
-  // ChannelsSection have theirs.
+  // #7749 review: the config tab's Save must not read the rename flow's
+  // mutation state — a failed rename (duplicate name → 400) would render its
+  // error inside the manifest editor and an in-flight rename would disable
+  // that Save. Its own instance, like `ChannelsSection` has its own.
   const manifestPatchMutation = usePatchAgent();
   const cloneMutation = useCloneAgent();
   const resetSessionMutation = useResetAgentSession();
@@ -1342,13 +1341,13 @@ export function AgentsPage() {
 
   // Full manifest editor (#7742) — reset and seed. Distinct from the create
   // dialog's Form⇄TOML sync above: this is a single seed-once parse (the
-  // drawer's own TOML source is the server, not a sibling tab), not a
+  // editor's own TOML source is the server, not a sibling tab), not a
   // bidirectional textarea round-trip.
   //
-  // Seeding is keyed on the agent and on the drawer being open, not gated on
-  // a surface being launched: the sections render inside whichever tab the
-  // operator is on, so the form has to hold the selected agent's manifest for
-  // as long as the drawer does.
+  // Seeding is keyed on the agent, not on a surface being launched: the
+  // sections render inside whichever group the operator is on, so the form has
+  // to hold the selected agent's manifest for as long as the config tab is
+  // selected.
   const manifestEditorAgentId = detailAgent?.id ?? null;
 
   // Clear the previous agent's parse the moment the selection changes.
@@ -3370,9 +3369,9 @@ export function AgentsPage() {
 
               {/* Appearance — the emoji and the avatar image (#8339).
                   Its own component, and exported, for the reason the file header
-                  gives for `SystemPromptSection`: `AgentsPage` has ~20 hooks and no
-                  render harness, so anything that has to be tested has to be
-                  reachable without mounting the page. */}
+                  gives for the brief: `AgentsPage` has ~20 hooks and no render
+                  harness, so anything that has to be tested has to be reachable
+                  without mounting the page. */}
               {canEditAppearance && (
                 <AgentAppearanceSection
                   agentId={detailAgent.id}
