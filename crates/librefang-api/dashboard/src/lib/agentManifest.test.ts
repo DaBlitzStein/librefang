@@ -779,6 +779,93 @@ custom = "x"
     expect(reparsed.extras.topLevel.response_format).toBeUndefined();
   });
 
+  // The keys inside a response_format table the form has no widget for must
+  // survive a round-trip, mapped type or not. The mode picker is the source
+  // of truth from the moment the operator touches it: edits within a mode
+  // keep the unknown keys, picking a different mode replaces them — the same
+  // semantics the unmappable-type test above pins.
+  describe("keys the form does not render", () => {
+    it("survive alongside a mapped type = json", () => {
+      const parsed = parseManifestToml(
+        `name = "x"\n\nresponse_format = { type = "json", custom_flag = true }\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.form.response_format.mode).toBe("json");
+
+      const toml = serializeManifestForm(parsed.form, parsed.extras);
+      expect(toml).toContain('response_format = { type = "json", custom_flag = true }');
+
+      const reparsed = parseManifestToml(toml);
+      expect(reparsed.ok).toBe(true);
+      if (!reparsed.ok) return;
+      expect(reparsed.form.response_format.mode).toBe("json");
+      const again = serializeManifestForm(reparsed.form, reparsed.extras);
+      expect(again).toContain('custom_flag = true');
+    });
+
+    it("survive inside a mapped json_schema table", () => {
+      const parsed = parseManifestToml(
+        `name = "x"\n\nresponse_format = { type = "json_schema", name = "user", schema = { type = "object" }, strict = true, custom_flag = true }\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      if (parsed.form.response_format.mode !== "json_schema") {
+        throw new Error("json_schema table did not map to the json_schema mode");
+      }
+      expect(parsed.form.response_format.name).toBe("user");
+
+      const toml = serializeManifestForm(parsed.form, parsed.extras);
+      expect(toml).toContain('type = "json_schema"');
+      expect(toml).toContain('name = "user"');
+      expect(toml).toContain("custom_flag = true");
+      expect(toml).toContain("strict = true");
+    });
+
+    it("a nested-table unknown key renders as an inline table", () => {
+      const parsed = parseManifestToml(
+        `name = "x"\n\nresponse_format = { type = "json", custom = { depth = 2 } }\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      const toml = serializeManifestForm(parsed.form, parsed.extras);
+      // A `[custom]` header inside the value would be multi-line and would
+      // re-anchor TOML scoping; only inline syntax is legal here.
+      expect(toml).toMatch(/response_format = \{ type = "json", custom = \{ depth = 2 \} \}/);
+    });
+
+    it("a type = text table keeps its keys through the extras", () => {
+      const parsed = parseManifestToml(
+        `name = "x"\n\nresponse_format = { type = "text", custom_flag = true }\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      // `type = "text"` maps to the text mode, which renders nothing — so the
+      // table has no form-emitted half to merge with and survives whole.
+      const toml = serializeManifestForm(parsed.form, parsed.extras);
+      expect(toml).toContain("custom_flag = true");
+    });
+
+    it("are replaced when the operator picks a different mode", () => {
+      const parsed = parseManifestToml(
+        `name = "x"\n\nresponse_format = { type = "json", custom_flag = true }\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      parsed.form.response_format = {
+        mode: "json_schema",
+        name: "user",
+        schema: "{}",
+        strict: false,
+      };
+      const toml = serializeManifestForm(parsed.form, parsed.extras);
+      expect(toml).toContain('type = "json_schema"');
+      expect(toml).not.toContain("custom_flag");
+    });
+  });
+
   it("parseResponseFormatField always yields a string schema", () => {
     // Codex-style regression: JSON.stringify(undefined, null, 2) returns
     // undefined, which would flow into a `<textarea value={…}>` and
@@ -2314,7 +2401,12 @@ describe("every table the form owns keeps the keys it does not render", () => {
     ["async_tasks", "[async_tasks]\nzz_unknown = 7"],
     ["rl_export", "[rl_export]\nzz_unknown = 7"],
     ["exec_policy", "[exec_policy]\nzz_unknown = 7"],
-    ["response_format", "[response_format]\nzz_unknown = 7"],
+    // `type = "json"` is deliberate: the fixture must carry a type the form
+    // maps, because an unknown-key table with NO type falls into the branch
+    // that preserves the whole table — the same fixture defect the sweep
+    // itself documents on the compaction test. Without a mapped type this
+    // entry passes over the one response_format loss it exists to catch.
+    ["response_format", '[response_format]\ntype = "json"\nzz_unknown = 7'],
     ["schedule", '[schedule.periodic]\ncron = "0 9 * * *"\nzz_unknown = 7'],
     ["compaction", "[compaction]\nzz_unknown = 7"],
     ["skill_workshop", "[skill_workshop]\nzz_unknown = 7"],

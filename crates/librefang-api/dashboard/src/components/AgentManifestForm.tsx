@@ -2133,10 +2133,13 @@ export function AgentManifestForm({
                 onChange={(e) =>
                   update({
                     response_format: {
-                      mode: "json_schema",
+                      // Spread rather than rebuild: the state may carry keys
+                      // the form does not render (stashed by parse), and an
+                      // edit inside the mode must not drop them. Picking a
+                      // different mode above does drop them — that is the
+                      // operator replacing the format, not editing it.
+                      ...jsonSchemaFormat,
                       name: e.target.value,
-                      schema: jsonSchemaFormat.schema,
-                      strict: jsonSchemaFormat.strict,
                     },
                   })
                 }
@@ -2157,10 +2160,8 @@ export function AgentManifestForm({
                 onChange={(e) =>
                   update({
                     response_format: {
-                      mode: "json_schema",
-                      name: jsonSchemaFormat.name,
+                      ...jsonSchemaFormat,
                       schema: e.target.value,
-                      strict: jsonSchemaFormat.strict,
                     },
                   })
                 }
@@ -2182,9 +2183,7 @@ export function AgentManifestForm({
               onChange={(checked) =>
                 update({
                   response_format: {
-                    mode: "json_schema",
-                    name: jsonSchemaFormat.name,
-                    schema: jsonSchemaFormat.schema,
+                    ...jsonSchemaFormat,
                     strict: checked,
                   },
                 })

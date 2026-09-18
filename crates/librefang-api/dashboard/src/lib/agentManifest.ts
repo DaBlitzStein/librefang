@@ -298,8 +298,15 @@ export interface ManifestFormState {
 
   response_format:
     | { mode: "text" }
-    | { mode: "json" }
-    | { mode: "json_schema"; name: string; schema: string; strict: boolean };
+    | { mode: "json"; preserved?: TomlTable }
+    | {
+        mode: "json_schema";
+        name: string;
+        schema: string;
+        strict: boolean;
+        /** Keys inside the table the form has no widget for. */
+        preserved?: TomlTable;
+      };
 
   // Only the shorthand string variants are exposed here. Full ExecPolicy
   // tables (`[exec_policy]` with mode/safe_bins/timeout_secs/…) stay in
@@ -1690,7 +1697,17 @@ const renderSchedule = (
 
 const renderResponseFormat = (rf: ManifestFormState["response_format"]): string => {
   if (rf.mode === "text") return "";
-  if (rf.mode === "json") return 'response_format = { type = "json" }';
+  // Keys the form does not render merge back into the single inline table
+  // here, after the form's own parts. `jsonValueToInlineToml` is the renderer
+  // for them because `renderExtraScalars` refuses table-typed values — and a
+  // `[custom]` header inside this value would re-anchor TOML scoping anyway.
+  const preservedParts = Object.entries(rf.preserved ?? {}).map(
+    ([key, value]) => `${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`,
+  );
+  if (rf.mode === "json") {
+    const parts = ['type = "json"', ...preservedParts];
+    return `response_format = { ${parts.join(", ")} }`;
+  }
   // json_schema — schemas can be deeply nested, which makes inline-table
   // syntax brittle. Build the value once via JSON, then convert to TOML
   // using a small recursive emitter that always produces inline syntax.
@@ -1700,6 +1717,7 @@ const renderResponseFormat = (rf: ManifestFormState["response_format"]): string 
   const parts: string[] = [`type = "json_schema"`, `name = ${escapeTomlString(rf.name || "response")}`];
   parts.push(`schema = ${jsonValueToInlineToml(schemaValue)}`);
   if (rf.strict) parts.push("strict = true");
+  parts.push(...preservedParts);
   return `response_format = { ${parts.join(", ")} }`;
 };
 
@@ -2109,13 +2127,16 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   }
   // exec_policy as a full table (not a shorthand string) is preserved in extras.
   if (isTomlTable(parsed.exec_policy)) topExtras.exec_policy = parsed.exec_policy;
-  // response_format that we couldn't fully map to the form's enum (e.g.
-  // unknown `type`) goes back into extras to avoid silent loss.
-  if (
-    isTomlTable(parsed.response_format) &&
-    form.response_format.mode === "text" &&
-    asString((parsed.response_format as TomlTable).type) !== "text"
-  ) {
+  // response_format the form cannot re-emit goes back into extras to avoid
+  // silent loss. Mapped tables (`type = "json"` / `"json_schema"`) instead
+  // stash their un-owned keys on the form state — parseResponseFormatField —
+  // because the form re-emits the whole table as one inline assignment, and
+  // an extras copy alongside it would be the double-emission the
+  // mutual-exclusion filter below exists to prevent. Text mode renders
+  // nothing, so there any table present survives only through extras; the
+  // old guard's `type !== "text"` carve-out dropped `{ type = "text", … }`
+  // tables whole, unknown keys included.
+  if (isTomlTable(parsed.response_format) && form.response_format.mode === "text") {
     topExtras.response_format = parsed.response_format;
   }
   extras.topLevel = topExtras;
@@ -2447,22 +2468,53 @@ const parseExecPolicyShorthand = (
   return EXEC_POLICY_ALIASES[spelling] ?? "";
 };
 
+// The keys the form re-emits for each mapped mode. Everything else inside a
+// mapped table is stashed on the form state and merged back when the field
+// renders, so an unknown key alongside `type = "json"` no longer vanishes on
+// save — the same preservation every section table gets, adapted to a field
+// whose whole value is one inline table.
+const RESPONSE_FORMAT_JSON_KEYS = new Set(["type"]);
+const RESPONSE_FORMAT_JSON_SCHEMA_KEYS = new Set(["type", "name", "schema", "strict"]);
+
+/**
+ * Attach the un-owned keys of the parsed table to the mapped form state.
+ *
+ * Empty means nothing to stash, and the returned object stays exactly the
+ * mapped one — so a table the form fully understands carries no hidden
+ * payload around.
+ */
+const withResponseFormatPreserved = (
+  mapped: { mode: "json" } | { mode: "json_schema"; name: string; schema: string; strict: boolean },
+  raw: TomlTable,
+  owned: Set<string>,
+): ManifestFormState["response_format"] => {
+  const preserved = stripKnown(raw, owned);
+  if (!Object.keys(preserved).length) return mapped;
+  return { ...mapped, preserved };
+};
+
 const parseResponseFormatField = (raw: unknown): ManifestFormState["response_format"] => {
   if (!isTomlTable(raw)) return { mode: "text" };
   const type = asString(raw.type);
-  if (type === "json") return { mode: "json" };
+  if (type === "json") {
+    return withResponseFormatPreserved({ mode: "json" }, raw, RESPONSE_FORMAT_JSON_KEYS);
+  }
   if (type === "json_schema") {
-    return {
-      mode: "json_schema",
-      name: asString(raw.name),
-      // JSON.stringify(undefined) returns undefined (not a string!), which
-      // would break the `schema: string` type and trigger React's
-      // uncontrolled→controlled warning when fed to <textarea value={…}>.
-      // Default to `{}` whenever the source schema is missing or
-      // unrenderable.
-      schema: stringifyOrEmpty(raw.schema),
-      strict: asBoolean(raw.strict, false),
-    };
+    return withResponseFormatPreserved(
+      {
+        mode: "json_schema",
+        name: asString(raw.name),
+        // JSON.stringify(undefined) returns undefined (not a string!), which
+        // would break the `schema: string` type and trigger React's
+        // uncontrolled→controlled warning when fed to <textarea value={…}>.
+        // Default to `{}` whenever the source schema is missing or
+        // unrenderable.
+        schema: stringifyOrEmpty(raw.schema),
+        strict: asBoolean(raw.strict, false),
+      },
+      raw,
+      RESPONSE_FORMAT_JSON_SCHEMA_KEYS,
+    );
   }
   return { mode: "text" };
 };
