@@ -80,6 +80,20 @@ export interface ManifestFormState {
     default_timeout_secs: string;
     notify_on_timeout: boolean;
   };
+  // Per-agent overrides of the kernel's `[compaction]`. Nine `Option<T>` with
+  // `skip_serializing_if`, so `""` inherits and a value overrides — and the
+  // table is not written at all when every field says nothing.
+  compaction: {
+    threshold_messages: string;
+    keep_recent: string;
+    max_summary_tokens: string;
+    token_threshold_ratio: string;
+    max_chunk_chars: string;
+    max_retries: string;
+    aggregate_developer_loops: "" | "true" | "false";
+    max_loop_steps_before_aggregate: string;
+    strip_reasoning_after_turns: string;
+  };
   pinned_model: string;
   workspace: string;
 
@@ -274,6 +288,7 @@ export interface ManifestExtras {
   // `[schedule]` root is a closed enum, so only a variant's contents can carry
   // a key this editor has no widget for.
   schedule: TomlTable;
+  compaction: TomlTable;
 }
 
 export const emptyManifestExtras = (): ManifestExtras => ({
@@ -288,6 +303,7 @@ export const emptyManifestExtras = (): ManifestExtras => ({
   async_tasks: {},
   rl_export: {},
   schedule: {},
+  compaction: {},
 });
 
 export const emptyManifestForm = (): ManifestFormState => ({
@@ -324,6 +340,17 @@ export const emptyManifestForm = (): ManifestFormState => ({
     default_timeout_secs: "",
     // The daemon's own default, not "off": see the interface comment above.
     notify_on_timeout: true,
+  },
+  compaction: {
+    threshold_messages: "",
+    keep_recent: "",
+    max_summary_tokens: "",
+    token_threshold_ratio: "",
+    max_chunk_chars: "",
+    max_retries: "",
+    aggregate_developer_loops: "",
+    max_loop_steps_before_aggregate: "",
+    strip_reasoning_after_turns: "",
   },
   pinned_model: "",
   workspace: "",
@@ -485,6 +512,7 @@ export const FORM_TOP_LEVEL_KEYS = new Set([
   "auto_dream_min_sessions",
   "rl_export",
   "async_tasks",
+  "compaction",
   "pinned_model",
   "workspace",
   "skills_disabled",
@@ -564,6 +592,18 @@ const FORM_CAPABILITY_KEYS = new Set([
   "speech",
 ]);
 const FORM_THINKING_KEYS = new Set(["budget_tokens", "stream_thinking"]);
+const FORM_COMPACTION_KEYS = new Set([
+  "threshold_messages",
+  "keep_recent",
+  "max_summary_tokens",
+  "token_threshold_ratio",
+  "max_chunk_chars",
+  "max_retries",
+  "aggregate_developer_loops",
+  "max_loop_steps_before_aggregate",
+  "strip_reasoning_after_turns",
+]);
+
 const FORM_PROACTIVE_MEMORY_KEYS = new Set([
   "enabled",
   "auto_memorize",
@@ -951,6 +991,11 @@ export const serializeManifestForm = (
   const safeAutonomousExtras = form.autonomous.enabled
     ? pluckSafeExtras(extras.autonomous, deferredSectionExtras, "autonomous")
     : {};
+  const safeCompactionExtras = pluckSafeExtras(
+    extras.compaction,
+    deferredSectionExtras,
+    "compaction",
+  );
   const safeAsyncTaskExtras = pluckSafeExtras(
     extras.async_tasks,
     deferredSectionExtras,
@@ -1133,6 +1178,37 @@ export const serializeManifestForm = (
     const asyncTaskExtras = renderExtraScalars(safeAsyncTaskExtras);
     if (body.length || asyncTaskExtras.length) {
       lines.push("", "[async_tasks]", ...body, ...asyncTaskExtras);
+    }
+  }
+
+  // [compaction]
+  {
+    const body: string[] = [];
+    const c = form.compaction;
+    writeNumberScalar(body, "threshold_messages", parseInteger(c.threshold_messages));
+    writeNumberScalar(body, "keep_recent", parseInteger(c.keep_recent));
+    writeNumberScalar(body, "max_summary_tokens", parseInteger(c.max_summary_tokens));
+    writeNumberScalar(body, "token_threshold_ratio", parseFloatish(c.token_threshold_ratio));
+    writeNumberScalar(body, "max_chunk_chars", parseInteger(c.max_chunk_chars));
+    writeNumberScalar(body, "max_retries", parseInteger(c.max_retries));
+    writeTriStateBool(body, "aggregate_developer_loops", c.aggregate_developer_loops);
+    writeNumberScalar(
+      body,
+      "max_loop_steps_before_aggregate",
+      parseInteger(c.max_loop_steps_before_aggregate),
+    );
+    writeNumberScalar(
+      body,
+      "strip_reasoning_after_turns",
+      parseInteger(c.strip_reasoning_after_turns),
+    );
+    // The guard covers the extras as well as the body: a table whose keys the
+    // form has no widget for — or whose only known key serializes to nothing —
+    // would otherwise be dropped whole, preserved keys included. Same form as
+    // the `[model]` and `[resources]` guards above.
+    const compactionExtras = renderExtraScalars(safeCompactionExtras);
+    if (body.length || compactionExtras.length) {
+      lines.push("", "[compaction]", ...body, ...compactionExtras);
     }
   }
 
@@ -1786,6 +1862,27 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
       at,
       new Set(["default_timeout_secs", "notify_on_timeout"]),
     );
+  }
+
+  // [compaction]
+  if (isTomlTable(parsed.compaction)) {
+    const c = parsed.compaction;
+    form.compaction.threshold_messages = asNumberString(c.threshold_messages);
+    form.compaction.keep_recent = asNumberString(c.keep_recent);
+    form.compaction.max_summary_tokens = asNumberString(c.max_summary_tokens);
+    form.compaction.token_threshold_ratio = asNumberString(c.token_threshold_ratio);
+    form.compaction.max_chunk_chars = asNumberString(c.max_chunk_chars);
+    form.compaction.max_retries = asNumberString(c.max_retries);
+    form.compaction.aggregate_developer_loops = asTriStateBool(
+      c.aggregate_developer_loops,
+    );
+    form.compaction.max_loop_steps_before_aggregate = asNumberString(
+      c.max_loop_steps_before_aggregate,
+    );
+    form.compaction.strip_reasoning_after_turns = asNumberString(
+      c.strip_reasoning_after_turns,
+    );
+    extras.compaction = stripKnown(c, FORM_COMPACTION_KEYS);
   }
 
   // [proactive_memory]

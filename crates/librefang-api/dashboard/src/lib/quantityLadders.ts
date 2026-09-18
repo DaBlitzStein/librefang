@@ -140,6 +140,32 @@ export function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
 }
 
+// ------------------------------------------------------------ compaction
+
+/** Message count that triggers compaction. */
+export const COMPACTION_THRESHOLD_LADDER = [10, 20, 40, 60, 100, 200] as const;
+
+/** Recent messages preserved verbatim through a compaction. */
+export const COMPACTION_KEEP_RECENT_LADDER = [3, 5, 10, 20, 40, 60] as const;
+
+/** Token budget for the summary the compaction produces. */
+export const COMPACTION_SUMMARY_TOKENS_LADDER = [1024, 2048, 4096, 8192] as const;
+
+/** Fraction of the context window that triggers token-based compaction. */
+export const COMPACTION_TOKEN_RATIO_LADDER = [0.5, 0.6, 0.7, 0.8, 0.9] as const;
+
+/** Chars per summarisation chunk. */
+export const COMPACTION_CHUNK_CHARS_LADDER = [2000, 4000, 8000, 16000] as const;
+
+/** Retry attempts for a summarisation call that fails. */
+export const COMPACTION_MAX_RETRIES_LADDER = [1, 2, 3, 5] as const;
+
+/** Consecutive developer-tool steps before they are collapsed into one. */
+export const COMPACTION_LOOP_STEPS_LADDER = [2, 3, 5, 10, 20] as const;
+
+/** Age, in turns, past which an assistant message loses its reasoning. */
+export const COMPACTION_STRIP_REASONING_LADDER = [0, 1, 2, 5, 10] as const;
+
 // -------------------------------------------------------------- memory
 
 /**
