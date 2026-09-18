@@ -291,6 +291,9 @@ const FIELD_PREFIX_TO_SECTION: ReadonlyArray<readonly [RegExp, ManifestSectionId
   [/^schedule\./, "scheduling"],
   [/^response_format\./, "response_format"],
   [/^workspaces\./, "shared_folders"],
+  [/^autonomous\./, "autonomous"],
+  [/^compaction\./, "compaction"],
+  [/^skill_workshop\./, "skill_workshop"],
   // The two per-agent counts render inside the "Lifecycle" section, not the
   // resource "Limits" one, so they are matched exactly rather than by prefix: a
   // loose prefix would claim any future field that starts the same way, and the
@@ -298,6 +301,10 @@ const FIELD_PREFIX_TO_SECTION: ReadonlyArray<readonly [RegExp, ManifestSectionId
   // is the one that renders it.
   [/^max_history_messages$/, "lifecycle"],
   [/^max_concurrent_invocations$/, "lifecycle"],
+  // Top-level in the manifest, but it renders inside the auto_dream section,
+  // next to its sibling threshold — matched exactly for the same reason the
+  // two counts above are.
+  [/^auto_dream_min_sessions$/, "auto_dream"],
 ];
 
 /** The section that renders `path`, or `undefined` when no entry covers it. */
@@ -562,6 +569,9 @@ export function AgentManifestForm({
             "model.top_p",
             "model.frequency_penalty",
             "model.presence_penalty",
+            "model.max_tokens",
+            "model.context_window",
+            "model.max_output_tokens",
           ].some((f) => invalidFields.has(f))}
         >
         {/*
@@ -625,6 +635,7 @@ export function AgentManifestForm({
           onChange={(next) => updateModel({ max_tokens: next })}
           cap={selectedModelLimits.maxOutputTokens}
           warning={maxTokensWarning}
+          invalid={invalidFields.has("model.max_tokens")}
         />
         {/*
           Endpoint limits, not preferences. These describe what the model can
@@ -637,11 +648,15 @@ export function AgentManifestForm({
           value={value.model.context_window}
           onChange={(next) => updateModel({ context_window: next })}
           warning={contextWindowWarning}
+          invalid={invalidFields.has("model.context_window")}
+          error={t("agents.form.whole_number_required")}
         />
         <ModelParamField
           param="max_output_tokens"
           value={value.model.max_output_tokens}
           onChange={(next) => updateModel({ max_output_tokens: next })}
+          invalid={invalidFields.has("model.max_output_tokens")}
+          error={t("agents.form.whole_number_required")}
         />
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.api_key_env")} hint={t("agents.form.api_key_env_hint")}>
@@ -1357,7 +1372,9 @@ export function AgentManifestForm({
                 />
               </Field>
             </div>
-            <AdvancedFields>
+            <AdvancedFields
+          invalid={invalidFields.has("autonomous.heartbeat_timeout_secs")}
+        >
               <div className="grid grid-cols-2 gap-3 mt-2">
             <Field label={t("agents.form.max_restarts")}>
               <StepLadderInput
@@ -1398,7 +1415,13 @@ export function AgentManifestForm({
                 customLabel={t("model_param.custom")}
                 customPlaceholder={t("agents.form.auto_placeholder")}
                 min={1}
-              />
+              
+              invalid={invalidFields.has("autonomous.heartbeat_timeout_secs")}
+              error={
+                invalidFields.has("autonomous.heartbeat_timeout_secs")
+                  ? t("agents.form.u32_overflow")
+                  : undefined
+              }/>
             </Field>
 
             <Field label={t("agents.form.heartbeat_keep_recent")}>
@@ -1546,7 +1569,13 @@ export function AgentManifestForm({
               inheritLabel={t("model_param.inherit")}
               customLabel={t("model_param.custom")}
               min={0}
-            />
+            
+              invalid={invalidFields.has("auto_dream_min_sessions")}
+              error={
+                invalidFields.has("auto_dream_min_sessions")
+                  ? t("agents.form.u32_overflow")
+                  : undefined
+              }/>
           </Field>
         </div>
       </FormSection>
@@ -1758,7 +1787,9 @@ export function AgentManifestForm({
         </div>
         {/* BASIC: the two switches. Approval, review and evolution modes
             and the pending caps fold behind Advanced. */}
-        <AdvancedFields>
+        <AdvancedFields
+          invalid={invalidFields.has("skill_workshop.max_pending_age_days")}
+        >
         <div className="grid grid-cols-2 gap-3 mt-2">
           <Field label={t("agents.form.skill_workshop_approval_policy")}>
             <select
@@ -1813,7 +1844,13 @@ export function AgentManifestForm({
               inheritLabel={t("model_param.inherit")}
               customLabel={t("model_param.custom")}
               min={1}
-            />
+            
+              invalid={invalidFields.has("skill_workshop.max_pending_age_days")}
+              error={
+                invalidFields.has("skill_workshop.max_pending_age_days")
+                  ? t("agents.form.u32_overflow")
+                  : undefined
+              }/>
           </Field>
           <Field label={t("agents.form.skill_workshop_evolution_mode")}>
             <select
@@ -1837,7 +1874,13 @@ export function AgentManifestForm({
         {/* Nine overrides of the kernel's compaction defaults, all `Option`, so
             every one of them leads with inherit and an untouched table is not
             written at all. */}
-        <AdvancedFields>
+        <AdvancedFields
+          invalid={[
+            "compaction.max_retries",
+            "compaction.max_loop_steps_before_aggregate",
+            "compaction.strip_reasoning_after_turns",
+          ].some((f) => invalidFields.has(f))}
+        >
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("config.fld_threshold_messages")}>
             <StepLadderInput
@@ -1911,7 +1954,13 @@ export function AgentManifestForm({
               inheritLabel={t("model_param.inherit")}
               customLabel={t("model_param.custom")}
               min={0}
-            />
+            
+              invalid={invalidFields.has("compaction.max_retries")}
+              error={
+                invalidFields.has("compaction.max_retries")
+                  ? t("agents.form.u32_overflow")
+                  : undefined
+              }/>
           </Field>
           <Field label={t("agents.form.compaction_max_loop_steps_before_aggregate")}>
             <StepLadderInput
@@ -1923,7 +1972,13 @@ export function AgentManifestForm({
               inheritLabel={t("model_param.inherit")}
               customLabel={t("model_param.custom")}
               min={1}
-            />
+            
+              invalid={invalidFields.has("compaction.max_loop_steps_before_aggregate")}
+              error={
+                invalidFields.has("compaction.max_loop_steps_before_aggregate")
+                  ? t("agents.form.u32_overflow")
+                  : undefined
+              }/>
           </Field>
           <Field label={t("agents.form.compaction_strip_reasoning_after_turns")}>
             <StepLadderInput
@@ -1935,7 +1990,13 @@ export function AgentManifestForm({
               inheritLabel={t("model_param.inherit")}
               customLabel={t("model_param.custom")}
               min={0}
-            />
+            
+              invalid={invalidFields.has("compaction.strip_reasoning_after_turns")}
+              error={
+                invalidFields.has("compaction.strip_reasoning_after_turns")
+                  ? t("agents.form.u32_overflow")
+                  : undefined
+              }/>
           </Field>
         </div>
         {/* A tri-state select, not a toggle: the value is an `Option<bool>`, and
