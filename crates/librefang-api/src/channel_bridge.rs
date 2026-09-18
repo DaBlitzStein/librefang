@@ -2335,27 +2335,24 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .should_reply(message, channel_type, agent_id)?;
         // Fire auto-reply synchronously (bridge already runs in background task).
         //
-        // Sent with the sender context rather than through the bare
-        // `send_message`: an auto-reply runs a full agent turn, tools included,
-        // and the tool authorization gate derives its (channel, sender) pair
-        // from this context. Without it every tool outside the guest read-only
-        // allowlist is forced into the approval queue.
-        //
-        // `thinking_override: None` leaves the turn on the agent / global
-        // default, which is what the previous `send_message` call did.
+        // Sent through this adapter's own channel-turn method rather than by
+        // reaching into the kernel: `send_message_with_sender` is the one place
+        // that knows how to send a channel turn, so it carries both halves of
+        // the conversation's turn state at once — the sender identity the tool
+        // authorization gate reads, and the conversation's `/think` preference.
+        // Calling the kernel directly here dropped both, because it bypassed the
+        // whole method rather than one of its arguments.
         match self
-            .kernel
-            .send_message_with_sender_context(agent_id, message, sender.clone(), None)
+            .send_message_with_sender(agent_id, message, sender)
             .await
         {
-            Ok(result) => {
-                // If the agent chose NO_REPLY (silent), don't send the literal text
-                if result.silent {
-                    None
-                } else {
-                    Some(result.response)
-                }
-            }
+            // Mirrors the guard the ordinary dispatch applies before delivering
+            // (`bridge.rs`, non-streaming success path): silence and an empty
+            // response both mean "nothing to say". Without it, an empty reply
+            // would reach `maybe_prefix_response` and come out as a prefix-only
+            // bubble whenever `prefix_agent_name` is configured.
+            Ok(reply) if !reply.is_empty() => Some(reply),
+            Ok(_) => None,
             Err(e) => {
                 tracing::warn!(error = %e, "Auto-reply failed");
                 None
