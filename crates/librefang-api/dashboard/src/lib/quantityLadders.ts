@@ -140,6 +140,67 @@ export function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
 }
 
+/** Pending skill candidates retained before the oldest is dropped. */
+export const SKILL_WORKSHOP_MAX_PENDING_LADDER = [5, 10, 25, 50, 100] as const;
+
+/** Age, in days, past which an unapproved candidate expires. */
+export const SKILL_WORKSHOP_MAX_AGE_LADDER = [1, 7, 14, 30, 90] as const;
+
+// ------------------------------------------------------- channel overrides
+
+/** Messages a channel may send per minute, per channel and per user. */
+export const CHANNEL_RATE_LIMIT_LADDER = [1, 5, 10, 30, 60, 120] as const;
+
+/** How long a channel waits for the next message before answering. */
+export const CHANNEL_DEBOUNCE_MS_LADDER = [0, 250, 500, 1000, 2000, 5000] as const;
+
+/** Debounce window ceiling, in milliseconds. */
+export const CHANNEL_DEBOUNCE_MAX_LADDER = [1000, 2000, 5000, 10_000, 30_000] as const;
+
+/** Messages buffered during a debounce window. */
+export const CHANNEL_DEBOUNCE_BUFFER_LADDER = [8, 16, 32, 64, 128] as const;
+
+/** Minutes an auto-routed conversation stays on its agent. */
+export const CHANNEL_ROUTE_TTL_LADDER = [5, 15, 30, 60, 120, 240] as const;
+
+/** Confidence a routing candidate needs, on the router's own scale. */
+export const CHANNEL_ROUTE_CONFIDENCE_LADDER = [1, 3, 5, 7, 9] as const;
+
+/** Bonus applied to the incumbent agent, so routing does not flap. */
+export const CHANNEL_ROUTE_BONUS_LADDER = [1, 2, 4, 6, 8] as const;
+
+/** How far a contender must diverge before it takes over. */
+export const CHANNEL_ROUTE_DIVERGENCE_LADDER = [1, 2, 3, 5, 8] as const;
+
+/** Seconds a thread stays owned by the agent that started it. */
+export const CHANNEL_THREAD_OWNERSHIP_TTL_LADDER = [60, 300, 600, 1800, 3600] as const;
+
+// ------------------------------------------------------------ compaction
+
+/** Message count that triggers compaction. */
+export const COMPACTION_THRESHOLD_LADDER = [10, 20, 40, 60, 100, 200] as const;
+
+/** Recent messages preserved verbatim through a compaction. */
+export const COMPACTION_KEEP_RECENT_LADDER = [3, 5, 10, 20, 40, 60] as const;
+
+/** Token budget for the summary the compaction produces. */
+export const COMPACTION_SUMMARY_TOKENS_LADDER = [1024, 2048, 4096, 8192] as const;
+
+/** Fraction of the context window that triggers token-based compaction. */
+export const COMPACTION_TOKEN_RATIO_LADDER = [0.5, 0.6, 0.7, 0.8, 0.9] as const;
+
+/** Chars per summarisation chunk. */
+export const COMPACTION_CHUNK_CHARS_LADDER = [2000, 4000, 8000, 16000] as const;
+
+/** Retry attempts for a summarisation call that fails. */
+export const COMPACTION_MAX_RETRIES_LADDER = [1, 2, 3, 5] as const;
+
+/** Consecutive developer-tool steps before they are collapsed into one. */
+export const COMPACTION_LOOP_STEPS_LADDER = [2, 3, 5, 10, 20] as const;
+
+/** Age, in turns, past which an assistant message loses its reasoning. */
+export const COMPACTION_STRIP_REASONING_LADDER = [0, 1, 2, 5, 10] as const;
+
 // -------------------------------------------------------------- memory
 
 /**

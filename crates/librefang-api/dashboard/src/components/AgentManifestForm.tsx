@@ -1,7 +1,17 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle, Plus, Trash2, X } from "lucide-react";
-import { CAPABILITY_ROUTING_KEYS, generateUid } from "../lib/agentManifest";
+import {
+  AUTO_ROUTE_STRATEGIES,
+  CAPABILITY_ROUTING_KEYS,
+  DM_POLICIES,
+  GROUP_POLICIES,
+  OUTPUT_FORMATS,
+  PREFIX_STYLES,
+  TYPING_MODES,
+  USAGE_FOOTERS,
+  generateUid,
+} from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 
 /// The tri-state caption for a memory capability field (#7749 review):
@@ -54,8 +64,25 @@ import { ModelPicker } from "./ui/ModelPicker";
 import { StepLadderInput } from "./ui/StepLadderInput";
 import {
   ASYNC_TASK_TIMEOUT_LADDER,
+  CHANNEL_DEBOUNCE_BUFFER_LADDER,
+  CHANNEL_DEBOUNCE_MAX_LADDER,
+  CHANNEL_DEBOUNCE_MS_LADDER,
+  CHANNEL_RATE_LIMIT_LADDER,
+  CHANNEL_ROUTE_BONUS_LADDER,
+  CHANNEL_ROUTE_CONFIDENCE_LADDER,
+  CHANNEL_ROUTE_DIVERGENCE_LADDER,
+  CHANNEL_ROUTE_TTL_LADDER,
+  CHANNEL_THREAD_OWNERSHIP_TTL_LADDER,
   AUTO_DREAM_MIN_HOURS_LADDER,
   AUTO_DREAM_MIN_SESSIONS_LADDER,
+  COMPACTION_CHUNK_CHARS_LADDER,
+  COMPACTION_KEEP_RECENT_LADDER,
+  COMPACTION_LOOP_STEPS_LADDER,
+  COMPACTION_MAX_RETRIES_LADDER,
+  COMPACTION_STRIP_REASONING_LADDER,
+  COMPACTION_SUMMARY_TOKENS_LADDER,
+  COMPACTION_THRESHOLD_LADDER,
+  COMPACTION_TOKEN_RATIO_LADDER,
   COST_PER_DAY_LADDER,
   COST_PER_HOUR_LADDER,
   COST_PER_MONTH_LADDER,
@@ -73,6 +100,8 @@ import {
   MIN_SIMILARITY_LADDER,
   NETWORK_BYTES_PER_HOUR_LADDER,
   ROUTING_THRESHOLD_LADDER,
+  SKILL_WORKSHOP_MAX_AGE_LADDER,
+  SKILL_WORKSHOP_MAX_PENDING_LADDER,
   THINKING_BUDGET_LADDER,
   TOOL_CALLS_PER_MINUTE_LADDER,
   formatBytes,
@@ -221,6 +250,9 @@ export const MANIFEST_SECTION_IDS = [
   "autonomous",
   "proactive_memory",
   "auto_dream",
+  "channel_overrides",
+  "compaction",
+  "skill_workshop",
   "async_tasks",
   "routing",
   "context_injection",
@@ -311,6 +343,21 @@ export function AgentManifestForm({
     onChange({ ...value, thinking: { ...value.thinking, ...patch } });
   const updateAutonomous = (patch: Partial<ManifestFormState["autonomous"]>): void =>
     onChange({ ...value, autonomous: { ...value.autonomous, ...patch } });
+  const updateChannelOverrides = (
+    patch: Partial<ManifestFormState["channel_overrides"]>,
+  ): void =>
+    onChange({ ...value, channel_overrides: { ...value.channel_overrides, ...patch } });
+
+  const updateSkillWorkshop = (
+    patch: Partial<ManifestFormState["skill_workshop"]>,
+  ): void =>
+    onChange({ ...value, skill_workshop: { ...value.skill_workshop, ...patch } });
+
+  const updateCompaction = (
+    patch: Partial<ManifestFormState["compaction"]>,
+  ): void =>
+    onChange({ ...value, compaction: { ...value.compaction, ...patch } });
+
   const updateProactiveMemory = (
     patch: Partial<ManifestFormState["proactive_memory"]>,
   ): void =>
@@ -1346,6 +1393,395 @@ export function AgentManifestForm({
               min={0}
             />
           </Field>
+        </div>
+      </FormSection>
+
+      <FormSection id="channel_overrides" shows={shows}
+        title={t("agents.form.channel_overrides")}
+        defaultOpen={false}
+      >
+        <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim mt-3">{t("agents.form.channel_overrides_group_reply")}</p>
+        <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_model")}>
+                  <input type="text" value={value.channel_overrides.model}
+                    onChange={(e) => updateChannelOverrides({ model: e.target.value })}
+                    placeholder={t("agents.form.inherit_default")} className={inputClass} />
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_system_prompt")}>
+                  <input type="text" value={value.channel_overrides.system_prompt}
+                    onChange={(e) => updateChannelOverrides({ system_prompt: e.target.value })}
+                    placeholder={t("agents.form.inherit_default")} className={inputClass} />
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_dm_policy")}>
+                  <select value={value.channel_overrides.dm_policy}
+                    onChange={(e) => updateChannelOverrides({ dm_policy: e.target.value as ManifestFormState["channel_overrides"]["dm_policy"] })}
+                    className={inputClass}>
+                    <option value="">{t("agents.form.inherit_default")}</option>
+                    {(DM_POLICIES as readonly string[]).map((v) => (<option key={v} value={v}>{v}</option>))}
+                  </select>
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_group_policy")}>
+                  <select value={value.channel_overrides.group_policy}
+                    onChange={(e) => updateChannelOverrides({ group_policy: e.target.value as ManifestFormState["channel_overrides"]["group_policy"] })}
+                    className={inputClass}>
+                    <option value="">{t("agents.form.inherit_default")}</option>
+                    {(GROUP_POLICIES as readonly string[]).map((v) => (<option key={v} value={v}>{v}</option>))}
+                  </select>
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_group_trigger_patterns")}>
+                  <TagInput value={value.channel_overrides.group_trigger_patterns}
+                    onChange={(next) => updateChannelOverrides({ group_trigger_patterns: next })}
+                    placeholder={t("agents.form.inherit_default")} />
+                </Field></div>
+              <div><Toggle label={t("agents.form.channel_overrides_reply_precheck")} checked={value.channel_overrides.reply_precheck}
+                  onChange={(checked) => updateChannelOverrides({ reply_precheck: checked })} /></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_reply_precheck_model")}>
+                  <input type="text" value={value.channel_overrides.reply_precheck_model}
+                    onChange={(e) => updateChannelOverrides({ reply_precheck_model: e.target.value })}
+                    placeholder={t("agents.form.inherit_default")} className={inputClass} />
+                </Field></div>
+        </div>
+        <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim mt-3">{t("agents.form.channel_overrides_group_limits")}</p>
+        <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_rate_limit_per_minute")}>
+                  <StepLadderInput label={t("agents.form.channel_overrides_rate_limit_per_minute")} value={value.channel_overrides.rate_limit_per_minute}
+                    onChange={(next) => updateChannelOverrides({ rate_limit_per_minute: next })} ladder={CHANNEL_RATE_LIMIT_LADDER}
+                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                    customLabel={t("model_param.custom")} min={0} />
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_rate_limit_per_user")}>
+                  <StepLadderInput label={t("agents.form.channel_overrides_rate_limit_per_user")} value={value.channel_overrides.rate_limit_per_user}
+                    onChange={(next) => updateChannelOverrides({ rate_limit_per_user: next })} ladder={CHANNEL_RATE_LIMIT_LADDER}
+                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                    customLabel={t("model_param.custom")} min={0} />
+                </Field></div>
+              <div><Toggle label={t("agents.form.channel_overrides_threading")} checked={value.channel_overrides.threading}
+                  onChange={(checked) => updateChannelOverrides({ threading: checked })} /></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_output_format")}>
+                  <select value={value.channel_overrides.output_format}
+                    onChange={(e) => updateChannelOverrides({ output_format: e.target.value as ManifestFormState["channel_overrides"]["output_format"] })}
+                    className={inputClass}>
+                    <option value="">{t("agents.form.inherit_default")}</option>
+                    {(OUTPUT_FORMATS as readonly string[]).map((v) => (<option key={v} value={v}>{v}</option>))}
+                  </select>
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_usage_footer")}>
+                  <select value={value.channel_overrides.usage_footer}
+                    onChange={(e) => updateChannelOverrides({ usage_footer: e.target.value as ManifestFormState["channel_overrides"]["usage_footer"] })}
+                    className={inputClass}>
+                    <option value="">{t("agents.form.inherit_default")}</option>
+                    {(USAGE_FOOTERS as readonly string[]).map((v) => (<option key={v} value={v}>{v}</option>))}
+                  </select>
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_typing_mode")}>
+                  <select value={value.channel_overrides.typing_mode}
+                    onChange={(e) => updateChannelOverrides({ typing_mode: e.target.value as ManifestFormState["channel_overrides"]["typing_mode"] })}
+                    className={inputClass}>
+                    <option value="">{t("agents.form.inherit_default")}</option>
+                    {(TYPING_MODES as readonly string[]).map((v) => (<option key={v} value={v}>{v}</option>))}
+                  </select>
+                </Field></div>
+        </div>
+        <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim mt-3">{t("agents.form.channel_overrides_group_debounce")}</p>
+        <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_message_debounce_ms")}>
+                  <StepLadderInput label={t("agents.form.channel_overrides_message_debounce_ms")} value={value.channel_overrides.message_debounce_ms}
+                    onChange={(next) => updateChannelOverrides({ message_debounce_ms: next })} ladder={CHANNEL_DEBOUNCE_MS_LADDER}
+                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                    customLabel={t("model_param.custom")} min={0} />
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_message_debounce_max_ms")}>
+                  <StepLadderInput label={t("agents.form.channel_overrides_message_debounce_max_ms")} value={value.channel_overrides.message_debounce_max_ms}
+                    onChange={(next) => updateChannelOverrides({ message_debounce_max_ms: next })} ladder={CHANNEL_DEBOUNCE_MAX_LADDER}
+                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                    customLabel={t("model_param.custom")} min={0} />
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_message_debounce_max_buffer")}>
+                  <StepLadderInput label={t("agents.form.channel_overrides_message_debounce_max_buffer")} value={value.channel_overrides.message_debounce_max_buffer}
+                    onChange={(next) => updateChannelOverrides({ message_debounce_max_buffer: next })} ladder={CHANNEL_DEBOUNCE_BUFFER_LADDER}
+                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                    customLabel={t("model_param.custom")} min={0} />
+                </Field></div>
+              <div><Toggle label={t("agents.form.channel_overrides_clear_done_reaction")} checked={value.channel_overrides.clear_done_reaction}
+                  onChange={(checked) => updateChannelOverrides({ clear_done_reaction: checked })} /></div>
+              <div><Toggle label={t("agents.form.channel_overrides_disable_commands")} checked={value.channel_overrides.disable_commands}
+                  onChange={(checked) => updateChannelOverrides({ disable_commands: checked })} /></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_allowed_commands")}>
+                  <TagInput value={value.channel_overrides.allowed_commands}
+                    onChange={(next) => updateChannelOverrides({ allowed_commands: next })}
+                    placeholder={t("agents.form.inherit_default")} />
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_blocked_commands")}>
+                  <TagInput value={value.channel_overrides.blocked_commands}
+                    onChange={(next) => updateChannelOverrides({ blocked_commands: next })}
+                    placeholder={t("agents.form.inherit_default")} />
+                </Field></div>
+        </div>
+        <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim mt-3">{t("agents.form.channel_overrides_group_routing")}</p>
+        <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_auto_route")}>
+                  <select value={value.channel_overrides.auto_route}
+                    onChange={(e) => updateChannelOverrides({ auto_route: e.target.value as ManifestFormState["channel_overrides"]["auto_route"] })}
+                    className={inputClass}>
+                    {(AUTO_ROUTE_STRATEGIES as readonly string[]).map((v) => (<option key={v} value={v}>{v}</option>))}
+                  </select>
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_auto_route_ttl_minutes")}>
+                  <StepLadderInput label={t("agents.form.channel_overrides_auto_route_ttl_minutes")} value={value.channel_overrides.auto_route_ttl_minutes}
+                    onChange={(next) => updateChannelOverrides({ auto_route_ttl_minutes: next })} ladder={CHANNEL_ROUTE_TTL_LADDER}
+                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                    customLabel={t("model_param.custom")} min={0} />
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_auto_route_confidence_threshold")}>
+                  <StepLadderInput label={t("agents.form.channel_overrides_auto_route_confidence_threshold")} value={value.channel_overrides.auto_route_confidence_threshold}
+                    onChange={(next) => updateChannelOverrides({ auto_route_confidence_threshold: next })} ladder={CHANNEL_ROUTE_CONFIDENCE_LADDER}
+                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                    customLabel={t("model_param.custom")} min={0} />
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_auto_route_sticky_bonus")}>
+                  <StepLadderInput label={t("agents.form.channel_overrides_auto_route_sticky_bonus")} value={value.channel_overrides.auto_route_sticky_bonus}
+                    onChange={(next) => updateChannelOverrides({ auto_route_sticky_bonus: next })} ladder={CHANNEL_ROUTE_BONUS_LADDER}
+                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                    customLabel={t("model_param.custom")} min={0} />
+                </Field></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_auto_route_divergence_count")}>
+                  <StepLadderInput label={t("agents.form.channel_overrides_auto_route_divergence_count")} value={value.channel_overrides.auto_route_divergence_count}
+                    onChange={(next) => updateChannelOverrides({ auto_route_divergence_count: next })} ladder={CHANNEL_ROUTE_DIVERGENCE_LADDER}
+                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                    customLabel={t("model_param.custom")} min={0} />
+                </Field></div>
+        </div>
+        <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim mt-3">{t("agents.form.channel_overrides_group_ownership")}</p>
+        <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_prefix_agent_name")}>
+                  <select value={value.channel_overrides.prefix_agent_name}
+                    onChange={(e) => updateChannelOverrides({ prefix_agent_name: e.target.value as ManifestFormState["channel_overrides"]["prefix_agent_name"] })}
+                    className={inputClass}>
+                    {(PREFIX_STYLES as readonly string[]).map((v) => (<option key={v} value={v}>{v}</option>))}
+                  </select>
+                </Field></div>
+              <div><Toggle label={t("agents.form.channel_overrides_thread_ownership_enabled")} checked={value.channel_overrides.thread_ownership_enabled}
+                  onChange={(checked) => updateChannelOverrides({ thread_ownership_enabled: checked })} /></div>
+              <div className="col-span-2"><Field label={t("agents.form.channel_overrides_conversation_ownership_ttl_seconds")}>
+                  <StepLadderInput label={t("agents.form.channel_overrides_conversation_ownership_ttl_seconds")} value={value.channel_overrides.conversation_ownership_ttl_seconds}
+                    onChange={(next) => updateChannelOverrides({ conversation_ownership_ttl_seconds: next })} ladder={CHANNEL_THREAD_OWNERSHIP_TTL_LADDER}
+                    formatRung={formatCount} inheritLabel={t("model_param.inherit")}
+                    customLabel={t("model_param.custom")} min={0} />
+                </Field></div>
+              <div><Toggle label={t("agents.form.channel_overrides_conversation_ownership_include_dms")} checked={value.channel_overrides.conversation_ownership_include_dms}
+                  onChange={(checked) => updateChannelOverrides({ conversation_ownership_include_dms: checked })} /></div>
+        </div>
+      </FormSection>
+
+      <FormSection id="compaction" shows={shows} title={t("config.sec_compaction")} defaultOpen={false}>
+      <FormSection
+        id="skill_workshop" shows={shows}
+        title={t("agents.form.skill_workshop")}
+        defaultOpen={false}
+      >
+        {/* The two switches are plain booleans, not tri-states: the Rust struct
+            supplies them from its `Default`, so "absent" and "the default" are
+            the same state and rendering a third one would invent a distinction
+            the manifest does not have. */}
+        <div className="flex flex-wrap gap-4">
+          <Toggle
+            label={t("agents.form.skill_workshop_enabled")}
+            checked={value.skill_workshop.enabled}
+            onChange={(checked) => updateSkillWorkshop({ enabled: checked })}
+          />
+          <Toggle
+            label={t("agents.form.skill_workshop_auto_capture")}
+            checked={value.skill_workshop.auto_capture}
+            onChange={(checked) => updateSkillWorkshop({ auto_capture: checked })}
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-2">
+          <Field label={t("agents.form.skill_workshop_approval_policy")}>
+            <select
+              value={value.skill_workshop.approval_policy}
+              onChange={(e) =>
+                updateSkillWorkshop({
+                  approval_policy: e.target
+                    .value as ManifestFormState["skill_workshop"]["approval_policy"],
+                })
+              }
+              className={inputClass}
+            >
+              <option value="pending">pending</option>
+              <option value="auto">auto</option>
+            </select>
+          </Field>
+          <Field label={t("agents.form.skill_workshop_review_mode")}>
+            <select
+              value={value.skill_workshop.review_mode}
+              onChange={(e) =>
+                updateSkillWorkshop({
+                  review_mode: e.target
+                    .value as ManifestFormState["skill_workshop"]["review_mode"],
+                })
+              }
+              className={inputClass}
+            >
+              <option value="heuristic">heuristic</option>
+              <option value="threshold_llm">threshold_llm</option>
+              <option value="none">none</option>
+            </select>
+          </Field>
+          <Field label={t("agents.form.skill_workshop_max_pending")}>
+            <StepLadderInput
+              label={t("agents.form.skill_workshop_max_pending")}
+              value={value.skill_workshop.max_pending}
+              onChange={(next) => updateSkillWorkshop({ max_pending: next })}
+              ladder={SKILL_WORKSHOP_MAX_PENDING_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </Field>
+          <Field label={t("agents.form.skill_workshop_max_pending_age_days")}>
+            <StepLadderInput
+              label={t("agents.form.skill_workshop_max_pending_age_days")}
+              value={value.skill_workshop.max_pending_age_days}
+              onChange={(next) => updateSkillWorkshop({ max_pending_age_days: next })}
+              ladder={SKILL_WORKSHOP_MAX_AGE_LADDER}
+              formatRung={formatHours}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </Field>
+          <Field label={t("agents.form.skill_workshop_evolution_mode")}>
+            <select
+              value={value.skill_workshop.evolution_mode}
+              onChange={(e) =>
+                updateSkillWorkshop({
+                  evolution_mode: e.target
+                    .value as ManifestFormState["skill_workshop"]["evolution_mode"],
+                })
+              }
+              className={inputClass}
+            >
+              <option value="free">free</option>
+              <option value="controlled">controlled</option>
+            </select>
+          </Field>
+        </div>
+      </FormSection>
+
+        {/* Nine overrides of the kernel's compaction defaults, all `Option`, so
+            every one of them leads with inherit and an untouched table is not
+            written at all. */}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label={t("config.fld_threshold_messages")}>
+            <StepLadderInput
+              label={t("config.fld_threshold_messages")}
+              value={value.compaction.threshold_messages}
+              onChange={(next) => updateCompaction({ threshold_messages: next })}
+              ladder={COMPACTION_THRESHOLD_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </Field>
+          <Field label={t("config.fld_keep_recent")}>
+            <StepLadderInput
+              label={t("config.fld_keep_recent")}
+              value={value.compaction.keep_recent}
+              onChange={(next) => updateCompaction({ keep_recent: next })}
+              ladder={COMPACTION_KEEP_RECENT_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+            />
+          </Field>
+          <Field label={t("config.fld_max_summary_tokens")}>
+            <StepLadderInput
+              label={t("config.fld_max_summary_tokens")}
+              value={value.compaction.max_summary_tokens}
+              onChange={(next) => updateCompaction({ max_summary_tokens: next })}
+              ladder={COMPACTION_SUMMARY_TOKENS_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </Field>
+          <Field label={t("config.fld_token_threshold_ratio")}>
+            <StepLadderInput
+              label={t("config.fld_token_threshold_ratio")}
+              value={value.compaction.token_threshold_ratio}
+              onChange={(next) => updateCompaction({ token_threshold_ratio: next })}
+              ladder={COMPACTION_TOKEN_RATIO_LADDER}
+              formatRung={formatPercent}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+              max={1}
+              step={0.01}
+            />
+          </Field>
+          <Field label={t("config.fld_max_chunk_chars")}>
+            <StepLadderInput
+              label={t("config.fld_max_chunk_chars")}
+              value={value.compaction.max_chunk_chars}
+              onChange={(next) => updateCompaction({ max_chunk_chars: next })}
+              ladder={COMPACTION_CHUNK_CHARS_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </Field>
+          <Field label={t("config.fld_max_retries")}>
+            <StepLadderInput
+              label={t("config.fld_max_retries")}
+              value={value.compaction.max_retries}
+              onChange={(next) => updateCompaction({ max_retries: next })}
+              ladder={COMPACTION_MAX_RETRIES_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+            />
+          </Field>
+          <Field label={t("agents.form.compaction_max_loop_steps_before_aggregate")}>
+            <StepLadderInput
+              label={t("agents.form.compaction_max_loop_steps_before_aggregate")}
+              value={value.compaction.max_loop_steps_before_aggregate}
+              onChange={(next) => updateCompaction({ max_loop_steps_before_aggregate: next })}
+              ladder={COMPACTION_LOOP_STEPS_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </Field>
+          <Field label={t("agents.form.compaction_strip_reasoning_after_turns")}>
+            <StepLadderInput
+              label={t("agents.form.compaction_strip_reasoning_after_turns")}
+              value={value.compaction.strip_reasoning_after_turns}
+              onChange={(next) => updateCompaction({ strip_reasoning_after_turns: next })}
+              ladder={COMPACTION_STRIP_REASONING_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+            />
+          </Field>
+        </div>
+        {/* A tri-state select, not a toggle: the value is an `Option<bool>`, and
+            a toggle collapses "inherit" and "false" onto the same unchecked
+            state — so touching it would write an explicit `false` where the
+            operator had not decided anything. */}
+        <div className="mt-2">
+          <TriStateField
+            label={t("agents.form.compaction_aggregate_developer_loops")}
+            value={value.compaction.aggregate_developer_loops}
+            onChange={(next) => updateCompaction({ aggregate_developer_loops: next })}
+          />
         </div>
       </FormSection>
 

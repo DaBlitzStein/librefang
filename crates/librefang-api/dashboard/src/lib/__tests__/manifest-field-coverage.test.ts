@@ -2,8 +2,18 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  AUTO_ROUTE_STRATEGIES,
+  DM_POLICIES,
   emptyManifestForm,
+  GROUP_POLICIES,
   ORPHAN_POLICIES,
+  OUTPUT_FORMATS,
+  PREFIX_STYLES,
+  TYPING_MODES,
+  USAGE_FOOTERS,
+  SKILL_APPROVAL_POLICIES,
+  SKILL_EVOLUTION_MODES,
+  SKILL_REVIEW_MODES,
   TOOL_EXEC_BACKENDS,
   TOOL_PROFILES,
 } from "../agentManifest";
@@ -47,26 +57,35 @@ const AGENT_RS = join(
  * shrink as surfaces land. `readonly` entries are the only ones meant to be
  * permanent — provenance and runtime-owned values that an operator should not
  * be able to type into a form.
+ *
+ * **A reason must name a mechanism and where to find it.** Not "derived from
+ * the manifest's origin" but "`structured.rs:472` sets it while migrating a
+ * legacy hand agent". The first kind was in this list and one of them was
+ * simply wrong — `channels` said its membership came from the channel's own
+ * page, which describes the inverse relation, since that page picks a
+ * channel's default *agent*.
+ *
+ * It was not found by reading the list more carefully. It was found by
+ * rewriting it so the claim could be checked: **a vague reason survives
+ * because nobody can tell whether it is false.** The moment it has to cite a
+ * file and a line, it is either confirmed or it falls over — which is the
+ * only property that makes this list worth keeping as the exemptions become
+ * permanent.
  */
 const NO_SURFACE: Record<string, string> = {
-  owner:
-    "readonly: principal the agent acts for on unattended turns; no widget yet",
-  source_template: "readonly: provenance written by the create flow",
-  channels: "readonly: channel membership is set from the channel's own page",
+  owner: "readonly: the API stamps it from the authenticated caller (routes/agents/lifecycle.rs:652) as the principal an unattended turn acts for. A form field would let a manifest claim an owner it was not created by, and the point of the field is that it is the one the request carried.",
+  source_template: "readonly: provenance, written by the create flow to record which template the agent came from, and displayed in the drawer header. There is no value an operator could set it to that would be true.",
+  channels: "elsewhere: the drawer's own Channels section edits this allowlist (useSetAgentChannels). It is a set-membership list the channel bridge reads to decide which channels an agent may serve (channels/src/bridge.rs:3839), and a second control for one list is the redundancy requirement 2 exists to remove.",
   metadata: "preserved: arbitrary key/value table, no widget",
   exec_policy:
     "partial: only the shorthand string form has a widget; the full table is preserved",
   tools:
     "missing: per-tool `[tools.<name>.params]` override table, no widget (distinct from capabilities.tools, which lists names)",
-  is_hand: "readonly: derived from the manifest's origin",
-  auto_dream_enabled: "elsewhere: toggled from Memory > Auto Dream",
-  auto_evolve: "elsewhere: toggled from the drawer's Skills tab",
-  channel_overrides: "missing: 29-key per-channel table, no widget",
-  skill_workshop: "missing: no widget anywhere",
-  compaction: "missing: no widget anywhere",
+  is_hand: "readonly: derived, not authored. memory/src/structured.rs:472 sets it while migrating a legacy hand agent, so it records what the agent is rather than what someone said about it. A form that could change it would let the label and the machinery disagree.",
+  auto_dream_enabled: "elsewhere: the Memory page's Auto Dream toggle owns it, and registry.rs:988 documents that toggle as in-memory only, with this manifest field being the persistent half of the same flag. A second control here would mean Save writes agent.toml while the toggle writes memory, and the file wins on the next reload -- reverting the toggle with nothing on screen to explain it.",
+  auto_evolve: "elsewhere: the drawer's Skills tab toggles it through PATCH /api/agents/{id}, next to the skills it evolves.",
   context_engine: "missing: no widget anywhere",
-  triggers:
-    "elsewhere: the Schedule tab edits the runtime registry, not this manifest array",
+  triggers: "elsewhere: the Schedule tab edits the runtime trigger registry over /api/triggers, and the manifest's [[triggers]] array is reconciled into that registry one way (routes/workflows/triggers.rs:1217). A field here would write the array the runtime then overwrites, not the registry the operator was looking at.",
 };
 
 /**
@@ -172,15 +191,37 @@ describe("manifest field coverage", () => {
 // renamed export is a compile error here instead of an `undefined` the test
 // would compare against and pass.
 const MANIFEST_ENUM_CONSTANTS: Record<string, readonly string[]> = {
+  DM_POLICIES,
+  GROUP_POLICIES,
+  OUTPUT_FORMATS,
+  USAGE_FOOTERS,
+  TYPING_MODES,
+  AUTO_ROUTE_STRATEGIES,
+  PREFIX_STYLES,
   TOOL_PROFILES,
   ORPHAN_POLICIES,
   TOOL_EXEC_BACKENDS,
+  SKILL_APPROVAL_POLICIES,
+  SKILL_REVIEW_MODES,
+  SKILL_EVOLUTION_MODES,
 };
 
 const RUST_ENUMS: Array<{ file: string; enum: string; exported: string }> = [
   { file: "agent.rs", enum: "ToolProfile", exported: "TOOL_PROFILES" },
   { file: "agent.rs", enum: "OrphanPolicy", exported: "ORPHAN_POLICIES" },
   { file: "tool_exec.rs", enum: "BackendKind", exported: "TOOL_EXEC_BACKENDS" },
+  { file: "agent.rs", enum: "ApprovalPolicy", exported: "SKILL_APPROVAL_POLICIES" },
+  { file: "agent.rs", enum: "ReviewMode", exported: "SKILL_REVIEW_MODES" },
+  { file: "agent.rs", enum: "EvolutionMode", exported: "SKILL_EVOLUTION_MODES" },
+  // `[channel_overrides]` — all seven live in config/types.rs, and all seven
+  // are `rename_all = "snake_case"`.
+  { file: "config/types.rs", enum: "DmPolicy", exported: "DM_POLICIES" },
+  { file: "config/types.rs", enum: "GroupPolicy", exported: "GROUP_POLICIES" },
+  { file: "config/types.rs", enum: "OutputFormat", exported: "OUTPUT_FORMATS" },
+  { file: "config/types.rs", enum: "UsageFooterMode", exported: "USAGE_FOOTERS" },
+  { file: "config/types.rs", enum: "TypingMode", exported: "TYPING_MODES" },
+  { file: "config/types.rs", enum: "AutoRouteStrategy", exported: "AUTO_ROUTE_STRATEGIES" },
+  { file: "config/types.rs", enum: "PrefixStyle", exported: "PREFIX_STYLES" },
 ];
 
 /** `rename_all` → the function that turns `CamelCase` into the serialised form. */

@@ -80,6 +80,78 @@ export interface ManifestFormState {
     default_timeout_secs: string;
     notify_on_timeout: boolean;
   };
+  // `[skill_workshop]`. `enabled` and `auto_capture` are plain `bool`s, not
+  // `Option<bool>`: the struct's `Default` supplies them, so "absent" and
+  // "the default" are the same state and a plain boolean says it exactly.
+  //
+  // The defaults are read from `impl Default for SkillWorkshopConfig`, not
+  // assumed. `auto_capture` is **true** — the workshop is off, but its capture
+  // pass is on by default, so that turning the master switch on gives a
+  // workshop that does something. Writing `false` for an agent that never
+  // touched it would silently disable capture the moment anyone opened and
+  // saved the agent.
+  skill_workshop: {
+    enabled: boolean;
+    auto_capture: boolean;
+    approval_policy: "pending" | "auto";
+    review_mode: "heuristic" | "threshold_llm" | "none";
+    max_pending: string;
+    max_pending_age_days: string;
+    evolution_mode: "free" | "controlled";
+  };
+  // `[channel_overrides]`: per-agent overrides of a channel's own config.
+  //
+  // Fields that are `Option<T>` hold `""` for "inherit the channel's value".
+  // The rest are plain, because `ChannelOverrides` carries `#[serde(default)]`
+  // and its own `Default` — and eight of those defaults come from named
+  // functions rather than the type's zero, so they are listed here rather than
+  // assumed. `thread_ownership_enabled` is the one that reads backwards:
+  // `true`, not `false`.
+  channel_overrides: {
+    model: string;
+    system_prompt: string;
+    dm_policy: "" | "respond" | "allowed_only" | "ignore";
+    group_policy: "" | "all" | "mention_only" | "commands_only" | "ignore";
+    group_trigger_patterns: string[];
+    reply_precheck: boolean;
+    reply_precheck_model: string;
+    rate_limit_per_minute: string;
+    rate_limit_per_user: string;
+    threading: boolean;
+    output_format: "" | "markdown" | "telegram_html" | "slack_mrkdwn" | "plain_text";
+    usage_footer: "" | "off" | "tokens" | "cost" | "full";
+    typing_mode: "" | "instant" | "message" | "thinking" | "never";
+    message_debounce_ms: string;
+    message_debounce_max_ms: string;
+    message_debounce_max_buffer: string;
+    clear_done_reaction: boolean;
+    disable_commands: boolean;
+    allowed_commands: string[];
+    blocked_commands: string[];
+    auto_route: "off" | "explicit_only" | "sticky_ttl" | "sticky_heuristic";
+    auto_route_ttl_minutes: string;
+    auto_route_confidence_threshold: string;
+    auto_route_sticky_bonus: string;
+    auto_route_divergence_count: string;
+    prefix_agent_name: "off" | "bracket" | "bold_bracket";
+    thread_ownership_enabled: boolean;
+    conversation_ownership_ttl_seconds: string;
+    conversation_ownership_include_dms: boolean;
+  };
+  // Per-agent overrides of the kernel's `[compaction]`. Nine `Option<T>` with
+  // `skip_serializing_if`, so `""` inherits and a value overrides — and the
+  // table is not written at all when every field says nothing.
+  compaction: {
+    threshold_messages: string;
+    keep_recent: string;
+    max_summary_tokens: string;
+    token_threshold_ratio: string;
+    max_chunk_chars: string;
+    max_retries: string;
+    aggregate_developer_loops: "" | "true" | "false";
+    max_loop_steps_before_aggregate: string;
+    strip_reasoning_after_turns: string;
+  };
   pinned_model: string;
   workspace: string;
 
@@ -271,6 +343,9 @@ export interface ManifestExtras {
   // `[schedule]` root is a closed enum, so only a variant's contents can carry
   // a key this editor has no widget for.
   schedule: TomlTable;
+  compaction: TomlTable;
+  skill_workshop: TomlTable;
+  channel_overrides: TomlTable;
 }
 
 export const emptyManifestExtras = (): ManifestExtras => ({
@@ -285,8 +360,36 @@ export const emptyManifestExtras = (): ManifestExtras => ({
   async_tasks: {},
   rl_export: {},
   schedule: {},
+  compaction: {},
+  skill_workshop: {},
+  channel_overrides: {},
 });
 
+/**
+ * The form's starting state, and the one place where a default can be got
+ * wrong in a way nothing else catches.
+ *
+ * **Read the Rust `Default`; do not infer the value from the field's name.**
+ * Three fields in this editor default to the opposite of what their name
+ * suggests, and all three were found by reading the source rather than by
+ * reasoning about them:
+ *
+ * - `show_progress` — `#[serde(default = "default_true")]`, so an absent key
+ *   means the agent *does* stream progress. Defaulting it to `false` here
+ *   would turn the indicator off for every agent opened and saved.
+ * - `auto_capture` — `impl Default for SkillWorkshopConfig` sets it `true`
+ *   while `enabled` is `false`: the workshop is off, its capture pass is on,
+ *   so the master switch has something to switch on.
+ * - `notify_on_timeout` — a plain `#[serde(default)]` on a field whose
+ *   sibling is an `Option`, so `false` is the value that must *not* be
+ *   written on an agent that never chose.
+ *
+ * The shape of the failure is the same in all three: the form writes a
+ * decision the operator never made, into a file nobody reads, and the symptom
+ * surfaces later as behaviour that changed on its own. A wrong default here
+ * is not caught by any test unless a test was written for that field — which
+ * is why the rule is to read, not to reason.
+ */
 export const emptyManifestForm = (): ManifestFormState => ({
   name: "",
   description: "",
@@ -321,6 +424,58 @@ export const emptyManifestForm = (): ManifestFormState => ({
     default_timeout_secs: "",
     // The daemon's own default, not "off": see the interface comment above.
     notify_on_timeout: true,
+  },
+  channel_overrides: {
+    model: "",
+    system_prompt: "",
+    dm_policy: "",
+    group_policy: "",
+    group_trigger_patterns: [],
+    reply_precheck: false,
+    reply_precheck_model: "",
+    rate_limit_per_minute: "",
+    rate_limit_per_user: "",
+    threading: false,
+    output_format: "",
+    usage_footer: "",
+    typing_mode: "",
+    message_debounce_ms: "",
+    message_debounce_max_ms: "",
+    message_debounce_max_buffer: "",
+    clear_done_reaction: false,
+    disable_commands: false,
+    allowed_commands: [],
+    blocked_commands: [],
+    auto_route: "off",
+    auto_route_ttl_minutes: "",
+    auto_route_confidence_threshold: "",
+    auto_route_sticky_bonus: "",
+    auto_route_divergence_count: "",
+    prefix_agent_name: "off",
+    // `default_thread_ownership_enabled` returns `true`.
+    thread_ownership_enabled: true,
+    conversation_ownership_ttl_seconds: "",
+    conversation_ownership_include_dms: false,
+  },
+  skill_workshop: {
+    enabled: false,
+    auto_capture: true,
+    approval_policy: "pending",
+    review_mode: "heuristic",
+    max_pending: "",
+    max_pending_age_days: "",
+    evolution_mode: "free",
+  },
+  compaction: {
+    threshold_messages: "",
+    keep_recent: "",
+    max_summary_tokens: "",
+    token_threshold_ratio: "",
+    max_chunk_chars: "",
+    max_retries: "",
+    aggregate_developer_loops: "",
+    max_loop_steps_before_aggregate: "",
+    strip_reasoning_after_turns: "",
   },
   pinned_model: "",
   workspace: "",
@@ -479,6 +634,9 @@ export const FORM_TOP_LEVEL_KEYS = new Set([
   "auto_dream_min_sessions",
   "rl_export",
   "async_tasks",
+  "compaction",
+  "skill_workshop",
+  "channel_overrides",
   "pinned_model",
   "workspace",
   "skills_disabled",
@@ -555,6 +713,60 @@ const FORM_CAPABILITY_KEYS = new Set([
   "speech",
 ]);
 const FORM_THINKING_KEYS = new Set(["budget_tokens", "stream_thinking"]);
+const FORM_CHANNEL_OVERRIDE_KEYS = new Set([
+  "model",
+  "system_prompt",
+  "dm_policy",
+  "group_policy",
+  "group_trigger_patterns",
+  "reply_precheck",
+  "reply_precheck_model",
+  "rate_limit_per_minute",
+  "rate_limit_per_user",
+  "threading",
+  "output_format",
+  "usage_footer",
+  "typing_mode",
+  "message_debounce_ms",
+  "message_debounce_max_ms",
+  "message_debounce_max_buffer",
+  "clear_done_reaction",
+  "disable_commands",
+  "allowed_commands",
+  "blocked_commands",
+  "auto_route",
+  "auto_route_ttl_minutes",
+  "auto_route_confidence_threshold",
+  "auto_route_sticky_bonus",
+  "auto_route_divergence_count",
+  "prefix_agent_name",
+  "thread_ownership_enabled",
+  "conversation_ownership_ttl_seconds",
+  "conversation_ownership_include_dms",
+]);
+
+const FORM_SKILL_WORKSHOP_KEYS = new Set([
+  "enabled",
+  "auto_capture",
+  "approval_policy",
+  "review_mode",
+  "max_pending",
+  "max_pending_age_days",
+  "evolution_mode",
+]);
+
+const FORM_COMPACTION_KEYS = new Set([
+  "threshold_messages",
+  "keep_recent",
+  "max_summary_tokens",
+  "token_threshold_ratio",
+  "max_chunk_chars",
+  "max_retries",
+  "aggregate_developer_loops",
+  "max_loop_steps_before_aggregate",
+  "strip_reasoning_after_turns",
+]);
+
 const FORM_PROACTIVE_MEMORY_KEYS = new Set([
   "enabled",
   "auto_memorize",
@@ -618,6 +830,32 @@ export const TOOL_PROFILES = [
   "custom",
 ] as const;
 export const ORPHAN_POLICIES = ["keep", "warn", "delete"] as const;
+// `ApprovalPolicy` and `EvolutionMode` are `rename_all = "lowercase"`,
+// `ReviewMode` is `"snake_case"`. The form speaks the serialised spelling
+// because that is what lands in the TOML.
+export const SKILL_APPROVAL_POLICIES = ["pending", "auto"] as const;
+// All seven of these are `rename_all = "snake_case"` on the Rust enum.
+export const DM_POLICIES = ["respond", "allowed_only", "ignore"] as const;
+export const GROUP_POLICIES = ["all", "mention_only", "commands_only", "ignore"] as const;
+export const OUTPUT_FORMATS = ["markdown", "telegram_html", "slack_mrkdwn", "plain_text"] as const;
+export const USAGE_FOOTERS = ["off", "tokens", "cost", "full"] as const;
+export const TYPING_MODES = ["instant", "message", "thinking", "never"] as const;
+export const AUTO_ROUTE_STRATEGIES = ["off", "explicit_only", "sticky_ttl", "sticky_heuristic"] as const;
+export const PREFIX_STYLES = ["off", "bracket", "bold_bracket"] as const;
+
+// Keyed by the manifest field, so the parse side can look one up by name and
+// the guard test can compare each against the Rust enum it came from.
+export const CHANNEL_ENUMS = {
+  dm_policy: DM_POLICIES,
+  group_policy: GROUP_POLICIES,
+  output_format: OUTPUT_FORMATS,
+  usage_footer: USAGE_FOOTERS,
+  typing_mode: TYPING_MODES,
+  auto_route: AUTO_ROUTE_STRATEGIES,
+  prefix_agent_name: PREFIX_STYLES,
+} as const;
+export const SKILL_REVIEW_MODES = ["heuristic", "threshold_llm", "none"] as const;
+export const SKILL_EVOLUTION_MODES = ["free", "controlled"] as const;
 
 const escapeTomlString = (value: string): string => {
   let escaped = "";
@@ -953,6 +1191,21 @@ export const serializeManifestForm = (
   const safeAutonomousExtras = form.autonomous.enabled
     ? pluckSafeExtras(extras.autonomous, deferredSectionExtras, "autonomous")
     : {};
+  const safeChannelOverrideExtras = pluckSafeExtras(
+    extras.channel_overrides,
+    deferredSectionExtras,
+    "channel_overrides",
+  );
+  const safeSkillWorkshopExtras = pluckSafeExtras(
+    extras.skill_workshop,
+    deferredSectionExtras,
+    "skill_workshop",
+  );
+  const safeCompactionExtras = pluckSafeExtras(
+    extras.compaction,
+    deferredSectionExtras,
+    "compaction",
+  );
   const safeAsyncTaskExtras = pluckSafeExtras(
     extras.async_tasks,
     deferredSectionExtras,
@@ -1132,6 +1385,109 @@ export const serializeManifestForm = (
     const asyncTaskExtras = renderExtraScalars(safeAsyncTaskExtras);
     if (body.length || asyncTaskExtras.length) {
       lines.push("", "[async_tasks]", ...body, ...asyncTaskExtras);
+    }
+  }
+
+  // [compaction]
+  {
+    const body: string[] = [];
+    const c = form.compaction;
+    writeNumberScalar(body, "threshold_messages", parseInteger(c.threshold_messages));
+    writeNumberScalar(body, "keep_recent", parseInteger(c.keep_recent));
+    writeNumberScalar(body, "max_summary_tokens", parseInteger(c.max_summary_tokens));
+    writeNumberScalar(body, "token_threshold_ratio", parseFloatish(c.token_threshold_ratio));
+    writeNumberScalar(body, "max_chunk_chars", parseInteger(c.max_chunk_chars));
+    writeNumberScalar(body, "max_retries", parseInteger(c.max_retries));
+    writeTriStateBool(body, "aggregate_developer_loops", c.aggregate_developer_loops);
+    writeNumberScalar(
+      body,
+      "max_loop_steps_before_aggregate",
+      parseInteger(c.max_loop_steps_before_aggregate),
+    );
+    writeNumberScalar(
+      body,
+      "strip_reasoning_after_turns",
+      parseInteger(c.strip_reasoning_after_turns),
+    );
+    // The guard covers the extras as well as the body: a table whose keys the
+    // form has no widget for — or whose only known key serializes to nothing —
+    // would otherwise be dropped whole, preserved keys included. Same form as
+    // the `[model]` and `[resources]` guards above.
+    const compactionExtras = renderExtraScalars(safeCompactionExtras);
+    if (body.length || compactionExtras.length) {
+      lines.push("", "[compaction]", ...body, ...compactionExtras);
+    }
+  }
+
+  // [channel_overrides]
+  {
+    const body: string[] = [];
+    const c = form.channel_overrides;
+    writeStringScalar(body, "model", c.model.trim());
+    writeStringScalar(body, "system_prompt", c.system_prompt.trim());
+    if (c.dm_policy !== "") writeStringScalar(body, "dm_policy", c.dm_policy);
+    if (c.group_policy !== "") writeStringScalar(body, "group_policy", c.group_policy);
+    if (c.group_trigger_patterns.length) body.push(`group_trigger_patterns = ${tomlArray(c.group_trigger_patterns)}`);
+    if (c.reply_precheck) writeBoolScalar(body, "reply_precheck", true);
+    writeStringScalar(body, "reply_precheck_model", c.reply_precheck_model.trim());
+    writeNumberScalar(body, "rate_limit_per_minute", parseInteger(c.rate_limit_per_minute));
+    writeNumberScalar(body, "rate_limit_per_user", parseInteger(c.rate_limit_per_user));
+    if (c.threading) writeBoolScalar(body, "threading", true);
+    if (c.output_format !== "") writeStringScalar(body, "output_format", c.output_format);
+    if (c.usage_footer !== "") writeStringScalar(body, "usage_footer", c.usage_footer);
+    if (c.typing_mode !== "") writeStringScalar(body, "typing_mode", c.typing_mode);
+    writeNumberScalar(body, "message_debounce_ms", parseInteger(c.message_debounce_ms));
+    writeNumberScalar(body, "message_debounce_max_ms", parseInteger(c.message_debounce_max_ms));
+    writeNumberScalar(body, "message_debounce_max_buffer", parseInteger(c.message_debounce_max_buffer));
+    if (c.clear_done_reaction) writeBoolScalar(body, "clear_done_reaction", true);
+    if (c.disable_commands) writeBoolScalar(body, "disable_commands", true);
+    if (c.allowed_commands.length) body.push(`allowed_commands = ${tomlArray(c.allowed_commands)}`);
+    if (c.blocked_commands.length) body.push(`blocked_commands = ${tomlArray(c.blocked_commands)}`);
+    if (c.auto_route !== "off") writeStringScalar(body, "auto_route", c.auto_route);
+    writeNumberScalar(body, "auto_route_ttl_minutes", parseInteger(c.auto_route_ttl_minutes));
+    writeNumberScalar(body, "auto_route_confidence_threshold", parseInteger(c.auto_route_confidence_threshold));
+    writeNumberScalar(body, "auto_route_sticky_bonus", parseInteger(c.auto_route_sticky_bonus));
+    writeNumberScalar(body, "auto_route_divergence_count", parseInteger(c.auto_route_divergence_count));
+    if (c.prefix_agent_name !== "off") writeStringScalar(body, "prefix_agent_name", c.prefix_agent_name);
+    // `default_thread_ownership_enabled` returns true, so `false` is the value
+    // worth writing.
+    if (!c.thread_ownership_enabled) writeBoolScalar(body, "thread_ownership_enabled", false);
+    writeNumberScalar(body, "conversation_ownership_ttl_seconds", parseInteger(c.conversation_ownership_ttl_seconds));
+    if (c.conversation_ownership_include_dms) writeBoolScalar(body, "conversation_ownership_include_dms", true);
+    // The guard covers the extras as well as the body: a table whose keys the
+    // form has no widget for would otherwise be dropped whole, preserved keys
+    // included. Same form as the `[model]` and `[resources]` guards above.
+    const channelOverrideExtras = renderExtraScalars(safeChannelOverrideExtras);
+    if (body.length || channelOverrideExtras.length) {
+      lines.push("", "[channel_overrides]", ...body, ...channelOverrideExtras);
+    }
+  }
+
+  // [skill_workshop]
+  {
+    const body: string[] = [];
+    const w = form.skill_workshop;
+    // Each field is written only when it differs from the Rust `Default`, so an
+    // agent that has never been configured for the workshop produces no table
+    // at all. `auto_capture` is the one that reads backwards: its default is
+    // `true`, so `false` is the value worth writing.
+    if (w.enabled) writeBoolScalar(body, "enabled", true);
+    if (!w.auto_capture) writeBoolScalar(body, "auto_capture", false);
+    if (w.approval_policy !== "pending") {
+      writeStringScalar(body, "approval_policy", w.approval_policy);
+    }
+    if (w.review_mode !== "heuristic") {
+      writeStringScalar(body, "review_mode", w.review_mode);
+    }
+    writeNumberScalar(body, "max_pending", parseInteger(w.max_pending));
+    writeNumberScalar(body, "max_pending_age_days", parseInteger(w.max_pending_age_days));
+    if (w.evolution_mode !== "free") {
+      writeStringScalar(body, "evolution_mode", w.evolution_mode);
+    }
+    // Same guard shape as `[compaction]` and `[channel_overrides]`.
+    const skillWorkshopExtras = renderExtraScalars(safeSkillWorkshopExtras);
+    if (body.length || skillWorkshopExtras.length) {
+      lines.push("", "[skill_workshop]", ...body, ...skillWorkshopExtras);
     }
   }
 
@@ -1789,6 +2145,84 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
       at,
       new Set(["default_timeout_secs", "notify_on_timeout"]),
     );
+  }
+
+  // [channel_overrides]
+  if (isTomlTable(parsed.channel_overrides)) {
+    const c = parsed.channel_overrides;
+    form.channel_overrides.model = asString(c.model);
+    form.channel_overrides.system_prompt = asString(c.system_prompt);
+    form.channel_overrides.dm_policy = asOptionalEnum(c.dm_policy, CHANNEL_ENUMS.dm_policy);
+    form.channel_overrides.group_policy = asOptionalEnum(c.group_policy, CHANNEL_ENUMS.group_policy);
+    form.channel_overrides.group_trigger_patterns = asStringArray(c.group_trigger_patterns);
+    form.channel_overrides.reply_precheck = asBoolean(c.reply_precheck, false);
+    form.channel_overrides.reply_precheck_model = asString(c.reply_precheck_model);
+    form.channel_overrides.rate_limit_per_minute = asNumberString(c.rate_limit_per_minute);
+    form.channel_overrides.rate_limit_per_user = asNumberString(c.rate_limit_per_user);
+    form.channel_overrides.threading = asBoolean(c.threading, false);
+    form.channel_overrides.output_format = asOptionalEnum(c.output_format, CHANNEL_ENUMS.output_format);
+    form.channel_overrides.usage_footer = asOptionalEnum(c.usage_footer, CHANNEL_ENUMS.usage_footer);
+    form.channel_overrides.typing_mode = asOptionalEnum(c.typing_mode, CHANNEL_ENUMS.typing_mode);
+    form.channel_overrides.message_debounce_ms = asNumberString(c.message_debounce_ms);
+    form.channel_overrides.message_debounce_max_ms = asNumberString(c.message_debounce_max_ms);
+    form.channel_overrides.message_debounce_max_buffer = asNumberString(c.message_debounce_max_buffer);
+    form.channel_overrides.clear_done_reaction = asBoolean(c.clear_done_reaction, false);
+    form.channel_overrides.disable_commands = asBoolean(c.disable_commands, false);
+    form.channel_overrides.allowed_commands = asStringArray(c.allowed_commands);
+    form.channel_overrides.blocked_commands = asStringArray(c.blocked_commands);
+    form.channel_overrides.auto_route = asEnum(c.auto_route, CHANNEL_ENUMS.auto_route, "off");
+    form.channel_overrides.auto_route_ttl_minutes = asNumberString(c.auto_route_ttl_minutes);
+    form.channel_overrides.auto_route_confidence_threshold = asNumberString(c.auto_route_confidence_threshold);
+    form.channel_overrides.auto_route_sticky_bonus = asNumberString(c.auto_route_sticky_bonus);
+    form.channel_overrides.auto_route_divergence_count = asNumberString(c.auto_route_divergence_count);
+    form.channel_overrides.prefix_agent_name = asEnum(c.prefix_agent_name, CHANNEL_ENUMS.prefix_agent_name, "off");
+    form.channel_overrides.thread_ownership_enabled = asBoolean(c.thread_ownership_enabled, true);
+    form.channel_overrides.conversation_ownership_ttl_seconds = asNumberString(c.conversation_ownership_ttl_seconds);
+    form.channel_overrides.conversation_ownership_include_dms = asBoolean(c.conversation_ownership_include_dms, false);
+    extras.channel_overrides = stripKnown(c, FORM_CHANNEL_OVERRIDE_KEYS);
+  }
+
+  // [skill_workshop]
+  if (isTomlTable(parsed.skill_workshop)) {
+    const w = parsed.skill_workshop;
+    form.skill_workshop.enabled = asBoolean(w.enabled, false);
+    // `true` is the Rust default, so an absent key means capture is ON.
+    form.skill_workshop.auto_capture = asBoolean(w.auto_capture, true);
+    form.skill_workshop.approval_policy = asEnum(
+      w.approval_policy,
+      SKILL_APPROVAL_POLICIES,
+      "pending",
+    );
+    form.skill_workshop.review_mode = asEnum(w.review_mode, SKILL_REVIEW_MODES, "heuristic");
+    form.skill_workshop.max_pending = asNumberString(w.max_pending);
+    form.skill_workshop.max_pending_age_days = asNumberString(w.max_pending_age_days);
+    form.skill_workshop.evolution_mode = asEnum(
+      w.evolution_mode,
+      SKILL_EVOLUTION_MODES,
+      "free",
+    );
+    extras.skill_workshop = stripKnown(w, FORM_SKILL_WORKSHOP_KEYS);
+  }
+
+  // [compaction]
+  if (isTomlTable(parsed.compaction)) {
+    const c = parsed.compaction;
+    form.compaction.threshold_messages = asNumberString(c.threshold_messages);
+    form.compaction.keep_recent = asNumberString(c.keep_recent);
+    form.compaction.max_summary_tokens = asNumberString(c.max_summary_tokens);
+    form.compaction.token_threshold_ratio = asNumberString(c.token_threshold_ratio);
+    form.compaction.max_chunk_chars = asNumberString(c.max_chunk_chars);
+    form.compaction.max_retries = asNumberString(c.max_retries);
+    form.compaction.aggregate_developer_loops = asTriStateBool(
+      c.aggregate_developer_loops,
+    );
+    form.compaction.max_loop_steps_before_aggregate = asNumberString(
+      c.max_loop_steps_before_aggregate,
+    );
+    form.compaction.strip_reasoning_after_turns = asNumberString(
+      c.strip_reasoning_after_turns,
+    );
+    extras.compaction = stripKnown(c, FORM_COMPACTION_KEYS);
   }
 
   // [proactive_memory]

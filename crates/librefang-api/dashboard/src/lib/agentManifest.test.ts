@@ -1334,7 +1334,13 @@ prompt_template = "on push"
     expect(reparsed.form.mcp_servers).toEqual(["github"]);
     expect(reparsed.form.tool_allowlist).toEqual(["file_read"]);
     expect(reparsed.extras.topLevel["future_field"]).toBe("unknown to this daemon");
-    expect(reparsed.extras.topLevel["compaction"]).toEqual({ threshold_messages: 7 });
+    // `[compaction]` became a first-class form table in this branch, so the
+    // value round-trips through `form.compaction` instead of surviving as an
+    // unknown top-level key — the same change of address `[workspaces]` went
+    // through below, in #8013. Where it survives changed; that it survives has
+    // not, and the assertion is stronger for it: it now checks the value
+    // reaches the field the daemon reads, not just that the table was kept.
+    expect(reparsed.form.compaction.threshold_messages).toBe("7");
     // `[workspaces]` is a first-class form field since #8013, so a path-based row round-trips through `form.workspaces` instead of surviving as an unknown top-level key.
     // Where it survives changed; that it survives has not.
     expect(reparsed.form.workspaces).toHaveLength(1);
@@ -2310,6 +2316,9 @@ describe("every table the form owns keeps the keys it does not render", () => {
     ["exec_policy", "[exec_policy]\nzz_unknown = 7"],
     ["response_format", "[response_format]\nzz_unknown = 7"],
     ["schedule", '[schedule.periodic]\ncron = "0 9 * * *"\nzz_unknown = 7'],
+    ["compaction", "[compaction]\nzz_unknown = 7"],
+    ["skill_workshop", "[skill_workshop]\nzz_unknown = 7"],
+    ["channel_overrides", "[channel_overrides]\nzz_unknown = 7"],
   ];
 
   for (const [table, body] of TABLES) {
@@ -2351,5 +2360,270 @@ describe("every table the form owns keeps the keys it does not render", () => {
       stale,
       `the sweep lists tables the form does not claim: ${stale.join(", ")}`,
     ).toEqual([]);
+  });
+});
+
+// `[compaction]` is the same shape as `[proactive_memory]`: nine `Option<T>`
+// overrides, so "inherit" and "explicitly set" are different keys on disk and
+// an untouched table must not be written at all.
+describe("compaction overrides", () => {
+  it("writes no table when every field inherits", () => {
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("[compaction]");
+  });
+
+  it("writes the table as soon as one field is set", () => {
+    const form = emptyManifestForm();
+    form.compaction.threshold_messages = "40";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[compaction]");
+    expect(toml).toContain("threshold_messages = 40");
+  });
+
+  it("round-trips every field", () => {
+    const form = emptyManifestForm();
+    form.compaction = {
+      threshold_messages: "40",
+      keep_recent: "10",
+      max_summary_tokens: "4096",
+      token_threshold_ratio: "0.7",
+      max_chunk_chars: "8000",
+      max_retries: "2",
+      aggregate_developer_loops: "false",
+      max_loop_steps_before_aggregate: "5",
+      strip_reasoning_after_turns: "2",
+    };
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.compaction).toEqual(form.compaction);
+  });
+
+  // An explicit `false` here is a real override — "do not aggregate these
+  // loops" — and the whole reason this one field is a tri-state select rather
+  // than a toggle. A toggle renders "inherit" and "false" identically, so
+  // touching it would write a decision nobody made.
+  it("keeps an explicit false distinct from inherit", () => {
+    const inherited = emptyManifestForm();
+    const explicit = emptyManifestForm();
+    explicit.compaction.aggregate_developer_loops = "false";
+
+    expect(serializeManifestForm(inherited)).not.toContain("aggregate_developer_loops");
+    expect(serializeManifestForm(explicit)).toContain("aggregate_developer_loops = false");
+
+    const parsed = parseManifestToml(serializeManifestForm(explicit));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.compaction.aggregate_developer_loops).toBe("false");
+  });
+
+  it("preserves keys inside [compaction] the form does not render", () => {
+    // One key the form does not render, and no key it does — with a rendered
+    // key present the body is never empty, the guard that drops a body-less
+    // table never runs, and this test passes over the bug it is named for.
+    const source = [
+      'name = "x"',
+      "",
+      "[compaction]",
+      "summariser_model = \"cheap/model\"",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("[compaction]");
+    expect(round).toContain('summariser_model = "cheap/model"');
+  });
+});
+
+// `[skill_workshop]` is not all-`Option` like the other tables: its fields are
+// plain `bool` / enum / `u32` with a `Default` on the struct, so "absent" and
+// "the default" are the same state. That means the form's defaults have to
+// match the Rust ones exactly, in the direction that writes nothing when they
+// agree.
+describe("skill_workshop overrides", () => {
+  const DEFAULTS = {
+    enabled: false,
+    // Not `false`. `impl Default for SkillWorkshopConfig` sets this to `true`:
+    // the workshop is off, but its capture pass is on, so that switching the
+    // master switch on gives a workshop that does something. A form that
+    // defaulted it to `false` would write `auto_capture = false` for every
+    // agent opened and saved, turning capture off for anyone who had never
+    // expressed an opinion.
+    auto_capture: true,
+    approval_policy: "pending" as const,
+    review_mode: "heuristic" as const,
+    max_pending: "",
+    max_pending_age_days: "",
+    evolution_mode: "free" as const,
+  };
+
+  it("starts at the Rust defaults", () => {
+    expect(emptyManifestForm().skill_workshop).toEqual(DEFAULTS);
+  });
+
+  it("writes no table while every field holds its default", () => {
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("[skill_workshop]");
+  });
+
+  it("writes auto_capture only when it is turned off, never when it is on", () => {
+    const on = emptyManifestForm();
+    on.skill_workshop.auto_capture = true;
+    expect(serializeManifestForm(on)).not.toContain("auto_capture");
+
+    const off = emptyManifestForm();
+    off.skill_workshop.auto_capture = false;
+    const toml = serializeManifestForm(off);
+    expect(toml).toContain("[skill_workshop]");
+    expect(toml).toContain("auto_capture = false");
+  });
+
+  it("writes enabled only when it is turned on", () => {
+    const on = emptyManifestForm();
+    on.skill_workshop.enabled = true;
+    expect(serializeManifestForm(on)).toContain("enabled = true");
+
+    const off = emptyManifestForm();
+    off.skill_workshop.enabled = false;
+    expect(serializeManifestForm(off)).not.toContain("enabled =");
+  });
+
+  it("writes an enum only when it leaves its default", () => {
+    const form = emptyManifestForm();
+    form.skill_workshop.approval_policy = "auto";
+    form.skill_workshop.review_mode = "none";
+    form.skill_workshop.evolution_mode = "controlled";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain('approval_policy = "auto"');
+    expect(toml).toContain('review_mode = "none"');
+    expect(toml).toContain('evolution_mode = "controlled"');
+  });
+
+  it("round-trips every field away from its default", () => {
+    const form = emptyManifestForm();
+    form.skill_workshop = {
+      enabled: true,
+      auto_capture: false,
+      approval_policy: "auto",
+      review_mode: "threshold_llm",
+      max_pending: "50",
+      max_pending_age_days: "14",
+      evolution_mode: "controlled",
+    };
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.skill_workshop).toEqual(form.skill_workshop);
+  });
+
+  it("reads an absent auto_capture as on, matching the Rust default", () => {
+    const parsed = parseManifestToml('[skill_workshop]\nenabled = true\n');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.skill_workshop.enabled).toBe(true);
+    expect(parsed.form.skill_workshop.auto_capture).toBe(true);
+  });
+});
+
+// `[channel_overrides]` is the largest table here: 29 fields, of which eight
+// have defaults that come from named functions rather than the type's zero.
+// That is the whole risk — a form that writes one of those defaults back turns
+// "inherit" into "override with the value it happened to have".
+describe("channel_overrides", () => {
+  it("writes no table when every field holds its default", () => {
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("[channel_overrides]");
+  });
+
+  it("writes none of the custom defaults when they are untouched", () => {
+    // These are `#[serde(default = "…")]` on the Rust side, so an absent key
+    // means the function's value. Emitting them would pin the agent to
+    // whatever those functions return today.
+    const toml = serializeManifestForm(emptyManifestForm());
+    for (const key of [
+      "message_debounce_max_ms",
+      "message_debounce_max_buffer",
+      "auto_route_ttl_minutes",
+      "auto_route_confidence_threshold",
+      "auto_route_sticky_bonus",
+      "auto_route_divergence_count",
+      "conversation_ownership_ttl_seconds",
+    ]) {
+      expect(toml, `${key} was written while untouched`).not.toContain(key);
+    }
+  });
+
+  it("has a form default matching default_thread_ownership_enabled", () => {
+    // The fourth default in this work that reads backwards: the Rust default
+    // is `true`, so `false` is the value worth writing and `true` is the state
+    // that must produce no key at all.
+    const form = emptyManifestForm();
+    expect(form.channel_overrides.thread_ownership_enabled).toBe(true);
+    expect(serializeManifestForm(form)).not.toContain("thread_ownership_enabled");
+
+    form.channel_overrides.thread_ownership_enabled = false;
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[channel_overrides]");
+    expect(toml).toContain("thread_ownership_enabled = false");
+  });
+
+  it("round-trips every field away from its default", () => {
+    const form = emptyManifestForm();
+    form.channel_overrides = {
+      model: "openai/gpt-4o",
+      system_prompt: "be brief",
+      dm_policy: "allowed_only",
+      group_policy: "mention_only",
+      group_trigger_patterns: ["^!"],
+      reply_precheck: true,
+      reply_precheck_model: "cheap/model",
+      rate_limit_per_minute: "30",
+      rate_limit_per_user: "5",
+      threading: true,
+      output_format: "telegram_html",
+      usage_footer: "tokens",
+      typing_mode: "thinking",
+      message_debounce_ms: "500",
+      message_debounce_max_ms: "5000",
+      message_debounce_max_buffer: "32",
+      clear_done_reaction: true,
+      disable_commands: true,
+      allowed_commands: ["/help"],
+      blocked_commands: ["/rm"],
+      auto_route: "sticky_ttl",
+      auto_route_ttl_minutes: "60",
+      auto_route_confidence_threshold: "7",
+      auto_route_sticky_bonus: "4",
+      auto_route_divergence_count: "2",
+      prefix_agent_name: "bracket",
+      thread_ownership_enabled: false,
+      conversation_ownership_ttl_seconds: "1800",
+      conversation_ownership_include_dms: true,
+    };
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.channel_overrides).toEqual(form.channel_overrides);
+  });
+
+  it("preserves keys inside the table the form does not render", () => {
+    const source = [
+      'name = "x"',
+      "",
+      "[channel_overrides]",
+      "threading = true",
+      "future_toggle = true",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("future_toggle = true");
+    expect(round).toContain("threading = true");
   });
 });
