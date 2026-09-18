@@ -953,7 +953,8 @@ pub struct ModelConfig {
     /// Optional nucleus-sampling threshold (OpenAI-compatible `top_p`).
     ///
     /// A typed [`Self`] field rather than an `extra_params` entry so the same intent cannot be expressed two ways with different validation: the form serializes it through one validated path and the agent loop merges it into `extra_body` at one site.
-    /// Providers that flatten `extra_body` receive it — that is every OpenAI-compatible provider (including groq, which routes through `OpenAIDriver`) plus Ollama.
+    /// Providers that flatten `extra_body` receive it — that is every OpenAI-compatible provider (including groq, which routes through `OpenAIDriver`).
+    /// Ollama's native API reads the same key only nested under `options`, so `librefang-llm-drivers` lifts `top_p` out of `extra_body` into `options` and strips the top-level copy before the body is merged.
     /// Typed-body drivers (Anthropic, Gemini) never read `extra_body`, so the value is silently dropped there.
     /// For the current Claude generations that is the right outcome anyway, since they reject sampling controls outright; on Claude 4.6 and earlier, which do accept `top_p`, it is a real gap — the dashboard field carries a provider hint so the operator is not left guessing.
     /// `None` (the default) sends nothing, so unaffected providers see no extra parameter.
