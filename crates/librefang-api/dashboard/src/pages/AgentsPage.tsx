@@ -1933,6 +1933,9 @@ export function AgentsPage() {
           active={configGroup}
           onSelect={setConfigGroup}
           ariaLabel={t("agents.tabs.config_groups", { defaultValue: "Configuration groups" })}
+          // Pill, like the info sub-tabs: these are one level below the main
+          // tabs and the same shape says so without a second legend.
+          variant="pill"
         />
         <div className="flex flex-col gap-4">
           {configGroup === "channels" && <ChannelsSection agentId={agent.id} />}
