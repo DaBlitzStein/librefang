@@ -811,87 +811,109 @@ export function ChannelsSection({ agentId }: { agentId: string }) {
   );
 }
 
-/** A tab of the agent detail drawer. */
-export type AgentDrawerTab =
-  | "conversation"
-  | "memory"
-  | "skills"
-  | "tools"
-  | "routing"
-  | "schedule"
-  | "logs"
-  | "history";
+/**
+ * The two main tabs of the agent detail panel.
+ *
+ * Every other surface of an agent is reachable from one of these two, and the
+ * split is by *what you are doing*, not by which subsystem the field belongs
+ * to: `info` reads the agent (what it is doing, what it has been doing, what it
+ * remembers), `config` writes it. The eight tabs this replaced were split by
+ * subsystem, which is how the token footprint ended up in a drawer and the
+ * complexity router two levels below the tab that named it.
+ */
+export type AgentMainTab = "info" | "config";
 
 /**
- * Which manifest sections each drawer tab hosts.
+ * Sub-tabs of "logs & info", in display order.
  *
- * The drawer *is* the agent's configuration surface. These sections used to
- * live behind a separate "Edit full configuration" drawer, which is how the
- * same field ended up reachable two ways while the advanced ones — the
- * complexity router's tiers, the fallback chain, extended thinking — sat two
- * levels down and nowhere near the tab that named them.
- *
- * A tab missing from this map renders no manifest sections. Logs and History
- * are read-only, and Memory's per-agent overrides have no widget yet, so
- * there is nothing to host.
- *
- * Order matters: it is the order the sections render in, so the always-open
- * ones (`identity`, `limits`, `lifecycle`) lead and the folded ones follow.
+ * Read-only surfaces, which is why they live under the reading tab: the
+ * manifest editor is the one writer of the agent's configuration, and none of
+ * these four carries a field of its own.
  */
-export const TAB_SECTIONS: Partial<Record<AgentDrawerTab, ManifestSectionId[]>> = {
-  conversation: [
-    "identity",
-    "limits",
-    "lifecycle",
-    "prompt",
-    "response_format",
-    "context_injection",
-    "shared_folders",
-    // How the agent behaves on the channels it serves. Conversation, because
-    // that is what these settings are about — not Tools, which is about what
-    // it can do, and not a tab of their own, which would put 29 controls one
-    // click away from the thing they modify.
-    "channel_overrides",
-  ],
-  // Memory was the empty tab: every knob the manifest exposes for it is a
-  // per-agent override of a kernel default, and none of them had a widget.
+export const INFO_TABS = ["logs", "memory", "prompts", "history"] as const;
+
+export type InfoTab = (typeof INFO_TABS)[number];
+
+/**
+ * The config groups, in display order.
+ *
+ * A runtime array rather than a bare union for the same reason
+ * `MANIFEST_SECTION_IDS` is one: the guard that checks every group has content
+ * and every group has a label can walk the real list instead of restating it.
+ */
+export const CONFIG_GROUP_IDS = [
+  "general",
+  "model",
+  "tools",
+  "memory",
+  "limits",
+  "channels",
+  "planning",
+  "conversation",
+] as const;
+
+export type ConfigGroupId = (typeof CONFIG_GROUP_IDS)[number];
+
+/**
+ * Which manifest sections each config group hosts.
+ *
+ * This is the map the whole surface hangs from: the group tabs are drawn from
+ * its keys, the form is handed its values, and the guards assert that the two
+ * directions agree — every section appears exactly once, and every group
+ * appears exactly once in the bar.
+ *
+ * The grouping is by subject rather than by manifest table, because the table
+ * boundaries are an implementation detail of the Rust struct and an operator
+ * looking for "where do I cap this agent's spending" does not know that
+ * `resources` and `rl_export` are siblings of `limits`.
+ *
+ * Every section of `AgentManifestForm` is here, including the ones the plan's
+ * original table named as separate groups: `tools` and `exec_policy` render
+ * inside `capabilities`, `resources` and `rl_export` inside `limits`, and
+ * `autonomous` — which that table omitted — is a scheduling concern, so it sits
+ * with the cron jobs it governs.
+ */
+export const CONFIG_GROUPS: Record<ConfigGroupId, readonly ManifestSectionId[]> = {
+  general: ["identity", "prompt", "lifecycle", "response_format"],
+  model: ["model", "fallback_models", "thinking", "routing"],
+  tools: ["capabilities", "skills", "mcp_servers", "skill_workshop"],
   memory: ["proactive_memory", "auto_dream", "compaction"],
-  skills: ["skills", "skill_workshop"],
-  tools: ["capabilities", "mcp_servers"],
-  routing: ["model", "fallback_models", "thinking", "routing"],
-  schedule: ["scheduling", "autonomous", "async_tasks"],
+  limits: ["limits"],
+  channels: ["channel_overrides"],
+  planning: ["scheduling", "autonomous", "async_tasks"],
+  conversation: ["context_injection", "shared_folders"],
 };
 
 /**
- * The tab that owns the first field a validation run complained about.
+ * The config group that owns the first field a validation run complained about.
  *
  * A failed save has to send the operator somewhere they can act. With the
- * sections split across tabs the offending field is usually on a tab they are
- * not looking at, and an error nobody can see is indistinguishable from no
- * error — so this resolves the first reported field path to its section, and
- * that section to the one tab that hosts it.
+ * sections grouped the offending field is usually in a group they are not
+ * looking at, and an error nobody can see is indistinguishable from no error —
+ * so this resolves the first reported field path to its section, and that
+ * section to the one group that hosts it.
  *
  * Pulled out of `saveManifestEditor` so it can be tested without rendering the
  * page: `AgentsPage` has some twenty hooks and no render harness, so anything
  * left inline there is untestable by construction. The decision is the part
- * with behaviour in it; the caller is one `setAgentTab`.
+ * with behaviour in it; the caller is one `setConfigGroup`.
  *
  * Returns `undefined` when nothing maps — an unrecognised path (in which case
  * `sectionForInvalidField` has no entry and its guard test fails), or a
- * section no tab hosts (in which case the layout guard fails). Every path
+ * section no group hosts (in which case the layout guard fails). Every path
  * `validateManifestForm` can produce is covered by one of those two, which is
  * what makes the fallback safe rather than silent.
  */
-export function tabForFirstInvalidField(
+export function groupForFirstInvalidField(
   errors: readonly string[],
-): AgentDrawerTab | undefined {
+): ConfigGroupId | undefined {
   const firstBadSection = errors
     .map(sectionForInvalidField)
     .find((section): section is ManifestSectionId => section !== undefined);
   if (!firstBadSection) return undefined;
 
-  return (Object.keys(TAB_SECTIONS) as AgentDrawerTab[]).find((tab) =>
-    TAB_SECTIONS[tab]?.includes(firstBadSection),
+  return CONFIG_GROUP_IDS.find((group) =>
+    CONFIG_GROUPS[group].includes(firstBadSection),
   );
 }
 

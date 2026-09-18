@@ -2,6 +2,8 @@
 // — AgentsPage has no render harness (~20 hooks).
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -13,8 +15,10 @@ import {
   SystemPromptSection,
   DescriptionSection,
   ChannelsSection,
-  TAB_SECTIONS,
-  tabForFirstInvalidField,
+  CONFIG_GROUPS,
+  CONFIG_GROUP_IDS,
+  INFO_TABS,
+  groupForFirstInvalidField,
 } from "./AgentsPage";
 import { MANIFEST_SECTION_IDS } from "../components/AgentManifestForm";
 import { emptyManifestForm, validateManifestForm } from "../lib/agentManifest";
@@ -51,6 +55,12 @@ vi.mock("react-i18next", () => ({
     i18n: { language: "en" },
   }),
 }));
+
+// Read from disk rather than through the i18n mock above: the mock resolves
+// every key to its `defaultValue`, so a missing translation is exactly what it
+// cannot see.
+const LOCALES_DIR = join(__dirname, "..", "locales");
+const LOCALE_FILES = readdirSync(LOCALES_DIR).filter((f) => f.endsWith(".json"));
 
 const usePatchAgentMock = usePatchAgent as unknown as ReturnType<typeof vi.fn>;
 const useBindMock = useBindPromptVersionToAgent as unknown as ReturnType<typeof vi.fn>;
@@ -362,12 +372,12 @@ describe("ChannelsSection (#7742)", () => {
   });
 });
 
-describe("agent drawer — manifest section layout", () => {
-  const hosted = Object.entries(TAB_SECTIONS).flatMap(([tab, ids]) =>
-    (ids ?? []).map((id) => ({ tab, id })),
+describe("agent detail — manifest section layout", () => {
+  const hosted = CONFIG_GROUP_IDS.flatMap((group) =>
+    CONFIG_GROUPS[group].map((id) => ({ group, id })),
   );
 
-  // A section the form can render but no tab hosts is a field the operator
+  // A section the form can render but no group hosts is a field the operator
   // cannot reach — the same defect as a manifest key with no widget, one level
   // up, and invisible in every other test because the form would still render
   // it happily wherever it was asked to.
@@ -377,8 +387,8 @@ describe("agent drawer — manifest section layout", () => {
     );
     expect(
       orphans,
-      `Sections exist in the editor that no tab renders, so they are ` +
-        `unreachable from the drawer. Add each to TAB_SECTIONS.\n\n` +
+      `Sections exist in the editor that no config group renders, so they ` +
+        `are unreachable from the agent view. Add each to CONFIG_GROUPS.\n\n` +
         `Orphaned: ${orphans.join(", ")}`,
     ).toEqual([]);
   });
@@ -386,10 +396,10 @@ describe("agent drawer — manifest section layout", () => {
   // The other direction, and the one that was missing.
   //
   // Everything above asks whether each *real* section is hosted somewhere. None
-  // of it asks whether each hosted id is real, so a tab naming a section the
+  // of it asks whether each hosted id is real, so a group naming a section the
   // editor does not implement passed every assertion while rendering a hole:
   // `sections={["skils"]}` finds no match in the form and draws nothing, and
-  // the drawer looks like it loaded an empty tab rather than like it is wrong.
+  // the group looks like it loaded an empty tab rather than like it is wrong.
   //
   // The ids are a join between two files — the form implements them, the page
   // arranges them — and a join is exactly where a name has to be checked from
@@ -400,11 +410,11 @@ describe("agent drawer — manifest section layout", () => {
 
     expect(
       imaginary,
-      `TAB_SECTIONS names sections the editor does not implement, so those ` +
-        `tabs render nothing where a section should be. Check the id against ` +
+      `CONFIG_GROUPS names sections the editor does not implement, so those ` +
+        `groups render nothing where a section should be. Check the id against ` +
         `MANIFEST_SECTION_IDS in AgentManifestForm.tsx.\n\n` +
         `Unknown (${imaginary.length}):\n` +
-        imaginary.map((e) => `${e.id} (${e.tab})`).join("\n"),
+        imaginary.map((e) => `${e.id} (${e.group})`).join("\n"),
     ).toEqual([]);
   });
 
@@ -412,32 +422,94 @@ describe("agent drawer — manifest section layout", () => {
   // to remove: two controls writing one field from two places, which is how the
   // complexity router ended up split between a tab and a drawer two levels
   // down.
-  it("hosts no manifest section in two tabs", () => {
+  it("hosts no manifest section in two groups", () => {
     const seen = new Map<string, string>();
     const clashes: string[] = [];
-    for (const { tab, id } of hosted) {
+    for (const { group, id } of hosted) {
       const previous = seen.get(id);
-      if (previous) clashes.push(`${id} (${previous} and ${tab})`);
-      else seen.set(id, tab);
+      if (previous) clashes.push(`${id} (${previous} and ${group})`);
+      else seen.set(id, group);
     }
     expect(
       clashes,
-      `A section rendered by two tabs means two controls for one field.\n\n` +
+      `A section rendered by two groups means two controls for one field.\n\n` +
         `Duplicated: ${clashes.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  // An empty group is a tab that renders nothing, which is the same defect the
+  // "unknown section" guard catches from the other side: the operator clicks
+  // "Integration" and gets an empty panel with no way to tell it apart from a
+  // failed load. The plan listed a group for `metadata`, and `metadata` has no
+  // widget anywhere (`manifest-field-coverage.test.ts` records it as
+  // preserved-only) — so the group would have shipped empty.
+  it("gives every config group at least one section", () => {
+    const empty = CONFIG_GROUP_IDS.filter((group) => CONFIG_GROUPS[group].length === 0);
+
+    expect(
+      empty,
+      `Config groups with no sections render an empty tab. Either give the ` +
+        `group a section or drop it from CONFIG_GROUP_IDS.\n\n` +
+        `Empty: ${empty.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  // The group tab bar draws its labels from `agents.group.<id>`, so a group id
+  // with no label in the locale files shows the raw key to the operator — and
+  // because the bar is built from `CONFIG_GROUP_IDS`, that is a failure the
+  // type system cannot see.
+  //
+  // Checked against every locale rather than against en.json alone: the ids are
+  // new, so the four translations are exactly the ones that can go missing
+  // while the English surface looks perfect.
+  it("labels every config group in every locale", () => {
+    const missing: string[] = [];
+    for (const file of LOCALE_FILES) {
+      const locale = JSON.parse(
+        readFileSync(join(LOCALES_DIR, file), "utf8"),
+      ) as { agents?: { group?: Record<string, string> } };
+      for (const group of CONFIG_GROUP_IDS) {
+        if (!locale.agents?.group?.[group]) missing.push(`${file}: agents.group.${group}`);
+      }
+    }
+    expect(
+      missing,
+      `Group ids are drawn from CONFIG_GROUP_IDS, so every id needs a label ` +
+        `in every locale or the tab shows the key itself.\n\n` +
+        `Missing (${missing.length}):\n${missing.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  // Same join, one level down: the sub-tabs under "logs & info" are built from
+  // `INFO_TABS`, so an id without a label is a tab reading `agents.info.logs`.
+  it("labels every logs & info sub-tab in every locale", () => {
+    const missing: string[] = [];
+    for (const file of LOCALE_FILES) {
+      const locale = JSON.parse(
+        readFileSync(join(LOCALES_DIR, file), "utf8"),
+      ) as { agents?: { info?: Record<string, string> } };
+      for (const tab of INFO_TABS) {
+        if (!locale.agents?.info?.[tab]) missing.push(`${file}: agents.info.${tab}`);
+      }
+    }
+    expect(
+      missing,
+      `Sub-tab ids are drawn from INFO_TABS, so every id needs a label in ` +
+        `every locale.\n\nMissing (${missing.length}):\n${missing.join("\n")}`,
     ).toEqual([]);
   });
 });
 
-// The tab jump on a failed save. With the sections split across tabs, the
-// field that failed validation is usually on a tab the operator is not looking
-// at — an error nobody can see is indistinguishable from no error, and this is
-// the half of the layout change that keeps it visible.
+// The group jump on a failed save. With the sections grouped, the field that
+// failed validation is usually in a group the operator is not looking at — an
+// error nobody can see is indistinguishable from no error, and this is the half
+// of the layout change that keeps it visible.
 //
 // Driven by the real validator rather than by hand-written field paths: what
-// matters is the pair (validator says X) -> (drawer goes there), and asserting
+// matters is the pair (validator says X) -> (view goes there), and asserting
 // on paths I chose myself would only confirm my idea of what the validator
 // emits. Each case trips exactly one rule in an otherwise valid form.
-describe("tabForFirstInvalidField", () => {
+describe("groupForFirstInvalidField", () => {
   const valid = () => {
     const form = emptyManifestForm();
     form.name = "an-agent";
@@ -446,34 +518,34 @@ describe("tabForFirstInvalidField", () => {
     return form;
   };
 
-  /** Trips one rule, asserts the validator agrees, and returns the tab. */
-  function tabFor(mutate: (form: ReturnType<typeof valid>) => void) {
+  /** Trips one rule, asserts the validator agrees, and returns the group. */
+  function groupFor(mutate: (form: ReturnType<typeof valid>) => void) {
     const form = valid();
     mutate(form);
     const errors = validateManifestForm(form);
     expect(errors.length, `the fixture should trip exactly one rule`).toBeGreaterThan(0);
-    return { errors, tab: tabForFirstInvalidField(errors) };
+    return { errors, group: groupForFirstInvalidField(errors) };
   }
 
   it.each([
-    ["a missing name", (f: ReturnType<typeof valid>) => { f.name = ""; }, "conversation"],
-    ["a blank cron", (f: ReturnType<typeof valid>) => { f.schedule = { mode: "periodic", cron: "" }; }, "schedule"],
-    ["a zero check interval", (f: ReturnType<typeof valid>) => { f.schedule = { mode: "continuous", check_interval_secs: "0" }; }, "schedule"],
-    ["an out-of-range temperature", (f: ReturnType<typeof valid>) => { f.model.temperature = "9"; }, "routing"],
-    ["an out-of-range top_p", (f: ReturnType<typeof valid>) => { f.model.top_p = "7"; }, "routing"],
+    ["a missing name", (f: ReturnType<typeof valid>) => { f.name = ""; }, "general"],
+    ["a blank cron", (f: ReturnType<typeof valid>) => { f.schedule = { mode: "periodic", cron: "" }; }, "planning"],
+    ["a zero check interval", (f: ReturnType<typeof valid>) => { f.schedule = { mode: "continuous", check_interval_secs: "0" }; }, "planning"],
+    ["an out-of-range temperature", (f: ReturnType<typeof valid>) => { f.model.temperature = "9"; }, "model"],
+    ["an out-of-range top_p", (f: ReturnType<typeof valid>) => { f.model.top_p = "7"; }, "model"],
     ["an unparseable JSON schema", (f: ReturnType<typeof valid>) => {
       f.response_format = { mode: "json_schema", name: "s", schema: "{not json", strict: false };
-    }, "conversation"],
+    }, "general"],
     ["a shared folder with no path", (f: ReturnType<typeof valid>) => {
       f.workspaces = [{ _uid: "u1", name: "docs", path: "", mode: "rw" }];
     }, "conversation"],
-  ])("sends %s to the tab that owns the field", (_label, mutate, expected) => {
-    const { tab } = tabFor(mutate as (form: ReturnType<typeof valid>) => void);
-    expect(tab).toBe(expected);
+  ])("sends %s to the group that owns the field", (_label, mutate, expected) => {
+    const { group } = groupFor(mutate as (form: ReturnType<typeof valid>) => void);
+    expect(group).toBe(expected);
   });
 
-  // The first message wins, because the operator is sent to exactly one tab and
-  // the validator's order is the order the rules are written in.
+  // The first message wins, because the operator is sent to exactly one group
+  // and the validator's order is the order the rules are written in.
   it("follows the first error when several are present", () => {
     const form = valid();
     form.name = "";
@@ -481,20 +553,20 @@ describe("tabForFirstInvalidField", () => {
     const errors = validateManifestForm(form);
     expect(errors.length).toBeGreaterThan(1);
 
-    // `name` is checked before the model ranges, and identity lives on
-    // Conversation while the model lives on Routing.
-    expect(tabForFirstInvalidField(errors)).toBe("conversation");
+    // `name` is checked before the model ranges, and identity lives in General
+    // while the model lives in Model.
+    expect(groupForFirstInvalidField(errors)).toBe("general");
   });
 
   it("returns nothing when there is nothing to report", () => {
-    expect(tabForFirstInvalidField([])).toBeUndefined();
-    expect(tabForFirstInvalidField(validateManifestForm(valid()))).toBeUndefined();
+    expect(groupForFirstInvalidField([])).toBeUndefined();
+    expect(groupForFirstInvalidField(validateManifestForm(valid()))).toBeUndefined();
   });
 
   // A path no section claims is already a failure of the coverage guard in
   // AgentManifestForm.test.tsx; this pins the behaviour here so the caller's
-  // `if (owningTab)` fallback is a no-op rather than a crash.
+  // `if (owningGroup)` fallback is a no-op rather than a crash.
   it("returns nothing for a field path no section claims", () => {
-    expect(tabForFirstInvalidField(["campo.inventado"])).toBeUndefined();
+    expect(groupForFirstInvalidField(["campo.inventado"])).toBeUndefined();
   });
 });
