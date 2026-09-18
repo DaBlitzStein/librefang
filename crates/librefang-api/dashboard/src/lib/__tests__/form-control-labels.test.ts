@@ -106,14 +106,10 @@ function titleRepeatedInField(source: string): string[] {
     if (close < 0) continue;
     const body = source.slice(tagEnd, close);
 
-    // Every `Field` in the section, not just the first: a section can hold
-    // several, and a scan that stopped at the first would miss a second one
-    // repeating the title — the exact shape this looks for.
-    for (const field of body.matchAll(/<Field\s+([^>]*?)>/g)) {
-      const label = /label=\{([^}]*)\}/.exec(field[1])?.[1];
-      if (label && label === title) {
-        found.push(`${kind} ${title} → Field ${label}`);
-      }
+    const field = /<Field\s+([^>]*?)>/.exec(body);
+    const label = field && /label=\{([^}]*)\}/.exec(field[1])?.[1];
+    if (label && label === title) {
+      found.push(`${kind} ${title} → Field ${label}`);
     }
   }
   return found;
