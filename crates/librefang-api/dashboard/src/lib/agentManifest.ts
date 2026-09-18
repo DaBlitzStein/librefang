@@ -324,6 +324,31 @@ export const emptyManifestExtras = (): ManifestExtras => ({
   skill_workshop: {},
 });
 
+/**
+ * The form's starting state, and the one place where a default can be got
+ * wrong in a way nothing else catches.
+ *
+ * **Read the Rust `Default`; do not infer the value from the field's name.**
+ * Three fields in this editor default to the opposite of what their name
+ * suggests, and all three were found by reading the source rather than by
+ * reasoning about them:
+ *
+ * - `show_progress` — `#[serde(default = "default_true")]`, so an absent key
+ *   means the agent *does* stream progress. Defaulting it to `false` here
+ *   would turn the indicator off for every agent opened and saved.
+ * - `auto_capture` — `impl Default for SkillWorkshopConfig` sets it `true`
+ *   while `enabled` is `false`: the workshop is off, its capture pass is on,
+ *   so the master switch has something to switch on.
+ * - `notify_on_timeout` — a plain `#[serde(default)]` on a field whose
+ *   sibling is an `Option`, so `false` is the value that must *not* be
+ *   written on an agent that never chose.
+ *
+ * The shape of the failure is the same in all three: the form writes a
+ * decision the operator never made, into a file nobody reads, and the symptom
+ * surfaces later as behaviour that changed on its own. A wrong default here
+ * is not caught by any test unless a test was written for that field — which
+ * is why the rule is to read, not to reason.
+ */
 export const emptyManifestForm = (): ManifestFormState => ({
   name: "",
   description: "",
