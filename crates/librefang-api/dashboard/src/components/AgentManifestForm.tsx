@@ -1482,6 +1482,25 @@ export function AgentManifestForm({
               <option value="always">{t("agents.form.web_search_always")}</option>
             </select>
           </Field>
+          <Field label={t("config.fld_assignee_wake")}>
+            {/* The label is the config page's own string, shared rather than
+                copied: it is the same setting seen from the other side — a
+                per-agent override of the same global switch — and a second
+                copy would be a second thing to keep in step. */}
+            <select
+              value={value.assignee_wake}
+              onChange={(e) =>
+                update({
+                  assignee_wake: e.target.value as ManifestFormState["assignee_wake"],
+                })
+              }
+              className={inputClass}
+            >
+              <option value="">{t("agents.form.inherit_default")}</option>
+              <option value="true">{t("common.yes")}</option>
+              <option value="false">{t("common.no")}</option>
+            </select>
+          </Field>
           <Field
             label={t("agents.form.exec_policy")}
             hint={
