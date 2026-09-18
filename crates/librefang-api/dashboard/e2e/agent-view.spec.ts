@@ -288,6 +288,30 @@ test("the general group hosts the identity sections and the model group the mode
   await page.getByRole("tab", { name: "Model & routing", exact: true }).click();
   await expect(page.locator('[data-section="model"]')).toBeVisible();
   await expect(page.locator('[data-section="identity"]')).toHaveCount(0);
+
+  // The way back to the deployment default, which the drawer's model editor
+  // used to own: a pinned agent has to be unpinnable without hand-editing
+  // `agent.toml`.
+  await expect(page.getByRole("button", { name: "Use global default" })).toBeVisible();
+});
+
+// The grants panels are the other half of "Tools & skills": live writes over
+// their own endpoints, above the manifest sections for the same subject. They
+// are also the piece with the least cover — removing both from the group left
+// every other test in this file green, because a group that renders its
+// manifest sections still shows a `[data-section]`.
+test("the tools & skills group keeps its live grants panels", async ({ page }) => {
+  await openAgent(page);
+  await page.getByRole("tab", { name: "config" }).click();
+  await page.getByRole("tab", { name: "Tools & skills", exact: true }).click();
+
+  // One string from each panel, and nothing else on the agent view renders
+  // either of them.
+  await expect(page.getByText("Using all available skills")).toBeVisible();
+  await expect(page.getByText("Using all available tools")).toBeVisible();
+  // The auto-evolve switch is the skills panel's own write, not a manifest
+  // field, so it goes with them.
+  await expect(page.getByText(/Auto-evolve/)).toBeVisible();
 });
 
 test("the channels group hosts the live allowlist and the 29 overrides together", async ({ page }) => {

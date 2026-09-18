@@ -183,7 +183,7 @@ export function AgentBrief({
         </span>
       </div>
 
-      {/* KPI tiles — Sessions · Cost · P95 · Model (matches design canvas).
+      {/* KPI tiles — Sessions · Cost · P95 · Tools (matches design canvas).
           Backed by GET /api/agents/{id}/stats so values are accurate even
           when the agent hasn't appeared in the global session list page. */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">

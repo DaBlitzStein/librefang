@@ -1027,7 +1027,8 @@
     "tools_declared_title": "Оголошені інструменти",
     "token_usage_title": "Обсяг токенів",
     "token_injected_total": "Додається до запиту",
-    "token_recent": "Останні виклики"
+    "token_recent": "Останні виклики",
+    "use_global_default": "Використовувати глобальну модель за замовчуванням"
   },
   "providers": {
     "title": "Провайдери",

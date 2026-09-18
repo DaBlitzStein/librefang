@@ -1401,13 +1401,14 @@ export function AgentsPage() {
     const errors = validateManifestForm(manifestEditorFormState);
     setManifestEditorErrors(new Set(errors));
     if (errors.length > 0) {
-      // The offending field may live on a tab the operator is not looking at,
-      // and with the sections split across tabs that is now the common case
+      // The offending field may live in a config group the operator is not
+      // looking at, and with the sections grouped that is the common case
       // rather than an edge one — an error nobody can see is indistinguishable
-      // from no error at all. Send them to the tab that owns the first one;
-      // `Field` and the section's own `invalid` flag then highlight it and
-      // force its section open, so the switch lands on something that reads as
-      // an explanation rather than as a stray navigation.
+      // from no error at all. This sends them to the config tab and to the
+      // group that owns the first one; `Field` and the section's own `invalid`
+      // flag then highlight it and force its section open, so the jump lands
+      // on something that reads as an explanation rather than as a stray
+      // navigation.
       const owningGroup = groupForFirstInvalidField(errors);
       if (owningGroup) {
         setMainTab("config");
@@ -3224,7 +3225,9 @@ export function AgentsPage() {
           </div>
         </Card>
 
-        {/* Right detail panel — header + KPI tiles + 5 tabs.
+        {/* Right detail panel — header, then the two main tabs. The KPI
+            tiles and the token footprint live in the brief inside "logs &
+            info", not above both tabs.
             Mobile: rendered as a fixed full-viewport overlay above the
             list (top inset 0, bottom inset 14 reserves the global tab
             bar's ~56px so it never gets covered). lg+: collapses back

@@ -1024,7 +1024,8 @@
     "tools_declared_desc": "이 에이전트가 사용할 수 있는 도구입니다. 모든 도구에 제한 없이 액세스하려면 비워 두세요.",
     "token_usage_title": "토큰 사용량",
     "token_injected_total": "요청당 주입량",
-    "token_recent": "최근 호출"
+    "token_recent": "최근 호출",
+    "use_global_default": "전역 기본 모델 사용"
   },
   "providers": {
     "title": "공급자",

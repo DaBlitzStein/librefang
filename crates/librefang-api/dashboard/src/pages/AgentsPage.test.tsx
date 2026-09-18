@@ -332,6 +332,21 @@ describe("agent detail — manifest section layout", () => {
     ).toEqual([]);
   });
 
+  // The map is free to be reorganised — that is what a map is for — but not
+  // every placement is ours to move. `autonomous` is the one the user named:
+  // the plan's table omitted it entirely, and grouping the agent's autonomous
+  // run settings with the cron jobs and scheduling mode they govern was the
+  // decision taken back to them. Pinning that single pair keeps the rest of
+  // the map rearranged at will without silently undoing a choice that was not
+  // made here.
+  it("keeps autonomous in Planning", () => {
+    expect(CONFIG_GROUPS.planning).toContain("autonomous");
+    const elsewhere = CONFIG_GROUP_IDS.filter(
+      (group) => group !== "planning" && CONFIG_GROUPS[group].includes("autonomous"),
+    );
+    expect(elsewhere, `autonomous also hosted by: ${elsewhere.join(", ")}`).toEqual([]);
+  });
+
   // Same join, one level down: the sub-tabs under "logs & info" are built from
   // `INFO_TABS`, so an id without a label is a tab reading `agents.info.logs`.
   it("labels every logs & info sub-tab in every locale", () => {

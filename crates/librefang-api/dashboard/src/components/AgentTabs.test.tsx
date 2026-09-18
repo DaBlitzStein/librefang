@@ -57,8 +57,15 @@ describe("AgentTabBar", () => {
     expect(onSelect).toHaveBeenCalledWith("planning");
   });
 
-  // The list the page actually hands it. Every group id has to reach the bar:
-  // a `CONFIG_GROUPS` entry with no tab is a group of fields with no way in.
+  // A rendering check, not a coverage one: this test builds its own list from
+  // `CONFIG_GROUP_IDS`, so it cannot see what `AgentsPage` hands the bar — a
+  // truncated list in the page would pass here. That join is guaranteed by
+  // construction there (`configTabs` is `CONFIG_GROUP_IDS.map(...)`, so a group
+  // cannot reach the map without a tab) and observed end to end by
+  // `e2e/agent-view.spec.ts`, which asserts all eight groups by name. What this
+  // test adds is that the bar draws every definition it *is* given: one dropped
+  // or deduplicated would take a group off the surface while the map still
+  // listed it.
   it("renders every config group id it is given", () => {
     const configTabs = CONFIG_GROUP_IDS.map((id) => ({
       id,

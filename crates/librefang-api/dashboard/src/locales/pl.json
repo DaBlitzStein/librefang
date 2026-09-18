@@ -1027,7 +1027,8 @@
     "tools_declared_desc": "Narzędzia, których ten agent może używać. Pozostaw puste, aby uzyskać nieograniczony dostęp do wszystkich narzędzi.",
     "token_usage_title": "Zużycie tokenów",
     "token_injected_total": "Wstrzykiwane na żądanie",
-    "token_recent": "Ostatnie wywołania"
+    "token_recent": "Ostatnie wywołania",
+    "use_global_default": "Użyj globalnego ustawienia domyślnego"
   },
   "providers": {
     "title": "Dostawcy",

@@ -1,6 +1,6 @@
 import { createContext, useContext, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, Plus, RotateCcw, Trash2, X } from "lucide-react";
 import {
   AUTO_ROUTE_STRATEGIES,
   CAPABILITY_ROUTING_KEYS,
@@ -577,6 +577,27 @@ export function AgentManifestForm({
             models={models}
             providers={providerPickerList}
           />
+          {/* The way back from a pinned model — the capability the drawer's
+              model editor took with it, and the only control that can write
+              it: `ModelPicker` commits a `{provider, model}` pair and has no
+              empty commit, so before this button an agent pinned to one model
+              could only be unpinned by hand-editing `agent.toml`.
+
+              `"default"` is the sentinel the daemon resolves for both the
+              provider and the model (`kernel/llm_drivers.rs:178` — "Resolve
+              'default' or empty provider to the effective default provider"),
+              and `ModelConfig::default()` spells the pair exactly this way,
+              so this writes the canonical form rather than a private one. */}
+          <div className="mt-1.5 flex justify-end">
+            <button
+              type="button"
+              onClick={() => updateModel({ provider: "default", model: "default" })}
+              className="inline-flex items-center gap-1 text-[10px] font-semibold text-text-dim hover:text-brand transition-colors"
+            >
+              <RotateCcw className="h-3 w-3" />
+              {t("agents.use_global_default", { defaultValue: "Use global default" })}
+            </button>
+          </div>
         </Field>
         {/*
           BASIC: which model runs. Everything else in this section — sampling
@@ -1365,7 +1386,11 @@ export function AgentManifestForm({
         )}
       </FormSection>
 
-      <FormSection id="autonomous" shows={shows} title={t("agents.form.autonomous")} defaultOpen={false}>
+      <FormSection id="autonomous" shows={shows}
+        title={t("agents.form.autonomous")}
+        defaultOpen={false}
+        invalid={invalidFields.has("autonomous.heartbeat_timeout_secs")}
+      >
         <Toggle
           label={t("agents.form.autonomous_enabled")}
           checked={value.autonomous.enabled}
@@ -1548,6 +1573,7 @@ export function AgentManifestForm({
         id="auto_dream" shows={shows}
         title={t("memory.tab_dreams")}
         defaultOpen={false}
+        invalid={invalidFields.has("auto_dream_min_sessions")}
       >
         {/* Both are `Option`, so both lead with inherit: an agent that has
             never been given a threshold should not acquire one by being
@@ -1759,6 +1785,7 @@ export function AgentManifestForm({
         id="skill_workshop" shows={shows}
         title={t("agents.form.skill_workshop")}
         defaultOpen={false}
+        invalid={invalidFields.has("skill_workshop.max_pending_age_days")}
       >
         {/* The two switches are plain booleans, not tri-states: the Rust struct
             supplies them from its `Default`, so "absent" and "the default" are
@@ -1858,7 +1885,15 @@ export function AgentManifestForm({
         </AdvancedFields>
       </FormSection>
 
-      <FormSection id="compaction" shows={shows} title={t("config.sec_compaction")} defaultOpen={false}>
+      <FormSection id="compaction" shows={shows}
+        title={t("config.sec_compaction")}
+        defaultOpen={false}
+        invalid={[
+          "compaction.max_retries",
+          "compaction.max_loop_steps_before_aggregate",
+          "compaction.strip_reasoning_after_turns",
+        ].some((f) => invalidFields.has(f))}
+      >
         {/* Nine overrides of the kernel's compaction defaults, all `Option`, so
             every one of them leads with inherit and an untouched table is not
             written at all. */}
@@ -2295,7 +2330,14 @@ export function AgentManifestForm({
         )}
       </FormSection>
 
-      <FormSection id="lifecycle" shows={shows} title={t("agents.form.lifecycle")} defaultOpen={false}>
+      <FormSection id="lifecycle" shows={shows}
+        title={t("agents.form.lifecycle")}
+        defaultOpen={false}
+        invalid={
+          invalidFields.has("max_history_messages") ||
+          invalidFields.has("max_concurrent_invocations")
+        }
+      >
         {/* BASIC: whether this agent runs, and whether an automated invocation
             reuses its session. Everything else in the section — the export and
             search switches, exec policy, plugins, the history and concurrency
