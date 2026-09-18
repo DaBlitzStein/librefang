@@ -50,6 +50,20 @@ const AGENT_RS = join(
  * shrink as surfaces land. `readonly` entries are the only ones meant to be
  * permanent — provenance and runtime-owned values that an operator should not
  * be able to type into a form.
+ *
+ * **A reason must name a mechanism and where to find it.** Not "derived from
+ * the manifest's origin" but "`structured.rs:472` sets it while migrating a
+ * legacy hand agent". The first kind was in this list and one of them was
+ * simply wrong — `channels` said its membership came from the channel's own
+ * page, which describes the inverse relation, since that page picks a
+ * channel's default *agent*.
+ *
+ * It was not found by reading the list more carefully. It was found by
+ * rewriting it so the claim could be checked: **a vague reason survives
+ * because nobody can tell whether it is false.** The moment it has to cite a
+ * file and a line, it is either confirmed or it falls over — which is the
+ * only property that makes this list worth keeping as the exemptions become
+ * permanent.
  */
 const NO_SURFACE: Record<string, string> = {
   owner: "readonly: the API stamps it from the authenticated caller (routes/agents/lifecycle.rs:652) as the principal an unattended turn acts for. A form field would let a manifest claim an owner it was not created by, and the point of the field is that it is the one the request carried.",
