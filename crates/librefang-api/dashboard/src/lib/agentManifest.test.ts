@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  FORM_TOP_LEVEL_KEYS,
   emptyManifestExtras,
   emptyManifestForm,
   parseManifestToml,
@@ -1757,5 +1758,598 @@ describe("agentManifest capability routing", () => {
     expect(parsed.form.capabilities.tools).toEqual(["memory_recall"]);
     expect(parsed.form.capabilities.memory_read).toEqual(["*"]);
     expect(parsed.form.capabilities.image_understanding).toBe("openai/gpt-4o");
+  });
+});
+
+// `assignee_wake` is an `Option<bool>` on the Rust side: absent means "inherit
+// the kernel's [task_board].assignee_wake", and the agent writes a value only
+// when an operator overrides it. That makes it a tri-state, and a tri-state
+// over a boolean is where this file has been wrong before — the same shape as
+// `fallback_models = []` (an explicit empty list is a statement, not an
+// absence) and `system_prompt` (a blank prompt is a statement too).
+describe("assignee_wake tri-state", () => {
+  it("omits the key when the agent has no opinion", () => {
+    const form = emptyManifestForm();
+    form.assignee_wake = "";
+
+    // Absent, not `false`: writing `false` would pin the agent against a later
+    // change to the deployment-wide default.
+    expect(serializeManifestForm(form)).not.toContain("assignee_wake");
+  });
+
+  it("emits an explicit false, which is a real override", () => {
+    const form = emptyManifestForm();
+    form.assignee_wake = "false";
+
+    expect(serializeManifestForm(form)).toContain("assignee_wake = false");
+  });
+
+  it("round-trips both explicit values", () => {
+    for (const value of ["true", "false"] as const) {
+      const form = emptyManifestForm();
+      form.assignee_wake = value;
+
+      const parsed = parseManifestToml(serializeManifestForm(form));
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.form.assignee_wake).toBe(value);
+    }
+  });
+});
+
+// Booleans whose serde default is not `false`.
+//
+// `show_progress` is declared `#[serde(default = "default_true")]` in
+// `AgentManifest`, so omitting the key means the agent *shows* progress. A
+// form that defaulted it to `false` and emitted the key would turn the
+// progress indicator off for every agent opened and saved without anyone
+// asking — a silent behaviour change on a value the operator never touched.
+// The two defaults have to agree in both directions: what the form writes when
+// the operator says nothing, and what it reads back when the file says nothing.
+describe("booleans whose default is true", () => {
+  it("agrees with serde on the default for an absent key", () => {
+    const parsed = parseManifestToml('name = "x"\n');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    // The Rust side fills this with `default_true`.
+    expect(parsed.form.show_progress).toBe(true);
+    // And this one with `#[serde(default)]`, i.e. false.
+    expect(parsed.form.cache_context).toBe(false);
+    expect(parsed.form.mcp_disabled).toBe(false);
+  });
+
+  it("omits show_progress while it holds the default", () => {
+    const form = emptyManifestForm();
+    expect(form.show_progress).toBe(true);
+    expect(serializeManifestForm(form)).not.toContain("show_progress");
+  });
+
+  it("emits show_progress only when it is turned off", () => {
+    const form = emptyManifestForm();
+    form.show_progress = false;
+    expect(serializeManifestForm(form)).toContain("show_progress = false");
+  });
+
+  it("omits the false-by-default flags while they are false", () => {
+    const form = emptyManifestForm();
+    const toml = serializeManifestForm(form);
+    expect(toml).not.toContain("cache_context");
+    expect(toml).not.toContain("mcp_disabled");
+  });
+
+  it("round-trips every state of all three", () => {
+    for (const show of [true, false]) {
+      for (const cache of [true, false]) {
+        for (const mcp of [true, false]) {
+          const form = emptyManifestForm();
+          form.show_progress = show;
+          form.cache_context = cache;
+          form.mcp_disabled = mcp;
+
+          const parsed = parseManifestToml(serializeManifestForm(form));
+          expect(parsed.ok).toBe(true);
+          if (!parsed.ok) return;
+          expect(parsed.form.show_progress).toBe(show);
+          expect(parsed.form.cache_context).toBe(cache);
+          expect(parsed.form.mcp_disabled).toBe(mcp);
+        }
+      }
+    }
+  });
+});
+
+// `Option<usize>` / `Option<u32>` / `Option<Enum>` fields: absent is a state,
+// and it is not zero and not the first variant. A count written as `0` is a
+// limit of nothing; an enum written as its Rust variant name is a value the
+// daemon cannot deserialise, and because these fields all carry
+// `#[serde(default)]` that failure is a silent revert rather than an error.
+describe("optional manifest overrides", () => {
+  it("omits the counts when they are not set", () => {
+    const toml = serializeManifestForm(emptyManifestForm());
+    expect(toml).not.toContain("max_history_messages");
+    expect(toml).not.toContain("max_concurrent_invocations");
+  });
+
+  it("emits a count as a bare number, not a string", () => {
+    const form = emptyManifestForm();
+    form.max_history_messages = "80";
+    form.max_concurrent_invocations = "3";
+
+    const toml = serializeManifestForm(form);
+    // TOML-typed: `max_history_messages = "80"` would be a string and the
+    // daemon would refuse the manifest.
+    expect(toml).toContain("max_history_messages = 80");
+    expect(toml).toContain("max_concurrent_invocations = 3");
+  });
+
+  it("round-trips the counts", () => {
+    const form = emptyManifestForm();
+    form.max_history_messages = "80";
+    form.max_concurrent_invocations = "3";
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.max_history_messages).toBe("80");
+    expect(parsed.form.max_concurrent_invocations).toBe("3");
+  });
+
+  it("omits every optional enum when unset, and round-trips every value", () => {
+    // Plain string keys, not `keyof ManifestFormState`: a keyof union includes
+    // symbol, which cannot be interpolated into the TOML assertions below.
+    const cases: Array<[string, readonly string[]]> = [
+      ["tool_exec_backend", ["local", "docker", "ssh", "daytona"]],
+      ["profile", ["minimal", "coding", "research", "messaging", "automation", "full", "custom"]],
+    ];
+
+    for (const [field, values] of cases) {
+      expect(serializeManifestForm(emptyManifestForm())).not.toContain(`${field} =`);
+
+      for (const value of values) {
+        const form = emptyManifestForm();
+        (form as unknown as Record<string, string>)[field] = value;
+
+        const toml = serializeManifestForm(form);
+        expect(toml).toContain(`${field} = "${value}"`);
+
+        const parsed = parseManifestToml(toml);
+        expect(parsed.ok).toBe(true);
+        if (!parsed.ok) return;
+        expect((parsed.form as unknown as Record<string, string>)[field]).toBe(value);
+      }
+    }
+  });
+
+  // `reconcile_orphans` is not an `Option`: it is an `OrphanPolicy` whose serde
+  // default is `Keep`. So the form has to agree on what "unset" means, and
+  // `keep` is the state that must not be written — an agent that has never
+  // been given a policy should not acquire one just by being opened and saved.
+  it("leaves reconcile_orphans out while it holds the default", () => {
+    const form = emptyManifestForm();
+    expect(form.reconcile_orphans).toBe("keep");
+    expect(serializeManifestForm(form)).not.toContain("reconcile_orphans");
+  });
+
+  it("writes reconcile_orphans for the two non-default policies", () => {
+    for (const value of ["warn", "delete"] as const) {
+      const form = emptyManifestForm();
+      form.reconcile_orphans = value;
+
+      const toml = serializeManifestForm(form);
+      expect(toml).toContain(`reconcile_orphans = "${value}"`);
+
+      const parsed = parseManifestToml(toml);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.form.reconcile_orphans).toBe(value);
+    }
+  });
+});
+
+// `[proactive_memory]` is a per-agent override table: every field is
+// `Option<T>` on the Rust side with `skip_serializing_if`, so "inherit" and
+// "explicitly off" are different keys on disk.
+describe("proactive_memory overrides", () => {
+  it("writes no table at all when every field inherits", () => {
+    // A `[proactive_memory]` header that overrides nothing reads as a
+    // configured section and is not one.
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("[proactive_memory]");
+  });
+
+  it("writes the table as soon as one field is set", () => {
+    const form = emptyManifestForm();
+    form.proactive_memory.auto_retrieve = "false";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[proactive_memory]");
+    // An explicit `false` is an override and must be written; omitting it here
+    // is the bug that turns "this agent does not retrieve" into "this agent
+    // does whatever the deployment says".
+    expect(toml).toContain("auto_retrieve = false");
+  });
+
+  it("round-trips every field", () => {
+    const form = emptyManifestForm();
+    form.proactive_memory = {
+      enabled: "true",
+      auto_memorize: "false",
+      auto_retrieve: "true",
+      extraction_model: "ollama/llama3",
+      session_scoped_recall: "false",
+      min_similarity: "0.7",
+      allow_self_consolidation: "true",
+    };
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.proactive_memory).toEqual(form.proactive_memory);
+  });
+
+  // The reason this table has its own slot in `ManifestExtras`.
+  //
+  // The form knows seven keys. Adding the table to `FORM_TOP_LEVEL_KEYS` means
+  // its contents stop reaching `topLevel`, so without a slot of its own every
+  // key the form has no widget for is consumed on parse and never re-emitted —
+  // which is how `[thinking] reasoning_mode` and `[autonomous]
+  // block_stall_degrade_after` were being deleted before those slots existed.
+  // Opening an agent in the editor and saving must not remove a key upstream
+  // added.
+  it("preserves keys inside the table that the form does not render", () => {
+    // The fixture carries no key the form renders, and that is load-bearing.
+    // With one present the body is never empty, the guard that drops a
+    // body-less table never runs, and the test passes over the very bug it is
+    // named for — measured, it did, until the fixture was cut to unknown keys.
+    const source = [
+      'name = "x"',
+      "",
+      "[proactive_memory]",
+      "consolidation_interval_turns = 42",
+      "",
+      "[proactive_memory.tuning]",
+      'mode = "eager"',
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("[proactive_memory]");
+    expect(round).toContain("consolidation_interval_turns = 42");
+    expect(round).toContain("[proactive_memory.tuning]");
+    expect(round).toContain('mode = "eager"');
+  });
+
+  it("keeps the table when every key the form knows serializes to nothing", () => {
+    // A table can be present, non-empty, and still produce an empty body: the
+    // form owns `extraction_model`, but an empty value writes no line. The same
+    // guard then dropped the whole table, preserved keys included.
+    const source = [
+      'name = "x"',
+      "",
+      "[proactive_memory]",
+      'extraction_model = ""',
+      "consolidation_interval_turns = 42",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("[proactive_memory]");
+    expect(round).toContain("consolidation_interval_turns = 42");
+  });
+});
+
+// `auto_dream_min_hours` and `auto_dream_min_sessions` are top-level scalars,
+// and the manifest format has no way to say "the table is over" — a bare key
+// after the first `[section]` header belongs to that section. Emitting them
+// with the tables would scope them into whichever one came last, where the
+// daemon would never look; that is the bug `fallback_models = []` hit before,
+// in the other direction.
+describe("top-level scalars stay above the first table header", () => {
+  it("emits the auto-dream thresholds before any section", () => {
+    const form = emptyManifestForm();
+    form.auto_dream_min_hours = "12";
+    form.auto_dream_min_sessions = "25";
+    // Force at least one table so there is a header to be scoped into.
+    form.thinking.enabled = true;
+
+    const toml = serializeManifestForm(form);
+    const firstHeader = toml.indexOf("\n[");
+
+    expect(firstHeader).toBeGreaterThan(-1);
+    for (const key of ["auto_dream_min_hours = 12", "auto_dream_min_sessions = 25"]) {
+      const at = toml.indexOf(key);
+      expect(at, `${key} missing`).toBeGreaterThan(-1);
+      expect(
+        at,
+        `${key} was emitted after the first table header, so it would be read ` +
+          `as a key of that table and never reach the manifest field it names.`,
+      ).toBeLessThan(firstHeader);
+    }
+  });
+
+  it("round-trips both thresholds", () => {
+    const form = emptyManifestForm();
+    form.auto_dream_min_hours = "12.5";
+    form.auto_dream_min_sessions = "25";
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.auto_dream_min_hours).toBe("12.5");
+    expect(parsed.form.auto_dream_min_sessions).toBe("25");
+  });
+});
+
+describe("rl_export and async_tasks", () => {
+  it("omits rl_export while it inherits, and writes the table when set", () => {
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("rl_export");
+
+    const form = emptyManifestForm();
+    form.rl_export = "false";
+    const toml = serializeManifestForm(form);
+
+    expect(toml).toContain("[rl_export]");
+    // An explicit `false` is an override of the kernel switch and must be
+    // written; that is the whole difference the tri-state exists to keep.
+    expect(toml).toContain("enabled = false");
+  });
+
+  it("round-trips rl_export in all three states", () => {
+    for (const value of ["", "true", "false"] as const) {
+      const form = emptyManifestForm();
+      form.rl_export = value;
+      const parsed = parseManifestToml(serializeManifestForm(form));
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.form.rl_export).toBe(value);
+    }
+  });
+
+  it("omits async_tasks when nothing is overridden", () => {
+    const toml = serializeManifestForm(emptyManifestForm());
+    expect(toml).not.toContain("[async_tasks]");
+    expect(toml).not.toContain("notify_on_timeout");
+  });
+
+  // `AsyncTasksConfig` has a manual `Default` impl with `notify_on_timeout:
+  // true` (crates/librefang-types/src/agent.rs), and its doc says why: a
+  // timeout is user-visible by default so the agent can react. So `true` is the
+  // state that must not be written — emitting it pins the agent against a later
+  // change to that default *and* records a decision the operator never made.
+  // Only `false` is one.
+  it("writes notify_on_timeout only when false, and round-trips the pair", () => {
+    const loud = emptyManifestForm();
+    loud.async_tasks.default_timeout_secs = "300";
+    expect(serializeManifestForm(loud)).not.toContain("notify_on_timeout");
+
+    const quiet = emptyManifestForm();
+    quiet.async_tasks = { default_timeout_secs: "300", notify_on_timeout: false };
+    const toml = serializeManifestForm(quiet);
+    expect(toml).toContain("[async_tasks]");
+    expect(toml).toContain("notify_on_timeout = false");
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.async_tasks).toEqual(quiet.async_tasks);
+  });
+
+  it("reads an omitted notify_on_timeout as the compiled default, not as off", () => {
+    // The daemon notifies when the key is absent. The editor read that as "off",
+    // so the operator turned the switch on and the form wrote `true` — the
+    // value the daemon was already using. Neither the display nor the write
+    // changed anything, and `false`, the one value that does change behaviour,
+    // could not be expressed at all.
+    const parsed = parseManifestToml("[async_tasks]\ndefault_timeout_secs = 300\n");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.async_tasks.notify_on_timeout).toBe(true);
+  });
+
+  it("keeps an explicit false across a round trip instead of deleting the key", () => {
+    const parsed = parseManifestToml("[async_tasks]\nnotify_on_timeout = false\n");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("[async_tasks]");
+    expect(round).toContain("notify_on_timeout = false");
+  });
+
+  it("preserves keys inside [async_tasks] the form does not render", () => {
+    // Unknown keys only — see the note on the [proactive_memory] case above.
+    const source = ['name = "x"', "", "[async_tasks]", "max_concurrent = 8"].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("[async_tasks]");
+    expect(round).toContain("max_concurrent = 8");
+  });
+
+  it("preserves keys inside [rl_export] the form does not render", () => {
+    // `rl_export` is in `FORM_TOP_LEVEL_KEYS`, so its table never reaches
+    // `topLevel`; without a slot of its own in `ManifestExtras` every key but
+    // `enabled` was consumed on parse and never re-emitted.
+    const source = ['name = "x"', "", "[rl_export]", "sample_rate = 0.5"].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("[rl_export]");
+    expect(round).toContain("sample_rate = 0.5");
+  });
+});
+
+// These two counters were interpolated into the TOML as raw text while the
+// other nine numeric fields went through a parser, so `-5`, `1.5` and `1e3`
+// were emitted verbatim. `PATCH /api/agents/{id}` parses the document before it
+// writes, so the result was a 400 — noisy rather than corrupting, but the
+// editor feeds that server and must not produce a document it will reject.
+describe("the per-agent counters are whole numbers or nothing", () => {
+  it("omits a counter that is not a whole number", () => {
+    for (const bad of ["-5", "1.5", "1e3", "1,000", "99999999999999999999"]) {
+      const form = emptyManifestForm();
+      form.max_history_messages = bad;
+      form.max_concurrent_invocations = bad;
+      const toml = serializeManifestForm(form);
+      expect(toml, `${bad} reached the TOML`).not.toContain("max_history_messages");
+      expect(toml, `${bad} reached the TOML`).not.toContain("max_concurrent_invocations");
+    }
+  });
+
+  it("writes both counters when they are whole numbers", () => {
+    const form = emptyManifestForm();
+    form.max_history_messages = "40";
+    form.max_concurrent_invocations = "4";
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("max_history_messages = 40");
+    expect(toml).toContain("max_concurrent_invocations = 4");
+  });
+
+  it("reports both counters before the save, not after the server rejects it", () => {
+    for (const bad of ["-5", "1.5", "1e3", "99999999999999999999"]) {
+      const form = emptyManifestForm();
+      form.name = "x";
+      form.max_history_messages = bad;
+      expect(validateManifestForm(form), bad).toContain("max_history_messages");
+    }
+
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.max_concurrent_invocations = "-1";
+    expect(validateManifestForm(form)).toContain("max_concurrent_invocations");
+  });
+
+  it("treats a blank counter as an override the agent does not make", () => {
+    const form = emptyManifestForm();
+    form.name = "x";
+    form.max_history_messages = "";
+    form.max_concurrent_invocations = "   ";
+    expect(validateManifestForm(form)).toEqual([]);
+  });
+});
+
+// A fifth member of the same class, found by measuring rather than by reading
+// the list: `[schedule]`'s variant tables are where the form's schedule editor
+// keeps its state, and they are the one place the `stripKnown` + extras
+// treatment was never applied.
+//
+// The `[schedule]` *root* is a closed enum (`ScheduleMode` in
+// crates/librefang-types/src/agent.rs), so an unknown key there is rejected by
+// the daemon and there is nothing to preserve. Inside a variant it is a struct
+// without `deny_unknown_fields`, so the daemon ignores an unknown field today —
+// and a field the manifest gains tomorrow is exactly the one the editor would
+// have deleted on the next save.
+describe("the schedule variants keep the keys the form does not render", () => {
+  for (const [variant, known] of [
+    ["periodic", 'cron = "0 9 * * *"'],
+    ["continuous", "check_interval_secs = 600"],
+    ["proactive", 'conditions = ["nightly"]'],
+  ] as const) {
+    it(`[schedule.${variant}] keeps an unknown key`, () => {
+      const source = `name = "x"\n\n[schedule.${variant}]\n${known}\nfuture_knob = 7\n`;
+
+      const parsed = parseManifestToml(source);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      const round = serializeManifestForm(parsed.form, parsed.extras);
+      expect(round).toContain("future_knob = 7");
+      // The key the form owns still round-trips through the same pass.
+      expect(round).toContain(variant);
+    });
+
+    it(`[schedule.${variant}] keeps the form's own key alongside it`, () => {
+      const source = `name = "x"\n\n[schedule.${variant}]\n${known}\nfuture_knob = 7\n`;
+
+      const parsed = parseManifestToml(source);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+
+      const again = parseManifestToml(serializeManifestForm(parsed.form, parsed.extras));
+      expect(again.ok).toBe(true);
+      if (!again.ok) return;
+      expect(again.form.schedule.mode).toBe(variant);
+    });
+  }
+});
+
+// The class this phase spent its time on: a table the form claims as its own
+// stops reaching `topLevel`, so every key it has no widget for is consumed on
+// parse and never re-emitted.
+// `[thinking] reasoning_mode`, `[autonomous] block_stall_degrade_after`,
+// `[rl_export]` and the `[schedule.<variant>]` tables were all this, and each
+// was found separately — one at a time, each by a measurement taken for
+// something else.
+//
+// Fixing instances one at a time is how a class survives, so this asks the
+// question of every table instead of the one that last broke.
+describe("every table the form owns keeps the keys it does not render", () => {
+  // Table-shaped by construction. A scalar has nowhere to hide a second key,
+  // and a row-shaped `[[array]]` carries its extras inside the row object.
+  // The `[schedule]` root is a closed enum, so its unknown key has to sit one
+  // level down — which is exactly why its slot is one level deep too.
+  const TABLES: ReadonlyArray<readonly [string, string]> = [
+    ["model", "[model]\nzz_unknown = 7"],
+    ["resources", "[resources]\nzz_unknown = 7"],
+    ["capabilities", "[capabilities]\nzz_unknown = 7"],
+    ["thinking", "[thinking]\nzz_unknown = 7"],
+    ["autonomous", "[autonomous]\nzz_unknown = 7"],
+    ["routing", "[routing]\nzz_unknown = 7"],
+    ["proactive_memory", "[proactive_memory]\nzz_unknown = 7"],
+    ["async_tasks", "[async_tasks]\nzz_unknown = 7"],
+    ["rl_export", "[rl_export]\nzz_unknown = 7"],
+    ["exec_policy", "[exec_policy]\nzz_unknown = 7"],
+    ["response_format", "[response_format]\nzz_unknown = 7"],
+    ["schedule", '[schedule.periodic]\ncron = "0 9 * * *"\nzz_unknown = 7'],
+  ];
+
+  for (const [table, body] of TABLES) {
+    it(`[${table}]`, () => {
+      const parsed = parseManifestToml(`name = "x"\n\n${body}\n`);
+      expect(parsed.ok, `[${table}] did not parse`).toBe(true);
+      if (!parsed.ok) return;
+
+      const round = serializeManifestForm(parsed.form, parsed.extras);
+      expect(
+        round,
+        `[${table}] dropped a key the form has no widget for, so opening an ` +
+          `agent in this editor and saving removes it from the manifest.`,
+      ).toContain("zz_unknown = 7");
+    });
+  }
+
+  it("sweeps every table the form claims, not a hand-kept list", () => {
+    // A table added to the form without an entry above would be swept by
+    // nothing — which is the state `[rl_export]` was in when it was found.
+    const objectValued = Object.entries(emptyManifestForm())
+      .filter(([, v]) => v !== null && typeof v === "object" && !Array.isArray(v))
+      .map(([k]) => k);
+    const swept = TABLES.map(([t]) => t);
+    const unswept = objectValued.filter(
+      (k) => FORM_TOP_LEVEL_KEYS.has(k) && !swept.includes(k),
+    );
+
+    expect(
+      unswept,
+      `these form-owned tables are swept by nothing: ${unswept.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("never names a table the form does not actually own", () => {
+    // A rename that misses this list would leave the sweep green and wrong.
+    const stale = TABLES.map(([t]) => t).filter((t) => !FORM_TOP_LEVEL_KEYS.has(t));
+    expect(
+      stale,
+      `the sweep lists tables the form does not claim: ${stale.join(", ")}`,
+    ).toEqual([]);
   });
 });

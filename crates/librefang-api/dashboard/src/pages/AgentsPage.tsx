@@ -45,7 +45,7 @@ import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch, History, ChevronRight, Radio, Route } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch, History, Radio, Route } from "lucide-react";
 import {
   buildModelConfigPatch,
   emptyModelNumerics,
@@ -67,6 +67,8 @@ import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
 import { useWhoami } from "../lib/queries/authz";
 import { AgentManifestForm } from "../components/AgentManifestForm";
+import type { ManifestSectionId } from "../components/AgentManifestForm";
+import { sectionForInvalidField } from "../components/AgentManifestForm";
 import { AgentModelParamFields } from "../components/AgentModelParamFields";
 import { selectModelLimits } from "../lib/modelLimits";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
@@ -811,6 +813,85 @@ export function ChannelsSection({ agentId }: { agentId: string }) {
   );
 }
 
+/** A tab of the agent detail drawer. */
+export type AgentDrawerTab =
+  | "conversation"
+  | "memory"
+  | "skills"
+  | "tools"
+  | "routing"
+  | "schedule"
+  | "logs"
+  | "history";
+
+/**
+ * Which manifest sections each drawer tab hosts.
+ *
+ * The drawer *is* the agent's configuration surface. These sections used to
+ * live behind a separate "Edit full configuration" drawer, which is how the
+ * same field ended up reachable two ways while the advanced ones — the
+ * complexity router's tiers, the fallback chain, extended thinking — sat two
+ * levels down and nowhere near the tab that named them.
+ *
+ * A tab missing from this map renders no manifest sections. Logs and History
+ * are read-only, and Memory's per-agent overrides have no widget yet, so
+ * there is nothing to host.
+ *
+ * Order matters: it is the order the sections render in, so the always-open
+ * ones (`identity`, `limits`, `lifecycle`) lead and the folded ones follow.
+ */
+export const TAB_SECTIONS: Partial<Record<AgentDrawerTab, ManifestSectionId[]>> = {
+  conversation: [
+    "identity",
+    "limits",
+    "lifecycle",
+    "prompt",
+    "response_format",
+    "context_injection",
+    "shared_folders",
+  ],
+  // Memory was the empty tab: every knob the manifest exposes for it is a
+  // per-agent override of a kernel default, and none of them had a widget.
+  memory: ["proactive_memory", "auto_dream"],
+  skills: ["skills"],
+  tools: ["capabilities", "mcp_servers"],
+  routing: ["model", "fallback_models", "thinking", "routing"],
+  schedule: ["scheduling", "autonomous", "async_tasks"],
+};
+
+/**
+ * The tab that owns the first field a validation run complained about.
+ *
+ * A failed save has to send the operator somewhere they can act. With the
+ * sections split across tabs the offending field is usually on a tab they are
+ * not looking at, and an error nobody can see is indistinguishable from no
+ * error — so this resolves the first reported field path to its section, and
+ * that section to the one tab that hosts it.
+ *
+ * Pulled out of `saveManifestEditor` so it can be tested without rendering the
+ * page: `AgentsPage` has some twenty hooks and no render harness, so anything
+ * left inline there is untestable by construction. The decision is the part
+ * with behaviour in it; the caller is one `setAgentTab`.
+ *
+ * Returns `undefined` when nothing maps — an unrecognised path (in which case
+ * `sectionForInvalidField` has no entry and its guard test fails), or a
+ * section no tab hosts (in which case the layout guard fails). Every path
+ * `validateManifestForm` can produce is covered by one of those two, which is
+ * what makes the fallback safe rather than silent.
+ */
+export function tabForFirstInvalidField(
+  errors: readonly string[],
+): AgentDrawerTab | undefined {
+  const firstBadSection = errors
+    .map(sectionForInvalidField)
+    .find((section): section is ManifestSectionId => section !== undefined);
+  if (!firstBadSection) return undefined;
+
+  return (Object.keys(TAB_SECTIONS) as AgentDrawerTab[]).find((tab) =>
+    TAB_SECTIONS[tab]?.includes(firstBadSection),
+  );
+}
+
 export function AgentsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -886,9 +967,7 @@ export function AgentsPage() {
   // mutate this local draft, so nothing persists until the Save button fires
   // the PUT — leaving the tab discards the draft (the "change your mind" path).
   const [skillsDraft, setSkillsDraft] = useState<string[] | null>(null);
-  const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "tools" | "routing" | "schedule" | "logs" | "history"
-  >("conversation");
+  const [agentTab, setAgentTab] = useState<AgentDrawerTab>("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
   // popping a drawer; the drawer is only opened when the user explicitly
@@ -901,14 +980,21 @@ export function AgentsPage() {
   // given agent; `manifestEditorSeeded` gates the seed effect so a
   // background refetch of that query (e.g. from an unrelated invalidation)
   // never clobbers in-progress edits.
-  const [manifestEditorOpen, setManifestEditorOpen] = useState(false);
-  const [manifestEditorSeeded, setManifestEditorSeeded] = useState(false);
+  // The manifest sections are rendered by the drawer's own tabs, so editing
+  // is live exactly while the drawer is: there is no second surface to open
+  // and nothing to gate the form on. `manifestEditorSeededFor` records which
+  // agent's TOML the form state was parsed from, so switching agents re-seeds
+  // rather than carrying one agent's edits onto another.
+  const [manifestEditorSeededFor, setManifestEditorSeededFor] = useState<string | null>(null);
   const [manifestEditorFormState, setManifestEditorFormState] =
     useState<ManifestFormState>(emptyManifestForm);
   const [manifestEditorExtras, setManifestEditorExtras] =
     useState<ManifestExtras>(emptyManifestExtras);
   const [manifestEditorErrors, setManifestEditorErrors] = useState<Set<string>>(new Set());
   const [manifestEditorParseError, setManifestEditorParseError] = useState<string | null>(null);
+  // Editing lives inside the drawer's tabs, so it is live exactly while the
+  // drawer is. Every query the form needs hangs off this one condition.
+  const manifestEditorLive = detailDrawerOpen && !!detailAgent;
   const addToast = useUIStore((s) => s.addToast);
   useCreateShortcut(() => setShowCreate(true));
   const templatesQuery = useAgentTemplates({
@@ -1130,7 +1216,7 @@ export function AgentsPage() {
       (showToolsEditor && !!toolsEditorAgentId) ||
       (showCreate && createMode === "form") ||
       (!!detailAgent && agentTab === "tools") ||
-      manifestEditorOpen,
+      manifestEditorLive,
   });
   const agentToolsQuery = useAgentTools(toolsEditorAgentId ?? "", { enabled: showToolsEditor && !!toolsEditorAgentId });
   const toolsEditorLoading = showToolsEditor && !!toolsEditorAgentId && (toolsListQuery.isLoading || agentToolsQuery.isLoading);
@@ -1314,7 +1400,7 @@ export function AgentsPage() {
     { provider: formModelsQueryProvider },
     {
       enabled:
-        ((showCreate && createMode === "form") || manifestEditorOpen) &&
+        ((showCreate && createMode === "form") || manifestEditorLive) &&
         !!formModelsQueryProvider.trim(),
     },
   );
@@ -1335,7 +1421,7 @@ export function AgentsPage() {
   // Raw manifest TOML for the full manifest editor (#7742) — only fetched
   // while that drawer is open for the currently selected agent.
   const agentManifestQuery = useAgentManifest(detailAgent?.id ?? "", {
-    enabled: manifestEditorOpen && !!detailAgent,
+    enabled: manifestEditorLive,
   });
   const skillDescriptionByName = useMemo(() => {
     const map = new Map<string, string>();
@@ -1423,7 +1509,7 @@ export function AgentsPage() {
   // and reopening the dialog triggers a fresh fetch via the `enabled`
   // toggle anyway.
   const mcpServersQuery = useMcpServers({
-    enabled: (showCreate && createMode === "form") || manifestEditorOpen,
+    enabled: (showCreate && createMode === "form") || manifestEditorLive,
     refetchInterval: false,
   });
   const mcpCatalogForForm = useMemo<
@@ -1522,36 +1608,41 @@ export function AgentsPage() {
     setCreateMode(next);
   };
 
-  // Full manifest editor (#7742) — open/close/seed/save. Distinct from the
-  // create dialog's Form⇄TOML sync above: this is a single seed-once
-  // parse (the drawer's own TOML source is the server, not a sibling tab),
-  // not a bidirectional textarea round-trip.
-  const openManifestEditor = () => {
-    setManifestEditorSeeded(false);
+  // Full manifest editor (#7742) — reset and seed. Distinct from the create
+  // dialog's Form⇄TOML sync above: this is a single seed-once parse (the
+  // drawer's own TOML source is the server, not a sibling tab), not a
+  // bidirectional textarea round-trip.
+  //
+  // Seeding is keyed on the agent and on the drawer being open, not gated on
+  // a surface being launched: the sections render inside whichever tab the
+  // operator is on, so the form has to hold the selected agent's manifest for
+  // as long as the drawer does.
+  const manifestEditorAgentId = detailAgent?.id ?? null;
+
+  // Clear the previous agent's parse the moment the selection changes.
+  // Without this the tabs render one agent's values under another agent's
+  // name until the manifest request lands — and, because the query is seeded
+  // once, they would keep rendering them.
+  useEffect(() => {
+    setManifestEditorSeededFor(null);
     setManifestEditorErrors(new Set());
     setManifestEditorParseError(null);
-    // The drawer renders `manifestPatchMutation.error` unconditionally, and a
-    // mutation keeps its last error until it is reset or re-run. Without this,
-    // a failed save → Cancel → reopen greets the operator with the previous
-    // attempt's error over a session that has submitted nothing (#7749 review).
-    manifestPatchMutation.reset();
+    setManifestEditorFormState(emptyManifestForm());
+    setManifestEditorExtras(emptyManifestExtras());
     // #7749 review: the query cache holds the TOML for `staleTime: 30_000`,
-    // so reopening inside that window serves the stale copy synchronously —
-    // the seed effect below marks the editor seeded from it and then
-    // discards the refetch, and a save writes the older manifest over
-    // whatever changed on the server since (file-watcher reload, another
-    // tab, POST /reload). Drop the cached entry so the enabled query
-    // refetches and the editor only seeds from post-open data.
-    if (detailAgent?.id) {
-      qc.removeQueries({ queryKey: agentQueries.manifest(detailAgent.id).queryKey });
+    // so reopening inside that window would serve a stale copy that the seed
+    // effect below marks as seeded — and a save would then write the older
+    // manifest over whatever changed on the server since (file-watcher
+    // reload, another tab, POST /reload). Drop the entry so the enabled query
+    // refetches and the editor only ever seeds from post-open data.
+    if (manifestEditorLive && manifestEditorAgentId) {
+      qc.removeQueries({ queryKey: agentQueries.manifest(manifestEditorAgentId).queryKey });
     }
-    setManifestEditorOpen(true);
-  };
-  const closeManifestEditor = () => {
-    setManifestEditorOpen(false);
-  };
+  }, [manifestEditorAgentId, manifestEditorLive, qc]);
+
   useEffect(() => {
-    if (!manifestEditorOpen || manifestEditorSeeded) return;
+    if (!manifestEditorLive || !manifestEditorAgentId) return;
+    if (manifestEditorSeededFor === manifestEditorAgentId) return;
     if (!agentManifestQuery.data) return;
     const parsed = parseManifestToml(agentManifestQuery.data);
     if (parsed.ok) {
@@ -1565,14 +1656,31 @@ export function AgentsPage() {
           : parsed.message,
       );
     }
-    setManifestEditorSeeded(true);
-  }, [manifestEditorOpen, manifestEditorSeeded, agentManifestQuery.data, t]);
+    setManifestEditorSeededFor(manifestEditorAgentId);
+  }, [
+    manifestEditorLive,
+    manifestEditorAgentId,
+    manifestEditorSeededFor,
+    agentManifestQuery.data,
+    t,
+  ]);
 
   const saveManifestEditor = () => {
     if (!detailAgent) return;
     const errors = validateManifestForm(manifestEditorFormState);
     setManifestEditorErrors(new Set(errors));
-    if (errors.length > 0) return;
+    if (errors.length > 0) {
+      // The offending field may live on a tab the operator is not looking at,
+      // and with the sections split across tabs that is now the common case
+      // rather than an edge one — an error nobody can see is indistinguishable
+      // from no error at all. Send them to the tab that owns the first one;
+      // `Field` and the section's own `invalid` flag then highlight it and
+      // force its section open, so the switch lands on something that reads as
+      // an explanation rather than as a stray navigation.
+      const owningTab = tabForFirstInvalidField(errors);
+      if (owningTab) setAgentTab(owningTab);
+      return;
+    }
     const toml = serializeManifestForm(manifestEditorFormState, manifestEditorExtras);
     manifestPatchMutation.mutate(
       { agentId: detailAgent.id, body: { manifest_toml: toml } },
@@ -1583,7 +1691,6 @@ export function AgentsPage() {
             "success",
           );
           await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
-          closeManifestEditor();
         },
         onError: (e: Error) =>
           addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
@@ -2052,7 +2159,7 @@ export function AgentsPage() {
     );
   };
 
-  const renderTabContent = (agent: AgentDetail, isCrashed: boolean) => {
+  const renderTabBody = (agent: AgentDetail, isCrashed: boolean) => {
     if (isCrashed && agentTab === "conversation") {
       return (
         <EmptyState
@@ -2084,6 +2191,84 @@ export function AgentsPage() {
       case "history":           return renderHistoryTab(agent);
     }
   };
+
+  // The manifest sections a tab hosts, under whatever the tab already showed.
+  // This is the "Edit full configuration" drawer folded back into the surface
+  // that names the field: routing sits with routing, MCP servers with the
+  // tools that use them, and the advanced halves of each unfold in place
+  // instead of two levels down in a second drawer.
+  const renderManifestSections = () => {
+    const sections = TAB_SECTIONS[agentTab];
+    if (!sections || sections.length === 0) return null;
+    if (manifestEditorParseError) {
+      return (
+        <p className="mt-4 text-xs text-error">
+          {t("agents.form.toml_parse_error", { msg: manifestEditorParseError })}
+        </p>
+      );
+    }
+    if (agentManifestQuery.isError) {
+      return (
+        <p className="mt-4 text-xs text-error">
+          {t("agents.detail.manifest_load_failed", {
+            defaultValue: "Failed to load the current configuration.",
+          })}
+        </p>
+      );
+    }
+    if (agentManifestQuery.isLoading) {
+      return (
+        <p className="mt-4 text-xs text-text-dim flex items-center gap-2">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          {t("common.loading", { defaultValue: "Loading..." })}
+        </p>
+      );
+    }
+    return (
+      <div className="mt-4 border-t border-border-subtle pt-4">
+        <AgentManifestForm
+          value={manifestEditorFormState}
+          onChange={setManifestEditorFormState}
+          providers={formProviderOptions}
+          models={formModelOptions}
+          invalidFields={manifestEditorErrors}
+          extras={manifestEditorExtras}
+          skillCatalog={skillCatalogForForm}
+          toolCatalog={toolCatalogForForm}
+          mcpCatalog={mcpCatalogForForm}
+          // Identity is decided by the drawer header's rename control; a
+          // second editable Name field here would be a second answer to the
+          // same question.
+          nameField="readonly"
+          sections={sections}
+        />
+        {/* One save for every section, wherever it is shown. The tabs share a
+            single form state, so a per-tab save would imply they are separate
+            documents when they are one manifest. */}
+        <div className="flex items-center justify-end pt-3">
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={saveManifestEditor}
+            disabled={manifestPatchMutation.isPending}
+          >
+            {manifestPatchMutation.isPending
+              ? t("common.saving", { defaultValue: "Saving..." })
+              : t("common.save", { defaultValue: "Save" })}
+          </Button>
+        </div>
+      </div>
+    );
+  };
+
+  // A tab is its own content plus the manifest sections it hosts. Logs and
+  // History host none, so they render exactly as before.
+  const renderTabContent = (agent: AgentDetail, isCrashed: boolean) => (
+    <>
+      {renderTabBody(agent, isCrashed)}
+      {manifestEditorLive && renderManifestSections()}
+    </>
+  );
 
   // ---------- Conversation tab — chat-bubble preview of latest session
   const renderConversationTab = (agent: AgentDetail) => {
@@ -3581,29 +3766,6 @@ export function AgentsPage() {
                 />
               )}
 
-              {/* Full manifest editor entry point (#7742). The widgets below
-                  only cover a fraction of AgentManifest's fields — this is
-                  the discoverable "long path" to everything else
-                  (resources, autonomy, response format, routing, …)
-                  without dropping to SSH + agent.toml. */}
-              <button
-                type="button"
-                onClick={openManifestEditor}
-                className="w-full flex items-center justify-between gap-3 rounded-lg border border-dashed border-brand/40 bg-brand/5 px-4 py-3 text-left hover:bg-brand/10 transition-colors"
-              >
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-brand">
-                    {t("agents.detail.edit_full_manifest", { defaultValue: "Edit full configuration" })}
-                  </p>
-                  <p className="text-[11px] text-text-dim mt-0.5 leading-relaxed">
-                    {t("agents.detail.edit_full_manifest_hint", {
-                      defaultValue: "Every manifest field — resources, capabilities, autonomy, response format, and more.",
-                    })}
-                  </p>
-                </div>
-                <ChevronRight className="w-4 h-4 text-brand shrink-0" />
-              </button>
-
               {/* Description */}
               <DescriptionSection
                 agentId={detailAgent.id}
@@ -4165,86 +4327,6 @@ export function AgentsPage() {
         </DrawerPanel>
       )}
 
-      {/* Full Manifest Editor (#7742) — the "long path" reachable from the
-          "Edit full configuration" button at the top of the Configure
-          drawer. Reuses AgentManifestForm (previously create-agent-only),
-          seeded from GET /agents/{id}/manifest and saved through
-          PATCH /agents/{id} (manifest_toml). */}
-      {detailAgent && manifestEditorOpen && (
-        <DrawerPanel
-          isOpen={manifestEditorOpen}
-          onClose={closeManifestEditor}
-          title={t("agents.detail.edit_full_manifest", { defaultValue: "Edit full configuration" })}
-          size="2xl"
-        >
-          <div className="p-5 space-y-4">
-            {agentManifestQuery.isLoading ? (
-              <p className="text-xs text-text-dim flex items-center gap-2">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                {t("common.loading", { defaultValue: "Loading..." })}
-              </p>
-            ) : manifestEditorParseError ? (
-              <p className="text-xs text-error">
-                {t("agents.form.toml_parse_error", { msg: manifestEditorParseError })}
-              </p>
-            ) : agentManifestQuery.isError ? (
-              <p className="text-xs text-error">
-                {t("agents.detail.manifest_load_failed", {
-                  defaultValue: "Failed to load the current configuration.",
-                })}
-              </p>
-            ) : (
-              <div className="max-h-[65vh] overflow-y-auto pr-1">
-                <AgentManifestForm
-                  value={manifestEditorFormState}
-                  onChange={setManifestEditorFormState}
-                  providers={formProviderOptions}
-                  models={formModelOptions}
-                  invalidFields={manifestEditorErrors}
-                  extras={manifestEditorExtras}
-                  skillCatalog={skillCatalogForForm}
-                  toolCatalog={toolCatalogForForm}
-                  mcpCatalog={mcpCatalogForForm}
-                  // `nameLocked` (the boolean #7835 introduced) expressed in the
-                  // integration's vocabulary: `nameField` is the 3-state superset
-                  // (`editable` / `readonly` / `hidden`), and "locked" is exactly
-                  // `readonly`. Renamed rather than keeping both props, so the
-                  // form has one name field contract instead of two.
-                  nameField="readonly"
-                />
-              </div>
-            )}
-            {manifestPatchMutation.error && (
-              <p className="text-xs text-error">
-                {toastErr(manifestPatchMutation.error, String(manifestPatchMutation.error))}
-              </p>
-            )}
-            <div className="flex gap-2 pt-2">
-              <Button
-                variant="primary"
-                className="flex-1"
-                onClick={saveManifestEditor}
-                disabled={
-                  manifestPatchMutation.isPending ||
-                  agentManifestQuery.isLoading ||
-                  !!manifestEditorParseError ||
-                  agentManifestQuery.isError
-                }
-              >
-                {manifestPatchMutation.isPending ? (
-                  <Loader2 className="w-4 h-4 animate-spin mr-1" />
-                ) : (
-                  <Save className="w-4 h-4 mr-1" />
-                )}
-                {t("common.save")}
-              </Button>
-              <Button variant="secondary" onClick={closeManifestEditor}>
-                {t("common.cancel")}
-              </Button>
-            </div>
-          </div>
-        </DrawerPanel>
-      )}
 
       {/* Tools Editor Modal */}
       {showToolsEditor && toolsEditorAgentId && (

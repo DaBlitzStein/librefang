@@ -48,8 +48,41 @@ function MemoryScopeNote({
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
 import { ModelParamField } from "./ui/ModelParamField";
 import { CollapsibleSection } from "./ui/CollapsibleSection";
+import type { CollapsibleSectionProps } from "./ui/CollapsibleSection";
 import { Field } from "./ui/Field";
 import { ModelPicker } from "./ui/ModelPicker";
+import { StepLadderInput } from "./ui/StepLadderInput";
+import {
+  ASYNC_TASK_TIMEOUT_LADDER,
+  AUTO_DREAM_MIN_HOURS_LADDER,
+  AUTO_DREAM_MIN_SESSIONS_LADDER,
+  COST_PER_DAY_LADDER,
+  COST_PER_HOUR_LADDER,
+  COST_PER_MONTH_LADDER,
+  CPU_TIME_MS_LADDER,
+  HEARTBEAT_INTERVAL_LADDER,
+  HEARTBEAT_KEEP_RECENT_LADDER,
+  HEARTBEAT_TIMEOUT_LADDER,
+  LLM_TOKENS_PER_HOUR_LADDER,
+  MAX_CONCURRENT_INVOCATIONS_LADDER,
+  MAX_HISTORY_MESSAGES_LADDER,
+  MAX_ITERATIONS_LADDER,
+  MAX_RESTARTS_LADDER,
+  MIN_HISTORY_MESSAGES,
+  MEMORY_BYTES_LADDER,
+  MIN_SIMILARITY_LADDER,
+  NETWORK_BYTES_PER_HOUR_LADDER,
+  ROUTING_THRESHOLD_LADDER,
+  THINKING_BUDGET_LADDER,
+  TOOL_CALLS_PER_MINUTE_LADDER,
+  formatBytes,
+  formatCount,
+  formatHours,
+  formatMillis,
+  formatPercent,
+  formatSeconds,
+  formatUsd,
+} from "../lib/quantityLadders";
 import {
   overLimitWarning,
   resolveMaxTokensLimit,
@@ -140,7 +173,103 @@ interface AgentManifestFormProps {
    *   which one wins.
    */
   nameField?: "editable" | "readonly" | "hidden";
+  /**
+   * Which sections this caller renders, in the order they appear here.
+   *
+   * Omitted (the default) renders every section, which is what the
+   * create-agent modal wants: one scrolling page with the whole manifest.
+   *
+   * The agent drawer passes a subset per tab so the same editor backs
+   * "Conversation", "Routing", "Tools" … instead of living in a second
+   * drawer behind an "Edit full configuration" button. Splitting the
+   * manifest across tabs rather than stacking a second surface on top of
+   * the first is the point: advanced fields reveal in place, and there is
+   * no second place to look.
+   *
+   * Ids name a *section*, not a field, because a section is the unit a
+   * tab can host. Where two tabs need part of a former section the
+   * section was split rather than duplicated — `model` became `prompt`
+   * (Conversation) plus `model` (Routing), `discovery` became `skills`
+   * and `mcp_servers`, and `tags` moved into `identity`.
+   *
+   * An empty array is a caller error and renders nothing; pass
+   * `undefined` to mean "all".
+   */
+  sections?: ManifestSectionId[];
 }
+
+/**
+ * Every addressable section of the manifest editor, in render order. See
+ * `sections` on `AgentManifestFormProps` for why sections are the unit of
+ * composition.
+ *
+ * A runtime array rather than a bare union so callers that need to reason
+ * about the whole set — the tab map, and the tests that guard it — can,
+ * instead of restating the list and drifting from it.
+ */
+export const MANIFEST_SECTION_IDS = [
+  "identity",
+  "model",
+  "prompt",
+  "limits",
+  "capabilities",
+  "skills",
+  "mcp_servers",
+  "scheduling",
+  "fallback_models",
+  "thinking",
+  "autonomous",
+  "proactive_memory",
+  "auto_dream",
+  "async_tasks",
+  "routing",
+  "context_injection",
+  "response_format",
+  "lifecycle",
+  "shared_folders",
+] as const;
+
+export type ManifestSectionId = (typeof MANIFEST_SECTION_IDS)[number];
+
+/**
+ * Which section renders the field a validation message names.
+ *
+ * `validateManifestForm` reports a dotted field path (`schedule.cron`), and
+ * with the sections split across tabs a message is only actionable if the
+ * operator is already looking at the tab that hosts the field. The caller
+ * needs to be able to send them there, which means knowing which section owns
+ * each path.
+ *
+ * The prefixes are matched in order, so the first entry that matches wins and
+ * a bare `name` cannot be swallowed by a `model.` rule.
+ *
+ * A test fails when `validateManifestForm` grows a path no entry covers, so a
+ * new rule cannot quietly produce an error nobody can find.
+ */
+const FIELD_PREFIX_TO_SECTION: ReadonlyArray<readonly [RegExp, ManifestSectionId]> = [
+  [/^name$/, "identity"],
+  [/^model\./, "model"],
+  [/^schedule\./, "scheduling"],
+  [/^response_format\./, "response_format"],
+  [/^workspaces\./, "shared_folders"],
+  // The two per-agent counts render inside the "Lifecycle" section, not the
+  // resource "Limits" one, so they are matched exactly rather than by prefix: a
+  // loose prefix would claim any future field that starts the same way, and the
+  // routability guard only checks that *some* section claims a path, not that it
+  // is the one that renders it.
+  [/^max_history_messages$/, "lifecycle"],
+  [/^max_concurrent_invocations$/, "lifecycle"],
+];
+
+/** The section that renders `path`, or `undefined` when no entry covers it. */
+export const sectionForInvalidField = (
+  path: string,
+): ManifestSectionId | undefined =>
+  FIELD_PREFIX_TO_SECTION.find(([pattern]) => pattern.test(path))?.[1];
+
+/** Every field path prefix the validator's errors are expected to start with. */
+export const knownInvalidFieldPrefixes = (): string[] =>
+  FIELD_PREFIX_TO_SECTION.map(([pattern]) => pattern.source);
 
 export function AgentManifestForm({
   value,
@@ -153,8 +282,14 @@ export function AgentManifestForm({
   toolCatalog,
   mcpCatalog,
   nameField = "editable",
+  sections,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
+
+  // `undefined` means "every section" (the create modal). A caller that
+  // passes a list gets exactly that list.
+  const shows = (id: ManifestSectionId): boolean =>
+    sections === undefined || sections.includes(id);
 
   // The provider the agent already runs on stays selectable even when the
   // caller filtered it out of `providers` (rejected key, local service down).
@@ -176,13 +311,13 @@ export function AgentManifestForm({
     onChange({ ...value, thinking: { ...value.thinking, ...patch } });
   const updateAutonomous = (patch: Partial<ManifestFormState["autonomous"]>): void =>
     onChange({ ...value, autonomous: { ...value.autonomous, ...patch } });
+  const updateProactiveMemory = (
+    patch: Partial<ManifestFormState["proactive_memory"]>,
+  ): void =>
+    onChange({ ...value, proactive_memory: { ...value.proactive_memory, ...patch } });
+
   const updateRouting = (patch: Partial<ManifestFormState["routing"]>): void =>
     onChange({ ...value, routing: { ...value.routing, ...patch } });
-
-  const filteredModels = useMemo(
-    () => (value.model.provider ? models.filter((m) => m.provider === value.model.provider) : models),
-    [models, value.model.provider],
-  );
 
   // The picker wants `{ id }` rather than `{ name }`. Memoised because it is
   // passed to every fallback row, and a fresh array each render would defeat
@@ -232,12 +367,14 @@ export function AgentManifestForm({
 
   return (
     <div className="space-y-4">
-      <Section title={t("agents.form.basics")}>
+      <Section when={shows("identity")} id="identity" title={t("agents.form.basics")}>
         {nameField !== "hidden" && (
           <Field
             label={t("agents.form.name")}
             required
             invalid={invalidFields.has("name")}
+            error={invalidFields.has("name") ? t("agents.form.name_required") : undefined}
+            errorId="agent-manifest-name-error"
             hint={nameField === "readonly" ? t("agents.form.name_locked_hint") : undefined}
           >
             <input
@@ -252,6 +389,10 @@ export function AgentManifestForm({
               // visible label is not associated with the control. Without this
               // the input has no accessible name.
               aria-label={t("agents.form.name")}
+              aria-invalid={invalidFields.has("name") || undefined}
+              aria-describedby={
+                invalidFields.has("name") ? "agent-manifest-name-error" : undefined
+              }
             />
           </Field>
         )}
@@ -305,70 +446,50 @@ export function AgentManifestForm({
             </select>
           </Field>
         </div>
+        <Field label={t("agents.form.tags")}>
+          <TagInput
+            value={value.tags}
+            onChange={(next) => update({ tags: next })}
+            placeholder={t("agents.form.tags_placeholder")}
+          />
+        </Field>
       </Section>
 
-      <Section title={t("agents.form.model")}>
-        <div className="grid grid-cols-2 gap-3">
-          <Field
-            label={t("agents.form.provider")}
-            hint={t("agents.form.inherit_default")}
-            invalid={invalidFields.has("model.provider")}
-          >
-            <select
-              value={value.model.provider}
-              onChange={(e) => updateModel({ provider: e.target.value, model: "" })}
-              className={inputClass}
-            >
-              <option value="">{t("agents.form.select_provider")}</option>
-              {/* The option list is "providers you could pick", which excludes
-                  one whose key was rejected or whose local service is down. The
-                  agent may already be assigned to exactly that provider, and a
-                  controlled <select> with no matching <option> renders blank —
-                  so the current value is always listed, even when it is not
-                  something you would newly choose. */}
-              {providerOptions.map((p) => (
-                <option key={p.name} value={p.name}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field
-            label={t("agents.form.model_id")}
-            hint={t("agents.form.inherit_default")}
-            invalid={invalidFields.has("model.model")}
-          >
-            {filteredModels.length > 0 ? (
-              <select
-                value={value.model.model}
-                onChange={(e) => updateModel({ model: e.target.value })}
-                className={inputClass}
-              >
-                <option value="">{t("agents.form.select_model")}</option>
-                {filteredModels.map((m) => (
-                  <option key={`${m.provider}/${m.id}`} value={m.id}>
-                    {m.id}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                type="text"
-                value={value.model.model}
-                onChange={(e) => updateModel({ model: e.target.value })}
-                placeholder={t("agents.form.model_id_placeholder")}
-                className={inputClass}
-              />
-            )}
-          </Field>
-        </div>
-        <Field label={t("agents.form.system_prompt")}>
-          <textarea
-            value={value.model.system_prompt}
-            onChange={(e) => updateModel({ system_prompt: e.target.value })}
-            placeholder={t("agents.form.system_prompt_placeholder")}
-            rows={3}
-            className={textareaClass}
+      <Section when={shows("model")} id="model" title={t("agents.form.model")}>
+        <Field
+          label={t("agents.form.model")}
+          hint={t("agents.form.inherit_default")}
+          invalid={
+            invalidFields.has("model.provider") || invalidFields.has("model.model")
+          }
+        >
+          {/* One control for choosing a model, the same one the fallback chain,
+              the routing tiers and `pinned_model` already use. A provider
+              <select> beside a model <select> answered the same question a
+              second way, and it was the pair that could not search: the
+              catalog runs to hundreds of ids, and the fallback rows had a
+              finder while the primary model — the field an operator sets
+              first — did not.
+
+              `allowCustom` is not a nicety. The catalog comes from live
+              discovery, and the control this replaces fell back to free text
+              whenever discovery returned nothing for a provider. Without the
+              escape hatch an operator could not set a model at all in exactly
+              the situation that needs one. */}
+          <ModelPicker
+            label={t("agents.form.model")}
+            variant="pair"
+            allowCustom
+            value={
+              value.model.provider || value.model.model
+                ? { provider: value.model.provider, model: value.model.model }
+                : null
+            }
+            onChange={(next) =>
+              updateModel({ provider: next.provider, model: next.model })
+            }
+            models={models}
+            providers={providerPickerList}
           />
         </Field>
         {/*
@@ -458,95 +579,137 @@ export function AgentManifestForm({
         </div>
       </Section>
 
-      <Section title={t("agents.form.resources")}>
+      <Section when={shows("prompt")} id="prompt" title={t("agents.form.system_prompt")}>
+        <Field label={t("agents.form.system_prompt")}>
+          <textarea
+            value={value.model.system_prompt}
+            onChange={(e) => updateModel({ system_prompt: e.target.value })}
+            placeholder={t("agents.form.system_prompt_placeholder")}
+            rows={3}
+            className={textareaClass}
+          />
+        </Field>
+      </Section>
+
+      <Section when={shows("limits")} id="limits" title={t("agents.form.resources")}>
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.tokens_per_hour")}>
-            <input
-              type="number"
-              min="0"
+            <StepLadderInput
+              label={t("agents.form.tokens_per_hour")}
               value={value.resources.max_llm_tokens_per_hour}
-              onChange={(e) => updateResources({ max_llm_tokens_per_hour: e.target.value })}
-              placeholder={t("agents.form.inherit_default")}
-              className={inputClass}
+              onChange={(next) => updateResources({ max_llm_tokens_per_hour: next })}
+              ladder={LLM_TOKENS_PER_HOUR_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.inherit_default")}
+              min={0}
             />
           </Field>
           <Field label={t("agents.form.tool_calls_per_minute")}>
-            <input
-              type="number"
-              min="0"
+            <StepLadderInput
+              label={t("agents.form.tool_calls_per_minute")}
               value={value.resources.max_tool_calls_per_minute}
-              onChange={(e) => updateResources({ max_tool_calls_per_minute: e.target.value })}
-              placeholder={t("agents.form.tool_calls_per_minute_placeholder")}
-              className={inputClass}
+              onChange={(next) => updateResources({ max_tool_calls_per_minute: next })}
+              ladder={TOOL_CALLS_PER_MINUTE_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.tool_calls_per_minute_placeholder")}
+              min={0}
             />
           </Field>
           <Field label={t("agents.form.cost_per_hour")}>
-            <input
-              type="number"
-              step="0.01"
-              min="0"
+            <StepLadderInput
+              label={t("agents.form.cost_per_hour")}
               value={value.resources.max_cost_per_hour_usd}
-              onChange={(e) => updateResources({ max_cost_per_hour_usd: e.target.value })}
-              placeholder={t("agents.form.unlimited_placeholder")}
-              className={inputClass}
+              onChange={(next) => updateResources({ max_cost_per_hour_usd: next })}
+              ladder={COST_PER_HOUR_LADDER}
+              formatRung={formatUsd}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.unlimited_placeholder")}
+              min={0}
+              // Dollars, so the custom box must accept cents: an unset step
+              // defaults to 1 and the browser marks a value like 0.50 invalid.
+              step={0.01}
             />
           </Field>
           <Field label={t("agents.form.cost_per_day")}>
-            <input
-              type="number"
-              step="0.01"
-              min="0"
+            <StepLadderInput
+              label={t("agents.form.cost_per_day")}
               value={value.resources.max_cost_per_day_usd}
-              onChange={(e) => updateResources({ max_cost_per_day_usd: e.target.value })}
-              placeholder={t("agents.form.unlimited_placeholder")}
-              className={inputClass}
+              onChange={(next) => updateResources({ max_cost_per_day_usd: next })}
+              ladder={COST_PER_DAY_LADDER}
+              formatRung={formatUsd}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.unlimited_placeholder")}
+              min={0}
+              // Dollars, so the custom box must accept cents: an unset step
+              // defaults to 1 and the browser marks a value like 0.50 invalid.
+              step={0.01}
             />
           </Field>
           <Field label={t("agents.form.cost_per_month")}>
-            <input
-              type="number"
-              step="0.01"
-              min="0"
+            <StepLadderInput
+              label={t("agents.form.cost_per_month")}
               value={value.resources.max_cost_per_month_usd}
-              onChange={(e) => updateResources({ max_cost_per_month_usd: e.target.value })}
-              placeholder={t("agents.form.unlimited_placeholder")}
-              className={inputClass}
+              onChange={(next) => updateResources({ max_cost_per_month_usd: next })}
+              ladder={COST_PER_MONTH_LADDER}
+              formatRung={formatUsd}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.unlimited_placeholder")}
+              min={0}
+              // Dollars, so the custom box must accept cents: an unset step
+              // defaults to 1 and the browser marks a value like 0.50 invalid.
+              step={0.01}
             />
           </Field>
           <Field label={t("agents.form.network_bytes_per_hour")}>
-            <input
-              type="number"
-              min="0"
+            <StepLadderInput
+              label={t("agents.form.network_bytes_per_hour")}
               value={value.resources.max_network_bytes_per_hour}
-              onChange={(e) => updateResources({ max_network_bytes_per_hour: e.target.value })}
-              placeholder={t("agents.form.network_bytes_placeholder")}
-              className={inputClass}
+              onChange={(next) => updateResources({ max_network_bytes_per_hour: next })}
+              ladder={NETWORK_BYTES_PER_HOUR_LADDER}
+              formatRung={formatBytes}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.network_bytes_placeholder")}
+              min={0}
             />
           </Field>
           <Field label={t("agents.form.memory_bytes")}>
-            <input
-              type="number"
-              min="0"
+            <StepLadderInput
+              label={t("agents.form.memory_bytes")}
               value={value.resources.max_memory_bytes}
-              onChange={(e) => updateResources({ max_memory_bytes: e.target.value })}
-              placeholder={t("agents.form.memory_bytes_placeholder")}
-              className={inputClass}
+              onChange={(next) => updateResources({ max_memory_bytes: next })}
+              ladder={MEMORY_BYTES_LADDER}
+              formatRung={formatBytes}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.memory_bytes_placeholder")}
+              min={0}
             />
           </Field>
           <Field label={t("agents.form.cpu_time_ms")}>
-            <input
-              type="number"
-              min="0"
+            <StepLadderInput
+              label={t("agents.form.cpu_time_ms")}
               value={value.resources.max_cpu_time_ms}
-              onChange={(e) => updateResources({ max_cpu_time_ms: e.target.value })}
-              placeholder={t("agents.form.cpu_time_placeholder")}
-              className={inputClass}
+              onChange={(next) => updateResources({ max_cpu_time_ms: next })}
+              ladder={CPU_TIME_MS_LADDER}
+              formatRung={formatMillis}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              customPlaceholder={t("agents.form.cpu_time_placeholder")}
+              min={0}
             />
           </Field>
         </div>
       </Section>
 
-      <Section title={t("agents.form.capabilities")}>
+      <Section when={shows("capabilities")} id="capabilities" title={t("agents.form.capabilities")}>
         <Field label={t("agents.form.network_hosts")} hint={t("agents.form.network_hosts_hint")}>
           <TagInput
             value={value.capabilities.network}
@@ -668,16 +831,28 @@ export function AgentManifestForm({
             ))}
           </div>
         </div>
+        <div className="grid grid-cols-2 gap-3 mt-2">
+          <Field label={t("agents.form.tool_exec_backend")} hint={t("agents.form.inherit_default")}>
+            <select
+              value={value.tool_exec_backend}
+              onChange={(e) =>
+                update({
+                  tool_exec_backend: e.target.value as ManifestFormState["tool_exec_backend"],
+                })
+              }
+              className={inputClass}
+            >
+              <option value="">{t("agents.form.inherit_default")}</option>
+              <option value="local">local</option>
+              <option value="docker">docker</option>
+              <option value="ssh">ssh</option>
+              <option value="daytona">daytona</option>
+            </select>
+          </Field>
+        </div>
       </Section>
 
-      <Section title={t("agents.form.discovery")}>
-        <Field label={t("agents.form.tags")}>
-          <TagInput
-            value={value.tags}
-            onChange={(next) => update({ tags: next })}
-            placeholder={t("agents.form.tags_placeholder")}
-          />
-        </Field>
+      <Section when={shows("skills")} id="skills" title={t("agents.form.skills")}>
         <Field label={t("agents.form.skills")} hint={t("agents.form.skills_hint")}>
           {skillFinder ? (
             <MultiSelectCmdk
@@ -702,6 +877,9 @@ export function AgentManifestForm({
             />
           )}
         </Field>
+      </Section>
+
+      <Section when={shows("mcp_servers")} id="mcp_servers" title={t("agents.form.mcp_servers")}>
         <Field label={t("agents.form.mcp_servers")} hint={t("agents.form.mcp_servers_hint")}>
           {mcpFinder ? (
             <MultiSelectCmdk
@@ -726,9 +904,16 @@ export function AgentManifestForm({
             />
           )}
         </Field>
+        <div className="mt-2">
+          <Toggle
+            label={t("agents.form.mcp_disabled")}
+            checked={value.mcp_disabled}
+            onChange={(checked) => update({ mcp_disabled: checked })}
+          />
+        </div>
       </Section>
 
-      <CollapsibleSection
+      <FormSection id="scheduling" shows={shows}
         title={t("agents.form.scheduling")}
         defaultOpen={false}
         invalid={
@@ -823,9 +1008,9 @@ export function AgentManifestForm({
             />
           </Field>
         )}
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection title={t("agents.form.fallback_models")} defaultOpen={false}>
+      <FormSection id="fallback_models" shows={shows} title={t("agents.form.fallback_models")} defaultOpen={false}>
         <p className="text-[10px] text-text-dim/70 mb-2">{t("agents.form.fallback_models_hint")}</p>
         {(value.fallback_models ?? []).map((fb, idx) => (
           <div
@@ -924,9 +1109,9 @@ export function AgentManifestForm({
               </button>
             </p>
           ))}
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection title={t("agents.form.thinking")} defaultOpen={false}>
+      <FormSection id="thinking" shows={shows} title={t("agents.form.thinking")} defaultOpen={false}>
         <Toggle
           label={t("agents.form.thinking_enabled")}
           checked={value.thinking.enabled}
@@ -935,15 +1120,19 @@ export function AgentManifestForm({
         {value.thinking.enabled && (
           <div className="grid grid-cols-2 gap-3 mt-2">
             <Field label={t("agents.form.budget_tokens")}>
-              <input
-                type="number"
-                min="0"
+              <StepLadderInput
+                label={t("agents.form.budget_tokens")}
                 value={value.thinking.budget_tokens}
-                onChange={(e) => updateThinking({ budget_tokens: e.target.value })}
-                placeholder={t("agents.form.budget_tokens_placeholder")}
-                className={inputClass}
+                onChange={(next) => updateThinking({ budget_tokens: next })}
+                ladder={THINKING_BUDGET_LADDER}
+                formatRung={formatCount}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                customPlaceholder={t("agents.form.budget_tokens_placeholder")}
+                min={0}
               />
             </Field>
+
             <Field label={t("agents.form.stream_thinking")}>
               <Toggle
                 label=""
@@ -954,9 +1143,9 @@ export function AgentManifestForm({
             </Field>
           </div>
         )}
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection title={t("agents.form.autonomous")} defaultOpen={false}>
+      <FormSection id="autonomous" shows={shows} title={t("agents.form.autonomous")} defaultOpen={false}>
         <Toggle
           label={t("agents.form.autonomous_enabled")}
           checked={value.autonomous.enabled}
@@ -965,55 +1154,75 @@ export function AgentManifestForm({
         {value.autonomous.enabled && (
           <div className="grid grid-cols-2 gap-3 mt-2">
             <Field label={t("agents.form.max_iterations")}>
-              <input
-                type="number"
-                min="1"
+              <StepLadderInput
+                label={t("agents.form.max_iterations")}
                 value={value.autonomous.max_iterations}
-                onChange={(e) => updateAutonomous({ max_iterations: e.target.value })}
-                placeholder={t("agents.form.max_iterations_placeholder")}
-                className={inputClass}
+                onChange={(next) => updateAutonomous({ max_iterations: next })}
+                ladder={MAX_ITERATIONS_LADDER}
+                formatRung={formatCount}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                customPlaceholder={t("agents.form.max_iterations_placeholder")}
+                min={1}
               />
             </Field>
+
             <Field label={t("agents.form.max_restarts")}>
-              <input
-                type="number"
-                min="0"
+              <StepLadderInput
+                label={t("agents.form.max_restarts")}
                 value={value.autonomous.max_restarts}
-                onChange={(e) => updateAutonomous({ max_restarts: e.target.value })}
-                placeholder={t("agents.form.max_restarts_placeholder")}
-                className={inputClass}
+                onChange={(next) => updateAutonomous({ max_restarts: next })}
+                ladder={MAX_RESTARTS_LADDER}
+                formatRung={formatCount}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                customPlaceholder={t("agents.form.max_restarts_placeholder")}
+                min={0}
               />
             </Field>
+
             <Field label={t("agents.form.heartbeat_interval_secs")}>
-              <input
-                type="number"
-                min="1"
+              <StepLadderInput
+                label={t("agents.form.heartbeat_interval_secs")}
                 value={value.autonomous.heartbeat_interval_secs}
-                onChange={(e) => updateAutonomous({ heartbeat_interval_secs: e.target.value })}
-                placeholder={t("agents.form.heartbeat_interval_placeholder")}
-                className={inputClass}
+                onChange={(next) => updateAutonomous({ heartbeat_interval_secs: next })}
+                ladder={HEARTBEAT_INTERVAL_LADDER}
+                formatRung={formatSeconds}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                customPlaceholder={t("agents.form.heartbeat_interval_placeholder")}
+                min={1}
               />
             </Field>
+
             <Field label={t("agents.form.heartbeat_timeout_secs")}>
-              <input
-                type="number"
-                min="1"
+              <StepLadderInput
+                label={t("agents.form.heartbeat_timeout_secs")}
                 value={value.autonomous.heartbeat_timeout_secs}
-                onChange={(e) => updateAutonomous({ heartbeat_timeout_secs: e.target.value })}
-                placeholder={t("agents.form.auto_placeholder")}
-                className={inputClass}
+                onChange={(next) => updateAutonomous({ heartbeat_timeout_secs: next })}
+                ladder={HEARTBEAT_TIMEOUT_LADDER}
+                formatRung={formatSeconds}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                customPlaceholder={t("agents.form.auto_placeholder")}
+                min={1}
               />
             </Field>
+
             <Field label={t("agents.form.heartbeat_keep_recent")}>
-              <input
-                type="number"
-                min="0"
+              <StepLadderInput
+                label={t("agents.form.heartbeat_keep_recent")}
                 value={value.autonomous.heartbeat_keep_recent}
-                onChange={(e) => updateAutonomous({ heartbeat_keep_recent: e.target.value })}
-                placeholder={t("agents.form.auto_placeholder")}
-                className={inputClass}
+                onChange={(next) => updateAutonomous({ heartbeat_keep_recent: next })}
+                ladder={HEARTBEAT_KEEP_RECENT_LADDER}
+                formatRung={formatCount}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                customPlaceholder={t("agents.form.auto_placeholder")}
+                min={0}
               />
             </Field>
+
             <Field
               label={t("agents.form.heartbeat_channel")}
               hint={t("agents.form.heartbeat_channel_hint")}
@@ -1037,9 +1246,139 @@ export function AgentManifestForm({
             </Field>
           </div>
         )}
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection title={t("agents.form.routing")} defaultOpen={false}>
+      <FormSection
+        id="proactive_memory" shows={shows}
+        title={t("config.sec_proactive_memory")}
+        defaultOpen={false}
+      >
+        {/* Every field is an override of a kernel default, so every one of them
+            leads with "inherit" — an agent that configures nothing here is the
+            normal case, and the table is not written at all when that is what
+            it says. */}
+        <div className="grid grid-cols-2 gap-3">
+          <TriStateField
+            label={t("memory.proactive_enabled")}
+            value={value.proactive_memory.enabled}
+            onChange={(next) => updateProactiveMemory({ enabled: next })}
+          />
+          <TriStateField
+            label={t("config.fld_auto_memorize")}
+            value={value.proactive_memory.auto_memorize}
+            onChange={(next) => updateProactiveMemory({ auto_memorize: next })}
+          />
+          <TriStateField
+            label={t("config.fld_auto_retrieve")}
+            value={value.proactive_memory.auto_retrieve}
+            onChange={(next) => updateProactiveMemory({ auto_retrieve: next })}
+          />
+          <TriStateField
+            label={t("memory.session_scoped_recall")}
+            value={value.proactive_memory.session_scoped_recall}
+            onChange={(next) => updateProactiveMemory({ session_scoped_recall: next })}
+          />
+          <TriStateField
+            label={t("agents.form.proactive_memory_allow_self_consolidation")}
+            value={value.proactive_memory.allow_self_consolidation}
+            onChange={(next) =>
+              updateProactiveMemory({ allow_self_consolidation: next })
+            }
+          />
+          <Field label={t("config.fld_extraction_model")} hint={t("config.desc_extraction_model")}>
+            <input
+              type="text"
+              value={value.proactive_memory.extraction_model}
+              onChange={(e) =>
+                updateProactiveMemory({ extraction_model: e.target.value })
+              }
+              placeholder={t("agents.form.inherit_default")}
+              className={inputClass}
+            />
+          </Field>
+        </div>
+        <Field label={t("agents.form.proactive_memory_min_similarity")}>
+          <StepLadderInput
+            label={t("agents.form.proactive_memory_min_similarity")}
+            value={value.proactive_memory.min_similarity}
+            onChange={(next) => updateProactiveMemory({ min_similarity: next })}
+            ladder={MIN_SIMILARITY_LADDER}
+            formatRung={formatPercent}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={0}
+            max={1}
+            step={0.01}
+          />
+        </Field>
+      </FormSection>
+
+      <FormSection
+        id="auto_dream" shows={shows}
+        title={t("memory.tab_dreams")}
+        defaultOpen={false}
+      >
+        {/* Both are `Option`, so both lead with inherit: an agent that has
+            never been given a threshold should not acquire one by being
+            opened and saved. */}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label={t("agents.form.auto_dream_min_hours")}>
+            <StepLadderInput
+              label={t("agents.form.auto_dream_min_hours")}
+              value={value.auto_dream_min_hours}
+              onChange={(next) => update({ auto_dream_min_hours: next })}
+              ladder={AUTO_DREAM_MIN_HOURS_LADDER}
+              formatRung={formatHours}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+            />
+          </Field>
+          <Field label={t("agents.form.auto_dream_min_sessions")}>
+            <StepLadderInput
+              label={t("agents.form.auto_dream_min_sessions")}
+              value={value.auto_dream_min_sessions}
+              onChange={(next) => update({ auto_dream_min_sessions: next })}
+              ladder={AUTO_DREAM_MIN_SESSIONS_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+            />
+          </Field>
+        </div>
+      </FormSection>
+
+      <FormSection
+        id="async_tasks" shows={shows}
+        title={t("agents.form.async_tasks")}
+        defaultOpen={false}
+      >
+        <Field label={t("config.fld_default_timeout_secs")}>
+          <StepLadderInput
+            label={t("config.fld_default_timeout_secs")}
+            value={value.async_tasks.default_timeout_secs}
+            onChange={(next) =>
+              update({ async_tasks: { ...value.async_tasks, default_timeout_secs: next } })
+            }
+            ladder={ASYNC_TASK_TIMEOUT_LADDER}
+            formatRung={formatSeconds}
+            inheritLabel={t("model_param.inherit")}
+            customLabel={t("model_param.custom")}
+            min={1}
+          />
+        </Field>
+        <p className="text-[10px] text-text-dim/70">{t("config.desc_default_timeout_secs")}</p>
+        <Toggle
+          label={t("agents.form.async_tasks_notify_on_timeout")}
+          checked={value.async_tasks.notify_on_timeout}
+          onChange={(checked) =>
+            update({ async_tasks: { ...value.async_tasks, notify_on_timeout: checked } })
+          }
+        />
+      </FormSection>
+
+      <FormSection id="routing" shows={shows} title={t("agents.form.routing")} defaultOpen={false}>
         <Toggle
           label={t("agents.form.routing_enabled")}
           checked={value.routing.enabled}
@@ -1081,31 +1420,79 @@ export function AgentManifestForm({
             </div>
             <div className="grid grid-cols-2 gap-3">
               <Field label={t("agents.form.simple_threshold")}>
-                <input
-                  type="number"
-                  min="0"
+                <StepLadderInput
+                  label={t("agents.form.simple_threshold")}
                   value={value.routing.simple_threshold}
-                  onChange={(e) => updateRouting({ simple_threshold: e.target.value })}
-                  placeholder={t("agents.form.simple_threshold_placeholder")}
-                  className={inputClass}
+                  onChange={(next) => updateRouting({ simple_threshold: next })}
+                  ladder={ROUTING_THRESHOLD_LADDER}
+                  formatRung={formatCount}
+                  inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")}
+                  customPlaceholder={t("agents.form.simple_threshold_placeholder")}
+                  min={0}
                 />
               </Field>
+
               <Field label={t("agents.form.complex_threshold")}>
-                <input
-                  type="number"
-                  min="0"
+                <StepLadderInput
+                  label={t("agents.form.complex_threshold")}
                   value={value.routing.complex_threshold}
-                  onChange={(e) => updateRouting({ complex_threshold: e.target.value })}
-                  placeholder={t("agents.form.complex_threshold_placeholder")}
-                  className={inputClass}
+                  onChange={(next) => updateRouting({ complex_threshold: next })}
+                  ladder={ROUTING_THRESHOLD_LADDER}
+                  formatRung={formatCount}
+                  inheritLabel={t("model_param.inherit")}
+                  customLabel={t("model_param.custom")}
+                  customPlaceholder={t("agents.form.complex_threshold_placeholder")}
+                  min={0}
                 />
               </Field>
+
             </div>
           </div>
         )}
-      </CollapsibleSection>
+          <div className="grid grid-cols-2 gap-3 mt-2">
+            <Field label={t("agents.form.reconcile_orphans")} hint={t("agents.form.inherit_default")}>
+              <select
+                value={value.reconcile_orphans}
+                onChange={(e) =>
+                  update({
+                    reconcile_orphans: e.target.value as ManifestFormState["reconcile_orphans"],
+                  })
+                }
+                className={inputClass}
+              >
+                <option value="">{t("agents.form.inherit_default")}</option>
+                <option value="keep">keep</option>
+                <option value="warn">warn</option>
+                <option value="delete">delete</option>
+              </select>
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-3 mt-2">
+            <Field label={t("agents.form.profile")} hint={t("agents.form.inherit_default")}>
+              <select
+                value={value.profile}
+                onChange={(e) =>
+                  update({
+                    profile: e.target.value as ManifestFormState["profile"],
+                  })
+                }
+                className={inputClass}
+              >
+                <option value="">{t("agents.form.inherit_default")}</option>
+                <option value="minimal">minimal</option>
+                <option value="coding">coding</option>
+                <option value="research">research</option>
+                <option value="messaging">messaging</option>
+                <option value="automation">automation</option>
+                <option value="full">full</option>
+                <option value="custom">custom</option>
+              </select>
+            </Field>
+          </div>
+      </FormSection>
 
-      <CollapsibleSection title={t("agents.form.context_injection")} defaultOpen={false}>
+      <FormSection id="context_injection" shows={shows} title={t("agents.form.context_injection")} defaultOpen={false}>
         <p className="text-[10px] text-text-dim/70 mb-2">
           {t("agents.form.context_injection_hint")}
         </p>
@@ -1179,9 +1566,9 @@ export function AgentManifestForm({
           <Plus className="w-3.5 h-3.5" />
           {t("agents.form.add_injection")}
         </button>
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection
+      <FormSection id="response_format" shows={shows}
         title={t("agents.form.response_format")}
         defaultOpen={false}
         invalid={invalidFields.has("response_format.schema")}
@@ -1273,9 +1660,9 @@ export function AgentManifestForm({
             />
           </div>
         )}
-      </CollapsibleSection>
+      </FormSection>
 
-      <CollapsibleSection title={t("agents.form.lifecycle")} defaultOpen={false}>
+      <FormSection id="lifecycle" shows={shows} title={t("agents.form.lifecycle")} defaultOpen={false}>
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.session_mode")}>
             <select
@@ -1287,6 +1674,19 @@ export function AgentManifestForm({
             >
               <option value="persistent">{t("agents.form.session_persistent")}</option>
               <option value="new">{t("agents.form.session_new")}</option>
+            </select>
+          </Field>
+          <Field label={t("agents.form.rl_export")}>
+            <select
+              value={value.rl_export}
+              onChange={(e) =>
+                update({ rl_export: e.target.value as ManifestFormState["rl_export"] })
+              }
+              className={inputClass}
+            >
+              <option value="">{t("agents.form.inherit_default")}</option>
+              <option value="true">{t("common.yes")}</option>
+              <option value="false">{t("common.no")}</option>
             </select>
           </Field>
           <Field label={t("agents.form.web_search_aug")}>
@@ -1303,6 +1703,25 @@ export function AgentManifestForm({
               <option value="off">{t("agents.form.web_search_off")}</option>
               <option value="auto">{t("agents.form.web_search_auto")}</option>
               <option value="always">{t("agents.form.web_search_always")}</option>
+            </select>
+          </Field>
+          <Field label={t("config.fld_assignee_wake")}>
+            {/* The label is the config page's own string, shared rather than
+                copied: it is the same setting seen from the other side — a
+                per-agent override of the same global switch — and a second
+                copy would be a second thing to keep in step. */}
+            <select
+              value={value.assignee_wake}
+              onChange={(e) =>
+                update({
+                  assignee_wake: e.target.value as ManifestFormState["assignee_wake"],
+                })
+              }
+              className={inputClass}
+            >
+              <option value="">{t("agents.form.inherit_default")}</option>
+              <option value="true">{t("common.yes")}</option>
+              <option value="false">{t("common.no")}</option>
             </select>
           </Field>
           <Field
@@ -1383,10 +1802,86 @@ export function AgentManifestForm({
             checked={value.generate_identity_files}
             onChange={(checked) => update({ generate_identity_files: checked })}
           />
+          {/* The hint sits beside the toggle rather than inside it: `Toggle`
+              renders one inline row, and teaching it to wrap would move the
+              five toggles above that do not have one. */}
+          <div>
+            <Toggle
+              label={t("agents.form.show_progress")}
+              checked={value.show_progress}
+              onChange={(checked) => update({ show_progress: checked })}
+            />
+            <p className="text-[10px] text-text-dim/70 mt-0.5 ml-6">
+              {t("agents.form.show_progress_hint")}
+            </p>
+          </div>
+          <div>
+            <Toggle
+              label={t("agents.form.cache_context")}
+              checked={value.cache_context}
+              onChange={(checked) => update({ cache_context: checked })}
+            />
+            <p className="text-[10px] text-text-dim/70 mt-0.5 ml-6">
+              {t("agents.form.cache_context_hint")}
+            </p>
+          </div>
         </div>
-      </CollapsibleSection>
+        <div className="grid grid-cols-2 gap-3 mt-2">
+          <Field
+            label={t("agents.form.max_history_messages")}
+            invalid={invalidFields.has("max_history_messages")}
+          >
+            <StepLadderInput
+              label={t("agents.form.max_history_messages")}
+              value={value.max_history_messages}
+              onChange={(next) => update({ max_history_messages: next })}
+              ladder={MAX_HISTORY_MESSAGES_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={MIN_HISTORY_MESSAGES}
+              invalid={invalidFields.has("max_history_messages")}
+              // `min` is not a guard: a pasted `1.5` still reaches the field.
+              // The message lives on the ladder — the control that accepted the
+              // value — and not on `Field` as well, which would announce it twice.
+              error={
+                invalidFields.has("max_history_messages")
+                  ? t("agents.form.whole_number_required")
+                  : undefined
+              }
+            />
+            <p className="text-[10px] text-text-dim/70 mt-1">
+              {t("agents.form.max_history_messages_hint")}
+            </p>
+          </Field>
+          <Field
+            label={t("agents.form.max_concurrent_invocations")}
+            invalid={invalidFields.has("max_concurrent_invocations")}
+          >
+            <StepLadderInput
+              label={t("agents.form.max_concurrent_invocations")}
+              value={value.max_concurrent_invocations}
+              onChange={(next) => update({ max_concurrent_invocations: next })}
+              ladder={MAX_CONCURRENT_INVOCATIONS_LADDER}
+              formatRung={formatCount}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+              invalid={invalidFields.has("max_concurrent_invocations")}
+              error={
+                invalidFields.has("max_concurrent_invocations")
+                  ? t("agents.form.whole_number_required")
+                  : undefined
+              }
+            />
+            <p className="text-[10px] text-text-dim/70 mt-1">
+              {t("agents.form.max_concurrent_invocations_hint")}
+            </p>
+          </Field>
+        </div>
+      </FormSection>
 
-      <CollapsibleSection
+      <FormSection id="shared_folders" shows={shows}
         title={t("agents.form.shared_folders")}
         defaultOpen={false}
         invalid={value.workspaces.some(
@@ -1468,7 +1963,7 @@ export function AgentManifestForm({
           <Plus className="w-3.5 h-3.5" />
           {t("agents.form.add_folder")}
         </button>
-      </CollapsibleSection>
+      </FormSection>
     </div>
   );
 }
@@ -1514,12 +2009,89 @@ function mergeCatalog(
   return { options, meta };
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+/**
+ * Always-open sibling of `CollapsibleSection`, for the handful of sections
+ * that carry the fields an operator edits most (identity, model, limits,
+ * grants). Those stay expanded because folding the common case behind a click
+ * trades no scroll for a click on every visit.
+ *
+ * `when` is the same render guard `FormSection` applies — a section this
+ * caller did not ask for renders nothing, not an empty frame.
+ */
+function Section({
+  title,
+  when = true,
+  id,
+  children,
+}: {
+  title: string;
+  when?: boolean;
+  /** Section identity, emitted as `data-section`. See `CollapsibleSectionProps.sectionId`. */
+  id?: string;
+  children: React.ReactNode;
+}) {
+  if (!when) return null;
   return (
-    <div className="space-y-2.5 rounded-xl border border-border-subtle/60 bg-surface/40 p-3">
+    <div
+      data-section={id}
+      className="space-y-2.5 rounded-xl border border-border-subtle/60 bg-surface/40 p-3"
+    >
       <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">{title}</p>
       {children}
     </div>
+  );
+}
+
+/**
+ * Folding a section is this caller's choice, so the guard lives here rather than being repeated at every call site.
+ * An unshown section renders nothing at all rather than a collapsed shell: a heading the operator cannot open is still a heading they will look for.
+ * `shows` stays a prop so the caller keeps one definition of what "shown" means.
+ *
+ * Declared at module scope on purpose.
+ * A component declared inside the render body is a new function on every render, and React compares element types by reference — so it unmounts and remounts its whole subtree on every keystroke.
+ * Here that subtree is a form section, so every controlled input inside the twelve sections using this wrapper kept only the first character typed into it: the element the second keystroke was headed for had already been destroyed, and the change event went to a detached node.
+ * The seven sections that use the module-scope `Section` never had it, which is what made a wrapper-wide defect read as a per-field oddity.
+ */
+function FormSection({
+  id,
+  shows,
+  ...props
+}: {
+  id: ManifestSectionId;
+  shows: (id: ManifestSectionId) => boolean;
+} & CollapsibleSectionProps) {
+  return shows(id) ? <CollapsibleSection sectionId={id} {...props} /> : null;
+}
+
+/**
+ * Inherit / yes / no — the three states an `Option<bool>` manifest key can be in.
+ * Five of the seven keys in `[proactive_memory]` are `Option<bool>` and they are the same control three times over; one helper rather than five copies means the absent option cannot be dropped from one of them.
+ *
+ * Module scope for the same reason as `FormSection` above.
+ * This was also the control whose open `<select>` was destroyed under the operator on every re-render — the symptom that led to finding the wrapper.
+ */
+function TriStateField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: "" | "true" | "false";
+  onChange: (next: "" | "true" | "false") => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Field label={label}>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as "" | "true" | "false")}
+        className={inputClass}
+      >
+        <option value="">{t("agents.form.inherit_default")}</option>
+        <option value="true">{t("common.yes")}</option>
+        <option value="false">{t("common.no")}</option>
+      </select>
+    </Field>
   );
 }
 

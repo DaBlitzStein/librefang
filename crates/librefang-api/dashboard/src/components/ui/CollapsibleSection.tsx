@@ -18,6 +18,15 @@ export interface CollapsibleSectionProps {
   children: ReactNode;
   defaultOpen?: boolean;
   invalid?: boolean;
+  /**
+   * Identity of the section as a whole, emitted as `data-section`.
+   *
+   * `title` is display text and therefore neither stable nor unique — two
+   * sections may legitimately share a title with a field inside them — so
+   * callers that need to address a section (the manifest editor's tab
+   * routing, and the tests that guard it) carry the id here instead.
+   */
+  sectionId?: string;
 }
 
 export function CollapsibleSection({
@@ -25,9 +34,11 @@ export function CollapsibleSection({
   children,
   defaultOpen,
   invalid,
+  sectionId,
 }: CollapsibleSectionProps) {
   return (
     <details
+      data-section={sectionId}
       className="group overflow-hidden rounded-xl border border-border-subtle/60 bg-surface/40"
       open={defaultOpen || invalid}
     >
