@@ -70,7 +70,7 @@ import { AgentManifestForm } from "../components/AgentManifestForm";
 import type { ManifestSectionId } from "../components/AgentManifestForm";
 import { sectionForInvalidField } from "../components/AgentManifestForm";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
-import { AgentModelRoutingPanel } from "../components/AgentModelRoutingPanel";
+import { useModelRouterProfiles } from "../lib/queries/modelRouter";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
   emptyManifestExtras,
@@ -1313,7 +1313,19 @@ export function AgentsPage() {
   // the design's stderr-style log feed wants. The previous source
   // (global audit) only had admin lifecycle entries, leaving the tab
   // blank for almost every agent.
+  // The model router's profile catalog backs the manifest form's
+  // allowed_profiles finder — the capability the routing panel used to own
+  // exclusively, ported when the panel died.
+  const routerProfilesQuery = useModelRouterProfiles();
   const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
+  const routerProfileCatalog = useMemo(
+    () =>
+      (routerProfilesQuery.data?.profiles ?? []).map((p) => ({
+        name: p.name,
+        description: [`${p.provider}/${p.model}`, p.cost_tier].join(" · "),
+      })),
+    [routerProfilesQuery.data],
+  );
   const tabAgentToolsQuery = useAgentTools(detailAgent?.id ?? "", {
     enabled: !!detailAgent && agentTab === "tools",
   });
@@ -2181,7 +2193,6 @@ export function AgentsPage() {
       case "memory":            return renderMemoryTab(agent);
       case "skills":            return renderSkillsTab(agent);
       case "tools":             return renderToolsTab(agent);
-      case "routing":           return renderRoutingTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
       case "history":           return renderHistoryTab(agent);
@@ -2232,6 +2243,8 @@ export function AgentsPage() {
           skillCatalog={skillCatalogForForm}
           toolCatalog={toolCatalogForForm}
           mcpCatalog={mcpCatalogForForm}
+          routerProfileCatalog={routerProfileCatalog}
+          routerProfilesEnabled={routerProfilesQuery.data?.enabled}
           // Identity is decided by the drawer header's rename control; a
           // second editable Name field here would be a second answer to the
           // same question.
@@ -3340,14 +3353,9 @@ export function AgentsPage() {
   // (no real per-fire telemetry endpoint yet) and was dropped in favour of
   // real editing affordances — restore it once a per-agent run-history feed
   // exists.
-  // ---------- Routing tab — per-agent model routing (fixed vs router-chosen,
-  // profile allowlist, cost budget). Owned by AgentModelRoutingPanel, which
-  // talks to GET/PUT /api/agents/{id}/model_routing and
-  // GET /api/model-router/profiles.
-  const renderRoutingTab = (agent: AgentDetail) => (
-    <AgentModelRoutingPanel agent={agent} />
-  );
-
+  // ---------- Routing tab — the manifest form is the tab's whole body now.
+  // Model routing (fixed vs router-chosen, profile allowlist, cost budget)
+  // lives in the model section it hosts; there is no second writer to it.
   const renderScheduleTab = (agent: AgentDetail) => (
     <AgentSchedulePanel agent={agent} />
   );
@@ -4517,6 +4525,8 @@ export function AgentsPage() {
                 skillCatalog={skillCatalogForForm}
                 toolCatalog={toolCatalogForForm}
                 mcpCatalog={mcpCatalogForForm}
+                routerProfileCatalog={routerProfileCatalog}
+                routerProfilesEnabled={routerProfilesQuery.data?.enabled}
               />
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">

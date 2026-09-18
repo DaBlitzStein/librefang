@@ -9,6 +9,7 @@ import { useSkills } from "../lib/queries/skills";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useMcpServers } from "../lib/queries/mcp";
+import { useModelRouterProfiles } from "../lib/queries/modelRouter";
 import {
   useCreateAgentTypeFromToml,
   useDeleteAgentType,
@@ -86,6 +87,7 @@ function AgentTypeEditor({
   const toolsQuery = useTools();
   const skillsQuery = useSkills();
   const mcpServersQuery = useMcpServers();
+  const routerProfilesQuery = useModelRouterProfiles();
 
   const [newName, setNewName] = useState("");
   const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
@@ -143,6 +145,15 @@ function AgentTypeEditor({
         ? mcpServersQuery.data.configured.map((s: { name: string }) => ({ name: s.name }))
         : [],
     [mcpServersQuery.data],
+  );
+
+  const routerProfileCatalog = useMemo<ManifestCatalogEntry[]>(
+    () =>
+      (routerProfilesQuery.data?.profiles ?? []).map((p) => ({
+        name: p.name,
+        description: [`${p.provider}/${p.model}`, p.cost_tier].join(" · "),
+      })),
+    [routerProfilesQuery.data],
   );
 
   const saving = createMutation.isPending || updateTomlMutation.isPending;
@@ -231,6 +242,8 @@ function AgentTypeEditor({
             skillCatalog={skillCatalog}
             toolCatalog={toolCatalog}
             mcpCatalog={mcpCatalog}
+            routerProfileCatalog={routerProfileCatalog}
+            routerProfilesEnabled={routerProfilesQuery.data?.enabled}
             nameField={isCreate ? "hidden" : "readonly"}
           />
 

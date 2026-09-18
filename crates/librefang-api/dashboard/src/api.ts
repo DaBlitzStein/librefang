@@ -2629,28 +2629,6 @@ export async function listModelRouterProfiles(): Promise<ModelRouterProfiles> {
   return get<ModelRouterProfiles>("/api/model-router/profiles");
 }
 
-export interface AgentModelRouting {
-  mode: "fixed" | "flexible";
-  allowed_profiles: string[];
-  cost_budget?: CostTier | null;
-  default_profile?: string | null;
-  /// Per-agent router opt-out (#7781 review). `true` means the router never
-  /// touches this agent even in `flexible` mode — surfaced so the panel can
-  /// warn an operator their allowlist/budget edits have no effect.
-  fixed?: boolean;
-}
-
-export async function getAgentModelRouting(agentId: string): Promise<AgentModelRouting> {
-  return get<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`);
-}
-
-export async function updateAgentModelRouting(
-  agentId: string,
-  routing: AgentModelRouting,
-): Promise<AgentModelRouting> {
-  return put<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`, routing);
-}
-
 export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {
   const query = new URLSearchParams();
   if (params?.provider) query.set("provider", params.provider);

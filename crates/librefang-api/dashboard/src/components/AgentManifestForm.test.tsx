@@ -42,6 +42,8 @@ function Harness({
   skillCatalog,
   toolCatalog,
   mcpCatalog,
+  routerProfileCatalog,
+  routerProfilesEnabled,
   initialState,
   invalidFields = new Set(),
   models = [{ provider: "openai", id: "gpt-4o" }],
@@ -53,6 +55,8 @@ function Harness({
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
   mcpCatalog?: ManifestCatalogEntry[];
+  routerProfileCatalog?: ManifestCatalogEntry[];
+  routerProfilesEnabled?: boolean;
   initialState?: ManifestFormState;
   invalidFields?: Set<string>;
   models?: HarnessModel[];
@@ -77,6 +81,8 @@ function Harness({
       skillCatalog={skillCatalog}
       toolCatalog={toolCatalog}
       mcpCatalog={mcpCatalog}
+      routerProfileCatalog={routerProfileCatalog}
+      routerProfilesEnabled={routerProfilesEnabled}
       nameField={nameField}
       sections={sections}
     />
@@ -867,19 +873,22 @@ describe("AgentManifestForm — the counters report before the server does", () 
 // the fields an operator sets first render always, and everything beyond them
 // folds behind the section's own Advanced disclosure — the same details/sum-
 // mary mechanism CollapsibleSection uses for the section itself.
-describe("AgentManifestForm — basic and advanced per section", () => {
-  /** The Advanced disclosure inside one section, addressed by section id. */
-  function advancedGroup(sectionId: string): HTMLDetailsElement | null {
-    const section = document.querySelector(`[data-section="${sectionId}"]`);
-    if (!section) return null;
-    const summary = Array.from(section.querySelectorAll("summary")).find(
-      // The harness's i18n stub echoes the key; the advanced group's summary
-      // is the only one this component renders itself.
-      (s) => s.textContent === "agents.form.advanced",
-    );
-    return summary ? (summary.closest("details") as HTMLDetailsElement) : null;
-  }
+/**
+ * The Advanced disclosure inside one section, addressed by section id.
+ * File scope: more describes than the fold's own need to reach it.
+ */
+function advancedGroup(sectionId: string): HTMLDetailsElement | null {
+  const section = document.querySelector(`[data-section="${sectionId}"]`);
+  if (!section) return null;
+  const summary = Array.from(section.querySelectorAll("summary")).find(
+    // The harness's i18n stub echoes the key; the advanced group's summary
+    // is the only one this component renders itself.
+    (s) => s.textContent === "agents.form.advanced",
+  );
+  return summary ? (summary.closest("details") as HTMLDetailsElement) : null;
+}
 
+describe("AgentManifestForm — basic and advanced per section", () => {
   it("keeps the model section basic: the sampling knobs fold behind Advanced", () => {
     render(<Harness />);
     const group = advancedGroup("model");
@@ -925,5 +934,88 @@ describe("AgentManifestForm — basic and advanced per section", () => {
     render(<Harness sections={["identity"]} />);
     expect(advancedGroup("identity")).toBeTruthy();
     expect(advancedGroup("model")).toBeNull();
+  });
+});
+
+
+// ALTO 1, remedied: the routing panel was the only surface with the
+// server-backed profile catalog, and the unified editor's allowed_profiles
+// was a blind tag box — a capability loss, not a unification. The catalog
+// comes in as a prop like every other catalog the form merges, and a name
+// the catalog does not know is still typeable.
+describe("AgentManifestForm — the router's profile picker", () => {
+  const PROFILES: ManifestCatalogEntry[] = [
+    { name: "coding", description: "openai/gpt-4o · cheap" },
+    { name: "research", description: "anthropic/claude-sonnet-5 · expensive" },
+  ];
+
+  async function openRouterFields(user: ReturnType<typeof userEvent.setup>) {
+    const group = advancedGroup("model");
+    if (!group) throw new Error("model advanced group not found");
+    await user.click(group.querySelector("summary")!);
+  }
+
+  it("offers the server-backed catalog for allowed_profiles", async () => {
+    const user = userEvent.setup();
+    render(<Harness routerProfileCatalog={PROFILES} />);
+    await openRouterFields(user);
+    const group = advancedGroup("model")!;
+
+    const input = within(group).getByPlaceholderText("Search model profiles…");
+    await user.click(input);
+    // Scoped to the section: the routing tab's tool-profile select offers a
+    // `coding` option of its own, and a closed details still queries in jsdom.
+    expect(await within(group).findByText("coding")).toBeInTheDocument();
+    expect(within(group).getByText("research")).toBeInTheDocument();
+
+    await user.click(within(group).getByText("coding"));
+    expect(screen.getByRole("button", { name: "Remove coding" })).toBeInTheDocument();
+  });
+
+  it("still accepts a profile the catalog does not know", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        routerProfileCatalog={PROFILES}
+        initialState={(() => {
+          const s = emptyManifestForm();
+          s.model.router_allowed_profiles = ["hand-written-profile"];
+          return s;
+        })()}
+      />,
+    );
+    await openRouterFields(user);
+
+    // The union merge keeps a hand-typed profile selectable, the way the
+    // skill finder keeps an uninstalled skill.
+    const group = advancedGroup("model")!;
+    expect(screen.getByRole("button", { name: "Remove hand-written-profile" })).toBeInTheDocument();
+    // With chips present the finder's placeholder is the add-more one (the
+    // stub resolves this key's defaultValue).
+    const input = within(group).getByPlaceholderText("Add more…");
+    await user.click(input);
+    expect(await within(group).findByText("hand-written-profile")).toBeInTheDocument();
+  });
+
+  it("keeps the plain tag box when the caller carries no catalog", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    await openRouterFields(user);
+
+    // No catalog prop, no picker — the TagInput the field had before, so a
+    // caller without the profiles query loses nothing it ever had. (The
+    // harness's i18n stub echoes keys, so the tag box carries the key.)
+    expect(screen.queryByPlaceholderText("Search model profiles…")).not.toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("agents.form.router_allowed_profiles_placeholder"),
+    ).toBeInTheDocument();
+  });
+
+  it("says when the router is off kernel-wide, instead of offering choices silently", async () => {
+    const user = userEvent.setup();
+    render(<Harness routerProfileCatalog={PROFILES} routerProfilesEnabled={false} />);
+    await openRouterFields(user);
+
+    expect(screen.getByText("agents.form.router_kernel_off")).toBeInTheDocument();
   });
 });

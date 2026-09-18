@@ -2912,6 +2912,29 @@ describe("model router fields round-trip through the form", () => {
     expect(toml).not.toContain("router_override");
   });
 
+  // The two surfaces this field used to have disagreed about fixed mode: the
+  // routing panel cleared allowed_profiles and cost_budget on a fixed write —
+  // mirroring `set_agent_model_routing`, which rebuilds the override wholesale
+  // for flexible and `None` for fixed (routes/agents/config.rs), a
+  // body-shape normalisation of that route, not a file-format constraint.
+  // The form writes the manifest file, where fixed alongside constraints is
+  // legal (no deny_unknown_fields) and the daemon keeps it on disk, inert
+  // until fixed is cleared. Deleting keys the operator did not touch is the
+  // silent-deletion class, so the form preserves.
+  it("keeps the constraints beside a fixed override, as the file format allows", () => {
+    const parsed = parseManifestToml(
+      `${BASE}\nrouter_override = { fixed = true, allowed_profiles = ["coding"], cost_budget = "cheap" }\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.model.router_fixed).toBe(true);
+
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain("fixed = true");
+    expect(toml).toContain('allowed_profiles = ["coding"]');
+    expect(toml).toContain('cost_budget = "cheap"');
+  });
+
   it("unknown mode and cost_budget spellings fall back to the defaults", () => {
     const parsed = parseManifestToml(
       `${BASE}\nmode = "yolo"\nrouter_override = { cost_budget = "bargain" }\n`,

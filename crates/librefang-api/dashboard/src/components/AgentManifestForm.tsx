@@ -187,6 +187,15 @@ interface AgentManifestFormProps {
    */
   mcpCatalog?: ManifestCatalogEntry[];
   /**
+   * The model router's profile catalog from the server (`GET
+   * /api/model-router/profiles`). Present, the profile allowlist renders the
+   * same finder the skills and tools lists use; absent, the plain tag box —
+   * a caller without the query loses nothing it ever had.
+   */
+  routerProfileCatalog?: ManifestCatalogEntry[];
+  /** Whether the router is enabled kernel-wide; `undefined` is unknown. */
+  routerProfilesEnabled?: boolean;
+  /**
    * How the "Name" field behaves for this caller (#8028).
    *
    * - `"editable"` (default): the field a caller spawning a brand-new agent
@@ -321,6 +330,8 @@ export function AgentManifestForm({
   skillCatalog,
   toolCatalog,
   mcpCatalog,
+  routerProfileCatalog,
+  routerProfilesEnabled,
   nameField = "editable",
   sections,
 }: AgentManifestFormProps) {
@@ -398,6 +409,10 @@ export function AgentManifestForm({
   const mcpFinder = useMemo(
     () => mergeCatalog(mcpCatalog, value.mcp_servers),
     [mcpCatalog, value.mcp_servers],
+  );
+  const routerProfileFinder = useMemo(
+    () => mergeCatalog(routerProfileCatalog, value.model.router_allowed_profiles),
+    [routerProfileCatalog, value.model.router_allowed_profiles],
   );
 
   // Limits for the selected model, and only when the catalog vouches for them.
@@ -658,10 +673,14 @@ export function AgentManifestForm({
           </Field>
         </div>
         {/*
-          The profile router's per-agent settings — the same five values
-          `GET/PUT /api/agents/{id}/model_routing` reads and writes, which were
-          the last manifest fields only a separate panel could reach. They are
-          manifest fields, so they live with the rest of the manifest.
+          The profile router's per-agent settings. They are manifest fields,
+          and this form is their only editor: the routing panel that shared
+          them died here — two writers to the same five values, and a form
+          save serialized its seeded state verbatim over anything the panel
+          had written, both surfaces toasting success. The profile allowlist
+          keeps the panel's server-backed catalog; the fixed-mode constraints
+          are preserved rather than cleared, as the manifest file format
+          allows.
         */}
         <p className="text-[11px] text-text-dim">{t("agents.form.router_hint")}</p>
         <div className="grid grid-cols-2 gap-3">
@@ -707,16 +726,40 @@ export function AgentManifestForm({
           checked={value.model.router_fixed}
           onChange={(checked) => updateModel({ router_fixed: checked })}
         />
+        {routerProfilesEnabled === false && (
+          <p className="text-[11px] text-text-dim">
+            {t("agents.form.router_kernel_off")}
+          </p>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <Field
             label={t("agents.form.router_allowed_profiles")}
             hint={t("agents.form.router_allowed_profiles_hint")}
           >
-            <TagInput
-              value={value.model.router_allowed_profiles}
-              onChange={(next) => updateModel({ router_allowed_profiles: next })}
-              placeholder={t("agents.form.router_allowed_profiles_placeholder")}
-            />
+            {routerProfileFinder ? (
+              <MultiSelectCmdk
+                options={routerProfileFinder.options}
+                optionMeta={routerProfileFinder.meta}
+                value={value.model.router_allowed_profiles}
+                onChange={(next) => {
+                  const nextValue =
+                    typeof next === "function"
+                      ? next(value.model.router_allowed_profiles)
+                      : next;
+                  updateModel({ router_allowed_profiles: nextValue });
+                }}
+                placeholder={t("agents.form.router_profiles_search_placeholder", {
+                  defaultValue: "Search model profiles…",
+                })}
+                allowFreeText
+              />
+            ) : (
+              <TagInput
+                value={value.model.router_allowed_profiles}
+                onChange={(next) => updateModel({ router_allowed_profiles: next })}
+                placeholder={t("agents.form.router_allowed_profiles_placeholder")}
+              />
+            )}
           </Field>
           <Field
             label={t("agents.form.router_default_profile")}
