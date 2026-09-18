@@ -60,17 +60,13 @@ const NO_SURFACE: Record<string, string> = {
     "missing: per-tool `[tools.<name>.params]` override table, no widget (distinct from capabilities.tools, which lists names)",
   is_hand: "readonly: derived from the manifest's origin",
   auto_dream_enabled: "elsewhere: toggled from Memory > Auto Dream",
-  auto_dream_min_hours: "missing: no widget anywhere",
-  auto_dream_min_sessions: "missing: no widget anywhere",
   auto_evolve: "elsewhere: toggled from the drawer's Skills tab",
   channel_overrides: "missing: 29-key per-channel table, no widget",
   skill_workshop: "missing: no widget anywhere",
   compaction: "missing: no widget anywhere",
   context_engine: "missing: no widget anywhere",
-  rl_export: "missing: no widget anywhere",
   triggers:
     "elsewhere: the Schedule tab edits the runtime registry, not this manifest array",
-  async_tasks: "missing: no widget anywhere",
 };
 
 /**
