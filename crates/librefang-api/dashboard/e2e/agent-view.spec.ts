@@ -324,3 +324,154 @@ test("the channels group hosts the live allowlist and the 29 overrides together"
   await expect(page.getByRole("button", { name: "Remove telegram" })).toBeVisible();
   await expect(page.locator('[data-section="channel_overrides"]')).toBeVisible();
 });
+
+// The four manifest tables that had no editor at all, driven the way an
+// operator reaches them: the group tab, the section, the control.
+//
+// Pure vitest cover cannot say whether the control is *reachable* — a section
+// hosted by no group, or a field the group's `shows()` filter excludes, passes
+// every unit test in the suite and renders nowhere. These four journeys are
+// what closes that gap, and each one captures the editor as it was filled in.
+//
+// `Section` and `CollapsibleSection` fold by default, so each journey turns on
+// Advanced mode first: that is what opens every fold in one move, and it is
+// the switch an operator looking for these fields would reach for too.
+async function openGroup(page: Page, group: string) {
+  await openAgent(page);
+  await page.getByRole("tab", { name: "config" }).click();
+  await page.getByRole("checkbox", { name: "Advanced mode" }).check();
+  await page.getByRole("tab", { name: group, exact: true }).click();
+}
+
+test("general edits the metadata table", async ({ page }) => {
+  await openGroup(page, "General");
+
+  const section = page.locator('[data-section="metadata"]');
+  await expect(section).toBeVisible();
+  // The card is the field's only label here, so the rows carry their names
+  // through `aria-label` — a bare grid of inputs announces nothing.
+  await section.getByRole("button", { name: "Add metadata entry" }).click();
+  await section.getByLabel("Key 1", { exact: true }).fill("owner");
+  await section.getByLabel("Value 1", { exact: true }).fill("ops");
+
+  await section.getByRole("button", { name: "Add metadata entry" }).click();
+  await section.getByLabel("Key 2", { exact: true }).fill("pinned");
+  await section.getByLabel("Type 2", { exact: true }).selectOption("boolean");
+  // A boolean row cannot hold free text, so the value control is a select.
+  await expect(section.getByLabel("Value 2", { exact: true })).toHaveJSProperty("tagName", "SELECT");
+  await section.getByLabel("Value 2", { exact: true }).selectOption("true");
+
+  await expect(section.getByLabel("Key 1", { exact: true })).toHaveValue("owner");
+  await expect(section.getByLabel("Value 2", { exact: true })).toHaveValue("true");
+
+  await page.screenshot({
+    path: join(SHOTS, "10-editor-metadata.png"),
+    fullPage: true,
+  });
+});
+
+test("tools & skills edits a per-tool override", async ({ page }) => {
+  await openGroup(page, "Tools & skills");
+
+  const section = page.locator('[data-section="tools"]');
+  await expect(section).toBeVisible();
+  await section.getByRole("button", { name: "Add tool override" }).click();
+  // `exact` because "Tool" is a substring of the remove button's name.
+  await section.getByLabel("Tool", { exact: true }).fill("web_search");
+
+  await section.getByRole("button", { name: "Add parameter" }).click();
+  await section.getByLabel("Parameter 1", { exact: true }).fill("max_results");
+  await section.getByLabel("Type 1", { exact: true }).selectOption("number");
+  await section.getByLabel("Value 1", { exact: true }).fill("5");
+
+  await expect(section.getByLabel("Parameter 1", { exact: true })).toHaveValue("max_results");
+  await expect(section.getByLabel("Value 1", { exact: true })).toHaveValue("5");
+
+  await page.screenshot({
+    path: join(SHOTS, "11-editor-tools.png"),
+    fullPage: true,
+  });
+});
+
+test("the exec policy table completes the shorthand in lifecycle", async ({ page }) => {
+  await openGroup(page, "General");
+
+  const lifecycle = page.locator('[data-section="lifecycle"]');
+  await expect(lifecycle).toBeVisible();
+  // The mode select is the control that was already there; the table beside it
+  // is what this change adds. Reached by its own name rather than by position:
+  // the lifecycle card's first select is `session_mode`.
+  const mode = lifecycle.getByLabel("Exec policy");
+  await mode.selectOption("allowlist");
+
+  // `[]` and the absent key are different policies, and only one of them is a
+  // statement about the safe list — the note is how the operator says which.
+  await expect(lifecycle.getByText("Using the daemon's built-in safe list.")).toBeVisible();
+  await lifecycle.getByRole("button", { name: "Declare an empty list" }).click();
+  await expect(
+    lifecycle.getByText("Declared empty: nothing bypasses the allowlist."),
+  ).toBeVisible();
+
+  const safeBins = lifecycle.getByPlaceholder("cat, head, wc");
+  await safeBins.fill("head");
+  await safeBins.press("Enter");
+
+  // Asserted on the chip rather than on the input: the placeholder is only
+  // rendered while the list is empty, so adding the first entry removes the
+  // thing the locator was built on.
+  await expect(lifecycle.getByRole("button", { name: "remove head" })).toBeVisible();
+  await expect(mode).toHaveValue("allowlist");
+
+  await page.screenshot({
+    path: join(SHOTS, "12-editor-exec-policy.png"),
+    fullPage: true,
+  });
+});
+
+test("memory edits the context engine", async ({ page }) => {
+  await openGroup(page, "Memory");
+
+  const section = page.locator('[data-section="context_engine"]');
+  await expect(section).toBeVisible();
+  // `engine` is a `String` on the Rust side, so the select is an offer rather
+  // than a closed set: a name it does not know is appended and survives.
+  await section.locator("select").first().selectOption("summary");
+  // `exact` because the plugin stack's placeholder starts with the same word.
+  await section
+    .getByPlaceholder("qdrant-recall", { exact: true })
+    .fill("qdrant-recall");
+
+  // The nine hook paths fold behind Advanced, which the journey already
+  // opened: fill one the way an operator wiring a plugin would.
+  await section
+    .getByPlaceholder("~/.librefang/plugins/hook.py")
+    .first()
+    .fill("~/.librefang/plugins/recall.py");
+
+  // A registry row, then the switch that says the list is deliberate.
+  await section.getByRole("button", { name: "Add registry" }).click();
+  await section.getByLabel("Registry name 1").fill("Mine");
+  await section.getByLabel("GitHub repository 1").fill("acme/librefang-plugins");
+
+  await expect(section.locator("select").first()).toHaveValue("summary");
+  await expect(section.getByLabel("GitHub repository 1")).toHaveValue(
+    "acme/librefang-plugins",
+  );
+
+  await page.screenshot({
+    path: join(SHOTS, "13-editor-context-engine.png"),
+    fullPage: true,
+  });
+
+  // The knobs sit below the fold, and `fullPage` cannot reach them: the app
+  // scrolls an inner container, so the document is exactly one viewport tall
+  // and the option is a no-op. Scrolling to the last block of the section is
+  // what puts the grouped controls — runtime, limits, caching, the sandbox
+  // switches, the circuit breaker, the env schema — on screen.
+  const knobs = section.getByText("Environment variables");
+  await knobs.scrollIntoViewIfNeeded();
+  await expect(knobs).toBeVisible();
+  await page.screenshot({
+    path: join(SHOTS, "13b-editor-context-engine-knobs.png"),
+  });
+});
