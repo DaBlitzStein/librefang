@@ -946,9 +946,11 @@ function advancedGroup(sectionId: string): HTMLDetailsElement | null {
   const section = document.querySelector(`[data-section="${sectionId}"]`);
   if (!section) return null;
   const summary = Array.from(section.querySelectorAll("summary")).find(
-    // The harness's i18n stub echoes the key; the advanced group's summary
-    // is the only one this component renders itself.
-    (s) => s.textContent === "agents.form.advanced",
+    // The harness's i18n stub echoes the key, and the label is the summary's
+    // first span — the one this component renders itself. Matched on that span
+    // rather than on the whole summary because the summary now also carries the
+    // field-count badge, which the stub echoes as a second key.
+    (s) => s.querySelector("span")?.textContent === "agents.form.advanced",
   );
   return summary ? (summary.closest("details") as HTMLDetailsElement) : null;
 }
