@@ -102,6 +102,15 @@ export function Field({
   return (
     <div
       className="block"
+      // `data-field` is the marker `CollapsibleSection` counts a section by:
+      // one marker, one field. Counting controls instead would report a
+      // preset ladder as its eight buttons and a `JsonRowEditor` row as the
+      // three boxes it holds, so the widgets that are a field in their own
+      // right — `StepLadderInput`, a labelled `ModelPicker` or `Toggle`, a
+      // `JsonRowEditor` row — carry the same attribute on their root. The
+      // counter reads only the outermost marker of a nested pair, which is
+      // what keeps a `Toggle` inside a `Field` one field rather than two.
+      data-field=""
       role={isGroup ? "group" : undefined}
       aria-label={groupFromAria ? ariaLabel : undefined}
       aria-labelledby={groupFromLabel ? labelId : undefined}

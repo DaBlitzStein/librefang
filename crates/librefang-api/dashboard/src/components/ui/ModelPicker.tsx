@@ -244,7 +244,7 @@ export function ModelPicker({
   };
 
   return (
-    <div ref={rootRef} className={cn("relative", className)}>
+    <div ref={rootRef} className={cn("relative", className)} data-field="">
       <button
         type="button"
         disabled={disabled}

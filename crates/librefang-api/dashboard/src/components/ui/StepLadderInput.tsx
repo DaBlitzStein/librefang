@@ -145,7 +145,7 @@ export function StepLadderInput({
     // not an association any browser or assistive technology honours — the
     // element is non-labellable, so the control announced itself as an
     // unnamed group.
-    <div className="space-y-1.5">
+    <div className="space-y-1.5" data-field="">
       <span
         id={`${id}-label`}
         className={`block text-xs font-bold ${invalid ? "text-error" : "text-text-dim"}`}

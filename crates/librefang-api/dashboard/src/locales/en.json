@@ -2641,6 +2641,8 @@
     "expand": "Expand",
     "collapse": "Collapse",
     "fields_unit": "fields",
+    "fields_unit_one": "{{count}} field",
+    "fields_unit_other": "{{count}} fields",
     "fld_alert_threshold": "Alert Threshold",
     "fld_allowed_commands": "Allowed Commands",
     "fld_allowed_domains": "Allowed Domains",

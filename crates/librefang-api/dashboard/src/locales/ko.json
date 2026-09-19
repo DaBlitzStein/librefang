@@ -2639,6 +2639,7 @@
     "expand": "확장하다",
     "collapse": "접기",
     "fields_unit": "필드",
+    "fields_unit_other": "{{count}}개 필드",
     "fld_alert_threshold": "경고 임계값",
     "fld_allowed_commands": "허용되는 명령",
     "fld_allowed_domains": "허용된 도메인",
