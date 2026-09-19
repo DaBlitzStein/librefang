@@ -333,7 +333,9 @@
       "tools": "工具"
     },
     "form": {
+    "exec_policy_mode": "\u6a21\u5f0f",
 
+    "exec_policy_hint": "\u6b64\u4ee3\u7406\u53ef\u4ee5\u8fd0\u884c\u54ea\u4e9b shell \u547d\u4ee4\uff0c\u4ee5\u53ca\u76f8\u5e94\u7684\u9650\u5236\u3002",
     "context_engine_hint": "The engine that assembles this agent's context, and the hooks that shape it. Everything here is optional: an agent that configures nothing uses the built-in engine.",
     "context_engine_engine": "Engine",
     "context_engine_engine_hint": "Which built-in engine to run. A name that is not listed is kept as written, because engine is a free-form string.",
@@ -1126,6 +1128,7 @@
     "group": {
       "general": "通用",
       "model": "模型与路由",
+      "permissions": "\u6743\u9650",
       "tools": "工具与技能",
       "memory": "记忆",
       "limits": "限额与成本",
