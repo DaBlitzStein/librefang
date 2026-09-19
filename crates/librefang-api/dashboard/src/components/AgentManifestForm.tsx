@@ -2977,12 +2977,12 @@ export function AgentManifestForm({
           The routing engine, and the only place the choice is made. It used
           to be three controls across two sections — a "Router mode" select
           and an "Opt out of routing" toggle in the model section, an enable
-          toggle here — and one of the states they could describe is a state
-          the kernel never runs: a flexible manifest with a `[routing]` table
-          routes by profile on every turn and the tiers never decide anything.
-          The selector writes the three fields together (lib/routingEngine.ts
-          holds the table), so what the operator picks is what the kernel
-          resolves.
+          toggle here — and they could name one engine while running another:
+          a manifest saying `mode = "flexible"` with the override on runs the
+          tiers rather than the profile router, and one with no `[routing]`
+          table runs neither. The selector writes the fields together
+          (lib/routingEngine.ts holds the table), so what the operator picks
+          is what the kernel resolves.
         */}
         <Field
           label={t("agents.form.routing_engine")}
@@ -3005,10 +3005,12 @@ export function AgentManifestForm({
           {routingEngine === "effort" && t("agents.form.routing_engine_effort_note")}
           {routingEngine === "profile" && t("agents.form.routing_engine_profile_note")}
         </p>
-        {/* The tiers, rendered only while the effort engine runs. Under the
-            other two they are inert — the profile router takes every turn it
-            applies to, and `mode = "fixed"` is what keeps it from applying —
-            and three model slots nothing reads are three controls that lie. */}
+        {/* The tiers are the effort engine's own controls, and render only
+            while it runs. Under the profile engine they are the fallback the
+            kernel reaches for when no profile matches — preserved in the file
+            (lib/routingEngine.ts leaves the table alone for that engine), but
+            not the thing the operator chose, so they are not presented as the
+            choice. Under the fixed engine nothing consults them at all. */}
         {routingEngine === "effort" && (
           <div className="space-y-2 mt-2">
             <div className="grid grid-cols-3 gap-3">

@@ -166,11 +166,11 @@ describe("AgentManifestForm — complexity routing tiers", () => {
 
 // Four controls across two sections used to describe one decision — a "Router
 // mode" select and an "Opt out of routing" toggle in the model section, an
-// enable toggle in the routing one — and one of the states they could describe
-// is a state the kernel never runs: the profile router takes every turn it
-// applies to, so a `[routing]` table left enabled underneath it never decides
-// anything. The selector is now the only place the choice is made, and it
-// writes the three fields together (lib/routingEngine.ts).
+// enable toggle in the routing one — and they could name one engine while
+// running another: `mode = "flexible"` with the override on runs the tiers
+// rather than the profile router, and a manifest with no `[routing]` table runs
+// neither. The selector is now the only place the choice is made, and it writes
+// the fields together (lib/routingEngine.ts).
 describe("AgentManifestForm — the routing engine selector", () => {
   async function openRouting(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByText("agents.form.routing"));
@@ -231,11 +231,13 @@ describe("AgentManifestForm — the routing engine selector", () => {
     await user.selectOptions(engineSelect(), "profile");
     expect(latest!.model.mode).toBe("flexible");
     expect(latest!.model.router_fixed).toBe(false);
-    expect(latest!.routing.enabled).toBe(false);
+    // The tier table is left exactly as the effort engine wrote it: it is the
+    // fallback the kernel reaches for when no profile matches, and dropping it
+    // would not switch an engine off — it would delete the fallback and every
+    // `[routing]` key the form has no widget for.
+    expect(latest!.routing.enabled).toBe(true);
     const profile = serializeManifestForm(latest!);
-    // No `[routing]` table: with the tiers off, a turn that matches no profile
-    // keeps this manifest's model instead of falling into another engine.
-    expect(profile).not.toContain("[routing]");
+    expect(profile).toContain("[routing]");
     // `fixed = false` is what the absent key means, so the override is not
     // written at all — and its absence is the profile router being armed.
     expect(profile).not.toContain("router_override");
@@ -255,8 +257,10 @@ describe("AgentManifestForm — the routing engine selector", () => {
     const simpleTier = () =>
       screen.queryByRole("button", { name: /agents\.form\.simple_model/ });
 
-    // The default form is the fixed engine, and the three tier slots are inert
-    // under it and under the profile engine alike.
+    // The default form is the fixed engine, where no router reads the tiers at
+    // all. Under the profile engine they are the preserved fallback rather than
+    // the choice, so they are not offered there either — but they stay in the
+    // file, which the TOML test below pins.
     expect(simpleTier()).not.toBeInTheDocument();
 
     await user.selectOptions(engineSelect(), "profile");
