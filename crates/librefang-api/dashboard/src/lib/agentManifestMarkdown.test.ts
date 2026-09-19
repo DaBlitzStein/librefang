@@ -166,6 +166,35 @@ describe("generateManifestMarkdown", () => {
     expect(md).toContain("json");
   });
 
+  /// The engine leads the routing section, because it is the question the
+  /// section exists to answer, and the tier table does not answer it: the
+  /// kernel consults the profile router first and the tiers only when nothing
+  /// matches, so an agent can carry tiers and still be routed by profile.
+  it("names the routing engine, and still prints tiers the tiers engine is not driving", () => {
+    const form = emptyManifestForm();
+    form.model.mode = "flexible";
+    form.model.router_fixed = false;
+    form.routing.enabled = true;
+    form.routing.simple_model = "tier-cheap";
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("## Model Routing");
+    expect(md).toContain("Profile router");
+    // Not hidden just because the profile router decides first: these are the
+    // kernel's fallback when no profile matches, and a reader who cannot see
+    // them cannot tell why an unmatched task picked a cheaper model.
+    expect(md).toContain("tier-cheap");
+  });
+
+  it("calls an agent with no routing fixed and prints no tiers", () => {
+    const md = generateManifestMarkdown(emptyManifestForm());
+
+    expect(md).toContain("## Model Routing");
+    expect(md).toContain("Fixed model");
+    expect(md).not.toContain("Simple threshold");
+  });
+
   it("includes lifecycle overrides when set to non-default values", () => {
     const form = emptyManifestForm();
     form.name = "ops";

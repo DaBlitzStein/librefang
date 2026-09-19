@@ -56,6 +56,20 @@ export const ROUTING_ENGINES = ["fixed", "effort", "profile"] as const;
 
 export type RoutingEngine = (typeof ROUTING_ENGINES)[number];
 
+/**
+ * English names for the engines, for surfaces that are not localised.
+ *
+ * The editor reads its own translated keys; this is for the markdown summary,
+ * which is a document rather than a screen. The `Record` is what keeps the set
+ * honest: an engine with no name here does not compile, so this list cannot
+ * quietly fall behind `ROUTING_ENGINES`.
+ */
+export const ROUTING_ENGINE_LABELS: Record<RoutingEngine, string> = {
+  fixed: "Fixed model",
+  effort: "Effort (complexity)",
+  profile: "Profile router",
+};
+
 /** The manifest fields the engine decides, under the names the file format uses. */
 export interface RoutingEngineSetting {
   /** `[model] mode` — `ModelMode` in crates/librefang-types/src/agent.rs. */

@@ -8,6 +8,7 @@
 // see them without having to read raw TOML.
 
 import { emptyManifestExtras } from "./agentManifest";
+import { ROUTING_ENGINE_LABELS, routingEngineOf } from "./routingEngine";
 import type { ManifestExtras, ManifestFormState } from "./agentManifest";
 
 const escapeTableCell = (value: string): string =>
@@ -211,14 +212,26 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
     lines.push("");
   }
 
-  if (form.routing.enabled) {
+  {
+    // Always rendered, and the engine leads it. Which engine decides an
+    // agent's model is the first question a reader of this document has, and
+    // the tier table answers a different one: an agent can carry tiers and
+    // still be routed by profile — the kernel consults the profile router
+    // first and the tiers only when nothing matches. Printing the tiers
+    // without the engine was how that read as contradictory.
     lines.push("## Model Routing");
     lines.push("");
-    pushBullet(lines, "Simple", form.routing.simple_model);
-    pushBullet(lines, "Medium", form.routing.medium_model);
-    pushBullet(lines, "Complex", form.routing.complex_model);
-    pushBullet(lines, "Simple threshold", form.routing.simple_threshold);
-    pushBullet(lines, "Complex threshold", form.routing.complex_threshold);
+    pushBullet(lines, "Engine", ROUTING_ENGINE_LABELS[routingEngineOf(form)]);
+    if (form.routing.enabled) {
+      // The table is present when the manifest has one, whatever engine runs:
+      // it is the kernel's fallback, and a reader who cannot see it cannot
+      // tell why a task that matched no profile still picked a cheaper model.
+      pushBullet(lines, "Simple", form.routing.simple_model);
+      pushBullet(lines, "Medium", form.routing.medium_model);
+      pushBullet(lines, "Complex", form.routing.complex_model);
+      pushBullet(lines, "Simple threshold", form.routing.simple_threshold);
+      pushBullet(lines, "Complex threshold", form.routing.complex_threshold);
+    }
     lines.push("");
   }
 
