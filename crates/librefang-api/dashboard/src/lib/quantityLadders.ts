@@ -245,6 +245,37 @@ export const EXEC_NO_OUTPUT_TIMEOUT_LADDER = [10, 30, 60, 300, 900] as const;
 /** How much output one command may return, in bytes. */
 export const EXEC_OUTPUT_BYTES_LADDER = [1024, 10_240, 102_400, 1_048_576, 10_485_760] as const;
 
+// --------------------------------------------------------- context engine
+
+/**
+ * Retries before a failing hook script is given up on.
+ *
+ * Leads with 0 because that is the Rust default (`max_retries`), and a ladder
+ * that cannot express the current value is a ladder that only loosens.
+ */
+export const HOOK_RETRIES_LADDER = [0, 1, 2, 3, 5] as const;
+
+/** Memory ceiling for one hook subprocess, in MiB. */
+export const HOOK_MEMORY_MB_LADDER = [128, 256, 512, 1024, 2048, 4096] as const;
+
+/** Concurrent `after_turn` hooks the engine will run. */
+export const HOOK_QUEUE_DEPTH_LADDER = [4, 8, 16, 32, 64] as const;
+
+/**
+ * Hook execution priority, signed: higher runs first and the Rust default is
+ * 0, which is why zero is the middle rung rather than the first.
+ */
+export const HOOK_PRIORITY_LADDER = [-10, -5, -1, 0, 1, 5, 10] as const;
+
+/** Consecutive hook failures before the circuit opens. */
+export const HOOK_CIRCUIT_FAILURES_LADDER = [1, 3, 5, 10, 25] as const;
+
+/** How long an open circuit waits before a half-open retry. */
+export const HOOK_CIRCUIT_RESET_LADDER = [30, 60, 120, 300, 600, 1800] as const;
+
+/** How long a hook result may be reused instead of recomputed. */
+export const HOOK_CACHE_TTL_LADDER = [0, 10, 30, 60, 300, 900] as const;
+
 // ------------------------------------------------------------ autonomous
 
 /** Iterations per invocation. */
