@@ -296,6 +296,7 @@ export const MANIFEST_SECTION_IDS = [
   "context_injection",
   "response_format",
   "lifecycle",
+  "exec_policy",
   "shared_folders",
 ] as const;
 
@@ -320,11 +321,7 @@ const FIELD_PREFIX_TO_SECTION: ReadonlyArray<readonly [RegExp, ManifestSectionId
   [/^name$/, "identity"],
   [/^metadata\./, "metadata"],
   [/^tools\./, "tools"],
-  // `exec_policy` renders inside the lifecycle section, not a section of its
-  // own: it has been one field of that card since the shorthand was the only
-  // spelling the form knew, and splitting it out now would move a control the
-  // operator already knows without changing what it does.
-  [/^exec_policy\./, "lifecycle"],
+  [/^exec_policy\./, "exec_policy"],
   [/^context_engine\./, "context_engine"],
   [/^model\./, "model"],
   [/^schedule\./, "scheduling"],
@@ -2621,6 +2618,10 @@ export function AgentManifestForm({
                         .value as ManifestFormState["context_engine"]["hooks"]["on_hook_failure"],
                     })
                   }
+                  // The visible label is a `<span>`, so the control carries its
+                  // own name. A select is never named by a placeholder, which
+                  // is why every unlabelled select in this form is mute.
+                  aria-label={t("agents.form.context_engine_on_failure")}
                   className={inputClass}
                 >
                   {HOOK_FAILURE_POLICIES.map((policy) => (
@@ -2640,6 +2641,7 @@ export function AgentManifestForm({
                   type="text"
                   value={hook.ingest_filter}
                   onChange={(e) => updateHook({ ingest_filter: e.target.value })}
+                  aria-label={t("agents.form.context_engine_ingest_filter")}
                   className={inputClass}
                 />
               </Field>
@@ -2651,6 +2653,7 @@ export function AgentManifestForm({
                   type="text"
                   value={hook.ingest_regex}
                   onChange={(e) => updateHook({ ingest_regex: e.target.value })}
+                  aria-label={t("agents.form.context_engine_ingest_regex")}
                   className={inputClass}
                 />
               </Field>
@@ -3172,8 +3175,9 @@ export function AgentManifestForm({
       >
         {/* BASIC: whether this agent runs, and whether an automated invocation
             reuses its session. Everything else in the section — the export and
-            search switches, exec policy, plugins, the history and concurrency
-            caps — folds behind Advanced. */}
+            search switches, plugins, the history and concurrency caps — folds
+            behind Advanced. The exec policy used to be here too; it is a
+            permission and now has its own card in that group. */}
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.session_mode")}>
             <select
@@ -3250,130 +3254,6 @@ export function AgentManifestForm({
               <option value="false">{t("common.no")}</option>
             </select>
           </Field>
-          {/* The whole policy, not just its shorthand: `exec_policy` reads as a
-              string or as a table and the form now owns both spellings, so the
-              mode is still the one-word case and the eight fields beside it are
-              the table. Spanning both columns because it is one subject. */}
-          <div className="col-span-2 space-y-2.5 rounded-lg border border-border-subtle/40 p-2.5">
-            <Field label={t("agents.form.exec_policy")}>
-              <select
-                value={value.exec_policy.mode}
-                onChange={(e) =>
-                  updateExecPolicy({
-                    mode: e.target.value as ManifestFormState["exec_policy"]["mode"],
-                  })
-                }
-                // The visible label is a `<span>` (Field only draws a real
-                // `<label>` when it is given an `htmlFor`), so the control
-                // carries its own name. Without it the operator's screen
-                // reader announces an unnamed combo box.
-                aria-label={t("agents.form.exec_policy")}
-                className={inputClass}
-              >
-                <option value="">{t("agents.form.exec_policy_global")}</option>
-                <option value="deny">deny</option>
-                <option value="allowlist">allowlist</option>
-                <option value="full">full</option>
-              </select>
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Field
-                  label={t("agents.form.exec_policy_safe_bins")}
-                  hint={t("agents.form.exec_policy_safe_bins_hint")}
-                >
-                  <TagInput
-                    value={value.exec_policy.safe_bins ?? []}
-                    onChange={(next) => updateExecPolicy({ safe_bins: next })}
-                    placeholder={t("agents.form.exec_policy_safe_bins_placeholder")}
-                  />
-                </Field>
-                {/* Only one of the two empties is a statement, and the tag
-                    input cannot say which one it is. */}
-                {(value.exec_policy.safe_bins ?? []).length === 0 && (
-                  <TriStateNote
-                    absent={value.exec_policy.safe_bins === null}
-                    absentText={t("agents.form.exec_policy_safe_bins_default")}
-                    emptyText={t("agents.form.exec_policy_safe_bins_empty")}
-                    declareEmptyLabel={t("agents.form.exec_policy_safe_bins_declare_empty")}
-                    restoreDefaultLabel={t("agents.form.exec_policy_safe_bins_use_default")}
-                    onDeclareEmpty={() => updateExecPolicy({ safe_bins: [] })}
-                    onRestoreDefault={() => updateExecPolicy({ safe_bins: null })}
-                  />
-                )}
-              </div>
-              <Field
-                label={t("agents.form.exec_policy_allowed_commands")}
-                hint={t("agents.form.exec_policy_allowed_commands_hint")}
-              >
-                <TagInput
-                  value={value.exec_policy.allowed_commands}
-                  onChange={(next) => updateExecPolicy({ allowed_commands: next })}
-                  placeholder={t("agents.form.exec_policy_allowed_commands_placeholder")}
-                />
-              </Field>
-              <Field
-                label={t("agents.form.exec_policy_allowed_env_vars")}
-                hint={t("agents.form.exec_policy_allowed_env_vars_hint")}
-              >
-                <TagInput
-                  value={value.exec_policy.allowed_env_vars}
-                  onChange={(next) => updateExecPolicy({ allowed_env_vars: next })}
-                  placeholder={t("agents.form.exec_policy_allowed_env_vars_placeholder")}
-                />
-              </Field>
-              <div className="space-y-2.5">
-                <Toggle
-                  label={t("agents.form.exec_policy_safe_bins_skip")}
-                  checked={value.exec_policy.safe_bins_skip_approval}
-                  onChange={(checked) => updateExecPolicy({ safe_bins_skip_approval: checked })}
-                />
-                <p className="text-[10px] text-text-dim/70">
-                  {t("agents.form.exec_policy_safe_bins_skip_hint")}
-                </p>
-                <Toggle
-                  label={t("agents.form.exec_policy_full_skips_approval")}
-                  checked={value.exec_policy.full_mode_skips_approval}
-                  onChange={(checked) => updateExecPolicy({ full_mode_skips_approval: checked })}
-                />
-                <p className="text-[10px] text-text-dim/70">
-                  {t("agents.form.exec_policy_full_skips_approval_hint")}
-                </p>
-              </div>
-            </div>
-            <div className="grid grid-cols-3 gap-3">
-              <StepLadderInput
-                label={t("agents.form.exec_policy_timeout")}
-                value={value.exec_policy.timeout_secs}
-                onChange={(next) => updateExecPolicy({ timeout_secs: next })}
-                ladder={EXEC_TIMEOUT_LADDER}
-                formatRung={formatSeconds}
-                inheritLabel={t("model_param.inherit")}
-                customLabel={t("model_param.custom")}
-                min={1}
-              />
-              <StepLadderInput
-                label={t("agents.form.exec_policy_no_output_timeout")}
-                value={value.exec_policy.no_output_timeout_secs}
-                onChange={(next) => updateExecPolicy({ no_output_timeout_secs: next })}
-                ladder={EXEC_NO_OUTPUT_TIMEOUT_LADDER}
-                formatRung={formatSeconds}
-                inheritLabel={t("model_param.inherit")}
-                customLabel={t("model_param.custom")}
-                min={0}
-              />
-              <StepLadderInput
-                label={t("agents.form.exec_policy_max_output")}
-                value={value.exec_policy.max_output_bytes}
-                onChange={(next) => updateExecPolicy({ max_output_bytes: next })}
-                ladder={EXEC_OUTPUT_BYTES_LADDER}
-                formatRung={formatBytes}
-                inheritLabel={t("model_param.inherit")}
-                customLabel={t("model_param.custom")}
-                min={1}
-              />
-            </div>
-          </div>
           <Field label={t("agents.form.pinned_model")}>
             <ModelPicker
               label={t("agents.form.pinned_model")}
@@ -3490,6 +3370,151 @@ export function AgentManifestForm({
           </p>
         </div>
         </AdvancedFields>
+      </FormSection>
+
+      {/* `exec_policy` is a permission, not a lifecycle setting: it says which
+          shell commands this agent may run, and under what limits. It renders
+          on a card of its own in the Permissions group rather than folded into
+          the lifecycle block, whose session-mode and search switches are not
+          permissions. */}
+      <FormSection
+        id="exec_policy"
+        shows={shows}
+        title={t("agents.form.exec_policy")}
+        defaultOpen={false}
+        invalid={
+          invalidFields.has("exec_policy.timeout_secs") ||
+          invalidFields.has("exec_policy.max_output_bytes") ||
+          invalidFields.has("exec_policy.no_output_timeout_secs")
+        }
+      >
+        <p className="text-[10px] text-text-dim/70 mb-2">
+          {t("agents.form.exec_policy_hint")}
+        </p>
+        {/* The whole policy, not just its shorthand: `exec_policy` reads as a
+            string or as a table and the form owns both spellings, so the mode
+            is still the one-word case and the eight fields beside it are the
+            table. */}
+      <div className="space-y-2.5">
+          <Field label={t("agents.form.exec_policy_mode")}>
+            <select
+              value={value.exec_policy.mode}
+              onChange={(e) =>
+                updateExecPolicy({
+                  mode: e.target.value as ManifestFormState["exec_policy"]["mode"],
+                })
+              }
+              // The visible label is a `<span>` (Field only draws a real
+              // `<label>` when it is given an `htmlFor`), so the control
+              // carries its own name. Without it the operator's screen
+              // reader announces an unnamed combo box.
+              aria-label={t("agents.form.exec_policy_mode")}
+              className={inputClass}
+            >
+              <option value="">{t("agents.form.exec_policy_global")}</option>
+              <option value="deny">deny</option>
+              <option value="allowlist">allowlist</option>
+              <option value="full">full</option>
+            </select>
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Field
+                label={t("agents.form.exec_policy_safe_bins")}
+                hint={t("agents.form.exec_policy_safe_bins_hint")}
+              >
+                <TagInput
+                  value={value.exec_policy.safe_bins ?? []}
+                  onChange={(next) => updateExecPolicy({ safe_bins: next })}
+                  placeholder={t("agents.form.exec_policy_safe_bins_placeholder")}
+                />
+              </Field>
+              {/* Only one of the two empties is a statement, and the tag
+                  input cannot say which one it is. */}
+              {(value.exec_policy.safe_bins ?? []).length === 0 && (
+                <TriStateNote
+                  absent={value.exec_policy.safe_bins === null}
+                  absentText={t("agents.form.exec_policy_safe_bins_default")}
+                  emptyText={t("agents.form.exec_policy_safe_bins_empty")}
+                  declareEmptyLabel={t("agents.form.exec_policy_safe_bins_declare_empty")}
+                  restoreDefaultLabel={t("agents.form.exec_policy_safe_bins_use_default")}
+                  onDeclareEmpty={() => updateExecPolicy({ safe_bins: [] })}
+                  onRestoreDefault={() => updateExecPolicy({ safe_bins: null })}
+                />
+              )}
+            </div>
+            <Field
+              label={t("agents.form.exec_policy_allowed_commands")}
+              hint={t("agents.form.exec_policy_allowed_commands_hint")}
+            >
+              <TagInput
+                value={value.exec_policy.allowed_commands}
+                onChange={(next) => updateExecPolicy({ allowed_commands: next })}
+                placeholder={t("agents.form.exec_policy_allowed_commands_placeholder")}
+              />
+            </Field>
+            <Field
+              label={t("agents.form.exec_policy_allowed_env_vars")}
+              hint={t("agents.form.exec_policy_allowed_env_vars_hint")}
+            >
+              <TagInput
+                value={value.exec_policy.allowed_env_vars}
+                onChange={(next) => updateExecPolicy({ allowed_env_vars: next })}
+                placeholder={t("agents.form.exec_policy_allowed_env_vars_placeholder")}
+              />
+            </Field>
+            <div className="space-y-2.5">
+              <Toggle
+                label={t("agents.form.exec_policy_safe_bins_skip")}
+                checked={value.exec_policy.safe_bins_skip_approval}
+                onChange={(checked) => updateExecPolicy({ safe_bins_skip_approval: checked })}
+              />
+              <p className="text-[10px] text-text-dim/70">
+                {t("agents.form.exec_policy_safe_bins_skip_hint")}
+              </p>
+              <Toggle
+                label={t("agents.form.exec_policy_full_skips_approval")}
+                checked={value.exec_policy.full_mode_skips_approval}
+                onChange={(checked) => updateExecPolicy({ full_mode_skips_approval: checked })}
+              />
+              <p className="text-[10px] text-text-dim/70">
+                {t("agents.form.exec_policy_full_skips_approval_hint")}
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <StepLadderInput
+              label={t("agents.form.exec_policy_timeout")}
+              value={value.exec_policy.timeout_secs}
+              onChange={(next) => updateExecPolicy({ timeout_secs: next })}
+              ladder={EXEC_TIMEOUT_LADDER}
+              formatRung={formatSeconds}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+            <StepLadderInput
+              label={t("agents.form.exec_policy_no_output_timeout")}
+              value={value.exec_policy.no_output_timeout_secs}
+              onChange={(next) => updateExecPolicy({ no_output_timeout_secs: next })}
+              ladder={EXEC_NO_OUTPUT_TIMEOUT_LADDER}
+              formatRung={formatSeconds}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={0}
+            />
+            <StepLadderInput
+              label={t("agents.form.exec_policy_max_output")}
+              value={value.exec_policy.max_output_bytes}
+              onChange={(next) => updateExecPolicy({ max_output_bytes: next })}
+              ladder={EXEC_OUTPUT_BYTES_LADDER}
+              formatRung={formatBytes}
+              inheritLabel={t("model_param.inherit")}
+              customLabel={t("model_param.custom")}
+              min={1}
+            />
+          </div>
+        </div>
       </FormSection>
 
       <FormSection id="shared_folders" shows={shows}
