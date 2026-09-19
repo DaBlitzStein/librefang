@@ -18,6 +18,11 @@ import {
   generateUid,
 } from "../lib/agentManifest";
 import type { JsonRowType, ManifestExtras, ManifestFormState } from "../lib/agentManifest";
+import {
+  applyRoutingEngine,
+  routingEngineOf,
+  type RoutingEngine,
+} from "../lib/routingEngine";
 
 /// The tri-state caption for a memory capability field (#7749 review):
 /// `null` is the omitted key (unrestricted), `[]` is the declared-empty deny.
@@ -472,6 +477,15 @@ export function AgentManifestForm({
   const updateRouting = (patch: Partial<ManifestFormState["routing"]>): void =>
     onChange({ ...value, routing: { ...value.routing, ...patch } });
 
+  // The one routing choice, derived from the manifest rather than stored: a
+  // manifest that arrives from the API or a template has no engine field, so
+  // it is classified by the state the kernel would resolve it to. The setter
+  // writes the three fields together (lib/routingEngine.ts holds the table and
+  // the reason for each cell).
+  const routingEngine = routingEngineOf(value);
+  const setRoutingEngine = (engine: RoutingEngine): void =>
+    onChange(applyRoutingEngine(value, engine));
+
   // The picker wants `{ id }` rather than `{ name }`. Memoised because it is
   // passed to every fallback row, and a fresh array each render would defeat
   // the picker's own memoisation of its provider list.
@@ -863,102 +877,91 @@ export function AgentManifestForm({
           them died here — two writers to the same five values, and a form
           save serialized its seeded state verbatim over anything the panel
           had written, both surfaces toasting success. The profile allowlist
-          keeps the panel's server-backed catalog; the fixed-mode constraints
-          are preserved rather than cleared, as the manifest file format
-          allows.
+          keeps the panel's server-backed catalog.
+
+          Rendered only while the routing engine is "profile". With any other
+          engine the kernel never consults them (`route_to_profile` returns
+          `None` unless the manifest is `flexible` — lib/routingEngine.ts
+          holds the table and the gate), and a control that writes something
+          nothing reads is a control that lies about what the agent will do.
+          Hidden, not cleared: switching engines back must not lose what was
+          configured for this one, the same way the serializer preserves
+          fixed-mode overrides rather than dropping them.
         */}
-        <p className="text-[11px] text-text-dim">{t("agents.form.router_hint")}</p>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.form.router_mode")} hint={t("agents.form.router_mode_hint")}>
-            {/* A closed two-state enum with a `#[default]` variant, so unlike
-                the tri-state selects below there is no inherit option: the
-                state always names a mode, and `fixed` is simply not written. */}
-            <select
-              value={value.model.mode}
-              onChange={(e) =>
-                updateModel({ mode: e.target.value as ManifestFormState["model"]["mode"] })
-              }
-              className={inputClass}
+        {routingEngine === "profile" && (
+          <div className="space-y-2">
+            <p className="text-[11px] text-text-dim">{t("agents.form.router_hint")}</p>
+            <div className="grid grid-cols-2 gap-3">
+              <Field
+                label={t("agents.form.router_cost_budget")}
+                hint={t("agents.form.router_cost_budget_hint")}
+              >
+                {/* Empty is the daemon's "no cap": the router may pick any tier. */}
+                <select
+                  value={value.model.router_cost_budget}
+                  onChange={(e) =>
+                    updateModel({
+                      router_cost_budget: e.target.value as
+                        ManifestFormState["model"]["router_cost_budget"],
+                    })
+                  }
+                  className={inputClass}
+                >
+                  <option value="">{t("agents.form.router_cost_budget_none")}</option>
+                  <option value="cheap">cheap</option>
+                  <option value="medium">medium</option>
+                  <option value="expensive">expensive</option>
+                </select>
+              </Field>
+              <Field
+                label={t("agents.form.router_default_profile")}
+                hint={t("agents.form.router_default_profile_hint")}
+              >
+                <input
+                  type="text"
+                  value={value.model.router_default_profile}
+                  onChange={(e) => updateModel({ router_default_profile: e.target.value })}
+                  placeholder={t("agents.form.router_default_profile_placeholder")}
+                  className={inputClass}
+                />
+              </Field>
+            </div>
+            <Field
+              label={t("agents.form.router_allowed_profiles")}
+              hint={t("agents.form.router_allowed_profiles_hint")}
             >
-              <option value="fixed">{t("agents.form.router_mode_fixed")}</option>
-              <option value="flexible">{t("agents.form.router_mode_flexible")}</option>
-            </select>
-          </Field>
-          <Field
-            label={t("agents.form.router_cost_budget")}
-            hint={t("agents.form.router_cost_budget_hint")}
-          >
-            {/* Empty is the daemon's "no cap": the router may pick any tier. */}
-            <select
-              value={value.model.router_cost_budget}
-              onChange={(e) =>
-                updateModel({
-                  router_cost_budget: e.target.value as
-                    ManifestFormState["model"]["router_cost_budget"],
-                })
-              }
-              className={inputClass}
-            >
-              <option value="">{t("agents.form.router_cost_budget_none")}</option>
-              <option value="cheap">cheap</option>
-              <option value="medium">medium</option>
-              <option value="expensive">expensive</option>
-            </select>
-          </Field>
-        </div>
-        <Toggle
-          label={t("agents.form.router_fixed")}
-          checked={value.model.router_fixed}
-          onChange={(checked) => updateModel({ router_fixed: checked })}
-        />
-        {routerProfilesEnabled === false && (
-          <p className="text-[11px] text-text-dim">
-            {t("agents.form.router_kernel_off")}
-          </p>
-        )}
-        <div className="grid grid-cols-2 gap-3">
-          <Field
-            label={t("agents.form.router_allowed_profiles")}
-            hint={t("agents.form.router_allowed_profiles_hint")}
-          >
-            {routerProfileFinder ? (
-              <MultiSelectCmdk
-                options={routerProfileFinder.options}
-                optionMeta={routerProfileFinder.meta}
-                value={value.model.router_allowed_profiles}
-                onChange={(next) => {
-                  const nextValue =
-                    typeof next === "function"
-                      ? next(value.model.router_allowed_profiles)
-                      : next;
-                  updateModel({ router_allowed_profiles: nextValue });
-                }}
-                placeholder={t("agents.form.router_profiles_search_placeholder", {
-                  defaultValue: "Search model profiles…",
-                })}
-                allowFreeText
-              />
-            ) : (
-              <TagInput
-                value={value.model.router_allowed_profiles}
-                onChange={(next) => updateModel({ router_allowed_profiles: next })}
-                placeholder={t("agents.form.router_allowed_profiles_placeholder")}
-              />
+              {routerProfileFinder ? (
+                <MultiSelectCmdk
+                  options={routerProfileFinder.options}
+                  optionMeta={routerProfileFinder.meta}
+                  value={value.model.router_allowed_profiles}
+                  onChange={(next) => {
+                    const nextValue =
+                      typeof next === "function"
+                        ? next(value.model.router_allowed_profiles)
+                        : next;
+                    updateModel({ router_allowed_profiles: nextValue });
+                  }}
+                  placeholder={t("agents.form.router_profiles_search_placeholder", {
+                    defaultValue: "Search model profiles…",
+                  })}
+                  allowFreeText
+                />
+              ) : (
+                <TagInput
+                  value={value.model.router_allowed_profiles}
+                  onChange={(next) => updateModel({ router_allowed_profiles: next })}
+                  placeholder={t("agents.form.router_allowed_profiles_placeholder")}
+                />
+              )}
+            </Field>
+            {routerProfilesEnabled === false && (
+              <p className="text-[11px] text-text-dim">
+                {t("agents.form.router_kernel_off")}
+              </p>
             )}
-          </Field>
-          <Field
-            label={t("agents.form.router_default_profile")}
-            hint={t("agents.form.router_default_profile_hint")}
-          >
-            <input
-              type="text"
-              value={value.model.router_default_profile}
-              onChange={(e) => updateModel({ router_default_profile: e.target.value })}
-              placeholder={t("agents.form.router_default_profile_placeholder")}
-              className={inputClass}
-            />
-          </Field>
-        </div>
+          </div>
+        )}
         </AdvancedFields>
       </Section>
     ),
@@ -2970,12 +2973,43 @@ export function AgentManifestForm({
 
     routing: (
       <FormSection id="routing" title={t("agents.form.routing")} defaultOpen={false}>
-        <Toggle
-          label={t("agents.form.routing_enabled")}
-          checked={value.routing.enabled}
-          onChange={(checked) => updateRouting({ enabled: checked })}
-        />
-        {value.routing.enabled && (
+        {/*
+          The routing engine, and the only place the choice is made. It used
+          to be three controls across two sections — a "Router mode" select
+          and an "Opt out of routing" toggle in the model section, an enable
+          toggle here — and one of the states they could describe is a state
+          the kernel never runs: a flexible manifest with a `[routing]` table
+          routes by profile on every turn and the tiers never decide anything.
+          The selector writes the three fields together (lib/routingEngine.ts
+          holds the table), so what the operator picks is what the kernel
+          resolves.
+        */}
+        <Field
+          label={t("agents.form.routing_engine")}
+          hint={t("agents.form.routing_engine_hint")}
+          htmlFor="manifest-routing-engine"
+        >
+          <select
+            id="manifest-routing-engine"
+            value={routingEngine}
+            onChange={(e) => setRoutingEngine(e.target.value as RoutingEngine)}
+            className={inputClass}
+          >
+            <option value="fixed">{t("agents.form.routing_engine_fixed")}</option>
+            <option value="effort">{t("agents.form.routing_engine_effort")}</option>
+            <option value="profile">{t("agents.form.routing_engine_profile")}</option>
+          </select>
+        </Field>
+        <p className="text-[10px] text-text-dim/70 mt-1">
+          {routingEngine === "fixed" && t("agents.form.routing_engine_fixed_note")}
+          {routingEngine === "effort" && t("agents.form.routing_engine_effort_note")}
+          {routingEngine === "profile" && t("agents.form.routing_engine_profile_note")}
+        </p>
+        {/* The tiers, rendered only while the effort engine runs. Under the
+            other two they are inert — the profile router takes every turn it
+            applies to, and `mode = "fixed"` is what keeps it from applying —
+            and three model slots nothing reads are three controls that lie. */}
+        {routingEngine === "effort" && (
           <div className="space-y-2 mt-2">
             <div className="grid grid-cols-3 gap-3">
               <Field label={t("agents.form.simple_model")}>
@@ -3037,8 +3071,8 @@ export function AgentManifestForm({
             </div>
           </div>
         )}
-        {/* BASIC: the router and its three tiers. Orphan reconciliation
-            and the tool profile are depth. */}
+        {/* BASIC: the engine selector and, when it is the effort engine, its
+            three tiers. Orphan reconciliation and the tool profile are depth. */}
         <AdvancedFields>
           <div className="grid grid-cols-2 gap-3 mt-2">
             <Field label={t("agents.form.reconcile_orphans")} hint={t("agents.form.inherit_default")}>

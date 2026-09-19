@@ -1308,9 +1308,9 @@ const SESSION_MODES = ["persistent", "new"] as const;
 const WEB_SEARCH_MODES = ["off", "auto", "always"] as const;
 const INJECTION_POSITIONS = ["system", "before_user", "after_reset"] as const;
 /** `ModelMode`'s `#[serde(rename_all = "snake_case")]` spellings. */
-const MODEL_MODES = ["fixed", "flexible"] as const;
+export const MODEL_MODES = ["fixed", "flexible"] as const;
 /** `CostTier`'s spellings, which the router API echoes byte for byte. */
-const COST_TIERS = ["cheap", "medium", "expensive"] as const;
+export const COST_TIERS = ["cheap", "medium", "expensive"] as const;
 /** The members of `AgentRouterOverride` the form renders. */
 const ROUTER_OVERRIDE_KEYS = new Set([
   "fixed",
