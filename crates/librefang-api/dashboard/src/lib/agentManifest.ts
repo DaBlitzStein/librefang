@@ -14,6 +14,111 @@ import { MODEL_PARAM_RANGES } from "../components/ui/ModelParamField";
 let _nextUid = 1;
 export const generateUid = (): string => String(_nextUid++);
 
+/**
+ * The JSON types a free-form override row can hold, named by the operator.
+ *
+ * `metadata` and `[tools.<name>.params]` are both
+ * `HashMap<String, serde_json::Value>`, so the text alone does not say which
+ * value is meant: `5` and `"5"` are both legal, and a form that guessed from
+ * the text would rewrite one into the other on the next save.
+ *
+ * Arrays and tables are deliberately absent. They have no scalar spelling, so
+ * a row cannot carry one; they are preserved verbatim instead of being put
+ * behind a JSON box that would re-parse on every keystroke.
+ */
+export const JSON_ROW_TYPES = ["string", "number", "boolean"] as const;
+export type JsonRowType = (typeof JSON_ROW_TYPES)[number];
+
+/** One `key = value` row of a JSON-valued table. See `JSON_ROW_TYPES`. */
+export interface JsonRow {
+  _uid: string;
+  key: string;
+  valueType: JsonRowType;
+  value: string;
+}
+
+/**
+ * The built-in context engines `ContextEngineTomlConfig::engine` names.
+ *
+ * Read off the doc comment on the Rust field rather than invented here:
+ * `engine` is a `String`, not an enum, so an unrecognised value is something
+ * the daemon keeps — which is why the editor offers these as options and
+ * carries any other value through instead of replacing it.
+ */
+export const CONTEXT_ENGINE_NAMES = ["default", "summary", "no_compact", "sidecar"] as const;
+
+/** The runtimes a hook script may be launched with (`ContextEngineHooks::runtime`). */
+export const HOOK_RUNTIMES = ["python", "native", "v", "node", "deno", "go"] as const;
+
+/** `HookFailurePolicy`'s `#[serde(rename_all = "snake_case")]` spellings. */
+export const HOOK_FAILURE_POLICIES = ["warn", "abort", "skip"] as const;
+
+/** One row of `[[context_engine.plugin_registries]]`. */
+export interface PluginRegistryRow {
+  _uid: string;
+  name: string;
+  github_repo: string;
+}
+
+/**
+ * `[context_engine.hooks]` — the nine script paths and the knobs that govern
+ * how they run (crates/librefang-types/src/config/types.rs:4903).
+ *
+ * The knobs are held as text exactly like every other optional number in this
+ * form: `""` is the absent key, which is not zero and not the Rust default.
+ */
+export interface ContextEngineHooksForm {
+  ingest: string;
+  after_turn: string;
+  bootstrap: string;
+  assemble: string;
+  compact: string;
+  transform_tool_result: string;
+  prepare_subagent: string;
+  merge_subagent: string;
+  on_event: string;
+  /** `""` lets the runtime default to python. */
+  runtime: string;
+  hook_timeout_secs: string;
+  max_retries: string;
+  retry_delay_ms: string;
+  max_memory_mb: string;
+  after_turn_queue_depth: string;
+  /** `i32`, and negative values are meaningful: lower runs later. */
+  priority: string;
+  on_hook_failure: "warn" | "abort" | "skip";
+  hook_protocol_version: string;
+  /** The whole `circuit_breaker` table is optional; this is its switch. */
+  circuit_enabled: boolean;
+  circuit_max_failures: string;
+  circuit_reset_secs: string;
+  ingest_filter: string;
+  ingest_regex: string;
+  only_for_agent_ids: string[];
+  hook_cache_ttl_secs: string;
+  assemble_cache_ttl_secs: string;
+  compact_cache_ttl_secs: string;
+  enable_shared_state: boolean;
+  persistent_subprocess: boolean;
+  prewarm_subprocesses: boolean;
+  allow_filesystem: boolean;
+  allow_network: boolean;
+  allowed_secrets: string[];
+  otel_endpoint: string;
+  /**
+   * `HashMap<String, String>` — declared environment variables, name to
+   * description. Rows rather than a preserved table because the value is
+   * always a string, so a row can hold it exactly.
+   */
+  env_schema: JsonRow[];
+  /**
+   * Everything else in `[context_engine.hooks]`: `hook_schemas`, whose values
+   * are nested JSON Schema tables no row can hold, and any key a later release
+   * adds. Re-emitted verbatim.
+   */
+  preserved?: TomlTable;
+}
+
 // Numeric inputs are stored as raw strings so empty fields stay empty
 // (instead of becoming 0 and silently overriding kernel defaults).
 export interface ManifestFormState {
@@ -158,6 +263,107 @@ export interface ManifestFormState {
   };
   pinned_model: string;
   workspace: string;
+
+  /**
+   * `metadata` is `HashMap<String, serde_json::Value>` (agent.rs:1322) and
+   * carries no declared shape, so the editor is one row per key with the
+   * value's JSON type named by the operator rather than inferred from the
+   * text: `5` the number and `"5"` the string are different values and both
+   * are legal in the same table.
+   *
+   * Only scalars are rows. A value that is a table or an array has no scalar
+   * spelling, so it is carried through untouched instead of being rendered as
+   * a JSON box that would have to re-parse on every keystroke — see
+   * `metadata_preserved`. Declared inline as `Array<{` on purpose: the sweep
+   * in agentManifest.test.ts reads the declaration to catch a row collection
+   * that has no preservation entry, and a named type would hide this one.
+   */
+  metadata: Array<{ _uid: string; key: string; valueType: JsonRowType; value: string }>;
+  /**
+   * `[metadata]` entries whose value is a table or an array, kept verbatim.
+   * Optional and left out of `emptyManifestForm` on purpose, exactly like
+   * `model.router_override_preserved`: the sweep's meta-guard treats an
+   * object-valued form field as a table the form owns, and this is not one —
+   * it is a stash belonging to `metadata`.
+   */
+  metadata_preserved?: TomlTable;
+
+  /**
+   * `context_engine` is `Option<ContextEngineTomlConfig>`
+   * (crates/librefang-types/src/config/types.rs:4743) — the memory subsystem's
+   * own configuration, and the only place a plugin, a sidecar engine or a
+   * hook script is declared for one agent.
+   *
+   * Typed rather than free-form because the type is knowable: eight keys at
+   * the top, a `hooks` table of script paths and their runtime knobs, an
+   * optional sidecar and a list of plugin registries.
+   */
+  context_engine: {
+    /** `""` = absent, which the daemon reads as `"default"`. */
+    engine: string;
+    plugin: string;
+    plugin_stack: string[];
+    /**
+     * Comma-separated floats, positional against `plugin_stack`: entry N is
+     * the weight of the Nth plugin. Held as text because it is a list of
+     * numbers rather than a list of strings, and because `""` (the absent key)
+     * is not `[]`.
+     */
+    plugin_stack_weights: string;
+    /** The Rust default is `true`, so only `false` is worth writing. */
+    deduplicate_file_reads: boolean;
+    /**
+     * `null` is the absent key, which the daemon reads as its official
+     * registry; `[]` is a declared empty list, which switches plugin browsing
+     * off. The `Vec` has a non-empty Rust default, so the two differ.
+     */
+    plugin_registries: PluginRegistryRow[] | null;
+    /**
+     * `sidecar` is `Option<ContextEngineSidecarConfig>`. A command with the
+     * switch off is a half-filled row and writes nothing: an `[sidecar]` the
+     * operator did not ask for would make the daemon delegate to it.
+     */
+    sidecar_enabled: boolean;
+    sidecar: {
+      command: string;
+      args: string[];
+      /** `""` inherits the Rust default (30s). */
+      request_timeout_secs: string;
+      /** Keys inside `[context_engine.sidecar]` the form has no widget for. */
+      preserved?: TomlTable;
+    };
+    hooks: ContextEngineHooksForm;
+    /** Keys inside `[context_engine]` the form has no widget for. */
+    preserved?: TomlTable;
+  };
+
+  /**
+   * Per-tool parameter overrides: `HashMap<String, ToolConfig>`, where
+   * `ToolConfig { params: HashMap<String, serde_json::Value> }`
+   * (crates/librefang-types/src/agent.rs:1072). Distinct from
+   * `capabilities.tools`, which lists the tools an agent may call; this table
+   * configures one that is already available.
+   *
+   * `params` is a named type rather than an inline `Array<{`: the row sweep in
+   * agentManifest.test.ts matches `(\w+): Array<{` against this file, and an
+   * inline declaration here would be read as a top-level manifest table named
+   * `params`, which does not exist. The nested level is exercised by the
+   * `tools` entry in that sweep.
+   */
+  tools: Array<{
+    _uid: string;
+    name: string;
+    params: JsonRow[];
+    /** Keys inside `[tools.<name>]` the form has no widget for. */
+    preserved?: TomlTable;
+    /**
+     * Entries of `[tools.<name>.params]` whose value is a table or an array.
+     * They keep their own slot rather than sharing `preserved`, because TOML
+     * will not let a `[tools.<name>.params]` header extend a table that a
+     * dotted `params.foo = …` key already defined.
+     */
+    params_preserved?: TomlTable;
+  }>;
 
   schedule:
     | { mode: "reactive" }
@@ -322,10 +528,43 @@ export interface ManifestFormState {
         preserved?: TomlTable;
       };
 
-  // Only the shorthand string variants are exposed here. Full ExecPolicy
-  // tables (`[exec_policy]` with mode/safe_bins/timeout_secs/…) stay in
-  // extras so they're preserved without complicating the form.
-  exec_policy_shorthand: "" | "allow" | "deny" | "full" | "allowlist";
+  /**
+   * `exec_policy` is `Option<ExecPolicy>` and `exec_policy_lenient`
+   * (crates/librefang-types/src/serde_compat.rs:244) reads a shorthand string
+   * as well as the table. Both spellings live here, because they are two ways
+   * of writing one policy: `mode` is the whole of the shorthand, and the other
+   * eight fields are the rest of the table.
+   *
+   * `mode` is `""` when the key is absent, which is not the same as any mode:
+   * `ExecPolicy::default()` supplies `allowlist` for the table form, and an
+   * absent key lets the kernel decide (`Kernel::spawn` promotes a standalone
+   * agent whose tools include `shell_exec` and which declares no policy).
+   */
+  exec_policy: {
+    /** `""` = no `mode` key, otherwise a serialised `ExecSecurityMode`. */
+    mode: "" | "deny" | "allowlist" | "full";
+    /**
+     * `null` is the absent key — the daemon then applies its built-in list of
+     * safe binaries — while `[]` is a declared empty list, which denies every
+     * bypass. The `Vec` has a non-empty Rust default, so the two are different
+     * statements and collapsing them would re-arm a bypass the operator had
+     * switched off.
+     */
+    safe_bins: string[] | null;
+    safe_bins_skip_approval: boolean;
+    /** The Rust default is `true` (`default_full_mode_skips_approval`). */
+    full_mode_skips_approval: boolean;
+    allowed_commands: string[];
+    allowed_env_vars: string[];
+    /** `""` inherits the Rust default (30s); otherwise a whole number. */
+    timeout_secs: string;
+    /** `""` inherits the Rust default (100 KiB). */
+    max_output_bytes: string;
+    /** `""` inherits the Rust default (30s). */
+    no_output_timeout_secs: string;
+    /** Keys inside the table the form has no widget for. */
+    preserved?: TomlTable;
+  };
 
   skills: string[];
   mcp_servers: string[];
@@ -433,6 +672,87 @@ export const emptyManifestExtras = (): ManifestExtras => ({
  * is not caught by any test unless a test was written for that field — which
  * is why the rule is to read, not to reason.
  */
+/**
+ * A policy with every key absent — the state an agent that never configured
+ * one is in, and the only one the serializer writes nothing from.
+ *
+ * Every value here is the *absent* marker (`""` or `null`), never the Rust
+ * default spelled out: `ExecPolicy` has defaults on both sides of `true`
+ * (`full_mode_skips_approval` is `true`, `safe_bins_skip_approval` is
+ * `false`), and a form that materialised them would write a decision the
+ * operator never made.
+ */
+const emptyExecPolicy = (): ManifestFormState["exec_policy"] => ({
+  mode: "",
+  safe_bins: null,
+  safe_bins_skip_approval: false,
+  full_mode_skips_approval: true,
+  allowed_commands: [],
+  allowed_env_vars: [],
+  timeout_secs: "",
+  max_output_bytes: "",
+  no_output_timeout_secs: "",
+});
+
+/**
+ * `[context_engine.hooks]` with every key absent.
+ *
+ * The two values that are not `""` are the ones with a Rust default this form
+ * agrees with: `on_hook_failure` is `warn` and can only be a member of its
+ * enum, so holding it as `""` would be a fourth state the daemon has no name
+ * for.
+ */
+const emptyContextEngineHooks = (): ContextEngineHooksForm => ({
+  ingest: "",
+  after_turn: "",
+  bootstrap: "",
+  assemble: "",
+  compact: "",
+  transform_tool_result: "",
+  prepare_subagent: "",
+  merge_subagent: "",
+  on_event: "",
+  runtime: "",
+  hook_timeout_secs: "",
+  max_retries: "",
+  retry_delay_ms: "",
+  max_memory_mb: "",
+  after_turn_queue_depth: "",
+  priority: "",
+  on_hook_failure: "warn",
+  hook_protocol_version: "",
+  circuit_enabled: false,
+  circuit_max_failures: "",
+  circuit_reset_secs: "",
+  ingest_filter: "",
+  ingest_regex: "",
+  only_for_agent_ids: [],
+  hook_cache_ttl_secs: "",
+  assemble_cache_ttl_secs: "",
+  compact_cache_ttl_secs: "",
+  enable_shared_state: false,
+  persistent_subprocess: false,
+  prewarm_subprocesses: false,
+  allow_filesystem: false,
+  allow_network: false,
+  allowed_secrets: [],
+  otel_endpoint: "",
+  env_schema: [],
+});
+
+/** `[context_engine]` with every key absent — the Rust defaults apply. */
+const emptyContextEngine = (): ManifestFormState["context_engine"] => ({
+  engine: "",
+  plugin: "",
+  plugin_stack: [],
+  plugin_stack_weights: "",
+  deduplicate_file_reads: true,
+  plugin_registries: null,
+  sidecar_enabled: false,
+  sidecar: { command: "", args: [], request_timeout_secs: "" },
+  hooks: emptyContextEngineHooks(),
+});
+
 export const emptyManifestForm = (): ManifestFormState => ({
   name: "",
   description: "",
@@ -596,7 +916,10 @@ export const emptyManifestForm = (): ManifestFormState => ({
   },
   context_injection: [],
   response_format: { mode: "text" },
-  exec_policy_shorthand: "",
+  exec_policy: emptyExecPolicy(),
+  context_engine: emptyContextEngine(),
+  metadata: [],
+  tools: [],
   skills: [],
   mcp_servers: [],
   tags: [],
@@ -714,6 +1037,9 @@ export const FORM_TOP_LEVEL_KEYS = new Set([
   "response_format",
   "exec_policy",
   "workspaces",
+  "metadata",
+  "tools",
+  "context_engine",
 ]);
 const FORM_MODEL_KEYS = new Set([
   "provider",
@@ -846,6 +1172,113 @@ const FORM_AUTONOMOUS_KEYS = new Set([
   "heartbeat_channel",
   "quiet_hours",
 ]);
+/**
+ * The members of a `[tools.<name>]` entry the form renders. `ToolConfig`
+ * declares exactly one field today, so the set is what tells the separate
+ * `params` table apart from a key the form would otherwise have to preserve.
+ */
+const FORM_TOOL_CONFIG_KEYS = new Set(["params"]);
+
+/**
+ * The members of `[exec_policy]` the form renders. Anything else in the table
+ * is a key the form has no widget for, and rides in `preserved`.
+ */
+const FORM_EXEC_POLICY_KEYS = new Set([
+  "mode",
+  "safe_bins",
+  "safe_bins_skip_approval",
+  "full_mode_skips_approval",
+  "allowed_commands",
+  "allowed_env_vars",
+  "timeout_secs",
+  "max_output_bytes",
+  "no_output_timeout_secs",
+]);
+
+/** `ExecSecurityMode`'s `#[serde(rename_all = "lowercase")]` spellings. */
+const EXEC_SECURITY_MODES = ["deny", "allowlist", "full"] as const;
+
+/**
+ * The members of `[context_engine]` the form renders. Anything else in the
+ * table rides in `preserved`.
+ */
+const FORM_CONTEXT_ENGINE_KEYS = new Set([
+  "engine",
+  "plugin",
+  "plugin_stack",
+  "plugin_stack_weights",
+  "hooks",
+  "plugin_registries",
+  "deduplicate_file_reads",
+  "sidecar",
+]);
+
+const FORM_CONTEXT_ENGINE_SIDECAR_KEYS = new Set([
+  "command",
+  "args",
+  "request_timeout_secs",
+]);
+
+/**
+ * Every member of `[context_engine.hooks]` the form renders — all thirty-three
+ * of them but `hook_schemas`, whose values are nested JSON Schema tables no
+ * row can hold and which therefore rides in the hooks `preserved` slot.
+ */
+const FORM_CONTEXT_ENGINE_HOOK_KEYS = new Set([
+  ...["ingest", "after_turn", "bootstrap", "assemble", "compact"],
+  ...["transform_tool_result", "prepare_subagent", "merge_subagent", "on_event"],
+  ...["runtime", "hook_timeout_secs", "on_hook_failure", "max_retries", "retry_delay_ms"],
+  ...["ingest_filter", "hook_protocol_version", "max_memory_mb", "allow_network"],
+  ...["only_for_agent_ids", "hook_cache_ttl_secs", "persistent_subprocess"],
+  ...["assemble_cache_ttl_secs", "compact_cache_ttl_secs", "priority", "ingest_regex"],
+  ...["env_schema", "enable_shared_state", "circuit_breaker", "after_turn_queue_depth"],
+  ...["prewarm_subprocesses", "allow_filesystem", "otel_endpoint", "allowed_secrets"],
+]);
+
+/** The nine script paths `[context_engine.hooks]` declares. */
+const CONTEXT_ENGINE_HOOK_SCRIPTS = [
+  "ingest",
+  "after_turn",
+  "bootstrap",
+  "assemble",
+  "compact",
+  "transform_tool_result",
+  "prepare_subagent",
+  "merge_subagent",
+  "on_event",
+] as const;
+
+/** The hook knobs whose Rust type is a whole number. */
+type ContextEngineHookCount =
+  | "hook_timeout_secs"
+  | "max_retries"
+  | "retry_delay_ms"
+  | "max_memory_mb"
+  | "after_turn_queue_depth"
+  | "hook_protocol_version"
+  | "hook_cache_ttl_secs"
+  | "assemble_cache_ttl_secs"
+  | "compact_cache_ttl_secs";
+
+const CONTEXT_ENGINE_HOOK_COUNTS: readonly ContextEngineHookCount[] = [
+  "hook_timeout_secs",
+  "max_retries",
+  "retry_delay_ms",
+  "max_memory_mb",
+  "after_turn_queue_depth",
+  "hook_protocol_version",
+  "hook_cache_ttl_secs",
+  "assemble_cache_ttl_secs",
+  "compact_cache_ttl_secs",
+];
+
+/** The members of that list whose Rust type is `u32` rather than `u64`. */
+const CONTEXT_ENGINE_HOOK_U32: readonly ContextEngineHookCount[] = [
+  "max_retries",
+  "after_turn_queue_depth",
+  "hook_protocol_version",
+];
+
 const FORM_ROUTING_KEYS = new Set([
   "simple_model",
   "medium_model",
@@ -889,7 +1322,6 @@ const ROUTER_OVERRIDE_KEYS = new Set([
 const CONTEXT_INJECTION_KEYS = new Set(["name", "content", "position", "condition"]);
 /** The members of a [workspaces] path-form row the form renders. */
 const WORKSPACE_ROW_KEYS = new Set(["path", "mode"]);
-const EXEC_SHORTHANDS = ["allow", "deny", "full", "allowlist"] as const;
 // These three mirror `rename_all` on the Rust enums, not the variant names:
 // `ToolProfile` and `OrphanPolicy` are `snake_case`, `BackendKind` is
 // `lowercase`. The form has to speak the serialised form because that is what
@@ -1071,6 +1503,45 @@ const parseSignedFloat = (raw: string): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
+/**
+ * A signed TOML integer, for the fields whose Rust type is `i32`.
+ *
+ * `parseInteger` refuses negatives because every other count in this form is
+ * unsigned; `hooks.priority` is not — a lower priority runs later — and
+ * routing it through the unsigned parser would silently drop any negative the
+ * operator typed.
+ */
+const parseSignedInteger = (raw: string): string | null => {
+  const trimmed = raw.trim();
+  if (!/^[+-]?\d+$/.test(trimmed)) return null;
+  // Handed back from its own digits: an `i32` cannot overflow a TOML integer,
+  // and going through `Number` would round one that is already exact.
+  return trimmed.startsWith("+") ? trimmed.slice(1) : trimmed;
+};
+
+/** Whether `raw` is blank or a signed whole number. */
+const isBlankOrSignedInteger = (raw: string): boolean =>
+  raw.trim() === "" || parseSignedInteger(raw) !== null;
+
+/**
+ * `plugin_stack_weights` as the form holds it: comma- or space-separated
+ * floats, positional against `plugin_stack`.
+ *
+ * `null` when the text is not a list of finite numbers, so the caller writes
+ * nothing rather than a `[abc]` the daemon cannot read back.
+ */
+const parseWeightList = (raw: string): number[] | null => {
+  const tokens = raw.split(/[,\s]+/).filter(Boolean);
+  if (!tokens.length) return null;
+  const weights: number[] = [];
+  for (const token of tokens) {
+    const value = Number(token);
+    if (!Number.isFinite(value)) return null;
+    weights.push(value);
+  }
+  return weights;
+};
+
 const parseFloatish = (raw: string): number | null => {
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -1236,9 +1707,11 @@ export const serializeManifestForm = (
   const scheduleLine = renderSchedule(form.schedule, extras.schedule);
   if (scheduleLine) lines.push(scheduleLine);
 
-  if (form.exec_policy_shorthand) {
-    writeStringScalar(lines, "exec_policy", form.exec_policy_shorthand);
-  }
+  // The shorthand spelling, when the state is exactly one mode. The table
+  // spelling is a header, so it is emitted with the other table blocks below:
+  // a header here would scope every bare top-level key that follows it.
+  const execPolicyShorthand = renderExecPolicyShorthand(form.exec_policy);
+  if (execPolicyShorthand) lines.push(execPolicyShorthand);
 
   // response_format — only emit if non-default.
   const responseFormatLine = renderResponseFormat(form.response_format);
@@ -1247,13 +1720,11 @@ export const serializeManifestForm = (
   // Top-level extras — split scalars (BEFORE table headers) and tables (AFTER).
   // Drop any key the form is about to emit itself, otherwise we'd produce
   // a duplicate key that smol-toml (and the kernel) rejects:
-  //   - exec_policy: form emits the shorthand, extras may carry the full table
   //   - response_format: form emits text/json/json_schema, extras may carry
   //     an unmappable `type = "future_format"` table that survived parse
+  //     (`exec_policy` needed the same filter while its table was preserved in
+  //     extras; the form owns both spellings now, so it never reaches here)
   let filteredTopExtras = extras.topLevel;
-  if (form.exec_policy_shorthand) {
-    filteredTopExtras = omitKey(filteredTopExtras, "exec_policy");
-  }
   if (form.response_format.mode !== "text") {
     filteredTopExtras = omitKey(filteredTopExtras, "response_format");
   }
@@ -1351,6 +1822,56 @@ export const serializeManifestForm = (
     }
     if (wsBody.length) lines.push("", "[workspaces]", ...wsBody);
   }
+
+  // [metadata] — a table header too, so it is emitted here rather than in the
+  // scalar block above.
+  {
+    const metadataBody = renderJsonRowLines(form.metadata);
+    // The guard covers the preserved half as well as the rows. A table whose
+    // only content is a nested value has no row to emit, so without this the
+    // block would be dropped whole, preserved entries included — the
+    // `[rl_export]` bug in miniature.
+    for (const [key, value] of Object.entries(form.metadata_preserved ?? {})) {
+      if (value === null || value === undefined) continue;
+      metadataBody.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+    }
+    if (metadataBody.length) lines.push("", "[metadata]", ...metadataBody);
+  }
+
+  // [tools.<name>] and its [tools.<name>.params] sub-table. Both headers, so
+  // they belong here with the other table blocks rather than in the scalar
+  // run above.
+  for (const entry of form.tools) {
+    const name = entry.name.trim();
+    // The name is the key. An override that has no name has no address, so it
+    // is dropped the way a blank metadata row is — validation is what tells
+    // the operator that a half-filled one will not be written.
+    if (!name) continue;
+
+    const head: string[] = [];
+    for (const [key, value] of Object.entries(entry.preserved ?? {})) {
+      if (value === null || value === undefined) continue;
+      head.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+    }
+    const paramLines = renderJsonRowLines(entry.params);
+    for (const [key, value] of Object.entries(entry.params_preserved ?? {})) {
+      if (value === null || value === undefined) continue;
+      paramLines.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+    }
+    if (!head.length && !paramLines.length) continue;
+
+    const quoted = tomlBareKeyOrQuoted(name);
+    lines.push("", `[tools.${quoted}]`, ...head);
+    if (paramLines.length) {
+      lines.push(`[tools.${quoted}.params]`, ...paramLines);
+    }
+  }
+
+  // [exec_policy] — the table spelling, when the state calls for it.
+  lines.push(...renderExecPolicyTable(form.exec_policy));
+
+  // [context_engine] and its sub-tables, in one block set.
+  lines.push(...renderContextEngine(form.context_engine));
 
   // [model]
   const modelBody: string[] = [];
@@ -1793,6 +2314,220 @@ const renderSchedule = (
   return `schedule = { ${s.mode} = { ${inner.join(", ")} } }`;
 };
 
+/**
+ * The `[exec_policy]` body: every key the form writes, in file order.
+ *
+ * Each field is written only when it differs from the Rust default, so a policy
+ * the operator opened and did not touch produces no table at all — and a
+ * shorthand that parsed into a single mode stays a single mode.
+ */
+const execPolicyBody = (p: ManifestFormState["exec_policy"]): string[] => {
+  const body: string[] = [];
+  if (p.mode) writeStringScalar(body, "mode", p.mode);
+  // `null` is the absent key, which the daemon reads as its built-in safe
+  // list; `[]` is a declared empty list and has to be written as one.
+  if (p.safe_bins !== null) body.push(`safe_bins = ${tomlArray(p.safe_bins)}`);
+  // `false` is the Rust default, so `true` is the value worth writing.
+  if (p.safe_bins_skip_approval) writeBoolScalar(body, "safe_bins_skip_approval", true);
+  // `true` is the Rust default, so `false` is the value worth writing.
+  if (!p.full_mode_skips_approval) writeBoolScalar(body, "full_mode_skips_approval", false);
+  if (p.allowed_commands.length) {
+    body.push(`allowed_commands = ${tomlArray(p.allowed_commands)}`);
+  }
+  if (p.allowed_env_vars.length) {
+    body.push(`allowed_env_vars = ${tomlArray(p.allowed_env_vars)}`);
+  }
+  if (p.timeout_secs.trim()) {
+    writeNumberScalar(body, "timeout_secs", parseInteger(p.timeout_secs));
+  }
+  if (p.max_output_bytes.trim()) {
+    writeNumberScalar(body, "max_output_bytes", parseInteger(p.max_output_bytes));
+  }
+  if (p.no_output_timeout_secs.trim()) {
+    writeNumberScalar(body, "no_output_timeout_secs", parseInteger(p.no_output_timeout_secs));
+  }
+  // The un-widgeted keys of the table, rendered inline. A `[exec_policy.<key>]`
+  // header after this table would be legal TOML, but `jsonValueToInlineToml` is
+  // what the other preserved stashes use and one renderer for one job is the
+  // reason they can be compared.
+  for (const [key, value] of Object.entries(p.preserved ?? {})) {
+    if (value === null || value === undefined) continue;
+    body.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+  }
+  return body;
+};
+
+/**
+ * The shorthand spelling: `exec_policy = "deny"`.
+ *
+ * A policy that is one mode is what the shorthand exists for, and it is what
+ * such a policy already looks like on disk — writing the table instead would
+ * grow a one-word line into nine keys the first time anyone opened the editor
+ * and pressed save.
+ *
+ * `null` when the state needs the table instead: a knob away from its default,
+ * or a preserved key, has nowhere to live inside a string.
+ */
+const renderExecPolicyShorthand = (
+  p: ManifestFormState["exec_policy"],
+): string | null => {
+  const body = execPolicyBody(p);
+  return p.mode && body.length === 1 ? `exec_policy = ${escapeTomlString(p.mode)}` : null;
+};
+
+/**
+ * `[context_engine.hooks]` and its `circuit_breaker` sub-table.
+ *
+ * Returns header-bearing blocks, so it is emitted with the other tables rather
+ * than inlined into the parent's body: a header inside a table's key run
+ * re-anchors TOML scoping for everything after it.
+ */
+const renderContextEngineHooks = (h: ContextEngineHooksForm): string[] => {
+  const body: string[] = [];
+  for (const key of CONTEXT_ENGINE_HOOK_SCRIPTS) writeStringScalar(body, key, h[key].trim());
+  // `runtime` is a `String` on the Rust side, so it is written as given.
+  writeStringScalar(body, "runtime", h.runtime.trim());
+  for (const key of CONTEXT_ENGINE_HOOK_COUNTS) {
+    if (h[key].trim()) writeNumberScalar(body, key, parseInteger(h[key]));
+  }
+  if (h.priority.trim()) {
+    writeIntegerScalar(body, "priority", parseSignedInteger(h.priority));
+  }
+  // `warn` is the Rust default, so only the other two are worth writing.
+  if (h.on_hook_failure !== "warn") {
+    writeStringScalar(body, "on_hook_failure", h.on_hook_failure);
+  }
+  writeStringScalar(body, "ingest_filter", h.ingest_filter.trim());
+  writeStringScalar(body, "ingest_regex", h.ingest_regex.trim());
+  if (h.only_for_agent_ids.length) {
+    body.push(`only_for_agent_ids = ${tomlArray(h.only_for_agent_ids)}`);
+  }
+  // Every one of these defaults to `false` in Rust, so `true` is the value
+  // worth writing and an untouched flag writes nothing.
+  if (h.enable_shared_state) writeBoolScalar(body, "enable_shared_state", true);
+  if (h.persistent_subprocess) writeBoolScalar(body, "persistent_subprocess", true);
+  if (h.prewarm_subprocesses) writeBoolScalar(body, "prewarm_subprocesses", true);
+  if (h.allow_filesystem) writeBoolScalar(body, "allow_filesystem", true);
+  if (h.allow_network) writeBoolScalar(body, "allow_network", true);
+  if (h.allowed_secrets.length) body.push(`allowed_secrets = ${tomlArray(h.allowed_secrets)}`);
+  writeStringScalar(body, "otel_endpoint", h.otel_endpoint.trim());
+  for (const [key, value] of Object.entries(h.preserved ?? {})) {
+    if (value === null || value === undefined) continue;
+    body.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+  }
+  // `env_schema` is a table of its own — `HashMap<String, String>` — so its
+  // rows are a sub-table rather than bare keys of `[context_engine.hooks]`.
+  // A key such as `!QDRANT_URL` is quoted by `tomlBareKeyOrQuoted`, which is
+  // what keeps the documented spelling readable.
+  const envRows = renderJsonRowLines(h.env_schema);
+
+  const circuit: string[] = [];
+  if (h.circuit_enabled) {
+    if (h.circuit_max_failures.trim()) {
+      writeNumberScalar(circuit, "max_failures", parseInteger(h.circuit_max_failures));
+    }
+    if (h.circuit_reset_secs.trim()) {
+      writeNumberScalar(circuit, "reset_secs", parseInteger(h.circuit_reset_secs));
+    }
+  }
+
+  const blocks: string[] = [];
+  if (body.length || envRows.length || circuit.length) {
+    blocks.push("", "[context_engine.hooks]", ...body);
+    if (envRows.length) blocks.push("", "[context_engine.hooks.env_schema]", ...envRows);
+    if (circuit.length) {
+      blocks.push("", "[context_engine.hooks.circuit_breaker]", ...circuit);
+    }
+  }
+  return blocks;
+};
+
+/** `[context_engine.sidecar]`, when the switch is on and a command is set. */
+const renderContextEngineSidecar = (
+  sidecar: ManifestFormState["context_engine"]["sidecar"],
+): string[] => {
+  const body: string[] = [];
+  writeStringScalar(body, "command", sidecar.command.trim());
+  if (sidecar.args.length) body.push(`args = ${tomlArray(sidecar.args)}`);
+  if (sidecar.request_timeout_secs.trim()) {
+    writeNumberScalar(
+      body,
+      "request_timeout_secs",
+      parseInteger(sidecar.request_timeout_secs),
+    );
+  }
+  for (const [key, value] of Object.entries(sidecar.preserved ?? {})) {
+    if (value === null || value === undefined) continue;
+    body.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+  }
+  return body;
+};
+
+/**
+ * `[context_engine]` — the whole subsystem, in one block set.
+ *
+ * Nothing is written while every key is absent, so an agent that never
+ * configured a context engine keeps its manifest exactly as it was: the Rust
+ * side is `Option<ContextEngineTomlConfig>` and an empty table would be a
+ * configured engine that configures nothing.
+ */
+const renderContextEngine = (ce: ManifestFormState["context_engine"]): string[] => {
+  const body: string[] = [];
+  writeStringScalar(body, "engine", ce.engine.trim());
+  writeStringScalar(body, "plugin", ce.plugin.trim());
+  if (ce.plugin_stack.length) body.push(`plugin_stack = ${tomlArray(ce.plugin_stack)}`);
+  const weights = parseWeightList(ce.plugin_stack_weights);
+  if (weights) body.push(`plugin_stack_weights = [${weights.join(", ")}]`);
+  // The Rust default is `true`, so `false` is the value worth writing.
+  if (!ce.deduplicate_file_reads) writeBoolScalar(body, "deduplicate_file_reads", false);
+  // `[]` is the declared-empty statement and is a plain key; a non-empty list
+  // is an array of tables, which needs its own header and so is collected
+  // separately.
+  const registries: string[] = [];
+  if (ce.plugin_registries !== null) {
+    if (ce.plugin_registries.length === 0) {
+      body.push("plugin_registries = []");
+    } else {
+      for (const row of ce.plugin_registries) {
+        const name = row.name.trim();
+        const repo = row.github_repo.trim();
+        // A freshly added row is blank, not an entry: an unnamed registry has
+        // nothing to resolve, and an empty one would make the daemon fetch
+        // nothing on every browse.
+        if (!name && !repo) continue;
+        registries.push(
+          "",
+          "[[context_engine.plugin_registries]]",
+          `name = ${escapeTomlString(name)}`,
+          `github_repo = ${escapeTomlString(repo)}`,
+        );
+      }
+    }
+  }
+  for (const [key, value] of Object.entries(ce.preserved ?? {})) {
+    if (value === null || value === undefined) continue;
+    body.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+  }
+
+  const hooks = renderContextEngineHooks(ce.hooks);
+  const sidecar = ce.sidecar_enabled ? renderContextEngineSidecar(ce.sidecar) : [];
+  if (!body.length && !registries.length && !hooks.length && !sidecar.length) return [];
+
+  const blocks: string[] = ["", "[context_engine]", ...body, ...registries];
+  if (sidecar.length) blocks.push("", "[context_engine.sidecar]", ...sidecar);
+  blocks.push(...hooks);
+  return blocks;
+};
+
+/** The table spelling: `[exec_policy]` and its body. */
+const renderExecPolicyTable = (p: ManifestFormState["exec_policy"]): string[] => {
+  const body = execPolicyBody(p);
+  if (!body.length) return [];
+  // Written as the shorthand instead; one `exec_policy` in the output.
+  if (p.mode && body.length === 1) return [];
+  return ["", "[exec_policy]", ...body];
+};
+
 const renderResponseFormat = (rf: ManifestFormState["response_format"]): string => {
   if (rf.mode === "text") return "";
   // Keys the form does not render merge back into the single inline table
@@ -1850,9 +2585,96 @@ const jsonValueToInlineToml = (value: unknown): string => {
 const tomlBareKeyOrQuoted = (key: string): string =>
   /^[A-Za-z0-9_-]+$/.test(key) ? key : escapeTomlString(key);
 
+/**
+ * A preserved value rendered the way the file holds it, for read-only display.
+ *
+ * Exported for the editor: a value the form does not edit still has to be
+ * visible, because "preserved" and "dropped" look identical to an operator who
+ * cannot see it.
+ */
+export const formatPreservedValue = (value: unknown): string =>
+  jsonValueToInlineToml(value);
+
 const stringifyExtras = (extras: TomlTable): string => {
   if (Object.keys(extras).length === 0) return "";
   return stringify(extras);
+};
+
+/**
+ * A TOML integer or float literal, matched so the row's own text can be
+ * emitted verbatim.
+ *
+ * Deliberately not parse-and-reprint: smol-toml hands integers past 2^53 back
+ * as BigInt, and `String(Number(raw))` would round one the operator typed —
+ * the same corruption `jsonValueToInlineToml` avoids for the preserved
+ * stashes. `inf` and `nan` are valid TOML but not JSON, and the field these
+ * rows hold is a `serde_json::Value`, so neither is reachable here.
+ */
+const TOML_NUMBER_LITERAL = /^[+-]?\d+(\.\d+)?([eE][+-]?\d+)?$/;
+
+/** Whether `raw` is a number literal a `serde_json::Value` row can hold. */
+const isTomlNumberLiteral = (raw: string): boolean => TOML_NUMBER_LITERAL.test(raw);
+
+/**
+ * A parsed TOML value as a row, or `null` when it has no scalar spelling.
+ *
+ * `null` is the signal for the caller to preserve the value verbatim: an
+ * array or a table cannot be written by a text box, and flattening one into
+ * JSON text would make the form re-parse on every keystroke.
+ */
+const jsonRowFromValue = (uid: string, key: string, value: unknown): JsonRow | null => {
+  if (typeof value === "string") return { _uid: uid, key, valueType: "string", value };
+  if (typeof value === "boolean") {
+    return { _uid: uid, key, valueType: "boolean", value: String(value) };
+  }
+  // Before the `number` arm: a big integer arrives as BigInt, and its digits
+  // are the value.
+  if (typeof value === "bigint") {
+    return { _uid: uid, key, valueType: "number", value: value.toString() };
+  }
+  if (typeof value === "number") {
+    return { _uid: uid, key, valueType: "number", value: String(value) };
+  }
+  return null;
+};
+
+/**
+ * The `key = value` lines of a JSON-valued table, with blank rows dropped.
+ *
+ * Shared by `[metadata]` and `[tools.<name>.params]`: both are
+ * `HashMap<String, serde_json::Value>`, so both need the same arms and the
+ * same refusal to guess a type from the text.
+ */
+const renderJsonRowLines = (rows: readonly JsonRow[]): string[] => {
+  const lines: string[] = [];
+  for (const row of rows) {
+    const key = row.key.trim();
+    // A freshly added row is blank, not an error: the serializer drops it the
+    // same way it drops a half-filled shared folder.
+    if (!key) continue;
+    const rendered = renderJsonRowValue(row);
+    if (rendered === null) continue;
+    lines.push(`${tomlBareKeyOrQuoted(key)} = ${rendered}`);
+  }
+  return lines;
+};
+
+const renderJsonRowValue = (row: JsonRow): string | null => {
+  switch (row.valueType) {
+    case "string":
+      return escapeTomlString(row.value);
+    case "boolean":
+      return row.value === "true" ? "true" : "false";
+    case "number": {
+      const raw = row.value.trim();
+      return isTomlNumberLiteral(raw) ? raw : null;
+    }
+    // Total on purpose. A `valueType` this build does not know is a row the
+    // serializer cannot honestly write, and falling through to `undefined`
+    // would put the string `undefined` in the file.
+    default:
+      return null;
+  }
 };
 
 const renderExtraScalars = (extras: TomlTable): string[] => {
@@ -2087,6 +2909,103 @@ export const validateManifestForm = (
     if (max === undefined) continue;
     if (!isInRange(form.model[param], min, max)) errors.push(`model.${param}`);
   }
+  // Metadata rows. A blank row is dropped by the serializer, not an error —
+  // but a row with a key and a value the row's own type cannot hold is a
+  // half-filled row of the shared-folder kind: the serializer would drop it
+  // and the operator would believe a metadata key had been set.
+  for (const row of form.metadata) {
+    if (!row.key.trim()) continue;
+    if (row.valueType === "number" && !isTomlNumberLiteral(row.value.trim())) {
+      errors.push(`metadata.${row._uid}.value`);
+    }
+  }
+
+  // The exec policy's three numeric fields. Each is a Rust u64 / usize, so an
+  // empty box inherits and anything else has to be a whole number: `-5` and
+  // `1.5` used to reach the TOML and come back as a 400 from the whole
+  // document, which is a failure the operator cannot trace to this field.
+  for (const field of [
+    "timeout_secs",
+    "max_output_bytes",
+    "no_output_timeout_secs",
+  ] as const) {
+    if (!isBlankOrUnsignedTomlInteger(form.exec_policy[field])) {
+      errors.push(`exec_policy.${field}`);
+    }
+  }
+
+  // `[context_engine]`. The weights are positional against `plugin_stack`, so
+  // a token that is not a number drops the whole list from the file without a
+  // word; the sidecar needs a command or the daemon has nothing to spawn.
+  if (parseWeightList(form.context_engine.plugin_stack_weights) === null &&
+      form.context_engine.plugin_stack_weights.trim() !== "") {
+    errors.push("context_engine.plugin_stack_weights");
+  }
+  if (form.context_engine.sidecar_enabled && !form.context_engine.sidecar.command.trim()) {
+    errors.push("context_engine.sidecar.command");
+  }
+  if (
+    form.context_engine.sidecar_enabled &&
+    form.context_engine.sidecar.request_timeout_secs.trim() !== "" &&
+    !isBlankOrUnsignedTomlInteger(form.context_engine.sidecar.request_timeout_secs)
+  ) {
+    errors.push("context_engine.sidecar.request_timeout_secs");
+  }
+  {
+    const hooks = form.context_engine.hooks;
+    for (const field of CONTEXT_ENGINE_HOOK_COUNTS) {
+      const valid = CONTEXT_ENGINE_HOOK_U32.includes(field)
+        ? isBlankOrU32TomlInteger(hooks[field])
+        : isBlankOrUnsignedTomlInteger(hooks[field]);
+      if (!valid) errors.push(`context_engine.hooks.${field}`);
+    }
+    if (!isBlankOrSignedInteger(hooks.priority)) {
+      errors.push("context_engine.hooks.priority");
+    }
+    // The circuit breaker's two knobs are `u32` and `u64` and are only written
+    // while the switch is on — but a bad value typed before switching it on
+    // must not sail through to a save that then drops it.
+    if (!isBlankOrU32TomlInteger(hooks.circuit_max_failures)) {
+      errors.push("context_engine.hooks.circuit_max_failures");
+    }
+    if (!isBlankOrUnsignedTomlInteger(hooks.circuit_reset_secs)) {
+      errors.push("context_engine.hooks.circuit_reset_secs");
+    }
+    for (const row of hooks.env_schema) {
+      if (!row.key.trim()) continue;
+      if (row.valueType === "number" && !isTomlNumberLiteral(row.value.trim())) {
+        errors.push(`context_engine.hooks.env_schema.${row._uid}.value`);
+      }
+    }
+  }
+
+  // Tool overrides. The tool name is the TOML key, so a duplicate is a
+  // duplicate key the daemon refuses to parse, and a half-filled override —
+  // params but no name — is dropped by the serializer, exactly like a
+  // half-filled shared folder. A wholly blank entry is not an error: it is a
+  // row the operator just added and has not typed into yet.
+  const seenToolNames = new Set<string>();
+  for (const entry of form.tools) {
+    const toolName = entry.name.trim();
+    if (!toolName) {
+      const filled =
+        entry.params.some((row) => row.key.trim()) ||
+        Object.keys(entry.preserved ?? {}).length > 0 ||
+        Object.keys(entry.params_preserved ?? {}).length > 0;
+      if (filled) errors.push(`tools.${entry._uid}.name`);
+      continue;
+    }
+    if (seenToolNames.has(toolName)) errors.push(`tools.${entry._uid}.name`);
+    seenToolNames.add(toolName);
+
+    for (const row of entry.params) {
+      if (!row.key.trim()) continue;
+      if (row.valueType === "number" && !isTomlNumberLiteral(row.value.trim())) {
+        errors.push(`tools.${entry._uid}.params.${row._uid}.value`);
+      }
+    }
+  }
+
   // Folder rows: duplicate names produce a duplicate TOML key (hard parse
   // failure on the daemon), and `path` mirrors the kernel's rule — relative
   // to workspaces_dir, no `..`. A mount row carries an absolute host path
@@ -2271,18 +3190,61 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
       }
     }
   }
-  form.exec_policy_shorthand = parseExecPolicyShorthand(parsed.exec_policy);
+  form.exec_policy = parseExecPolicy(parsed.exec_policy);
+  form.context_engine = parseContextEngine(parsed.context_engine, generateParsedUid);
   form.response_format = parseResponseFormatField(parsed.response_format);
 
-  // Extras for top-level: capture exec_policy only when it's a table
-  // (the form owns the shorthand string form).
+  // [metadata] — one row per key, in file order. A scalar becomes a typed row;
+  // a table or an array has no scalar spelling, so it is stashed and re-emitted
+  // verbatim rather than being flattened into text the form would re-parse.
+  if (isTomlTable(parsed.metadata)) {
+    const rows: ManifestFormState["metadata"] = [];
+    const preserved: TomlTable = {};
+    for (const [key, value] of Object.entries(parsed.metadata)) {
+      const row = jsonRowFromValue(generateParsedUid(), key, value);
+      if (row) rows.push(row);
+      else preserved[key] = value;
+    }
+    form.metadata = rows;
+    if (Object.keys(preserved).length) form.metadata_preserved = preserved;
+  }
+
+  // [tools] — one entry per tool, each carrying its own `params` table.
+  if (isTomlTable(parsed.tools)) {
+    const entries: ManifestFormState["tools"] = [];
+    for (const [name, rawConfig] of Object.entries(parsed.tools)) {
+      // `ToolConfig` is a struct, so a non-table value here is a manifest the
+      // daemon cannot load at all — there is no shape to preserve it as.
+      if (!isTomlTable(rawConfig)) continue;
+      const entry: ManifestFormState["tools"][number] = {
+        _uid: generateParsedUid(),
+        name,
+        params: [],
+      };
+      if (isTomlTable(rawConfig.params)) {
+        const paramsPreserved: TomlTable = {};
+        for (const [key, value] of Object.entries(rawConfig.params)) {
+          const row = jsonRowFromValue(generateParsedUid(), key, value);
+          if (row) entry.params.push(row);
+          else paramsPreserved[key] = value;
+        }
+        if (Object.keys(paramsPreserved).length) entry.params_preserved = paramsPreserved;
+      }
+      const preserved = stripKnown(rawConfig, FORM_TOOL_CONFIG_KEYS);
+      if (Object.keys(preserved).length) entry.preserved = preserved;
+      entries.push(entry);
+    }
+    form.tools = entries;
+  }
+
+
+  // Extras for top-level: everything the form does not claim by name. The form
+  // owns both spellings of `exec_policy` now, so neither reaches here.
   const topExtras: TomlTable = {};
   for (const [k, v] of Object.entries(parsed)) {
     if (FORM_TOP_LEVEL_KEYS.has(k)) continue;
     topExtras[k] = v;
   }
-  // exec_policy as a full table (not a shorthand string) is preserved in extras.
-  if (isTomlTable(parsed.exec_policy)) topExtras.exec_policy = parsed.exec_policy;
   // response_format the form cannot re-emit goes back into extras to avoid
   // silent loss. Mapped tables (`type = "json"` / `"json_schema"`) instead
   // stash their un-owned keys on the form state — parseResponseFormatField —
@@ -2603,12 +3565,16 @@ const parseScheduleField = (raw: unknown): ManifestFormState["schedule"] => {
   return { mode: "reactive" };
 };
 
-// exec_policy_lenient on the kernel side (serde_compat.rs) accepts
-// aliases for each canonical mode. The form's dropdown only knows the
-// canonical names, so normalize aliases at the parse boundary —
-// otherwise the alias spelling rounds-trips to an empty shorthand and
-// the user's intent (deny / allowlist / full) is silently lost.
-const EXEC_POLICY_ALIASES: Record<string, ManifestFormState["exec_policy_shorthand"]> = {
+// exec_policy_lenient on the kernel side (serde_compat.rs) accepts aliases for
+// each canonical mode. The form's dropdown only knows the canonical names, so
+// aliases are normalised at the parse boundary — otherwise the alias spelling
+// rounds-trips to "no policy at all" and the user's intent is silently lost.
+//
+// `allow` is in the list despite reading like the opposite of `deny`: it is
+// `ExecSecurityMode::Allowlist`'s own serde alias (`all`, `unrestricted` and
+// `restricted` are the others), not a fourth mode.
+const EXEC_POLICY_ALIASES: Record<string, ManifestFormState["exec_policy"]["mode"]> = {
+  allow: "allowlist",
   none: "deny",
   disabled: "deny",
   restricted: "allowlist",
@@ -2616,9 +3582,7 @@ const EXEC_POLICY_ALIASES: Record<string, ManifestFormState["exec_policy_shortha
   unrestricted: "full",
 };
 
-const parseExecPolicyShorthand = (
-  raw: unknown,
-): ManifestFormState["exec_policy_shorthand"] => {
+const normaliseExecMode = (raw: unknown): ManifestFormState["exec_policy"]["mode"] => {
   if (typeof raw !== "string") return "";
   // Lowercased first, because the kernel lowercases it: `exec_policy_lenient`
   // normalises through `to_lowercase()` before mapping
@@ -2630,10 +3594,129 @@ const parseExecPolicyShorthand = (
   // promoted to `Full` when none is present
   // (`kernel/spawn.rs:236-250`, `kernel/boot.rs:2690-2705`).
   const spelling = raw.toLowerCase();
-  if ((EXEC_SHORTHANDS as readonly string[]).includes(spelling)) {
-    return spelling as ManifestFormState["exec_policy_shorthand"];
+  if ((EXEC_SECURITY_MODES as readonly string[]).includes(spelling)) {
+    return spelling as ManifestFormState["exec_policy"]["mode"];
   }
   return EXEC_POLICY_ALIASES[spelling] ?? "";
+};
+
+/**
+ * `exec_policy` in both of its spellings, read into one state.
+ *
+ * The string form is `{ mode }` and nothing else — that is what
+ * `exec_policy_lenient` expands it to — so a shorthand parse leaves every
+ * other field absent rather than at its Rust default: writing those defaults
+ * out on the next save would turn a one-word policy into a nine-key table.
+ */
+/**
+ * `[context_engine]`, read as far as the form renders it and stashed beyond.
+ *
+ * The nesting is why this is one function rather than a field-by-field block
+ * in `parseManifestToml`: three levels of table (`context_engine`, its
+ * `hooks`, and `hooks.circuit_breaker`) each need their own preserved slot,
+ * because a `[context_engine.hooks]` header cannot extend a table the parent
+ * block already opened with a dotted key.
+ */
+const parseContextEngine = (
+  raw: unknown,
+  // The row ids have to come from the parse's own counter, so that a manifest
+  // read twice produces the same uids — the same reason the metadata and tool
+  // rows take theirs from there.
+  nextUid: () => string,
+): ManifestFormState["context_engine"] => {
+  const ce = emptyContextEngine();
+  if (!isTomlTable(raw)) return ce;
+
+  ce.engine = asString(raw.engine);
+  ce.plugin = asString(raw.plugin);
+  ce.plugin_stack = asStringArray(raw.plugin_stack);
+  ce.plugin_stack_weights = Array.isArray(raw.plugin_stack_weights)
+    ? raw.plugin_stack_weights
+        .filter((value): value is number => typeof value === "number")
+        .join(", ")
+    : "";
+  ce.deduplicate_file_reads = asBoolean(raw.deduplicate_file_reads, true);
+  if (Array.isArray(raw.plugin_registries)) {
+    ce.plugin_registries = raw.plugin_registries.filter(isTomlTable).map((row) => ({
+      _uid: nextUid(),
+      name: asString(row.name),
+      github_repo: asString(row.github_repo),
+    }));
+  }
+
+  if (isTomlTable(raw.sidecar)) {
+    // The key existing is what "the sidecar is on" means: the Rust field is an
+    // `Option`, so there is no boolean to read.
+    ce.sidecar_enabled = true;
+    ce.sidecar.command = asString(raw.sidecar.command);
+    ce.sidecar.args = asStringArray(raw.sidecar.args);
+    ce.sidecar.request_timeout_secs = asNumberString(raw.sidecar.request_timeout_secs);
+    const preserved = stripKnown(raw.sidecar, FORM_CONTEXT_ENGINE_SIDECAR_KEYS);
+    if (Object.keys(preserved).length) ce.sidecar.preserved = preserved;
+  }
+
+  if (isTomlTable(raw.hooks)) {
+    const source = raw.hooks;
+    const hooks = ce.hooks;
+    for (const key of CONTEXT_ENGINE_HOOK_SCRIPTS) hooks[key] = asString(source[key]);
+    for (const key of CONTEXT_ENGINE_HOOK_COUNTS) hooks[key] = asNumberString(source[key]);
+    hooks.runtime = asString(source.runtime);
+    hooks.priority = asNumberString(source.priority);
+    hooks.on_hook_failure = asEnum(source.on_hook_failure, HOOK_FAILURE_POLICIES, "warn");
+    if (isTomlTable(source.circuit_breaker)) {
+      hooks.circuit_enabled = true;
+      hooks.circuit_max_failures = asNumberString(source.circuit_breaker.max_failures);
+      hooks.circuit_reset_secs = asNumberString(source.circuit_breaker.reset_secs);
+    }
+    hooks.ingest_filter = asString(source.ingest_filter);
+    hooks.ingest_regex = asString(source.ingest_regex);
+    hooks.only_for_agent_ids = asStringArray(source.only_for_agent_ids);
+    hooks.enable_shared_state = asBoolean(source.enable_shared_state, false);
+    hooks.persistent_subprocess = asBoolean(source.persistent_subprocess, false);
+    hooks.prewarm_subprocesses = asBoolean(source.prewarm_subprocesses, false);
+    hooks.allow_filesystem = asBoolean(source.allow_filesystem, false);
+    hooks.allow_network = asBoolean(source.allow_network, false);
+    hooks.allowed_secrets = asStringArray(source.allowed_secrets);
+    hooks.otel_endpoint = asString(source.otel_endpoint);
+    if (isTomlTable(source.env_schema)) {
+      const rows: JsonRow[] = [];
+      for (const [key, value] of Object.entries(source.env_schema)) {
+        const row = jsonRowFromValue(nextUid(), key, value);
+        if (row) rows.push(row);
+      }
+      hooks.env_schema = rows;
+    }
+    // `hook_schemas` is deliberately not a rendered key, so it lands here.
+    const hooksPreserved = stripKnown(source, FORM_CONTEXT_ENGINE_HOOK_KEYS);
+    if (Object.keys(hooksPreserved).length) hooks.preserved = hooksPreserved;
+  }
+
+  const preserved = stripKnown(raw, FORM_CONTEXT_ENGINE_KEYS);
+  if (Object.keys(preserved).length) ce.preserved = preserved;
+  return ce;
+};
+
+const parseExecPolicy = (raw: unknown): ManifestFormState["exec_policy"] => {
+  const policy = emptyExecPolicy();
+  if (typeof raw === "string") {
+    policy.mode = normaliseExecMode(raw);
+    return policy;
+  }
+  if (!isTomlTable(raw)) return policy;
+
+  policy.mode = normaliseExecMode(raw.mode);
+  policy.safe_bins = Array.isArray(raw.safe_bins) ? asStringArray(raw.safe_bins) : null;
+  policy.safe_bins_skip_approval = asBoolean(raw.safe_bins_skip_approval, false);
+  policy.full_mode_skips_approval = asBoolean(raw.full_mode_skips_approval, true);
+  policy.allowed_commands = asStringArray(raw.allowed_commands);
+  policy.allowed_env_vars = asStringArray(raw.allowed_env_vars);
+  policy.timeout_secs = asNumberString(raw.timeout_secs);
+  policy.max_output_bytes = asNumberString(raw.max_output_bytes);
+  policy.no_output_timeout_secs = asNumberString(raw.no_output_timeout_secs);
+
+  const preserved = stripKnown(raw, FORM_EXEC_POLICY_KEYS);
+  if (Object.keys(preserved).length) policy.preserved = preserved;
+  return policy;
 };
 
 // The keys the form re-emits for each mapped mode. Everything else inside a

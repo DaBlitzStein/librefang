@@ -4,15 +4,20 @@ import { AlertTriangle, ChevronDown, Plus, RotateCcw, Trash2, X } from "lucide-r
 import {
   AUTO_ROUTE_STRATEGIES,
   CAPABILITY_ROUTING_KEYS,
+  CONTEXT_ENGINE_NAMES,
   DM_POLICIES,
   GROUP_POLICIES,
+  HOOK_FAILURE_POLICIES,
+  HOOK_RUNTIMES,
+  JSON_ROW_TYPES,
   OUTPUT_FORMATS,
   PREFIX_STYLES,
   TYPING_MODES,
   USAGE_FOOTERS,
+  formatPreservedValue,
   generateUid,
 } from "../lib/agentManifest";
-import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
+import type { JsonRowType, ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 
 /// The tri-state caption for a memory capability field (#7749 review):
 /// `null` is the omitted key (unrestricted), `[]` is the declared-empty deny.
@@ -74,6 +79,16 @@ import {
   CHANNEL_ROUTE_DIVERGENCE_LADDER,
   CHANNEL_ROUTE_TTL_LADDER,
   CHANNEL_THREAD_OWNERSHIP_TTL_LADDER,
+  EXEC_NO_OUTPUT_TIMEOUT_LADDER,
+  EXEC_OUTPUT_BYTES_LADDER,
+  EXEC_TIMEOUT_LADDER,
+  HOOK_CACHE_TTL_LADDER,
+  HOOK_CIRCUIT_FAILURES_LADDER,
+  HOOK_CIRCUIT_RESET_LADDER,
+  HOOK_MEMORY_MB_LADDER,
+  HOOK_PRIORITY_LADDER,
+  HOOK_QUEUE_DEPTH_LADDER,
+  HOOK_RETRIES_LADDER,
   AUTO_DREAM_MIN_HOURS_LADDER,
   AUTO_DREAM_MIN_SESSIONS_LADDER,
   COMPACTION_CHUNK_CHARS_LADDER,
@@ -258,10 +273,12 @@ interface AgentManifestFormProps {
  */
 export const MANIFEST_SECTION_IDS = [
   "identity",
+  "metadata",
   "model",
   "prompt",
   "limits",
   "capabilities",
+  "tools",
   "skills",
   "mcp_servers",
   "scheduling",
@@ -273,6 +290,7 @@ export const MANIFEST_SECTION_IDS = [
   "channel_overrides",
   "skill_workshop",
   "compaction",
+  "context_engine",
   "async_tasks",
   "routing",
   "context_injection",
@@ -300,6 +318,14 @@ export type ManifestSectionId = (typeof MANIFEST_SECTION_IDS)[number];
  */
 const FIELD_PREFIX_TO_SECTION: ReadonlyArray<readonly [RegExp, ManifestSectionId]> = [
   [/^name$/, "identity"],
+  [/^metadata\./, "metadata"],
+  [/^tools\./, "tools"],
+  // `exec_policy` renders inside the lifecycle section, not a section of its
+  // own: it has been one field of that card since the shorthand was the only
+  // spelling the form knew, and splitting it out now would move a control the
+  // operator already knows without changing what it does.
+  [/^exec_policy\./, "lifecycle"],
+  [/^context_engine\./, "context_engine"],
   [/^model\./, "model"],
   [/^schedule\./, "scheduling"],
   [/^response_format\./, "response_format"],
@@ -377,6 +403,33 @@ export function AgentManifestForm({
     patch: Partial<ManifestFormState["channel_overrides"]>,
   ): void =>
     onChange({ ...value, channel_overrides: { ...value.channel_overrides, ...patch } });
+
+  const updateExecPolicy = (
+    patch: Partial<ManifestFormState["exec_policy"]>,
+  ): void => onChange({ ...value, exec_policy: { ...value.exec_policy, ...patch } });
+
+  const updateContextEngine = (
+    patch: Partial<ManifestFormState["context_engine"]>,
+  ): void =>
+    onChange({ ...value, context_engine: { ...value.context_engine, ...patch } });
+
+  // The context engine's two levels, aliased once: the section below reads
+  // `ce.hooks.ingest` about thirty times, and `value.context_engine.hooks`
+  // every one of those would be noise rather than clarity.
+  const ce = value.context_engine;
+  const hook = ce.hooks;
+
+  /** The hooks table is two levels down, so it gets a setter of its own. */
+  const updateHook = (
+    patch: Partial<ManifestFormState["context_engine"]["hooks"]>,
+  ): void =>
+    onChange({
+      ...value,
+      context_engine: {
+        ...value.context_engine,
+        hooks: { ...value.context_engine.hooks, ...patch },
+      },
+    });
 
   const updateSkillWorkshop = (
     patch: Partial<ManifestFormState["skill_workshop"]>,
@@ -540,6 +593,59 @@ export function AgentManifestForm({
           </Field>
         </AdvancedFields>
       </Section>
+
+      {/* A free-form table, so the editor is the table: one row per key with
+          the value's JSON type named by the operator. Inferring the type from
+          the text would rewrite `"5"` into `5` on the next save, and both are
+          legal values of `HashMap<String, serde_json::Value>`. */}
+      <FormSection
+        id="metadata"
+        shows={shows}
+        title={t("agents.form.metadata")}
+        defaultOpen={false}
+      >
+        <p className="text-[10px] text-text-dim/70 mb-2">
+          {t("agents.form.metadata_hint")}
+        </p>
+        {value.metadata.map((row, idx) => (
+          <JsonRowEditor
+            key={row._uid}
+            row={row}
+            index={idx}
+            labels={{
+              key: t("agents.form.metadata_key"),
+              type: t("agents.form.metadata_type"),
+              value: t("agents.form.metadata_value"),
+              remove: t("agents.form.metadata_remove"),
+            }}
+            onChange={(next) =>
+              update({ metadata: patchListItem(value.metadata, idx, next) })
+            }
+            onRemove={() =>
+              update({ metadata: value.metadata.filter((_, i) => i !== idx) })
+            }
+          />
+        ))}
+        <PreservedValues
+          entries={value.metadata_preserved ?? {}}
+          hint={t("agents.form.metadata_preserved_hint")}
+        />
+        <button
+          type="button"
+          onClick={() =>
+            update({
+              metadata: [
+                ...value.metadata,
+                { _uid: generateUid(), key: "", valueType: "string", value: "" },
+              ],
+            })
+          }
+          className="flex items-center gap-1 text-xs text-brand hover:underline"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          {t("agents.form.metadata_add")}
+        </button>
+      </FormSection>
 
       <Section when={shows("model")} id="model" title={t("agents.form.model")}>
         {/* No visible label: the card above is titled "Model" and the field
@@ -1099,6 +1205,124 @@ export function AgentManifestForm({
         </div>
         </AdvancedFields>
       </Section>
+
+      {/* Not `capabilities.tools`, which lists the names an agent may call.
+          This is `[tools.<name>]` — the per-tool parameter overrides for a
+          tool that is already available. */}
+      <FormSection
+        id="tools"
+        shows={shows}
+        title={t("agents.form.tool_overrides")}
+        defaultOpen={false}
+      >
+        <p className="text-[10px] text-text-dim/70 mb-2">
+          {t("agents.form.tool_overrides_hint")}
+        </p>
+        {value.tools.map((entry, idx) => (
+          <div
+            key={entry._uid}
+            className="mb-2 space-y-2 rounded-lg border border-border-subtle/60 bg-main/40 p-2"
+          >
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={entry.name}
+                onChange={(e) =>
+                  update({
+                    tools: patchListItem(value.tools, idx, {
+                      ...entry,
+                      name: e.target.value,
+                    }),
+                  })
+                }
+                placeholder={t("agents.form.tool_name")}
+                aria-label={t("agents.form.tool_name")}
+                className={inputClass}
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  update({ tools: value.tools.filter((_, i) => i !== idx) })
+                }
+                className="shrink-0 text-text-dim hover:text-error"
+                aria-label={t("agents.form.tool_remove")}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            {entry.params.map((row, paramIdx) => (
+              <JsonRowEditor
+                key={row._uid}
+                row={row}
+                index={paramIdx}
+                labels={{
+                  key: t("agents.form.tool_param_key"),
+                  type: t("agents.form.tool_param_type"),
+                  value: t("agents.form.tool_param_value"),
+                  remove: t("agents.form.tool_param_remove"),
+                }}
+                onChange={(next) =>
+                  update({
+                    tools: patchListItem(value.tools, idx, {
+                      ...entry,
+                      params: patchListItem(entry.params, paramIdx, next),
+                    }),
+                  })
+                }
+                onRemove={() =>
+                  update({
+                    tools: patchListItem(value.tools, idx, {
+                      ...entry,
+                      params: entry.params.filter((_, i) => i !== paramIdx),
+                    }),
+                  })
+                }
+              />
+            ))}
+            <PreservedValues
+              entries={entry.params_preserved ?? {}}
+              hint={t("agents.form.tool_params_preserved_hint")}
+            />
+            <PreservedValues
+              entries={entry.preserved ?? {}}
+              hint={t("agents.form.tool_preserved_hint")}
+            />
+            <button
+              type="button"
+              onClick={() =>
+                update({
+                  tools: patchListItem(value.tools, idx, {
+                    ...entry,
+                    params: [
+                      ...entry.params,
+                      { _uid: generateUid(), key: "", valueType: "string", value: "" },
+                    ],
+                  }),
+                })
+              }
+              className="flex items-center gap-1 text-xs text-brand hover:underline"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              {t("agents.form.tool_param_add")}
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() =>
+            update({
+              tools: [
+                ...value.tools,
+                { _uid: generateUid(), name: "", params: [] },
+              ],
+            })
+          }
+          className="flex items-center gap-1 text-xs text-brand hover:underline"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          {t("agents.form.tool_add")}
+        </button>
+      </FormSection>
 
       <Section when={shows("skills")} id="skills" title={t("agents.form.skills")}>
         <Field hint={t("agents.form.skills_hint")} ariaLabel={t("agents.form.skills")}>
@@ -2025,6 +2249,609 @@ export function AgentManifestForm({
         </AdvancedFields>
       </FormSection>
 
+      {/* The memory subsystem's own configuration: which engine assembles the
+          context, and the hooks that get to shape it. Typed rather than
+          generic because the type is knowable — eight keys at the top, a hooks
+          table, an optional sidecar and a list of plugin registries. */}
+      <FormSection
+        id="context_engine"
+        shows={shows}
+        title={t("config.sec_context_engine")}
+        defaultOpen={false}
+        invalid={invalidFields.has("context_engine.sidecar.command")}
+      >
+        <p className="text-[10px] text-text-dim/70 mb-2">
+          {t("agents.form.context_engine_hint")}
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <Field
+            label={t("agents.form.context_engine_engine")}
+            hint={t("agents.form.context_engine_engine_hint")}
+          >
+            <OpenStringSelect
+              value={ce.engine}
+              options={CONTEXT_ENGINE_NAMES}
+              inheritLabel={t("agents.form.inherit_default")}
+              ariaLabel={t("agents.form.context_engine_engine")}
+              onChange={(next) => updateContextEngine({ engine: next })}
+            />
+          </Field>
+          <Field
+            label={t("agents.form.context_engine_plugin")}
+            hint={t("agents.form.context_engine_plugin_hint")}
+          >
+            <input
+              type="text"
+              value={ce.plugin}
+              onChange={(e) => updateContextEngine({ plugin: e.target.value })}
+              placeholder={t("agents.form.context_engine_plugin_placeholder")}
+              className={inputClass}
+            />
+          </Field>
+          <Field
+            label={t("agents.form.context_engine_plugin_stack")}
+            hint={t("agents.form.context_engine_plugin_stack_hint")}
+          >
+            <TagInput
+              value={ce.plugin_stack}
+              onChange={(next) => updateContextEngine({ plugin_stack: next })}
+              placeholder={t("agents.form.context_engine_plugin_stack_placeholder")}
+            />
+          </Field>
+          <Field
+            label={t("agents.form.context_engine_weights")}
+            hint={t("agents.form.context_engine_weights_hint")}
+          >
+            <input
+              type="text"
+              value={ce.plugin_stack_weights}
+              onChange={(e) =>
+                updateContextEngine({ plugin_stack_weights: e.target.value })
+              }
+              placeholder={t("agents.form.context_engine_weights_placeholder")}
+              className={inputClass}
+            />
+          </Field>
+        </div>
+        <div className="pt-2">
+          <Toggle
+            label={t("agents.form.context_engine_dedup")}
+            checked={ce.deduplicate_file_reads}
+            onChange={(checked) =>
+              updateContextEngine({ deduplicate_file_reads: checked })
+            }
+          />
+          <p className="text-[10px] text-text-dim/70">
+            {t("agents.form.context_engine_dedup_hint")}
+          </p>
+        </div>
+
+        {/* Plugin registries. The Rust default is the official registry, so an
+            empty list and an absent key are different statements — the second
+            keeps the default, the first switches browsing off. */}
+        <div className="space-y-2 rounded-lg border border-border-subtle/40 p-2.5">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">
+            {t("agents.form.context_engine_registries")}
+          </p>
+          <p className="text-[10px] text-text-dim/70">
+            {t("agents.form.context_engine_registries_hint")}
+          </p>
+          {(ce.plugin_registries ?? []).map((row, idx) => (
+            <div key={row._uid} className="flex items-center gap-2">
+              <input
+                type="text"
+                value={row.name}
+                onChange={(e) =>
+                  updateContextEngine({
+                    plugin_registries: patchListItem(ce.plugin_registries ?? [], idx, {
+                      ...row,
+                      name: e.target.value,
+                    }),
+                  })
+                }
+                placeholder={t("agents.form.context_engine_registry_name")}
+                aria-label={`${t("agents.form.context_engine_registry_name")} ${idx + 1}`}
+                className={inputClass}
+              />
+              <input
+                type="text"
+                value={row.github_repo}
+                onChange={(e) =>
+                  updateContextEngine({
+                    plugin_registries: patchListItem(ce.plugin_registries ?? [], idx, {
+                      ...row,
+                      github_repo: e.target.value,
+                    }),
+                  })
+                }
+                placeholder={t("agents.form.context_engine_registry_repo")}
+                aria-label={`${t("agents.form.context_engine_registry_repo")} ${idx + 1}`}
+                className={inputClass}
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  updateContextEngine({
+                    plugin_registries: (ce.plugin_registries ?? []).filter(
+                      (_, i) => i !== idx,
+                    ),
+                  })
+                }
+                className="shrink-0 text-text-dim hover:text-error"
+                aria-label={`${t("agents.form.context_engine_registry_remove")} ${idx + 1}`}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+          {(ce.plugin_registries ?? []).length === 0 && (
+            <TriStateNote
+              absent={ce.plugin_registries === null}
+              absentText={t("agents.form.context_engine_registry_default")}
+              emptyText={t("agents.form.context_engine_registry_empty")}
+              declareEmptyLabel={t("agents.form.context_engine_registry_declare_empty")}
+              restoreDefaultLabel={t("agents.form.context_engine_registry_use_default")}
+              onDeclareEmpty={() => updateContextEngine({ plugin_registries: [] })}
+              onRestoreDefault={() => updateContextEngine({ plugin_registries: null })}
+            />
+          )}
+          <button
+            type="button"
+            onClick={() =>
+              updateContextEngine({
+                plugin_registries: [
+                  ...(ce.plugin_registries ?? []),
+                  { _uid: generateUid(), name: "", github_repo: "" },
+                ],
+              })
+            }
+            className="flex items-center gap-1 text-xs text-brand hover:underline"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            {t("agents.form.context_engine_registry_add")}
+          </button>
+        </div>
+
+        {/* Sidecar. `Option<ContextEngineSidecarConfig>` on the Rust side, so
+            the switch is the Option and a command with the switch off writes
+            nothing — an `[sidecar]` nobody asked for would make the daemon
+            delegate every turn to a process that is not there. */}
+        <div className="space-y-2 rounded-lg border border-border-subtle/40 p-2.5">
+          <Toggle
+            label={t("agents.form.context_engine_sidecar")}
+            checked={ce.sidecar_enabled}
+            onChange={(checked) => updateContextEngine({ sidecar_enabled: checked })}
+          />
+          <p className="text-[10px] text-text-dim/70">
+            {t("agents.form.context_engine_sidecar_hint")}
+          </p>
+          {ce.sidecar_enabled && (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label={t("agents.form.context_engine_sidecar_command")}>
+                  <input
+                    type="text"
+                    value={ce.sidecar.command}
+                    onChange={(e) =>
+                      updateContextEngine({
+                        sidecar: { ...ce.sidecar, command: e.target.value },
+                      })
+                    }
+                    placeholder={t("agents.form.context_engine_sidecar_command_placeholder")}
+                    className={inputClass}
+                  />
+                </Field>
+                <Field
+                  label={t("agents.form.context_engine_sidecar_args")}
+                  hint={t("agents.form.context_engine_sidecar_args_hint")}
+                >
+                  <TagInput
+                    value={ce.sidecar.args}
+                    onChange={(next) =>
+                      updateContextEngine({ sidecar: { ...ce.sidecar, args: next } })
+                    }
+                    placeholder={t("agents.form.context_engine_sidecar_args_placeholder")}
+                  />
+                </Field>
+              </div>
+              <StepLadderInput
+                label={t("agents.form.context_engine_sidecar_timeout")}
+                value={ce.sidecar.request_timeout_secs}
+                onChange={(next) =>
+                  updateContextEngine({
+                    sidecar: { ...ce.sidecar, request_timeout_secs: next },
+                  })
+                }
+                ladder={ASYNC_TASK_TIMEOUT_LADDER}
+                formatRung={formatSeconds}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={0}
+              />
+              <PreservedValues
+                entries={ce.sidecar.preserved ?? {}}
+                hint={t("agents.form.context_engine_preserved_hint")}
+              />
+            </>
+          )}
+        </div>
+
+        {/* Hooks. Nine script paths, and the knobs that govern how they run
+            folded behind Advanced: which scripts run is the choice an operator
+            comes here to make, and how long they may take is the follow-up. */}
+        <div className="space-y-2 rounded-lg border border-border-subtle/40 p-2.5">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">
+            {t("agents.form.context_engine_hooks")}
+          </p>
+          <p className="text-[10px] text-text-dim/70">
+            {t("agents.form.context_engine_hooks_hint")}
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <HookScriptField
+              label={t("agents.form.context_engine_hook_ingest")}
+              value={hook.ingest}
+              onChange={(next) => updateHook({ ingest: next })}
+            />
+            <HookScriptField
+              label={t("agents.form.context_engine_hook_after_turn")}
+              value={hook.after_turn}
+              onChange={(next) => updateHook({ after_turn: next })}
+            />
+            <HookScriptField
+              label={t("agents.form.context_engine_hook_bootstrap")}
+              value={hook.bootstrap}
+              onChange={(next) => updateHook({ bootstrap: next })}
+            />
+            <HookScriptField
+              label={t("agents.form.context_engine_hook_assemble")}
+              value={hook.assemble}
+              onChange={(next) => updateHook({ assemble: next })}
+            />
+            <HookScriptField
+              label={t("agents.form.context_engine_hook_compact")}
+              value={hook.compact}
+              onChange={(next) => updateHook({ compact: next })}
+            />
+            <HookScriptField
+              label={t("agents.form.context_engine_hook_transform_tool_result")}
+              value={hook.transform_tool_result}
+              onChange={(next) => updateHook({ transform_tool_result: next })}
+            />
+            <HookScriptField
+              label={t("agents.form.context_engine_hook_prepare_subagent")}
+              value={hook.prepare_subagent}
+              onChange={(next) => updateHook({ prepare_subagent: next })}
+            />
+            <HookScriptField
+              label={t("agents.form.context_engine_hook_merge_subagent")}
+              value={hook.merge_subagent}
+              onChange={(next) => updateHook({ merge_subagent: next })}
+            />
+            <HookScriptField
+              label={t("agents.form.context_engine_hook_on_event")}
+              value={hook.on_event}
+              onChange={(next) => updateHook({ on_event: next })}
+            />
+          </div>
+          <AdvancedFields invalid={invalidFields.has("context_engine.sidecar.command")}>
+            <div className="grid grid-cols-2 gap-3">
+              <Field
+                label={t("agents.form.context_engine_runtime")}
+                hint={t("agents.form.context_engine_runtime_hint")}
+              >
+                <OpenStringSelect
+                  value={hook.runtime}
+                  options={HOOK_RUNTIMES}
+                  inheritLabel={t("agents.form.inherit_default")}
+                  ariaLabel={t("agents.form.context_engine_runtime")}
+                  onChange={(next) => updateHook({ runtime: next })}
+                />
+              </Field>
+              <StepLadderInput
+                label={t("agents.form.context_engine_hook_timeout")}
+                value={hook.hook_timeout_secs}
+                onChange={(next) => updateHook({ hook_timeout_secs: next })}
+                ladder={ASYNC_TASK_TIMEOUT_LADDER}
+                formatRung={formatSeconds}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={1}
+              />
+              <StepLadderInput
+                label={t("agents.form.context_engine_hook_retries")}
+                value={hook.max_retries}
+                onChange={(next) => updateHook({ max_retries: next })}
+                ladder={HOOK_RETRIES_LADDER}
+                formatRung={formatCount}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={0}
+              />
+              <StepLadderInput
+                label={t("agents.form.context_engine_hook_retry_delay")}
+                value={hook.retry_delay_ms}
+                onChange={(next) => updateHook({ retry_delay_ms: next })}
+                ladder={CHANNEL_DEBOUNCE_MS_LADDER}
+                formatRung={(value) => `${value} ms`}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={0}
+              />
+              <StepLadderInput
+                label={t("agents.form.context_engine_hook_memory")}
+                value={hook.max_memory_mb}
+                onChange={(next) => updateHook({ max_memory_mb: next })}
+                ladder={HOOK_MEMORY_MB_LADDER}
+                formatRung={(value) => `${value} MB`}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={1}
+              />
+              <StepLadderInput
+                label={t("agents.form.context_engine_after_turn_queue")}
+                value={hook.after_turn_queue_depth}
+                onChange={(next) => updateHook({ after_turn_queue_depth: next })}
+                ladder={HOOK_QUEUE_DEPTH_LADDER}
+                formatRung={formatCount}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={1}
+              />
+              <StepLadderInput
+                label={t("agents.form.context_engine_priority")}
+                value={hook.priority}
+                onChange={(next) => updateHook({ priority: next })}
+                ladder={HOOK_PRIORITY_LADDER}
+                formatRung={formatCount}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                // Signed: a lower priority runs later, and the Rust default is 0.
+                min={-2147483648}
+                max={2147483647}
+              />
+              <Field
+                label={t("agents.form.context_engine_on_failure")}
+                hint={t("agents.form.context_engine_on_failure_hint")}
+              >
+                <select
+                  value={hook.on_hook_failure}
+                  onChange={(e) =>
+                    updateHook({
+                      on_hook_failure: e.target
+                        .value as ManifestFormState["context_engine"]["hooks"]["on_hook_failure"],
+                    })
+                  }
+                  className={inputClass}
+                >
+                  {HOOK_FAILURE_POLICIES.map((policy) => (
+                    <option key={policy} value={policy}>
+                      {policy}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field
+                label={t("agents.form.context_engine_ingest_filter")}
+                hint={t("agents.form.context_engine_ingest_filter_hint")}
+              >
+                <input
+                  type="text"
+                  value={hook.ingest_filter}
+                  onChange={(e) => updateHook({ ingest_filter: e.target.value })}
+                  className={inputClass}
+                />
+              </Field>
+              <Field
+                label={t("agents.form.context_engine_ingest_regex")}
+                hint={t("agents.form.context_engine_ingest_regex_hint")}
+              >
+                <input
+                  type="text"
+                  value={hook.ingest_regex}
+                  onChange={(e) => updateHook({ ingest_regex: e.target.value })}
+                  className={inputClass}
+                />
+              </Field>
+              <Field
+                label={t("agents.form.context_engine_only_for_agents")}
+                hint={t("agents.form.context_engine_only_for_agents_hint")}
+              >
+                <TagInput
+                  value={hook.only_for_agent_ids}
+                  onChange={(next) => updateHook({ only_for_agent_ids: next })}
+                  placeholder={t("agents.form.context_engine_only_for_agents_placeholder")}
+                />
+              </Field>
+              <Field
+                label={t("agents.form.context_engine_allowed_secrets")}
+                hint={t("agents.form.context_engine_allowed_secrets_hint")}
+              >
+                <TagInput
+                  value={hook.allowed_secrets}
+                  onChange={(next) => updateHook({ allowed_secrets: next })}
+                  placeholder={t("agents.form.context_engine_allowed_secrets_placeholder")}
+                />
+              </Field>
+              <Field label={t("agents.form.context_engine_otel_endpoint")}>
+                <input
+                  type="text"
+                  value={hook.otel_endpoint}
+                  onChange={(e) => updateHook({ otel_endpoint: e.target.value })}
+                  placeholder={t("agents.form.context_engine_otel_endpoint_placeholder")}
+                  className={inputClass}
+                />
+              </Field>
+              <Field label={t("agents.form.context_engine_hook_protocol")}>
+                <input
+                  type="text"
+                  value={hook.hook_protocol_version}
+                  onChange={(e) => updateHook({ hook_protocol_version: e.target.value })}
+                  placeholder={t("agents.form.context_engine_hook_protocol_placeholder")}
+                  className={inputClass}
+                />
+              </Field>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <StepLadderInput
+                label={t("agents.form.context_engine_cache_ttl")}
+                value={hook.hook_cache_ttl_secs}
+                onChange={(next) => updateHook({ hook_cache_ttl_secs: next })}
+                ladder={HOOK_CACHE_TTL_LADDER}
+                formatRung={formatSeconds}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={0}
+              />
+              <StepLadderInput
+                label={t("agents.form.context_engine_assemble_cache_ttl")}
+                value={hook.assemble_cache_ttl_secs}
+                onChange={(next) => updateHook({ assemble_cache_ttl_secs: next })}
+                ladder={HOOK_CACHE_TTL_LADDER}
+                formatRung={formatSeconds}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={0}
+              />
+              <StepLadderInput
+                label={t("agents.form.context_engine_compact_cache_ttl")}
+                value={hook.compact_cache_ttl_secs}
+                onChange={(next) => updateHook({ compact_cache_ttl_secs: next })}
+                ladder={HOOK_CACHE_TTL_LADDER}
+                formatRung={formatSeconds}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={0}
+              />
+            </div>
+            <div className="flex flex-wrap gap-4 pt-1">
+              <Toggle
+                label={t("agents.form.context_engine_shared_state")}
+                checked={hook.enable_shared_state}
+                onChange={(checked) => updateHook({ enable_shared_state: checked })}
+              />
+              <Toggle
+                label={t("agents.form.context_engine_persistent_subprocess")}
+                checked={hook.persistent_subprocess}
+                onChange={(checked) => updateHook({ persistent_subprocess: checked })}
+              />
+              <Toggle
+                label={t("agents.form.context_engine_prewarm")}
+                checked={hook.prewarm_subprocesses}
+                onChange={(checked) => updateHook({ prewarm_subprocesses: checked })}
+              />
+              <Toggle
+                label={t("agents.form.context_engine_allow_filesystem")}
+                checked={hook.allow_filesystem}
+                onChange={(checked) => updateHook({ allow_filesystem: checked })}
+              />
+              <Toggle
+                label={t("agents.form.context_engine_allow_network")}
+                checked={hook.allow_network}
+                onChange={(checked) => updateHook({ allow_network: checked })}
+              />
+            </div>
+            <p className="text-[10px] text-text-dim/70">
+              {t("agents.form.context_engine_sandbox_hint")}
+            </p>
+
+            {/* The circuit breaker is an `Option<CircuitBreakerConfig>`: the
+                switch is the Option and its two knobs are optional even then,
+                because the Rust side gives each its own default. */}
+            <div className="space-y-2 rounded-lg border border-border-subtle/40 p-2.5">
+              <Toggle
+                label={t("agents.form.context_engine_circuit")}
+                checked={hook.circuit_enabled}
+                onChange={(checked) => updateHook({ circuit_enabled: checked })}
+              />
+              {hook.circuit_enabled && (
+                <div className="grid grid-cols-2 gap-3">
+                  <StepLadderInput
+                    label={t("agents.form.context_engine_circuit_failures")}
+                    value={hook.circuit_max_failures}
+                    onChange={(next) => updateHook({ circuit_max_failures: next })}
+                    ladder={HOOK_CIRCUIT_FAILURES_LADDER}
+                    formatRung={formatCount}
+                    inheritLabel={t("model_param.inherit")}
+                    customLabel={t("model_param.custom")}
+                    min={1}
+                  />
+                  <StepLadderInput
+                    label={t("agents.form.context_engine_circuit_reset")}
+                    value={hook.circuit_reset_secs}
+                    onChange={(next) => updateHook({ circuit_reset_secs: next })}
+                    ladder={HOOK_CIRCUIT_RESET_LADDER}
+                    formatRung={formatSeconds}
+                    inheritLabel={t("model_param.inherit")}
+                    customLabel={t("model_param.custom")}
+                    min={1}
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* `HashMap<String, String>`: a name and what it is for. One type,
+                so the row editor has no type column to offer. */}
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">
+                {t("agents.form.context_engine_env_schema")}
+              </p>
+              <p className="text-[10px] text-text-dim/70">
+                {t("agents.form.context_engine_env_schema_hint")}
+              </p>
+              {hook.env_schema.map((row, idx) => (
+                <JsonRowEditor
+                  key={row._uid}
+                  row={row}
+                  index={idx}
+                  types={["string"]}
+                  labels={{
+                    key: t("agents.form.context_engine_env_schema_key"),
+                    type: t("agents.form.context_engine_env_schema_type"),
+                    value: t("agents.form.context_engine_env_schema_value"),
+                    remove: t("agents.form.context_engine_env_schema_remove"),
+                  }}
+                  onChange={(next) =>
+                    updateHook({ env_schema: patchListItem(hook.env_schema, idx, next) })
+                  }
+                  onRemove={() =>
+                    updateHook({ env_schema: hook.env_schema.filter((_, i) => i !== idx) })
+                  }
+                />
+              ))}
+              <button
+                type="button"
+                onClick={() =>
+                  updateHook({
+                    env_schema: [
+                      ...hook.env_schema,
+                      { _uid: generateUid(), key: "", valueType: "string", value: "" },
+                    ],
+                  })
+                }
+                className="flex items-center gap-1 text-xs text-brand hover:underline"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                {t("agents.form.context_engine_env_schema_add")}
+              </button>
+            </div>
+
+            {/* `hook_schemas` and any key a later release adds. Shown rather
+                than hidden: a key the operator cannot see is indistinguishable
+                from one the editor dropped. */}
+            <PreservedValues
+              entries={hook.preserved ?? {}}
+              hint={t("agents.form.context_engine_preserved_hint")}
+            />
+          </AdvancedFields>
+        </div>
+        <PreservedValues
+          entries={ce.preserved ?? {}}
+          hint={t("agents.form.context_engine_preserved_hint")}
+        />
+      </FormSection>
+
       <FormSection
         id="async_tasks" shows={shows}
         title={t("agents.form.async_tasks")}
@@ -2423,31 +3250,130 @@ export function AgentManifestForm({
               <option value="false">{t("common.no")}</option>
             </select>
           </Field>
-          <Field
-            label={t("agents.form.exec_policy")}
-            hint={
-              !value.exec_policy_shorthand && extras.topLevel.exec_policy !== undefined
-                ? t("agents.form.exec_policy_extras_hint")
-                : undefined
-            }
-          >
-            <select
-              value={value.exec_policy_shorthand}
-              onChange={(e) =>
-                update({
-                  exec_policy_shorthand:
-                    e.target.value as ManifestFormState["exec_policy_shorthand"],
-                })
-              }
-              className={inputClass}
-            >
-              <option value="">{t("agents.form.exec_policy_global")}</option>
-              <option value="allow">allow</option>
-              <option value="deny">deny</option>
-              <option value="full">full</option>
-              <option value="allowlist">allowlist</option>
-            </select>
-          </Field>
+          {/* The whole policy, not just its shorthand: `exec_policy` reads as a
+              string or as a table and the form now owns both spellings, so the
+              mode is still the one-word case and the eight fields beside it are
+              the table. Spanning both columns because it is one subject. */}
+          <div className="col-span-2 space-y-2.5 rounded-lg border border-border-subtle/40 p-2.5">
+            <Field label={t("agents.form.exec_policy")}>
+              <select
+                value={value.exec_policy.mode}
+                onChange={(e) =>
+                  updateExecPolicy({
+                    mode: e.target.value as ManifestFormState["exec_policy"]["mode"],
+                  })
+                }
+                // The visible label is a `<span>` (Field only draws a real
+                // `<label>` when it is given an `htmlFor`), so the control
+                // carries its own name. Without it the operator's screen
+                // reader announces an unnamed combo box.
+                aria-label={t("agents.form.exec_policy")}
+                className={inputClass}
+              >
+                <option value="">{t("agents.form.exec_policy_global")}</option>
+                <option value="deny">deny</option>
+                <option value="allowlist">allowlist</option>
+                <option value="full">full</option>
+              </select>
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Field
+                  label={t("agents.form.exec_policy_safe_bins")}
+                  hint={t("agents.form.exec_policy_safe_bins_hint")}
+                >
+                  <TagInput
+                    value={value.exec_policy.safe_bins ?? []}
+                    onChange={(next) => updateExecPolicy({ safe_bins: next })}
+                    placeholder={t("agents.form.exec_policy_safe_bins_placeholder")}
+                  />
+                </Field>
+                {/* Only one of the two empties is a statement, and the tag
+                    input cannot say which one it is. */}
+                {(value.exec_policy.safe_bins ?? []).length === 0 && (
+                  <TriStateNote
+                    absent={value.exec_policy.safe_bins === null}
+                    absentText={t("agents.form.exec_policy_safe_bins_default")}
+                    emptyText={t("agents.form.exec_policy_safe_bins_empty")}
+                    declareEmptyLabel={t("agents.form.exec_policy_safe_bins_declare_empty")}
+                    restoreDefaultLabel={t("agents.form.exec_policy_safe_bins_use_default")}
+                    onDeclareEmpty={() => updateExecPolicy({ safe_bins: [] })}
+                    onRestoreDefault={() => updateExecPolicy({ safe_bins: null })}
+                  />
+                )}
+              </div>
+              <Field
+                label={t("agents.form.exec_policy_allowed_commands")}
+                hint={t("agents.form.exec_policy_allowed_commands_hint")}
+              >
+                <TagInput
+                  value={value.exec_policy.allowed_commands}
+                  onChange={(next) => updateExecPolicy({ allowed_commands: next })}
+                  placeholder={t("agents.form.exec_policy_allowed_commands_placeholder")}
+                />
+              </Field>
+              <Field
+                label={t("agents.form.exec_policy_allowed_env_vars")}
+                hint={t("agents.form.exec_policy_allowed_env_vars_hint")}
+              >
+                <TagInput
+                  value={value.exec_policy.allowed_env_vars}
+                  onChange={(next) => updateExecPolicy({ allowed_env_vars: next })}
+                  placeholder={t("agents.form.exec_policy_allowed_env_vars_placeholder")}
+                />
+              </Field>
+              <div className="space-y-2.5">
+                <Toggle
+                  label={t("agents.form.exec_policy_safe_bins_skip")}
+                  checked={value.exec_policy.safe_bins_skip_approval}
+                  onChange={(checked) => updateExecPolicy({ safe_bins_skip_approval: checked })}
+                />
+                <p className="text-[10px] text-text-dim/70">
+                  {t("agents.form.exec_policy_safe_bins_skip_hint")}
+                </p>
+                <Toggle
+                  label={t("agents.form.exec_policy_full_skips_approval")}
+                  checked={value.exec_policy.full_mode_skips_approval}
+                  onChange={(checked) => updateExecPolicy({ full_mode_skips_approval: checked })}
+                />
+                <p className="text-[10px] text-text-dim/70">
+                  {t("agents.form.exec_policy_full_skips_approval_hint")}
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <StepLadderInput
+                label={t("agents.form.exec_policy_timeout")}
+                value={value.exec_policy.timeout_secs}
+                onChange={(next) => updateExecPolicy({ timeout_secs: next })}
+                ladder={EXEC_TIMEOUT_LADDER}
+                formatRung={formatSeconds}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={1}
+              />
+              <StepLadderInput
+                label={t("agents.form.exec_policy_no_output_timeout")}
+                value={value.exec_policy.no_output_timeout_secs}
+                onChange={(next) => updateExecPolicy({ no_output_timeout_secs: next })}
+                ladder={EXEC_NO_OUTPUT_TIMEOUT_LADDER}
+                formatRung={formatSeconds}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={0}
+              />
+              <StepLadderInput
+                label={t("agents.form.exec_policy_max_output")}
+                value={value.exec_policy.max_output_bytes}
+                onChange={(next) => updateExecPolicy({ max_output_bytes: next })}
+                ladder={EXEC_OUTPUT_BYTES_LADDER}
+                formatRung={formatBytes}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={1}
+              />
+            </div>
+          </div>
           <Field label={t("agents.form.pinned_model")}>
             <ModelPicker
               label={t("agents.form.pinned_model")}
@@ -2840,6 +3766,121 @@ function TriStateField({
   );
 }
 
+/**
+ * The note that makes an empty tri-state list say which empty it is.
+ *
+ * `null` is the absent key — for `safe_bins` the daemon's built-in list, for
+ * `plugin_registries` the official registry — while `[]` is a declared empty
+ * list, which is a different statement and sometimes a security-relevant one.
+ * An empty tag input cannot carry the difference, so the switch is explicit
+ * rather than inferred from "the operator deleted every chip".
+ *
+ * Module scope for the same reason as `FormSection`.
+ */
+function TriStateNote({
+  absent,
+  absentText,
+  emptyText,
+  declareEmptyLabel,
+  restoreDefaultLabel,
+  onDeclareEmpty,
+  onRestoreDefault,
+}: {
+  /** `true` while the key is absent, which is not the same as declared empty. */
+  absent: boolean;
+  absentText: string;
+  emptyText: string;
+  declareEmptyLabel: string;
+  restoreDefaultLabel: string;
+  onDeclareEmpty: () => void;
+  onRestoreDefault: () => void;
+}) {
+  return (
+    <p className={`mt-1 text-[10px] ${absent ? "text-text-dim/70" : "text-warning"}`}>
+      {absent ? absentText : emptyText}{" "}
+      <button
+        type="button"
+        className="underline hover:text-brand"
+        onClick={absent ? onDeclareEmpty : onRestoreDefault}
+      >
+        {absent ? declareEmptyLabel : restoreDefaultLabel}
+      </button>
+    </p>
+  );
+}
+
+/**
+ * A select for a `String` field whose accepted values are a known list.
+ *
+ * Not the closed-enum treatment `asEnum` gives a Rust enum: `engine` and
+ * `hooks.runtime` are `String`s, so a value outside the list is one the daemon
+ * accepts and runs with. The current value is appended to the options when it
+ * is not in the list, which is what stops the editor from silently rewriting a
+ * manifest it did not understand into one it does.
+ *
+ * Module scope for the same reason as `FormSection`.
+ */
+function OpenStringSelect({
+  value,
+  options,
+  inheritLabel,
+  ariaLabel,
+  onChange,
+}: {
+  value: string;
+  options: readonly string[];
+  inheritLabel: string;
+  ariaLabel?: string;
+  onChange: (next: string) => void;
+}) {
+  const known = value === "" || options.includes(value);
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      aria-label={ariaLabel}
+      className={inputClass}
+    >
+      <option value="">{inheritLabel}</option>
+      {options.map((option) => (
+        <option key={option} value={option}>
+          {option}
+        </option>
+      ))}
+      {!known ? <option value={value}>{value}</option> : null}
+    </select>
+  );
+}
+
+/**
+ * One hook script path.
+ *
+ * Nine of these, one per lifecycle hook, and they are the same control nine
+ * times over: a labelled box whose placeholder is the shape of a path.
+ */
+function HookScriptField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Field label={label}>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={t("agents.form.context_engine_hook_placeholder")}
+        className={inputClass}
+      />
+    </Field>
+  );
+}
+
 function ExtrasOverrideHint({ message }: { message: string }) {
   return (
     <div className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/5 px-2.5 py-1.5 text-[11px] text-warning">
@@ -2871,6 +3912,148 @@ function Toggle({
       />
       {label ? <span>{label}</span> : null}
     </label>
+  );
+}
+
+/** The four accessible names a `JsonRowEditor` needs, resolved by the caller. */
+interface JsonRowLabels {
+  key: string;
+  type: string;
+  value: string;
+  remove: string;
+}
+
+/**
+ * One `key = value` row of a JSON-valued table.
+ *
+ * Shared by `[metadata]` and `[tools.<name>.params]`: both are
+ * `HashMap<String, serde_json::Value>`, so both need the same three scalar
+ * arms and the same explicit type choice. One component rather than two copies
+ * means the type list cannot drift between them.
+ *
+ * Module scope for the same reason as `FormSection`: a component declared in
+ * the render body is a new function on every render, and React compares
+ * element types by reference — so the subtree unmounts on every keystroke and
+ * each controlled input keeps only its first character.
+ *
+ * No visible labels. The row is a grid of near-identical controls, so a label
+ * above each one would repeat the same word down the column; the accessible
+ * name carries the row number instead, which is what tells a screen reader
+ * which of the five "Key" boxes it is in.
+ */
+function JsonRowEditor({
+  row,
+  index,
+  labels,
+  types = JSON_ROW_TYPES,
+  onChange,
+  onRemove,
+}: {
+  row: { _uid: string; key: string; valueType: JsonRowType; value: string };
+  index: number;
+  labels: JsonRowLabels;
+  /**
+   * The types this table's values may take. `[hooks.env_schema]` is a
+   * `HashMap<String, String>`, so it passes one and gets no type column: a
+   * control that offers a choice the manifest cannot hold is worse than no
+   * control.
+   */
+  types?: readonly JsonRowType[];
+  onChange: (next: { _uid: string; key: string; valueType: JsonRowType; value: string }) => void;
+  onRemove: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="mb-2 flex items-center gap-2">
+      <input
+        type="text"
+        value={row.key}
+        onChange={(e) => onChange({ ...row, key: e.target.value })}
+        placeholder={labels.key}
+        aria-label={`${labels.key} ${index + 1}`}
+        // `flex-1 min-w-0` on both the key and the value: `inputClass` carries
+        // `w-full`, and three width-100% children in a flex row collapse the
+        // two flexible ones to nothing beside the fixed-width type select.
+        className={`${inputClass} flex-1 min-w-0`}
+      />
+      {types.length > 1 && (
+        <select
+          value={row.valueType}
+          onChange={(e) => onChange({ ...row, valueType: e.target.value as JsonRowType })}
+          aria-label={`${labels.type} ${index + 1}`}
+          // `basis-28` rather than `w-28`: `inputClass` carries `w-full`, and
+          // two conflicting width utilities are resolved by their order in the
+          // generated stylesheet — which put `w-full` last and gave this
+          // select the whole row, collapsing the two inputs beside it to a
+          // sliver. `flex-basis` is a different property, so it wins outright.
+          className={`${inputClass} basis-28 grow-0 shrink-0`}
+        >
+          {types.map((type) => (
+            <option key={type} value={type}>
+              {t(`agents.form.json_type_${type}`)}
+            </option>
+          ))}
+        </select>
+      )}
+      {row.valueType === "boolean" ? (
+        // A boolean row cannot hold free text: `yes`, `1` and `TRUE` are all
+        // things an operator types and none of them is a TOML boolean.
+        <select
+          value={row.value}
+          onChange={(e) => onChange({ ...row, value: e.target.value })}
+          aria-label={`${labels.value} ${index + 1}`}
+          className={`${inputClass} flex-1 min-w-0`}
+        >
+          <option value="true">{t("common.yes")}</option>
+          <option value="false">{t("common.no")}</option>
+        </select>
+      ) : (
+        <input
+          type="text"
+          value={row.value}
+          onChange={(e) => onChange({ ...row, value: e.target.value })}
+          placeholder={labels.value}
+          aria-label={`${labels.value} ${index + 1}`}
+          className={`${inputClass} flex-1 min-w-0`}
+        />
+      )}
+      <button
+        type="button"
+        onClick={onRemove}
+        className="shrink-0 text-text-dim hover:text-error"
+        aria-label={`${labels.remove} ${index + 1}`}
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The half of a JSON-valued table a row cannot hold: values that are tables or
+ * arrays, shown as the file holds them.
+ *
+ * Rendered rather than hidden on purpose — a value the operator cannot see is
+ * indistinguishable from one the editor ate.
+ */
+function PreservedValues({
+  entries,
+  hint,
+}: {
+  entries: Record<string, unknown>;
+  hint: string;
+}) {
+  const keys = Object.keys(entries);
+  if (!keys.length) return null;
+  return (
+    <div className="mb-2">
+      {keys.map((key) => (
+        <p key={key} className="font-mono text-[11px] text-text-dim">
+          {key} = {formatPreservedValue(entries[key])}
+        </p>
+      ))}
+      <p className="text-[10px] text-text-dim/70">{hint}</p>
+    </div>
   );
 }
 
