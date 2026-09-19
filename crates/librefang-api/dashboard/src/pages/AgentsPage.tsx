@@ -631,7 +631,7 @@ export const CONFIG_GROUPS: Record<ConfigGroupId, readonly ManifestSectionId[]> 
   general: ["identity", "metadata", "prompt", "lifecycle", "response_format"],
   model: ["model", "fallback_models", "thinking", "routing"],
   tools: ["capabilities", "tools", "skills", "mcp_servers", "skill_workshop"],
-  memory: ["proactive_memory", "auto_dream", "compaction"],
+  memory: ["proactive_memory", "auto_dream", "compaction", "context_engine"],
   limits: ["limits"],
   channels: ["channel_overrides"],
   planning: ["scheduling", "autonomous", "async_tasks"],
