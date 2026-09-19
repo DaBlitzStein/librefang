@@ -63,7 +63,7 @@ function MemoryScopeNote({
 import { AgentIdentityFileEditor } from "./AgentIdentityFileEditor";
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
 import { ModelParamField } from "./ui/ModelParamField";
-import { CollapsibleSection } from "./ui/CollapsibleSection";
+import { CollapsibleSection, useFieldCount } from "./ui/CollapsibleSection";
 import type { CollapsibleSectionProps } from "./ui/CollapsibleSection";
 import { Field } from "./ui/Field";
 import { ModelPicker } from "./ui/ModelPicker";
@@ -3809,6 +3809,13 @@ function Section({
  * there are fifteen call sites, and a prop would be fifteen chances to forget
  * one — with the failure invisible, since a forgotten site simply folds in
  * advanced mode where the operator expects everything open.
+ *
+ * The summary carries how many fields it hides, by the same `useFieldCount` the
+ * section bar uses and in the same unit. In basic mode this fold is the only
+ * thing between the operator and those fields, so a bare "Advanced" reads as
+ * "nothing worth opening" exactly the way a bare section bar did — and the
+ * count is scoped to this fold, so a fold inside a fold reports its own fields
+ * rather than the outer one's total.
  */
 const AdvancedModeContext = createContext(false);
 
@@ -3821,19 +3828,32 @@ export function AdvancedFields({
 }) {
   const { t } = useTranslation();
   const advanced = useContext(AdvancedModeContext);
+  const { bodyRef, count } = useFieldCount();
   return (
     <details
       data-advanced
       className="group rounded-lg border border-border-subtle/40 bg-main/30"
       open={advanced || invalid}
     >
-      <summary className="flex cursor-pointer list-none items-center justify-between px-2.5 py-1.5 select-none">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-1.5 select-none">
         <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim group-open:text-text-main">
           {t("agents.form.advanced")}
+        </span>{" "}
+        {/* The space separates the label from the count in the summary's
+            accessible name and in its text content. Flexbox does not render a
+            whitespace-only child, so it costs nothing on screen. */}
+        <span className="flex shrink-0 items-center gap-2">
+          {count !== null && count > 0 && (
+            <span className="text-[10px] font-bold tracking-widest text-text-dim/60">
+              {t("config.fields_unit", { count })}
+            </span>
+          )}
+          <ChevronDown className="h-3.5 w-3.5 text-text-dim transition-transform group-open:rotate-180" />
         </span>
-        <ChevronDown className="h-3.5 w-3.5 text-text-dim transition-transform group-open:rotate-180" />
       </summary>
-      <div className="space-y-2.5 px-2.5 pb-2.5 pt-1">{children}</div>
+      <div ref={bodyRef} className="space-y-2.5 px-2.5 pb-2.5 pt-1">
+        {children}
+      </div>
     </details>
   );
 }

@@ -26,17 +26,18 @@ function countFields(root: HTMLElement): number {
 }
 
 /**
- * The number of fields the section body holds, kept in step with the DOM.
+ * The number of fields the subtree behind `bodyRef` holds, kept in step with
+ * the DOM — the one mechanism behind every count the editor shows.
  *
- * Measured rather than declared. The fields are not the section's direct
- * children — they arrive through the components a section is built from
- * (`TriStateField`, the finders, the model pickers) — so there is no list to
- * take `length` of, and a number each call site had to pass would be one
- * nothing keeps true: it would go stale the first time a field was added, which
- * is the same silent lie as a section that reads as empty.
+ * Measured rather than declared. The fields are not the fold's direct children
+ * — they arrive through the components the form is built from (`TriStateField`,
+ * the finders, the model pickers) — so there is no list to take `length` of,
+ * and a number each call site had to pass would be one nothing keeps true: it
+ * would go stale the first time a field was added, which is the same silent lie
+ * as a fold that reads as empty.
  *
  * `useLayoutEffect` rather than `useEffect`, so the first paint already carries
- * the count — a badge that appears a frame after the section does reads as a
+ * the count — a badge that appears a frame after the fold does reads as a
  * flicker.
  *
  * The observer covers fields that arrive after that first paint: a fallback row
@@ -47,7 +48,7 @@ function countFields(root: HTMLElement): number {
  * summary, outside the observed subtree, so rendering a new count cannot feed
  * back into the count.
  */
-function useFieldCount() {
+export function useFieldCount() {
   const bodyRef = useRef<HTMLDivElement>(null);
   const [count, setCount] = useState<number | null>(null);
 
@@ -98,6 +99,10 @@ function useFieldCount() {
  * with a number attached to make it look authoritative — while a section whose
  * fields the counter cannot see would claim the same. No badge is the honest
  * answer in both cases, and it is what every section showed before.
+ *
+ * `AgentManifestForm.AdvancedFields` counts its own body with the same hook and
+ * renders the same badge, so a count reads the same wherever the editor folds
+ * something away.
  */
 export interface CollapsibleSectionProps {
   title: string;
