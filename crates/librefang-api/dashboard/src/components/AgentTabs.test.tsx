@@ -62,7 +62,7 @@ describe("AgentTabBar", () => {
   // truncated list in the page would pass here. That join is guaranteed by
   // construction there (`configTabs` is `CONFIG_GROUP_IDS.map(...)`, so a group
   // cannot reach the map without a tab) and observed end to end by
-  // `e2e/agent-view.spec.ts`, which asserts all eight groups by name. What this
+  // `e2e/agent-view.spec.ts`, which asserts all nine groups by name. What this
   // test adds is that the bar draws every definition it *is* given: one dropped
   // or deduplicated would take a group off the surface while the map still
   // listed it.
