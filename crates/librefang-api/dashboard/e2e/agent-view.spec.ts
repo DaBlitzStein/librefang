@@ -403,7 +403,10 @@ test("the exec policy table completes the shorthand in Permissions", async ({ pa
   // The mode select is the control that was already there — it used to render
   // inside the Lifecycle card, where its first select is `session_mode`, so it
   // is reached by its own name rather than by position.
-  const mode = section.getByLabel("Mode", { exact: true });
+  // `getByRole("combobox")` rather than `getByLabel`: the Field wrapper is
+  // now a named group, so `getByLabel("Mode")` matches it as well as the
+  // select — two elements, and strict mode refuses.
+  const mode = section.getByRole("combobox", { name: "Mode", exact: true });
   await mode.selectOption("allowlist");
 
   // `[]` and the absent key are different policies, and only one of them is a
@@ -499,7 +502,7 @@ test("permissions hosts the grant lists and the exec policy, and only there", as
     capabilities.getByRole("button", { name: "remove api.openai.com:443" }),
   ).toBeVisible();
 
-  const mode = execPolicy.getByLabel("Mode", { exact: true });
+  const mode = execPolicy.getByRole("combobox", { name: "Mode", exact: true });
   await mode.selectOption("allowlist");
   await expect(mode).toHaveValue("allowlist");
 
@@ -525,4 +528,119 @@ test("permissions hosts the grant lists and the exec policy, and only there", as
   await page.getByRole("tab", { name: "General", exact: true }).click();
   await expect(page.locator('[data-section="exec_policy"]')).toHaveCount(0);
   await expect(page.locator('[data-section="lifecycle"]')).toBeVisible();
+});
+
+// The guard for the `Field` gap, and the reason it is a test rather than a
+// one-off fix: `Field` draws its visible label as a `<span>`, so a control
+// inside one is named only by its own `aria-label`, by a placeholder, or by
+// the named group its wrapper is. Before this branch that last source did not
+// exist for a labelled Field, and 29 controls across the form were mute to a
+// screen reader — invisible to every unit test, because the markup renders
+// perfectly well.
+//
+// Read through the DOM rather than through Playwright's `toHaveAccessibleName`
+// one control at a time: the pass needs to visit every control of every group,
+// and the failure needs to name the section and the field it belongs to. The
+// name sources are the ones the accname algorithm falls back to — notably
+// `placeholder`, which is why a label-only scan reported 70 where the real
+// figure was 32.
+test("every control in the config form has an accessible name", async ({ page }) => {
+  await openAgent(page);
+  await page.getByRole("tab", { name: "config" }).click();
+  await page.getByRole("checkbox", { name: "Advanced mode" }).check();
+
+  const groups = [
+    "General",
+    "Model & routing",
+    "Permissions",
+    "Tools & skills",
+    "Memory",
+    "Limits & cost",
+    "Channels",
+    "Planning",
+    "Conversation",
+  ];
+
+  const mute: string[] = [];
+  for (const group of groups) {
+    await page.getByRole("tab", { name: group, exact: true }).click();
+    mute.push(
+      ...(await page.evaluate(() => {
+        const ownName = (el: Element): boolean =>
+          Boolean(
+            (el as HTMLInputElement).labels?.length ||
+              el.getAttribute("aria-label") ||
+              el.getAttribute("aria-labelledby") ||
+              el.getAttribute("placeholder") ||
+              el.getAttribute("title"),
+          );
+
+        /** A name inherited from the enclosing `role="group"` — the
+         *  fieldset/legend pattern, and what `Field` renders for a labelled
+         *  field. */
+        const groupName = (el: Element): string => {
+          let node: Element | null = el.parentElement;
+          while (node) {
+            if (node.getAttribute("role") === "group") {
+              const direct = node.getAttribute("aria-label");
+              if (direct) return direct;
+              const by = node.getAttribute("aria-labelledby");
+              if (by) {
+                const text = by
+                  .split(/\s+/)
+                  .map((id) => document.getElementById(id)?.textContent ?? "")
+                  .join(" ")
+                  .trim();
+                if (text) return text;
+              }
+            }
+            node = node.parentElement;
+          }
+          return "";
+        };
+
+        /** The visible label of the field the control sits in, for the
+         *  failure message: `Field` renders it as the first span child of the
+         *  wrapper, a few levels up from the control. */
+        const fieldLabel = (el: Element): string => {
+          let node: Element | null = el;
+          let outermost = "";
+          for (let depth = 0; depth < 5 && node; depth++) {
+            const parent: Element | null = node.parentElement;
+            if (!parent) break;
+            const first = Array.from(parent.children).find(
+              (child) => child.tagName === "SPAN" && child.textContent?.trim(),
+            );
+            // The outermost match wins: the inner spans belong to the control
+            // (a tag chip, a picker's own caption), and the failure message is
+            // only useful if it names the field.
+            if (first) outermost = first.textContent!.trim().slice(0, 40);
+            node = parent;
+          }
+          return outermost || "(no enclosing field label)";
+        };
+
+        const found: string[] = [];
+        for (const el of document.querySelectorAll(
+          "[data-section] input, [data-section] select, [data-section] textarea",
+        )) {
+          if (el.closest('[aria-hidden="true"]')) continue;
+          if (ownName(el) || groupName(el)) continue;
+          const section =
+            el.closest("[data-section]")?.getAttribute("data-section") ?? "(no section)";
+          found.push(`${section} | ${fieldLabel(el)} | <${el.tagName.toLowerCase()}>`);
+        }
+        return found;
+      })),
+    );
+  }
+
+  expect(
+    mute,
+    `These controls have no accessible name: neither their own, nor one from ` +
+      `the field they sit in. A screen reader announces them as an unnamed ` +
+      `control, so an operator using one cannot tell which field it is. Give ` +
+      `the control an aria-label, or name the group that wraps it.\n\n` +
+      `Mute (${mute.length}):\n${mute.join("\n")}`,
+  ).toEqual([]);
 });
