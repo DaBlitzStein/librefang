@@ -1978,6 +1978,10 @@ export function AgentsPage() {
             // second editable Name field here would be a second answer to the
             // same question.
             nameField="readonly"
+            // The identity section offers this agent's `IDENTITY.md` front
+            // matter. The create modal renders the same form without an id,
+            // because there is no workspace file to read yet.
+            agentId={agent.id}
             sections={CONFIG_GROUPS[configGroup] as ManifestSectionId[]}
             advanced={advancedMode}
           />
