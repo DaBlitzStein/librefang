@@ -73,6 +73,7 @@ function MemoryScopeNote({
     </p>
   );
 }
+import { AgentIdentityFileEditor } from "./AgentIdentityFileEditor";
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
 import { ModelParamField } from "./ui/ModelParamField";
 import { CollapsibleSection, FieldCountBadge } from "./ui/CollapsibleSection";
@@ -278,6 +279,25 @@ interface AgentManifestFormProps {
    * indistinguishable from no error.
    */
   advanced?: boolean;
+  /**
+   * The agent whose workspace files this form may edit, when there is one.
+   *
+   * Only the identity section uses it, to offer `IDENTITY.md`'s front-matter
+   * as fields. It is optional because the create-agent modal renders this same
+   * form before an agent exists, and a workspace file cannot be read or
+   * written for an id the server has never seen; the section simply omits the
+   * editor there, which is the truth rather than a disabled control.
+   *
+   * The name will not do: `/api/agents/{id}` resolves an id, not a name, and a
+   * name-shaped path segment answers `invalid_agent_id`. This is the same id
+   * the detail panel already holds.
+   *
+   * The editor writes the file, never the manifest, and has its own save. It
+   * is not wired into this form's `onChange` on purpose: one Save button that
+   * wrote `agent.toml` and a workspace file at once would make the two stores
+   * disagree depending on which half failed.
+   */
+  agentId?: string;
 }
 
 /**
@@ -386,6 +406,7 @@ export function AgentManifestForm({
   routerProfilesEnabled,
   nameField = "editable",
   routingInertReason,
+  agentId,
   sections,
   advanced = false,
 }: AgentManifestFormProps) {
@@ -673,6 +694,11 @@ export function AgentManifestForm({
             />
           </Field>
         </AdvancedFields>
+        {/* The agent's own identity document, when there is an agent. It sits
+            outside `AdvancedFields` because it is not an optional detail of the
+            manifest — it is the file the prompt reads as "## Identity", and
+            the three fields it holds had no surface at all before. */}
+        {agentId && <AgentIdentityFileEditor agentId={agentId} />}
       </Section>
 
       {/* A free-form table, so the editor is the table: one row per key with

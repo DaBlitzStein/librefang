@@ -19,16 +19,26 @@ import {
   type ManifestFormState,
 } from "../lib/agentManifest";
 
-vi.mock("react-i18next", () => ({
-  useTranslation: () => ({
-    t: (_key: string, opts?: { defaultValue?: string } | Record<string, unknown>) => {
-      if (opts && typeof opts === "object" && "defaultValue" in opts) {
-        return (opts as { defaultValue?: string }).defaultValue ?? _key;
-      }
-      return _key;
-    },
-  }),
-}));
+// Spread the real module rather than replacing it. The identity section now
+// renders the `IDENTITY.md` editor, which reads the UI store, and `lib/store`
+// initialises i18n at module load — so `initReactI18next` has to exist on this
+// mock or the suite fails to collect before a single test runs. Same reason and
+// same shape as `KnowledgePage.test.tsx`.
+vi.mock("react-i18next", async () => {
+  const actual = await vi.importActual<typeof import("react-i18next")>("react-i18next");
+  return {
+    ...actual,
+    useTranslation: () => ({
+      t: (_key: string, opts?: { defaultValue?: string } | Record<string, unknown>) => {
+        if (opts && typeof opts === "object" && "defaultValue" in opts) {
+          return (opts as { defaultValue?: string }).defaultValue ?? _key;
+        }
+        return _key;
+      },
+      i18n: { language: "en" },
+    }),
+  };
+});
 
 interface HarnessModel {
   provider: string;
