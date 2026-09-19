@@ -186,6 +186,29 @@ mod identity_file_list_tests {
         );
     }
 
+    /// A directory that shares the file's name at the workspace root is not a
+    /// fallback the read path can have served, so the write must not aim at it.
+    ///
+    /// `resolve_identity_file` returns the root path only when it holds the
+    /// file; a directory there means the read would have failed, and treating
+    /// `exists()` as "this is where it was read from" turned every write into a
+    /// rename-over-a-directory 500. The old code wrote `.identity/` and never
+    /// noticed the directory at all.
+    #[test]
+    fn write_ignores_a_directory_that_shares_the_file_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().to_path_buf();
+        std::fs::create_dir(workspace.join("SOUL.md")).unwrap();
+
+        write_identity_file(&workspace, "SOUL.md", "edited").expect("write must succeed");
+
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".identity/SOUL.md")).unwrap(),
+            "edited",
+            "the write must land in .identity/ when the root name is not a file"
+        );
+    }
+
     /// Once `.identity/<name>` exists it is the copy the read path prefers, so
     /// writes must keep landing there and leave a stale root fallback alone.
     #[test]
@@ -427,9 +450,15 @@ fn write_identity_file(
     // operator's edit went to a file nobody read. Migration itself stays the
     // kernel's job (`migrate_identity_files`, which runs on every spawn); the
     // write path only follows the read.
+    // `is_file`, not `exists`, on the root: a workspace that happens to hold a
+    // *directory* named `SOUL.md` is not a workspace whose `SOUL.md` was read
+    // from there — `read_identity_file` would have failed on it — so falling
+    // back to it would aim the write at a directory and fail with a 500 where
+    // the old code simply wrote `.identity/`. Only a regular file is the
+    // fallback the read path can actually have served.
     let file_path = if identity_file.exists() {
         identity_file
-    } else if root_file.exists() {
+    } else if root_file.is_file() {
         root_file
     } else {
         std::fs::create_dir_all(&identity_dir).map_err(IdentityFileMutationError::Io)?;
