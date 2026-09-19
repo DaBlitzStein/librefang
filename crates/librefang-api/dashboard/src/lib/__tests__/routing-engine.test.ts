@@ -12,7 +12,9 @@ import {
   applyRoutingEngine,
   ROUTING_ENGINES,
   ROUTING_ENGINE_SETTINGS,
+  ROUTING_TIER_DEFAULTS,
   routingEngineOf,
+  routingTierModel,
 } from "../routingEngine";
 
 // The engine selector is a mapping from one operator choice onto three manifest
@@ -74,6 +76,34 @@ function rustEnumSpellings(source: string, name: string): string[] {
       }
       return variant;
     });
+}
+
+/**
+ * `impl Default for ModelRoutingConfig`'s field values, as Rust spells them.
+ *
+ * Read rather than restated for the reason the rest of this file gives: the
+ * numbers and model names are the daemon's, and a bumped snapshot upstream
+ * must fail here rather than leave the editor describing a model the kernel
+ * stopped using.
+ */
+function modelRoutingDefaults(source: string): Record<string, string | number> {
+  const block =
+    /impl Default for ModelRoutingConfig \{[\s\S]*?fn default\(\) -> Self \{\s*Self \{([\s\S]*?)\n\s*\}/.exec(
+      source,
+    );
+  if (!block) throw new Error("impl Default for ModelRoutingConfig not found");
+
+  const out: Record<string, string | number> = {};
+  for (const line of block[1].split("\n")) {
+    const text = /^\s*(\w+):\s*"([^"]*)"\.to_string\(\),/.exec(line);
+    if (text) {
+      out[text[1]] = text[2];
+      continue;
+    }
+    const number = /^\s*(\w+):\s*(\d+),/.exec(line);
+    if (number) out[number[1]] = Number(number[2]);
+  }
+  return out;
 }
 
 /**
@@ -402,11 +432,79 @@ describe("changing to the profile engine never drops the tier table", () => {
     expect(toml).not.toContain("[routing]");
   });
 
+  it("arms the router on the daemon's models when the table is saved blank", () => {
+    // The state the editor has to describe rather than hide: the effort engine
+    // writes `[routing]` for a form whose slots are all empty, and the daemon
+    // reads the table's presence as "route", filling every missing key from
+    // `ModelRoutingConfig::default()`.
+    const toml = serializeManifestForm(applyRoutingEngine(emptyManifestForm(), "effort"));
+
+    expect(toml).toContain("[routing]");
+    expect(toml).not.toContain("simple_model");
+    expect(routingTierModel(emptyManifestForm(), "simple_model")).toBe(
+      ROUTING_TIER_DEFAULTS.simple_model,
+    );
+  });
+
   it("still removes the table when an engine without tiers is chosen outright", () => {
     // "Fixed" is an explicit statement about routing, and `false` is how it is
     // made; only "profile" declines to make one.
     const toml = serializeManifestForm(applyRoutingEngine(withTiers(), "fixed"));
 
     expect(toml).not.toContain("[routing]");
+  });
+});
+
+// The editor names the daemon's fallbacks in two places — the effort engine's
+// blank-slot line and the profile engine's unmatched-turn line — so the names
+// have to be the daemon's own, not this form's idea of them. A fresh agent's
+// tier slots are all empty and the `[routing]` table arms the router anyway,
+// so a stale name here would describe a model the kernel stopped using.
+describe("the tier defaults the editor names are the daemon's", () => {
+  it("mirrors `ModelRoutingConfig::default()` field for field", () => {
+    const defaults = modelRoutingDefaults(AGENT_RS);
+
+    expect(Object.keys(defaults).sort()).toEqual(Object.keys(ROUTING_TIER_DEFAULTS).sort());
+    for (const [key, value] of Object.entries(defaults)) {
+      expect(
+        ROUTING_TIER_DEFAULTS[key as keyof typeof ROUTING_TIER_DEFAULTS],
+        `${key} has drifted from ModelRoutingConfig::default(), which is what the ` +
+          `daemon routes on when the manifest leaves the key out.`,
+      ).toBe(value);
+    }
+  });
+
+  it("the defaults reader reads the source it is given", () => {
+    const synthetic = `
+impl Default for ModelRoutingConfig {
+    fn default() -> Self {
+        Self {
+            simple_model: "one".to_string(),
+            simple_threshold: 7,
+        }
+    }
+}
+`;
+    expect(modelRoutingDefaults(synthetic)).toEqual({
+      simple_model: "one",
+      simple_threshold: 7,
+    });
+    expect(modelRoutingDefaults(synthetic.replace('"one"', '"two"'))).toEqual({
+      simple_model: "two",
+      simple_threshold: 7,
+    });
+  });
+
+  it("resolves a slot to the default only when the manifest is blank", () => {
+    const form = emptyManifestForm();
+    expect(routingTierModel(form, "simple_model")).toBe(ROUTING_TIER_DEFAULTS.simple_model);
+
+    form.routing.simple_model = "gpt-4o-mini";
+    expect(routingTierModel(form, "simple_model")).toBe("gpt-4o-mini");
+
+    // Whitespace is the absent key as far as the serializer is concerned: it
+    // trims before deciding whether to write the line.
+    form.routing.simple_model = "   ";
+    expect(routingTierModel(form, "simple_model")).toBe(ROUTING_TIER_DEFAULTS.simple_model);
   });
 });

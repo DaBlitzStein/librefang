@@ -195,6 +195,30 @@ describe("generateManifestMarkdown", () => {
     expect(md).not.toContain("Simple threshold");
   });
 
+  it("caveats the fixed engine with the daemon's own default routing", () => {
+    // "Fixed model" alone is true of the manifest and false of the agent: the
+    // kernel runs the daemon's `[default_routing]` for every agent with no
+    // `[routing]` table of its own, which is exactly the state this engine
+    // writes.
+    const md = generateManifestMarkdown(emptyManifestForm());
+
+    expect(md).toContain("Fixed model");
+    expect(md).toContain("kernel-wide `[default_routing]`");
+  });
+
+  it("prints the daemon's model for a blank tier, marked as the daemon's", () => {
+    // The table arms the router whether or not it names models, so a reader
+    // shown nothing where the model belongs would be reading a table that
+    // routes onto a model nobody chose.
+    const form = emptyManifestForm();
+    form.routing.enabled = true;
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("Effort (complexity)");
+    expect(md).toContain("claude-haiku-4-5-20251001 _(daemon default)_");
+  });
+
   it("includes lifecycle overrides when set to non-default values", () => {
     const form = emptyManifestForm();
     form.name = "ops";

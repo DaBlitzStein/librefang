@@ -139,3 +139,45 @@ export function applyRoutingEngine(
         : { ...form.routing, enabled: setting.routing_table },
   };
 }
+
+/** The tier slots that name a model, as `[routing]` spells them. */
+export type RoutingTierModelSlot = "simple_model" | "medium_model" | "complex_model";
+
+/**
+ * `impl Default for ModelRoutingConfig` — what the daemon substitutes for
+ * every `[routing]` key the manifest leaves out
+ * (crates/librefang-types/src/agent.rs).
+ *
+ * These are not decoration: the struct is `#[serde(default)]`, so a
+ * `[routing]` table written with no keys at all still arms the tier router,
+ * on these three models and these two thresholds. An editor that showed three
+ * blank pickers and said nothing would be describing an agent that does not
+ * exist — the operator would believe the tiers were unconfigured while every
+ * turn was being routed onto `claude-haiku-4-5-20251001`.
+ *
+ * `routing-engine.test.ts` reads the Rust `Default` at test time and fails
+ * when these drift, so a bumped snapshot model upstream is a test failure
+ * rather than a stale name on screen.
+ */
+export const ROUTING_TIER_DEFAULTS = {
+  simple_model: "claude-haiku-4-5-20251001",
+  medium_model: "claude-sonnet-4-20250514",
+  complex_model: "claude-sonnet-4-20250514",
+  simple_threshold: 100,
+  complex_threshold: 500,
+} as const;
+
+/**
+ * The model a tier slot will actually route to: what the manifest says, or the
+ * daemon's own default for that slot when it says nothing.
+ *
+ * The empty string is the absent key — `serializeManifestForm` omits it — and
+ * it is *not* "no model": serde fills it. Callers that want to show an
+ * operator what the slot resolves to have to show this, not the raw field.
+ */
+export function routingTierModel(
+  form: ManifestFormState,
+  slot: RoutingTierModelSlot,
+): string {
+  return form.routing[slot].trim() || ROUTING_TIER_DEFAULTS[slot];
+}
