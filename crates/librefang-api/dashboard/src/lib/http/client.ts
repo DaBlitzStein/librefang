@@ -20,6 +20,8 @@ export {
   // agents
   listAgents,
   getAgentDetail,
+  // workspace identity file bytes (`GET /api/agents/{id}/files/{filename}`)
+  getAgentFile,
   getAgentManifest,
   getAgentChannels,
   getAgentStats,
@@ -213,6 +215,9 @@ export type {
   OperatorActionDescriptor,
   // agent avatar upload (#8339)
   AgentAvatarUploadResult,
+  // workspace identity file bytes (`GET|PUT /api/agents/{id}/files/{filename}`)
+  AgentIdentityFile,
+  AgentIdentityFileWriteResult,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -241,6 +246,8 @@ export {
   clearHandAgentRuntimeConfig,
   resetAgentSession,
   updateAgentTools,
+  // workspace identity file bytes (`PUT /api/agents/{id}/files/{filename}`)
+  setAgentFile,
   // visual identity: emoji / colour, and the avatar image (#8339)
   updateAgentIdentity,
   uploadAgentAvatar,
