@@ -20,7 +20,9 @@ import {
 import type { JsonRowType, ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 import {
   applyRoutingEngine,
+  ROUTING_TIER_DEFAULTS,
   routingEngineOf,
+  routingTierModel,
   type RoutingEngine,
 } from "../lib/routingEngine";
 
@@ -3005,6 +3007,22 @@ export function AgentManifestForm({
           {routingEngine === "effort" && t("agents.form.routing_engine_effort_note")}
           {routingEngine === "profile" && t("agents.form.routing_engine_profile_note")}
         </p>
+        {/* Under the profile engine the tiers are not editable here, so the
+            operator cannot otherwise tell what an unmatched turn runs on. The
+            line names the models the kernel would use — the fallback table
+            when there is one, and the daemon's default routing when there is
+            not (which reaches an agent with no `[routing]` of its own). */}
+        {routingEngine === "profile" && (
+          <p className="text-[10px] text-text-dim/70 mt-1">
+            {value.routing.enabled
+              ? t("agents.form.routing_engine_profile_fallback", {
+                  simple: routingTierModel(value, "simple_model"),
+                  medium: routingTierModel(value, "medium_model"),
+                  complex: routingTierModel(value, "complex_model"),
+                })
+              : t("agents.form.routing_engine_profile_fallback_none")}
+          </p>
+        )}
         {/* The tiers are the effort engine's own controls, and render only
             while it runs. Under the profile engine they are the fallback the
             kernel reaches for when no profile matches — preserved in the file
@@ -3045,6 +3063,21 @@ export function AgentManifestForm({
                 />
               </Field>
             </div>
+            {/* A blank picker reads as "no model", and it is not: the table
+                arms the tier router by its presence, and serde fills every key
+                it leaves out from `ModelRoutingConfig::default()`. The line
+                names those values rather than leaving the operator to
+                discover them from a routed turn (lib/routingEngine.ts holds
+                them, guarded against the Rust `Default`). */}
+            <p className="text-[10px] text-text-dim/70">
+              {t("agents.form.routing_tier_blank_defaults", {
+                simple: ROUTING_TIER_DEFAULTS.simple_model,
+                medium: ROUTING_TIER_DEFAULTS.medium_model,
+                complex: ROUTING_TIER_DEFAULTS.complex_model,
+                simpleThreshold: ROUTING_TIER_DEFAULTS.simple_threshold,
+                complexThreshold: ROUTING_TIER_DEFAULTS.complex_threshold,
+              })}
+            </p>
             <div className="grid grid-cols-2 gap-3">
               <StepLadderInput
                 label={t("agents.form.simple_threshold")}
