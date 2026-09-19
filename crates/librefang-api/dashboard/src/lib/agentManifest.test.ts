@@ -2537,6 +2537,7 @@ describe("every table the form owns keeps the keys it does not render", () => {
     ["compaction", "[compaction]\nzz_unknown = 7"],
     ["skill_workshop", "[skill_workshop]\nzz_unknown = 7"],
     ["channel_overrides", "[channel_overrides]\nzz_unknown = 7"],
+    ["context_engine", "[context_engine]\nzz_unknown = 7"],
   ];
 
   for (const [table, body] of TABLES) {
@@ -3604,5 +3605,287 @@ describe("exec_policy table", () => {
     expect(round).toContain("zz_unknown = 7");
     // The preserved key forces the table: a shorthand has nowhere to carry it.
     expect(round).not.toContain('exec_policy = "');
+  });
+});
+
+// `context_engine` is `Option<ContextEngineTomlConfig>`
+// (crates/librefang-types/src/config/types.rs:4743) and had no editor at all —
+// a key with a whole subsystem behind it that the dashboard could not see.
+//
+// It is typed rather than generic because the type is knowable: eight keys at
+// the top, a `hooks` table of script paths and their runtime knobs, an optional
+// sidecar, and a list of plugin registries.
+describe("context_engine", () => {
+  it("writes nothing while every field holds its default", () => {
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("[context_engine");
+  });
+
+  it("round-trips the top-level fields", () => {
+    const form = emptyManifestForm();
+    form.context_engine.engine = "summary";
+    form.context_engine.plugin = "qdrant-recall";
+    form.context_engine.plugin_stack = ["qdrant-recall", "my-indexer"];
+    form.context_engine.plugin_stack_weights = "2, 1";
+    form.context_engine.deduplicate_file_reads = false;
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[context_engine]");
+    expect(toml).toContain('engine = "summary"');
+    expect(toml).toContain('plugin = "qdrant-recall"');
+    expect(toml).toContain('plugin_stack = ["qdrant-recall", "my-indexer"]');
+    expect(toml).toContain("plugin_stack_weights = [2, 1]");
+    // `deduplicate_file_reads` defaults to `true` in Rust, so `false` is the
+    // value worth writing.
+    expect(toml).toContain("deduplicate_file_reads = false");
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.context_engine.engine).toBe("summary");
+    expect(parsed.form.context_engine.plugin).toBe("qdrant-recall");
+    expect(parsed.form.context_engine.plugin_stack).toEqual(["qdrant-recall", "my-indexer"]);
+    expect(parsed.form.context_engine.plugin_stack_weights).toBe("2, 1");
+    expect(parsed.form.context_engine.deduplicate_file_reads).toBe(false);
+  });
+
+  it("leaves deduplicate_file_reads out when it is on", () => {
+    const form = emptyManifestForm();
+    form.context_engine.engine = "default";
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[context_engine]");
+    expect(toml).not.toContain("deduplicate_file_reads");
+  });
+
+  it("keeps an engine name the built-in list does not know", () => {
+    // `engine` is a `String`, not an enum: the daemon reads these four names
+    // and an unknown one is a value it will not recognise but will keep. A
+    // select that replaced it with its own first option would be the editor
+    // rewriting a manifest it did not understand.
+    const parsed = parseManifestToml('[context_engine]\nengine = "my_engine"\n');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.context_engine.engine).toBe("my_engine");
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain('engine = "my_engine"');
+  });
+
+  it("writes the sidecar table only when it is enabled", () => {
+    const off = emptyManifestForm();
+    off.context_engine.sidecar.command = "python3";
+    // A command with the switch off is a half-filled row: dropped, because an
+    // `[context_engine.sidecar]` the operator did not ask for would make the
+    // daemon run the sidecar engine.
+    expect(serializeManifestForm(off)).not.toContain("[context_engine.sidecar]");
+
+    const on = emptyManifestForm();
+    on.context_engine.sidecar_enabled = true;
+    on.context_engine.sidecar.command = "python3";
+    on.context_engine.sidecar.args = ["recall.py"];
+    on.context_engine.sidecar.request_timeout_secs = "45";
+
+    const toml = serializeManifestForm(on);
+    expect(toml).toContain("[context_engine.sidecar]");
+    expect(toml).toContain('command = "python3"');
+    expect(toml).toContain('args = ["recall.py"]');
+    expect(toml).toContain("request_timeout_secs = 45");
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.context_engine.sidecar_enabled).toBe(true);
+    expect(parsed.form.context_engine.sidecar.command).toBe("python3");
+    expect(parsed.form.context_engine.sidecar.args).toEqual(["recall.py"]);
+    expect(parsed.form.context_engine.sidecar.request_timeout_secs).toBe("45");
+  });
+
+  it("reads a sidecar table already in the file as enabled", () => {
+    const parsed = parseManifestToml(
+      '[context_engine]\nengine = "sidecar"\n\n[context_engine.sidecar]\ncommand = "python3"\n',
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.context_engine.sidecar_enabled).toBe(true);
+    expect(parsed.form.context_engine.sidecar.command).toBe("python3");
+  });
+
+  it("round-trips the hook script paths and their knobs", () => {
+    const form = emptyManifestForm();
+    const hooks = form.context_engine.hooks;
+    hooks.ingest = "~/.librefang/plugins/recall.py";
+    hooks.after_turn = "~/.librefang/plugins/index.py";
+    hooks.bootstrap = "boot.py";
+    hooks.assemble = "assemble.py";
+    hooks.compact = "compact.py";
+    hooks.transform_tool_result = "rewrite.py";
+    hooks.prepare_subagent = "prepare.py";
+    hooks.merge_subagent = "merge.py";
+    hooks.on_event = "event.py";
+    hooks.runtime = "node";
+    hooks.hook_timeout_secs = "45";
+    hooks.max_retries = "2";
+    hooks.retry_delay_ms = "250";
+    hooks.max_memory_mb = "512";
+    hooks.after_turn_queue_depth = "32";
+    hooks.priority = "10";
+    hooks.on_hook_failure = "abort";
+    hooks.hook_protocol_version = "1";
+    hooks.circuit_enabled = true;
+    hooks.circuit_max_failures = "3";
+    hooks.circuit_reset_secs = "120";
+    hooks.ingest_filter = "remember";
+    hooks.ingest_regex = "(?i)note";
+    hooks.only_for_agent_ids = ["3f2a"];
+    hooks.hook_cache_ttl_secs = "60";
+    hooks.assemble_cache_ttl_secs = "30";
+    hooks.compact_cache_ttl_secs = "15";
+    hooks.enable_shared_state = true;
+    hooks.persistent_subprocess = true;
+    hooks.prewarm_subprocesses = true;
+    hooks.allow_filesystem = true;
+    hooks.allow_network = true;
+    hooks.allowed_secrets = ["GITHUB_TOKEN"];
+    hooks.otel_endpoint = "http://localhost:4317";
+    hooks.env_schema = [{ _uid: "e1", key: "QDRANT_URL", valueType: "string", value: "required" }];
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[context_engine.hooks]");
+    expect(toml).toContain("[context_engine.hooks.circuit_breaker]");
+    expect(toml).toContain('on_hook_failure = "abort"');
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = parsed.form.context_engine.hooks;
+    const original = form.context_engine.hooks;
+    expect(round.ingest).toBe(original.ingest);
+    expect(round.on_event).toBe(original.on_event);
+    expect(round.runtime).toBe(original.runtime);
+    expect(round.hook_timeout_secs).toBe(original.hook_timeout_secs);
+    expect(round.max_retries).toBe(original.max_retries);
+    expect(round.retry_delay_ms).toBe(original.retry_delay_ms);
+    expect(round.max_memory_mb).toBe(original.max_memory_mb);
+    expect(round.after_turn_queue_depth).toBe(original.after_turn_queue_depth);
+    expect(round.priority).toBe(original.priority);
+    expect(round.on_hook_failure).toBe(original.on_hook_failure);
+    expect(round.hook_protocol_version).toBe(original.hook_protocol_version);
+    expect(round.circuit_enabled).toBe(true);
+    expect(round.circuit_max_failures).toBe(original.circuit_max_failures);
+    expect(round.circuit_reset_secs).toBe(original.circuit_reset_secs);
+    expect(round.ingest_filter).toBe(original.ingest_filter);
+    expect(round.ingest_regex).toBe(original.ingest_regex);
+    expect(round.only_for_agent_ids).toEqual(original.only_for_agent_ids);
+    expect(round.hook_cache_ttl_secs).toBe(original.hook_cache_ttl_secs);
+    expect(round.assemble_cache_ttl_secs).toBe(original.assemble_cache_ttl_secs);
+    expect(round.compact_cache_ttl_secs).toBe(original.compact_cache_ttl_secs);
+    expect(round.enable_shared_state).toBe(true);
+    expect(round.persistent_subprocess).toBe(true);
+    expect(round.prewarm_subprocesses).toBe(true);
+    expect(round.allow_filesystem).toBe(true);
+    expect(round.allow_network).toBe(true);
+    expect(round.allowed_secrets).toEqual(original.allowed_secrets);
+    expect(round.otel_endpoint).toBe(original.otel_endpoint);
+    expect(round.env_schema.map(({ _uid, ...rest }) => rest)).toEqual([
+      { key: "QDRANT_URL", valueType: "string", value: "required" },
+    ]);
+  });
+
+  it("writes a hook knob only when it is set", () => {
+    // Every key absent: the whole table stays out of the file.
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("[context_engine");
+
+    // The flags default to `false` in Rust, so `false` writes nothing.
+    const off = emptyManifestForm();
+    off.context_engine.hooks.persistent_subprocess = false;
+    off.context_engine.hooks.allow_network = false;
+    expect(serializeManifestForm(off)).not.toContain("[context_engine");
+
+    // `warn` is the enum's Rust default, so only the other two are statements.
+    const warn = emptyManifestForm();
+    warn.context_engine.hooks.on_hook_failure = "warn";
+    expect(serializeManifestForm(warn)).not.toContain("[context_engine");
+
+    const abort = emptyManifestForm();
+    abort.context_engine.hooks.on_hook_failure = "abort";
+    const toml = serializeManifestForm(abort);
+    expect(toml).toContain("[context_engine.hooks]");
+    expect(toml).toContain('on_hook_failure = "abort"');
+  });
+
+  it("tells a declared-empty plugin_registries from an absent one", () => {
+    // The Rust default is the official registry, so `null` (absent) and `[]`
+    // (declared empty) are different statements: the second switches the
+    // plugin browser off.
+    const absent = emptyManifestForm();
+    absent.context_engine.engine = "default";
+    expect(serializeManifestForm(absent)).not.toContain("plugin_registries");
+
+    const declared = emptyManifestForm();
+    declared.context_engine.plugin_registries = [];
+    expect(serializeManifestForm(declared)).toContain("plugin_registries = []");
+
+    const rows = emptyManifestForm();
+    rows.context_engine.plugin_registries = [
+      { _uid: "r1", name: "Mine", github_repo: "acme/librefang-plugins" },
+    ];
+    const toml = serializeManifestForm(rows);
+    expect(toml).toContain("[[context_engine.plugin_registries]]");
+    expect(toml).toContain('github_repo = "acme/librefang-plugins"');
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.context_engine.plugin_registries?.map(({ _uid, ...rest }) => rest)).toEqual([
+      { name: "Mine", github_repo: "acme/librefang-plugins" },
+    ]);
+  });
+
+  it("preserves hook_schemas and any key the form does not render", () => {
+    const source = [
+      "[context_engine]",
+      'engine = "default"',
+      "zz_unknown = 7",
+      "",
+      "[context_engine.hooks]",
+      'ingest = "recall.py"',
+      "future_knob = true",
+      "",
+      "[context_engine.hooks.hook_schemas.ingest.output]",
+      'type = "object"',
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    expect(Object.keys(parsed.form.context_engine.preserved ?? {})).toEqual(["zz_unknown"]);
+    expect(Object.keys(parsed.form.context_engine.hooks.preserved ?? {}).sort()).toEqual([
+      "future_knob",
+      "hook_schemas",
+    ]);
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("zz_unknown = 7");
+    expect(round).toContain("future_knob = true");
+    expect(round).toContain("hook_schemas");
+    // And the parsed schema survives another full cycle.
+    const reparsed = parseManifestToml(round);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(
+      Object.keys(reparsed.form.context_engine.hooks.preserved ?? {}).sort(),
+    ).toEqual(["future_knob", "hook_schemas"]);
+  });
+
+  it("drops a weights list that is not a list of numbers", () => {
+    // Positional floats matching `plugin_stack`. The serializer writes nothing
+    // rather than a bare `plugin_stack_weights = [abc]`, which TOML would not
+    // read back; validation is what tells the operator.
+    const form = emptyManifestForm();
+    form.context_engine.plugin_stack_weights = "abc";
+    const toml = serializeManifestForm(form);
+    expect(toml).not.toContain("plugin_stack_weights");
+    expect(validateManifestForm(form)).toContain("context_engine.plugin_stack_weights");
   });
 });
