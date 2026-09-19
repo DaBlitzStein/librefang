@@ -629,7 +629,11 @@ export type ConfigGroupId = (typeof CONFIG_GROUP_IDS)[number];
  * with the cron jobs it governs.
  */
 export const CONFIG_GROUPS: Record<ConfigGroupId, readonly ManifestSectionId[]> = {
-  general: ["identity", "metadata", "prompt", "lifecycle", "response_format"],
+  // The name and the system prompt are what an operator comes to this tab for,
+  // so they come first; `metadata` is the table almost nobody opens, so it is
+  // last. The order of each array is the order the tab renders — see
+  // `sections` on `AgentManifestFormProps`.
+  general: ["identity", "prompt", "response_format", "lifecycle", "metadata"],
   model: ["model", "fallback_models", "thinking", "routing"],
   // The user's split: model and routing on one tab, and what the agent is
   // *allowed* to do on a tab of its own. `capabilities` grants network hosts,
@@ -638,8 +642,8 @@ export const CONFIG_GROUPS: Record<ConfigGroupId, readonly ManifestSectionId[]> 
   // and exec_policy folded into Lifecycle, where every other switch is a
   // preference rather than a permission.
   permissions: ["capabilities", "exec_policy"],
-  tools: ["tools", "skills", "mcp_servers", "skill_workshop"],
-  memory: ["proactive_memory", "auto_dream", "compaction", "context_engine"],
+  tools: ["skills", "mcp_servers", "tools", "skill_workshop"],
+  memory: ["proactive_memory", "compaction", "auto_dream", "context_engine"],
   limits: ["limits"],
   channels: ["channel_overrides"],
   planning: ["scheduling", "autonomous", "async_tasks"],

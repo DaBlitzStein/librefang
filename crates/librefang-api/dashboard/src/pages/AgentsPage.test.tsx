@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { useState } from "react";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -18,8 +19,16 @@ import {
   INFO_TABS,
   groupForFirstInvalidField,
 } from "./AgentsPage";
-import { MANIFEST_SECTION_IDS } from "../components/AgentManifestForm";
-import { emptyManifestForm, validateManifestForm } from "../lib/agentManifest";
+import {
+  AgentManifestForm,
+  type ManifestSectionId,
+  MANIFEST_SECTION_IDS,
+} from "../components/AgentManifestForm";
+import {
+  emptyManifestExtras,
+  emptyManifestForm,
+  validateManifestForm,
+} from "../lib/agentManifest";
 import { useSetAgentChannels } from "../lib/mutations/agents";
 import { useAgentChannels } from "../lib/queries/agents";
 
@@ -224,6 +233,22 @@ describe("ChannelsSection (#7742)", () => {
   });
 });
 
+/** The editor as the agent view mounts it: one config group, no catalogs. */
+function GroupForm({ sections }: { sections: ManifestSectionId[] }) {
+  const [state, setState] = useState(() => emptyManifestForm());
+  return (
+    <AgentManifestForm
+      value={state}
+      onChange={setState}
+      providers={[{ name: "openai" }]}
+      models={[{ provider: "openai", id: "gpt-4o" }]}
+      invalidFields={new Set()}
+      extras={emptyManifestExtras()}
+      sections={sections}
+    />
+  );
+}
+
 describe("agent detail — manifest section layout", () => {
   const hosted = CONFIG_GROUP_IDS.flatMap((group) =>
     CONFIG_GROUPS[group].map((id) => ({ group, id })),
@@ -384,6 +409,32 @@ describe("agent detail — manifest section layout", () => {
         `every locale.\n\nMissing (${missing.length}):\n${missing.join("\n")}`,
     ).toEqual([]);
   });
+
+  // The array is the render order, not a membership filter.
+  //
+  // While it only filtered, the sections rendered in the order they happened to
+  // sit in `AgentManifestForm`'s JSX: most groups matched by accident, `general`
+  // did not (`response_format` before `lifecycle` on screen, the reverse in the
+  // array), and reordering an array changed nothing. Every group is checked
+  // because that failure was invisible in the groups nobody had reordered yet.
+  it.each(CONFIG_GROUP_IDS)(
+    "renders the %s group in the order its array declares",
+    (group) => {
+      const declared = [...CONFIG_GROUPS[group]];
+      const { container } = render(<GroupForm sections={declared} />);
+      const rendered = Array.from(
+        container.querySelectorAll("[data-section]"),
+      ).map((el) => el.getAttribute("data-section") ?? "");
+
+      expect(
+        rendered,
+        `The ${group} tab renders its sections in an order its array does not ` +
+          `declare, so the array is back to being a filter the JSX order ` +
+          `overrides.\n\nDeclared: ${declared.join(", ")}\n` +
+          `Rendered: ${rendered.join(", ")}`,
+      ).toEqual(declared);
+    },
+  );
 });
 
 // The group jump on a failed save. With the sections grouped, the field that
