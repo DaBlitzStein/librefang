@@ -1,4 +1,4 @@
-import { createContext, useContext, useMemo, useState } from "react";
+import { Fragment, createContext, useContext, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, Plus, RotateCcw, Trash2, X } from "lucide-react";
 import {
@@ -228,10 +228,17 @@ interface AgentManifestFormProps {
    */
   nameField?: "editable" | "readonly" | "hidden";
   /**
-   * Which sections this caller renders, in the order they appear here.
+   * Which sections this caller renders, in the order given here.
    *
-   * Omitted (the default) renders every section, which is what the
-   * create-agent modal wants: one scrolling page with the whole manifest.
+   * The array is the render order, not a membership filter: the sections are
+   * keyed by id and rendered by walking this list, so it decides both what is
+   * on the tab and where. The JSX order below is not consulted — a section
+   * that moves in the file keeps its place on screen — which is what lets a
+   * group put `response_format` before `lifecycle` and get it.
+   *
+   * Omitted (the default) renders every section, in the order of
+   * `MANIFEST_SECTION_IDS`, which is what the create-agent modal wants: one
+   * scrolling page with the whole manifest.
    *
    * The agent view passes one config group at a time so the same editor backs
    * every group instead of living in a second drawer behind an "Edit full
@@ -263,13 +270,16 @@ interface AgentManifestFormProps {
 }
 
 /**
- * Every addressable section of the manifest editor, in render order. See
- * `sections` on `AgentManifestFormProps` for why sections are the unit of
- * composition.
+ * Every addressable section of the manifest editor, and the order the editor
+ * renders them in when the caller does not name one. See `sections` on
+ * `AgentManifestFormProps` for why sections are the unit of composition and
+ * what its array does.
  *
  * A runtime array rather than a bare union so callers that need to reason
  * about the whole set — the tab map, and the tests that guard it — can,
- * instead of restating the list and drifting from it.
+ * instead of restating the list and drifting from it. It is also the total
+ * key set of the form's section map, so an id added here fails to compile
+ * until a section for it exists.
  */
 export const MANIFEST_SECTION_IDS = [
   "identity",
@@ -370,11 +380,6 @@ export function AgentManifestForm({
   advanced = false,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
-
-  // `undefined` means "every section" (the create modal). A caller that
-  // passes a list gets exactly that list.
-  const shows = (id: ManifestSectionId): boolean =>
-    sections === undefined || sections.includes(id);
 
   // The provider the agent already runs on stays selectable even when the
   // caller filtered it out of `providers` (rejected key, local service down).
@@ -496,10 +501,23 @@ export function AgentManifestForm({
   const jsonSchemaFormat =
     value.response_format.mode === "json_schema" ? value.response_format : null;
 
-  return (
-    <AdvancedModeContext.Provider value={advanced}>
-    <div className="space-y-4">
-      <Section when={shows("identity")} id="identity" title={t("agents.form.basics")}>
+  // The caller's list is the render order, not a membership filter: the
+  // sections below are keyed and rendered in exactly this order, so a group's
+  // array decides what is on the tab and where. `undefined` means every
+  // section, in the order they are listed here.
+  const renderOrder: readonly ManifestSectionId[] = sections ?? MANIFEST_SECTION_IDS;
+
+  /**
+   * Every section of the editor, by id.
+   *
+   * The order of this object is not the render order — `renderOrder` is — so a
+   * section that moves between these entries changes nothing on screen. It is
+   * keyed and total on purpose: a new id in `MANIFEST_SECTION_IDS` is a
+   * compile error until the section that renders it lands here too.
+   */
+  const sectionsById: Record<ManifestSectionId, React.ReactNode> = {
+    identity: (
+      <Section id="identity" title={t("agents.form.basics")}>
         {nameField !== "hidden" && (
           <Field
             label={t("agents.form.name")}
@@ -590,14 +608,15 @@ export function AgentManifestForm({
           </Field>
         </AdvancedFields>
       </Section>
+    ),
 
-      {/* A free-form table, so the editor is the table: one row per key with
-          the value's JSON type named by the operator. Inferring the type from
-          the text would rewrite `"5"` into `5` on the next save, and both are
-          legal values of `HashMap<String, serde_json::Value>`. */}
+    /* A free-form table, so the editor is the table: one row per key with
+        the value's JSON type named by the operator. Inferring the type from
+        the text would rewrite `"5"` into `5` on the next save, and both are
+        legal values of `HashMap<String, serde_json::Value>`. */
+    metadata: (
       <FormSection
         id="metadata"
-        shows={shows}
         title={t("agents.form.metadata")}
         defaultOpen={false}
       >
@@ -643,8 +662,10 @@ export function AgentManifestForm({
           {t("agents.form.metadata_add")}
         </button>
       </FormSection>
+    ),
 
-      <Section when={shows("model")} id="model" title={t("agents.form.model")}>
+    model: (
+      <Section id="model" title={t("agents.form.model")}>
         {/* No visible label: the card above is titled "Model" and the field
             would repeat the word one line lower. The picker keeps its own
             accessible name through its `label` prop. */}
@@ -914,8 +935,10 @@ export function AgentManifestForm({
         </div>
         </AdvancedFields>
       </Section>
+    ),
 
-      <Section when={shows("prompt")} id="prompt" title={t("agents.form.system_prompt")}>
+    prompt: (
+      <Section id="prompt" title={t("agents.form.system_prompt")}>
         {/* Labelled on the control, not above it: the card says "System
             Prompt" and a second copy one line down reads as a stutter. */}
         <Field>
@@ -929,8 +952,10 @@ export function AgentManifestForm({
           />
         </Field>
       </Section>
+    ),
 
-      <Section when={shows("limits")} id="limits" title={t("agents.form.resources")}>
+    limits: (
+      <Section id="limits" title={t("agents.form.resources")}>
         {/* BASIC: the two quotas an operator sets first — the hourly token
             budget and the daily cost ceiling. The rest of the resource table
             folds behind Advanced. */}
@@ -1054,8 +1079,10 @@ export function AgentManifestForm({
           </p>
         </AdvancedFields>
       </Section>
+    ),
 
-      <Section when={shows("capabilities")} id="capabilities" title={t("agents.form.capabilities")}>
+    capabilities: (
+      <Section id="capabilities" title={t("agents.form.capabilities")}>
         <Field label={t("agents.form.network_hosts")} hint={t("agents.form.network_hosts_hint")}>
           <TagInput
             value={value.capabilities.network}
@@ -1202,13 +1229,14 @@ export function AgentManifestForm({
         </div>
         </AdvancedFields>
       </Section>
+    ),
 
-      {/* Not `capabilities.tools`, which lists the names an agent may call.
-          This is `[tools.<name>]` — the per-tool parameter overrides for a
-          tool that is already available. */}
+    /* Not `capabilities.tools`, which lists the names an agent may call.
+        This is `[tools.<name>]` — the per-tool parameter overrides for a
+        tool that is already available. */
+    tools: (
       <FormSection
         id="tools"
-        shows={shows}
         title={t("agents.form.tool_overrides")}
         defaultOpen={false}
       >
@@ -1323,8 +1351,10 @@ export function AgentManifestForm({
           {t("agents.form.tool_add")}
         </button>
       </FormSection>
+    ),
 
-      <Section when={shows("skills")} id="skills" title={t("agents.form.skills")}>
+    skills: (
+      <Section id="skills" title={t("agents.form.skills")}>
         <Field hint={t("agents.form.skills_hint")} ariaLabel={t("agents.form.skills")}>
           {skillFinder ? (
             <MultiSelectCmdk
@@ -1350,8 +1380,10 @@ export function AgentManifestForm({
           )}
         </Field>
       </Section>
+    ),
 
-      <Section when={shows("mcp_servers")} id="mcp_servers" title={t("agents.form.mcp_servers")}>
+    mcp_servers: (
+      <Section id="mcp_servers" title={t("agents.form.mcp_servers")}>
         <Field hint={t("agents.form.mcp_servers_hint")} ariaLabel={t("agents.form.mcp_servers")}>
           {mcpFinder ? (
             <MultiSelectCmdk
@@ -1384,8 +1416,10 @@ export function AgentManifestForm({
           />
         </div>
       </Section>
+    ),
 
-      <FormSection id="scheduling" shows={shows}
+    scheduling: (
+      <FormSection id="scheduling"
         title={t("agents.form.scheduling")}
         defaultOpen={false}
         invalid={
@@ -1481,8 +1515,10 @@ export function AgentManifestForm({
           </Field>
         )}
       </FormSection>
+    ),
 
-      <FormSection id="fallback_models" shows={shows} title={t("agents.form.fallback_models")} defaultOpen={false}>
+    fallback_models: (
+      <FormSection id="fallback_models" title={t("agents.form.fallback_models")} defaultOpen={false}>
         <p className="text-[10px] text-text-dim/70 mb-2">{t("agents.form.fallback_models_hint")}</p>
         {(value.fallback_models ?? []).map((fb, idx) => (
           <div
@@ -1585,8 +1621,10 @@ export function AgentManifestForm({
             </p>
           ))}
       </FormSection>
+    ),
 
-      <FormSection id="thinking" shows={shows} title={t("agents.form.thinking")} defaultOpen={false}>
+    thinking: (
+      <FormSection id="thinking" title={t("agents.form.thinking")} defaultOpen={false}>
         <Toggle
           label={t("agents.form.thinking_enabled")}
           checked={value.thinking.enabled}
@@ -1617,8 +1655,10 @@ export function AgentManifestForm({
           </div>
         )}
       </FormSection>
+    ),
 
-      <FormSection id="autonomous" shows={shows}
+    autonomous: (
+      <FormSection id="autonomous"
         title={t("agents.form.autonomous")}
         defaultOpen={false}
         invalid={invalidFields.has("autonomous.heartbeat_timeout_secs")}
@@ -1729,9 +1769,11 @@ export function AgentManifestForm({
           </>
         )}
       </FormSection>
+    ),
 
+    proactive_memory: (
       <FormSection
-        id="proactive_memory" shows={shows}
+        id="proactive_memory"
         title={t("config.sec_proactive_memory")}
         defaultOpen={false}
       >
@@ -1800,9 +1842,11 @@ export function AgentManifestForm({
         />
         </AdvancedFields>
       </FormSection>
+    ),
 
+    auto_dream: (
       <FormSection
-        id="auto_dream" shows={shows}
+        id="auto_dream"
         title={t("memory.tab_dreams")}
         defaultOpen={false}
         invalid={invalidFields.has("auto_dream_min_sessions")}
@@ -1839,8 +1883,10 @@ export function AgentManifestForm({
             }/>
         </div>
       </FormSection>
+    ),
 
-      <FormSection id="channel_overrides" shows={shows}
+    channel_overrides: (
+      <FormSection id="channel_overrides"
         title={t("agents.form.channel_overrides")}
         defaultOpen={false}
       >
@@ -2012,9 +2058,11 @@ export function AgentManifestForm({
         </div>
         </AdvancedFields>
       </FormSection>
+    ),
 
+    skill_workshop: (
       <FormSection
-        id="skill_workshop" shows={shows}
+        id="skill_workshop"
         title={t("agents.form.skill_workshop")}
         defaultOpen={false}
         invalid={invalidFields.has("skill_workshop.max_pending_age_days")}
@@ -2116,8 +2164,10 @@ export function AgentManifestForm({
         </div>
         </AdvancedFields>
       </FormSection>
+    ),
 
-      <FormSection id="compaction" shows={shows}
+    compaction: (
+      <FormSection id="compaction"
         title={t("config.sec_compaction")}
         defaultOpen={false}
         invalid={[
@@ -2251,14 +2301,15 @@ export function AgentManifestForm({
         </div>
         </AdvancedFields>
       </FormSection>
+    ),
 
-      {/* The memory subsystem's own configuration: which engine assembles the
-          context, and the hooks that get to shape it. Typed rather than
-          generic because the type is knowable — eight keys at the top, a hooks
-          table, an optional sidecar and a list of plugin registries. */}
+    /* The memory subsystem's own configuration: which engine assembles the
+        context, and the hooks that get to shape it. Typed rather than
+        generic because the type is knowable — eight keys at the top, a hooks
+        table, an optional sidecar and a list of plugin registries. */
+    context_engine: (
       <FormSection
         id="context_engine"
-        shows={shows}
         title={t("config.sec_context_engine")}
         defaultOpen={false}
         invalid={invalidFields.has("context_engine.sidecar.command")}
@@ -2860,9 +2911,11 @@ export function AgentManifestForm({
           hint={t("agents.form.context_engine_preserved_hint")}
         />
       </FormSection>
+    ),
 
+    async_tasks: (
       <FormSection
-        id="async_tasks" shows={shows}
+        id="async_tasks"
         title={t("agents.form.async_tasks")}
         defaultOpen={false}
       >
@@ -2887,8 +2940,10 @@ export function AgentManifestForm({
           }
         />
       </FormSection>
+    ),
 
-      <FormSection id="routing" shows={shows} title={t("agents.form.routing")} defaultOpen={false}>
+    routing: (
+      <FormSection id="routing" title={t("agents.form.routing")} defaultOpen={false}>
         <Toggle
           label={t("agents.form.routing_enabled")}
           checked={value.routing.enabled}
@@ -3001,8 +3056,10 @@ export function AgentManifestForm({
           </div>
         </AdvancedFields>
       </FormSection>
+    ),
 
-      <FormSection id="context_injection" shows={shows} title={t("agents.form.context_injection")} defaultOpen={false}>
+    context_injection: (
+      <FormSection id="context_injection" title={t("agents.form.context_injection")} defaultOpen={false}>
         <p className="text-[10px] text-text-dim/70 mb-2">
           {t("agents.form.context_injection_hint")}
         </p>
@@ -3080,8 +3137,10 @@ export function AgentManifestForm({
           {t("agents.form.add_injection")}
         </button>
       </FormSection>
+    ),
 
-      <FormSection id="response_format" shows={shows}
+    response_format: (
+      <FormSection id="response_format"
         title={t("agents.form.response_format")}
         defaultOpen={false}
         invalid={invalidFields.has("response_format.schema")}
@@ -3173,8 +3232,10 @@ export function AgentManifestForm({
           </div>
         )}
       </FormSection>
+    ),
 
-      <FormSection id="lifecycle" shows={shows}
+    lifecycle: (
+      <FormSection id="lifecycle"
         title={t("agents.form.lifecycle")}
         defaultOpen={false}
         invalid={
@@ -3380,15 +3441,16 @@ export function AgentManifestForm({
         </div>
         </AdvancedFields>
       </FormSection>
+    ),
 
-      {/* `exec_policy` is a permission, not a lifecycle setting: it says which
-          shell commands this agent may run, and under what limits. It renders
-          on a card of its own in the Permissions group rather than folded into
-          the lifecycle block, whose session-mode and search switches are not
-          permissions. */}
+    /* `exec_policy` is a permission, not a lifecycle setting: it says which
+        shell commands this agent may run, and under what limits. It renders
+        on a card of its own in the Permissions group rather than folded into
+        the lifecycle block, whose session-mode and search switches are not
+        permissions. */
+    exec_policy: (
       <FormSection
         id="exec_policy"
-        shows={shows}
         title={t("agents.form.exec_policy")}
         defaultOpen={false}
         invalid={
@@ -3525,8 +3587,10 @@ export function AgentManifestForm({
           </div>
         </div>
       </FormSection>
+    ),
 
-      <FormSection id="shared_folders" shows={shows}
+    shared_folders: (
+      <FormSection id="shared_folders"
         title={t("agents.form.shared_folders")}
         defaultOpen={false}
         invalid={value.workspaces.some(
@@ -3612,7 +3676,18 @@ export function AgentManifestForm({
           {t("agents.form.add_folder")}
         </button>
       </FormSection>
-    </div>
+    ),
+  };
+
+  return (
+    <AdvancedModeContext.Provider value={advanced}>
+      <div className="space-y-4">
+        {renderOrder.map((id) => (
+          <Fragment key={id}>
+            {sectionsById[id]}
+          </Fragment>
+        ))}
+      </div>
     </AdvancedModeContext.Provider>
   );
 }
@@ -3664,22 +3739,19 @@ function mergeCatalog(
  * grants). Those stay expanded because folding the common case behind a click
  * trades no scroll for a click on every visit.
  *
- * `when` is the same render guard `FormSection` applies — a section this
- * caller did not ask for renders nothing, not an empty frame.
+ * Like `FormSection`, it renders whatever it is handed: whether a section is
+ * shown at all, and where, is `renderOrder` on the form, not each call site.
  */
 function Section({
   title,
-  when = true,
   id,
   children,
 }: {
   title: string;
-  when?: boolean;
   /** Section identity, emitted as `data-section`. See `CollapsibleSectionProps.sectionId`. */
-  id?: string;
+  id: string;
   children: React.ReactNode;
 }) {
-  if (!when) return null;
   return (
     <div
       data-section={id}
@@ -3741,9 +3813,9 @@ export function AdvancedFields({
 }
 
 /**
- * Folding a section is this caller's choice, so the guard lives here rather than being repeated at every call site.
- * An unshown section renders nothing at all rather than a collapsed shell: a heading the operator cannot open is still a heading they will look for.
- * `shows` stays a prop so the caller keeps one definition of what "shown" means.
+ * The folded flavour of a section: everything in `Section`, plus the `<details>` the operator opens.
+ *
+ * It renders whatever it is handed, and does not decide whether it should be rendered — a section the caller did not ask for is not in `renderOrder` and never reaches this component. That decision used to live here, and it was a filter only: the order of the sections was whatever order the JSX happened to be in, so a group's array could not put `response_format` before `lifecycle` however it was written.
  *
  * Declared at module scope on purpose.
  * A component declared inside the render body is a new function on every render, and React compares element types by reference — so it unmounts and remounts its whole subtree on every keystroke.
@@ -3752,23 +3824,21 @@ export function AdvancedFields({
  */
 function FormSection({
   id,
-  shows,
   ...props
 }: {
   id: ManifestSectionId;
-  shows: (id: ManifestSectionId) => boolean;
 } & CollapsibleSectionProps) {
   // The whole section opens in advanced mode too, not only its inner folds:
   // "advanced shows everything" has to mean the fold the operator would
   // otherwise click, or the switch leaves most of the group still closed.
   const advanced = useContext(AdvancedModeContext);
-  return shows(id) ? (
+  return (
     <CollapsibleSection
       sectionId={id}
       {...props}
       defaultOpen={props.defaultOpen || advanced}
     />
-  ) : null;
+  );
 }
 
 /**
