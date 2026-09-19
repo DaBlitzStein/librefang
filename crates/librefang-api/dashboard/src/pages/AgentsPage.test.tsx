@@ -347,6 +347,25 @@ describe("agent detail — manifest section layout", () => {
     expect(elsewhere, `autonomous also hosted by: ${elsewhere.join(", ")}`).toEqual([]);
   });
 
+  // The user's own split, in their words: "modelo y routing en una pestaña y
+  // permisos en una dedicada". `capabilities` grants network hosts, shell
+  // commands and tool names; `exec_policy` says which shell commands may run
+  // and under what limits. Both are permissions, and neither is a lifecycle
+  // setting — which is where `exec_policy` used to render, folded into a card
+  // whose session-mode and search switches are not permissions at all.
+  it("keeps the permission sections in Permissions", () => {
+    expect(CONFIG_GROUPS.permissions).toContain("capabilities");
+    expect(CONFIG_GROUPS.permissions).toContain("exec_policy");
+
+    const elsewhere = CONFIG_GROUP_IDS.filter(
+      (group) =>
+        group !== "permissions" &&
+        (CONFIG_GROUPS[group].includes("capabilities") ||
+          CONFIG_GROUPS[group].includes("exec_policy")),
+    );
+    expect(elsewhere, `a permission also hosted by: ${elsewhere.join(", ")}`).toEqual([]);
+  });
+
   // Same join, one level down: the sub-tabs under "logs & info" are built from
   // `INFO_TABS`, so an id without a label is a tab reading `agents.info.logs`.
   it("labels every logs & info sub-tab in every locale", () => {
@@ -406,6 +425,11 @@ describe("groupForFirstInvalidField", () => {
     ["a shared folder with no path", (f: ReturnType<typeof valid>) => {
       f.workspaces = [{ _uid: "u1", name: "docs", path: "", mode: "rw" }];
     }, "conversation"],
+    // `exec_policy` renders on its own card in Permissions now; before the
+    // split this path resolved to `lifecycle`, and Lifecycle is in General.
+    ["a negative exec timeout", (f: ReturnType<typeof valid>) => {
+      f.exec_policy.timeout_secs = "-5";
+    }, "permissions"],
   ])("sends %s to the group that owns the field", (_label, mutate, expected) => {
     const { group } = groupFor(mutate as (form: ReturnType<typeof valid>) => void);
     expect(group).toBe(expected);

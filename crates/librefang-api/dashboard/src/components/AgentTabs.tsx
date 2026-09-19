@@ -53,7 +53,7 @@ export function AgentTabBar<Id extends string>({
       aria-label={ariaLabel}
       className={
         // `flex-wrap` rather than a horizontal scrollbar: the config bar has
-        // eight groups whose labels do not fit on one row at any ordinary
+        // nine groups whose labels do not fit on one row at any ordinary
         // width, and a group that is only reachable by scrolling a strip with
         // no visible affordance is a group the operator will not find.
         isUnderline

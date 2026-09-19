@@ -333,7 +333,9 @@
       "tools": "도구"
     },
     "form": {
+    "exec_policy_mode": "\ubaa8\ub4dc",
 
+    "exec_policy_hint": "\uc774 \uc5d0\uc774\uc804\ud2b8\uac00 \uc2e4\ud589\ud560 \uc218 \uc788\ub294 \uc178 \uba85\ub839\uacfc \uadf8 \uc81c\ud55c\uc785\ub2c8\ub2e4.",
     "context_engine_hint": "The engine that assembles this agent's context, and the hooks that shape it. Everything here is optional: an agent that configures nothing uses the built-in engine.",
     "context_engine_engine": "Engine",
     "context_engine_engine_hint": "Which built-in engine to run. A name that is not listed is kept as written, because engine is a free-form string.",
@@ -1125,6 +1127,7 @@
     "group": {
       "general": "일반",
       "model": "모델 및 라우팅",
+      "permissions": "\uad8c\ud55c",
       "tools": "도구 및 기술",
       "memory": "메모리",
       "limits": "한도 및 비용",

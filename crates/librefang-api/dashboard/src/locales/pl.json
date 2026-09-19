@@ -333,7 +333,9 @@
       "tools": "Narzędzia"
     },
     "form": {
+    "exec_policy_mode": "Tryb",
 
+    "exec_policy_hint": "Jakie polecenia pow\u0142oki mo\u017ce uruchamia\u0107 ten agent i w jakich limitach.",
     "context_engine_hint": "The engine that assembles this agent's context, and the hooks that shape it. Everything here is optional: an agent that configures nothing uses the built-in engine.",
     "context_engine_engine": "Engine",
     "context_engine_engine_hint": "Which built-in engine to run. A name that is not listed is kept as written, because engine is a free-form string.",
@@ -1128,6 +1130,7 @@
     "group": {
       "general": "Ogólne",
       "model": "Model i routing",
+      "permissions": "Uprawnienia",
       "tools": "Narzędzia i umiejętności",
       "memory": "Pamięć",
       "limits": "Limity i koszty",

@@ -46,7 +46,7 @@ import { QuickRunModal } from "../components/QuickRunModal";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, GitBranch, History, Radio, Route, Settings } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, GitBranch, History, Radio, Route, Settings, KeyRound } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -598,6 +598,7 @@ export type InfoTab = (typeof INFO_TABS)[number];
 export const CONFIG_GROUP_IDS = [
   "general",
   "model",
+  "permissions",
   "tools",
   "memory",
   "limits",
@@ -630,7 +631,14 @@ export type ConfigGroupId = (typeof CONFIG_GROUP_IDS)[number];
 export const CONFIG_GROUPS: Record<ConfigGroupId, readonly ManifestSectionId[]> = {
   general: ["identity", "metadata", "prompt", "lifecycle", "response_format"],
   model: ["model", "fallback_models", "thinking", "routing"],
-  tools: ["capabilities", "tools", "skills", "mcp_servers", "skill_workshop"],
+  // The user's split: model and routing on one tab, and what the agent is
+  // *allowed* to do on a tab of its own. `capabilities` grants network hosts,
+  // shell commands and tool names; `exec_policy` bounds the shell. Both were
+  // elsewhere — capabilities under Tools & skills beside the tools it grants,
+  // and exec_policy folded into Lifecycle, where every other switch is a
+  // preference rather than a permission.
+  permissions: ["capabilities", "exec_policy"],
+  tools: ["tools", "skills", "mcp_servers", "skill_workshop"],
   memory: ["proactive_memory", "auto_dream", "compaction", "context_engine"],
   limits: ["limits"],
   channels: ["channel_overrides"],
@@ -1627,6 +1635,10 @@ export function AgentsPage() {
   const GROUP_ICONS: Record<ConfigGroupId, typeof Bot> = {
     general: Bot,
     model: Route,
+    // `KeyRound` rather than the `Shield` that Limits uses: this group is about
+    // what the agent is allowed to do, and a second shield beside "Limits &
+    // cost" would read as the same subject twice.
+    permissions: KeyRound,
     tools: Wrench,
     memory: Database,
     limits: Shield,

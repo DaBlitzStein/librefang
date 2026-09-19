@@ -186,13 +186,14 @@ test("the token footprint folds open in place", async ({ page }) => {
   await page.screenshot({ path: join(SHOTS, "02-info-footprint-open.png"), fullPage: true });
 });
 
-test("config carries all eight groups and one save", async ({ page }) => {
+test("config carries all nine groups and one save", async ({ page }) => {
   await openAgent(page);
   await page.getByRole("tab", { name: "config" }).click();
 
   for (const label of [
     "General",
     "Model & routing",
+    "Permissions",
     "Tools & skills",
     "Memory",
     "Limits & cost",
@@ -202,8 +203,8 @@ test("config carries all eight groups and one save", async ({ page }) => {
   ]) {
     await expect(page.getByRole("tab", { name: label, exact: true })).toBeVisible();
   }
-  // Two main tabs + eight groups.
-  await expect(page.getByRole("tab")).toHaveCount(10);
+  // Two main tabs + nine groups.
+  await expect(page.getByRole("tab")).toHaveCount(11);
   await expect(page.getByRole("checkbox", { name: "Advanced mode" })).not.toBeChecked();
   // Settle the main-tab underline transition before any shot, for the reason
   // the group loop gives.
@@ -243,6 +244,7 @@ test("every group renders and is captured", async ({ page }) => {
   const groups = [
     "General",
     "Model & routing",
+    "Permissions",
     "Tools & skills",
     "Memory",
     "Limits & cost",
@@ -393,33 +395,33 @@ test("tools & skills edits a per-tool override", async ({ page }) => {
   });
 });
 
-test("the exec policy table completes the shorthand in lifecycle", async ({ page }) => {
-  await openGroup(page, "General");
+test("the exec policy table completes the shorthand in Permissions", async ({ page }) => {
+  await openGroup(page, "Permissions");
 
-  const lifecycle = page.locator('[data-section="lifecycle"]');
-  await expect(lifecycle).toBeVisible();
-  // The mode select is the control that was already there; the table beside it
-  // is what this change adds. Reached by its own name rather than by position:
-  // the lifecycle card's first select is `session_mode`.
-  const mode = lifecycle.getByLabel("Exec policy");
+  const section = page.locator('[data-section="exec_policy"]');
+  await expect(section).toBeVisible();
+  // The mode select is the control that was already there — it used to render
+  // inside the Lifecycle card, where its first select is `session_mode`, so it
+  // is reached by its own name rather than by position.
+  const mode = section.getByLabel("Mode", { exact: true });
   await mode.selectOption("allowlist");
 
   // `[]` and the absent key are different policies, and only one of them is a
   // statement about the safe list — the note is how the operator says which.
-  await expect(lifecycle.getByText("Using the daemon's built-in safe list.")).toBeVisible();
-  await lifecycle.getByRole("button", { name: "Declare an empty list" }).click();
+  await expect(section.getByText("Using the daemon's built-in safe list.")).toBeVisible();
+  await section.getByRole("button", { name: "Declare an empty list" }).click();
   await expect(
-    lifecycle.getByText("Declared empty: nothing bypasses the allowlist."),
+    section.getByText("Declared empty: nothing bypasses the allowlist."),
   ).toBeVisible();
 
-  const safeBins = lifecycle.getByPlaceholder("cat, head, wc");
+  const safeBins = section.getByPlaceholder("cat, head, wc");
   await safeBins.fill("head");
   await safeBins.press("Enter");
 
   // Asserted on the chip rather than on the input: the placeholder is only
   // rendered while the list is empty, so adding the first entry removes the
   // thing the locator was built on.
-  await expect(lifecycle.getByRole("button", { name: "remove head" })).toBeVisible();
+  await expect(section.getByRole("button", { name: "remove head" })).toBeVisible();
   await expect(mode).toHaveValue("allowlist");
 
   await page.screenshot({
@@ -474,4 +476,53 @@ test("memory edits the context engine", async ({ page }) => {
   await page.screenshot({
     path: join(SHOTS, "13b-editor-context-engine-knobs.png"),
   });
+});
+
+// The user's split, driven: model and routing kept their tab, and what the
+// agent is *allowed* to do got one of its own. A map assertion cannot see
+// whether the sections actually left the groups they came from — a section
+// listed in two groups renders twice, and the layout guards catch that on the
+// map rather than on the page.
+test("permissions hosts the grant lists and the exec policy, and only there", async ({ page }) => {
+  await openGroup(page, "Permissions");
+
+  const capabilities = page.locator('[data-section="capabilities"]');
+  const execPolicy = page.locator('[data-section="exec_policy"]');
+  await expect(capabilities).toBeVisible();
+  await expect(execPolicy).toBeVisible();
+
+  // Editable, not merely present: one grant from each card.
+  const hosts = capabilities.getByPlaceholder("api.openai.com:443");
+  await hosts.fill("api.openai.com:443");
+  await hosts.press("Enter");
+  await expect(
+    capabilities.getByRole("button", { name: "remove api.openai.com:443" }),
+  ).toBeVisible();
+
+  const mode = execPolicy.getByLabel("Mode", { exact: true });
+  await mode.selectOption("allowlist");
+  await expect(mode).toHaveValue("allowlist");
+
+  await page.screenshot({
+    path: join(SHOTS, "14-group-permissions.png"),
+    fullPage: true,
+  });
+
+  // The exec policy card sits below the fold, and `fullPage` cannot reach it:
+  // the app scrolls an inner container, so the document is one viewport tall.
+  // Without this shot the "Permissions hosts both" claim is only half visible.
+  const policyHeading = page.getByText("Which shell commands this agent may run");
+  await policyHeading.scrollIntoViewIfNeeded();
+  await expect(policyHeading).toBeVisible();
+  await page.screenshot({ path: join(SHOTS, "14b-permissions-exec-policy.png") });
+
+  // And gone from where they used to render: Tools & skills keeps the per-tool
+  // editor and the grants panels, General keeps the lifecycle switches.
+  await page.getByRole("tab", { name: "Tools & skills", exact: true }).click();
+  await expect(page.locator('[data-section="capabilities"]')).toHaveCount(0);
+  await expect(page.locator('[data-section="tools"]')).toBeVisible();
+
+  await page.getByRole("tab", { name: "General", exact: true }).click();
+  await expect(page.locator('[data-section="exec_policy"]')).toHaveCount(0);
+  await expect(page.locator('[data-section="lifecycle"]')).toBeVisible();
 });

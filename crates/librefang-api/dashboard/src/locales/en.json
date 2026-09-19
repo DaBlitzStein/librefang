@@ -333,6 +333,8 @@
       "tools": "Tools"
     },
     "form": {
+    "exec_policy_mode": "Mode",
+    "exec_policy_hint": "Which shell commands this agent may run, and under what limits.",
 
     "context_engine_hint": "The engine that assembles this agent's context, and the hooks that shape it. Everything here is optional: an agent that configures nothing uses the built-in engine.",
     "context_engine_engine": "Engine",
@@ -1126,6 +1128,7 @@
     "group": {
       "general": "General",
       "model": "Model & routing",
+      "permissions": "Permissions",
       "tools": "Tools & skills",
       "memory": "Memory",
       "limits": "Limits & cost",
