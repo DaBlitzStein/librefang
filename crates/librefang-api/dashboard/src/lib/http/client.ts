@@ -20,6 +20,8 @@ export {
   // agents
   listAgents,
   getAgentDetail,
+  // workspace identity file bytes (`GET /api/agents/{id}/files/{filename}`)
+  getAgentFile,
   getAgentManifest,
   getAgentChannels,
   getAgentStats,
@@ -200,6 +202,9 @@ export type {
   OperatorPause,
   OperatorActionVerb,
   OperatorActionDescriptor,
+  // workspace identity file bytes (`GET|PUT /api/agents/{id}/files/{filename}`)
+  AgentIdentityFile,
+  AgentIdentityFileWriteResult,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -228,6 +233,8 @@ export {
   clearHandAgentRuntimeConfig,
   resetAgentSession,
   updateAgentTools,
+  // workspace identity file bytes (`PUT /api/agents/{id}/files/{filename}`)
+  setAgentFile,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
   // per-agent MCP server grant — write (#6565 follow-up)
