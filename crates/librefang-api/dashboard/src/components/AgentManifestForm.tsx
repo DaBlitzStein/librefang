@@ -76,6 +76,9 @@ import {
   CHANNEL_ROUTE_DIVERGENCE_LADDER,
   CHANNEL_ROUTE_TTL_LADDER,
   CHANNEL_THREAD_OWNERSHIP_TTL_LADDER,
+  EXEC_NO_OUTPUT_TIMEOUT_LADDER,
+  EXEC_OUTPUT_BYTES_LADDER,
+  EXEC_TIMEOUT_LADDER,
   AUTO_DREAM_MIN_HOURS_LADDER,
   AUTO_DREAM_MIN_SESSIONS_LADDER,
   COMPACTION_CHUNK_CHARS_LADDER,
@@ -306,6 +309,11 @@ const FIELD_PREFIX_TO_SECTION: ReadonlyArray<readonly [RegExp, ManifestSectionId
   [/^name$/, "identity"],
   [/^metadata\./, "metadata"],
   [/^tools\./, "tools"],
+  // `exec_policy` renders inside the lifecycle section, not a section of its
+  // own: it has been one field of that card since the shorthand was the only
+  // spelling the form knew, and splitting it out now would move a control the
+  // operator already knows without changing what it does.
+  [/^exec_policy\./, "lifecycle"],
   [/^model\./, "model"],
   [/^schedule\./, "scheduling"],
   [/^response_format\./, "response_format"],
@@ -383,6 +391,10 @@ export function AgentManifestForm({
     patch: Partial<ManifestFormState["channel_overrides"]>,
   ): void =>
     onChange({ ...value, channel_overrides: { ...value.channel_overrides, ...patch } });
+
+  const updateExecPolicy = (
+    patch: Partial<ManifestFormState["exec_policy"]>,
+  ): void => onChange({ ...value, exec_policy: { ...value.exec_policy, ...patch } });
 
   const updateSkillWorkshop = (
     patch: Partial<ManifestFormState["skill_workshop"]>,
@@ -2600,31 +2612,120 @@ export function AgentManifestForm({
               <option value="false">{t("common.no")}</option>
             </select>
           </Field>
-          <Field
-            label={t("agents.form.exec_policy")}
-            hint={
-              !value.exec_policy_shorthand && extras.topLevel.exec_policy !== undefined
-                ? t("agents.form.exec_policy_extras_hint")
-                : undefined
-            }
-          >
-            <select
-              value={value.exec_policy_shorthand}
-              onChange={(e) =>
-                update({
-                  exec_policy_shorthand:
-                    e.target.value as ManifestFormState["exec_policy_shorthand"],
-                })
-              }
-              className={inputClass}
-            >
-              <option value="">{t("agents.form.exec_policy_global")}</option>
-              <option value="allow">allow</option>
-              <option value="deny">deny</option>
-              <option value="full">full</option>
-              <option value="allowlist">allowlist</option>
-            </select>
-          </Field>
+          {/* The whole policy, not just its shorthand: `exec_policy` reads as a
+              string or as a table and the form now owns both spellings, so the
+              mode is still the one-word case and the eight fields beside it are
+              the table. Spanning both columns because it is one subject. */}
+          <div className="col-span-2 space-y-2.5 rounded-lg border border-border-subtle/40 p-2.5">
+            <Field label={t("agents.form.exec_policy")}>
+              <select
+                value={value.exec_policy.mode}
+                onChange={(e) =>
+                  updateExecPolicy({
+                    mode: e.target.value as ManifestFormState["exec_policy"]["mode"],
+                  })
+                }
+                className={inputClass}
+              >
+                <option value="">{t("agents.form.exec_policy_global")}</option>
+                <option value="deny">deny</option>
+                <option value="allowlist">allowlist</option>
+                <option value="full">full</option>
+              </select>
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Field
+                  label={t("agents.form.exec_policy_safe_bins")}
+                  hint={t("agents.form.exec_policy_safe_bins_hint")}
+                >
+                  <TagInput
+                    value={value.exec_policy.safe_bins ?? []}
+                    onChange={(next) => updateExecPolicy({ safe_bins: next })}
+                    placeholder={t("agents.form.exec_policy_safe_bins_placeholder")}
+                  />
+                </Field>
+                <TriStateListNote
+                  value={value.exec_policy.safe_bins}
+                  onSet={(next) => updateExecPolicy({ safe_bins: next })}
+                  absentText={t("agents.form.exec_policy_safe_bins_default")}
+                  emptyText={t("agents.form.exec_policy_safe_bins_empty")}
+                  toEmptyLabel={t("agents.form.exec_policy_safe_bins_declare_empty")}
+                  toAbsentLabel={t("agents.form.exec_policy_safe_bins_use_default")}
+                />
+              </div>
+              <Field
+                label={t("agents.form.exec_policy_allowed_commands")}
+                hint={t("agents.form.exec_policy_allowed_commands_hint")}
+              >
+                <TagInput
+                  value={value.exec_policy.allowed_commands}
+                  onChange={(next) => updateExecPolicy({ allowed_commands: next })}
+                  placeholder={t("agents.form.exec_policy_allowed_commands_placeholder")}
+                />
+              </Field>
+              <Field
+                label={t("agents.form.exec_policy_allowed_env_vars")}
+                hint={t("agents.form.exec_policy_allowed_env_vars_hint")}
+              >
+                <TagInput
+                  value={value.exec_policy.allowed_env_vars}
+                  onChange={(next) => updateExecPolicy({ allowed_env_vars: next })}
+                  placeholder={t("agents.form.exec_policy_allowed_env_vars_placeholder")}
+                />
+              </Field>
+              <div className="space-y-2.5">
+                <Toggle
+                  label={t("agents.form.exec_policy_safe_bins_skip")}
+                  checked={value.exec_policy.safe_bins_skip_approval}
+                  onChange={(checked) => updateExecPolicy({ safe_bins_skip_approval: checked })}
+                />
+                <p className="text-[10px] text-text-dim/70">
+                  {t("agents.form.exec_policy_safe_bins_skip_hint")}
+                </p>
+                <Toggle
+                  label={t("agents.form.exec_policy_full_skips_approval")}
+                  checked={value.exec_policy.full_mode_skips_approval}
+                  onChange={(checked) => updateExecPolicy({ full_mode_skips_approval: checked })}
+                />
+                <p className="text-[10px] text-text-dim/70">
+                  {t("agents.form.exec_policy_full_skips_approval_hint")}
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <StepLadderInput
+                label={t("agents.form.exec_policy_timeout")}
+                value={value.exec_policy.timeout_secs}
+                onChange={(next) => updateExecPolicy({ timeout_secs: next })}
+                ladder={EXEC_TIMEOUT_LADDER}
+                formatRung={formatSeconds}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={1}
+              />
+              <StepLadderInput
+                label={t("agents.form.exec_policy_no_output_timeout")}
+                value={value.exec_policy.no_output_timeout_secs}
+                onChange={(next) => updateExecPolicy({ no_output_timeout_secs: next })}
+                ladder={EXEC_NO_OUTPUT_TIMEOUT_LADDER}
+                formatRung={formatSeconds}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={0}
+              />
+              <StepLadderInput
+                label={t("agents.form.exec_policy_max_output")}
+                value={value.exec_policy.max_output_bytes}
+                onChange={(next) => updateExecPolicy({ max_output_bytes: next })}
+                ladder={EXEC_OUTPUT_BYTES_LADDER}
+                formatRung={formatBytes}
+                inheritLabel={t("model_param.inherit")}
+                customLabel={t("model_param.custom")}
+                min={1}
+              />
+            </div>
+          </div>
           <Field label={t("agents.form.pinned_model")}>
             <ModelPicker
               label={t("agents.form.pinned_model")}
@@ -3014,6 +3115,48 @@ function TriStateField({
         <option value="false">{t("common.no")}</option>
       </select>
     </Field>
+  );
+}
+
+/**
+ * The note that makes an empty tri-state list say which empty it is.
+ *
+ * `null` is the absent key — for `safe_bins` the daemon's built-in list, for
+ * `plugin_registries` the official registry — while `[]` is a declared empty
+ * list, which is a different statement and sometimes a security-relevant one.
+ * An empty tag input cannot carry the difference, so the switch is explicit
+ * rather than inferred from "the operator deleted every chip".
+ *
+ * Module scope for the same reason as `FormSection`.
+ */
+function TriStateListNote({
+  value,
+  onSet,
+  absentText,
+  emptyText,
+  toEmptyLabel,
+  toAbsentLabel,
+}: {
+  value: string[] | null;
+  onSet: (next: string[] | null) => void;
+  absentText: string;
+  emptyText: string;
+  toEmptyLabel: string;
+  toAbsentLabel: string;
+}) {
+  // A non-empty list speaks for itself.
+  if ((value ?? []).length > 0) return null;
+  return (
+    <p className={`mt-1 text-[10px] ${value === null ? "text-text-dim/70" : "text-warning"}`}>
+      {value === null ? absentText : emptyText}{" "}
+      <button
+        type="button"
+        className="underline hover:text-brand"
+        onClick={() => onSet(value === null ? [] : null)}
+      >
+        {value === null ? toEmptyLabel : toAbsentLabel}
+      </button>
+    </p>
   );
 }
 
