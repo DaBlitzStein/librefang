@@ -603,12 +603,16 @@ params = { region = "us" }
     expect(result.form.context_injection.map(({ _uid, ...rest }) => rest)).toEqual([
       { name: "policy", content: "Always be polite.", position: "before_user", condition: "" },
     ]);
-    // Genuinely unknown stuff (model.custom_provider_param, [tools.*])
-    // still rides along in extras.
+    // Genuinely unknown stuff (model.custom_provider_param) still rides along
+    // in extras. `[tools.*]` no longer does: it has a table of its own now,
+    // which is also why it must not be in the extras as well — that would put
+    // the same key in the output twice.
     expect(result.extras.model.custom_provider_param).toBe("preserved");
-    expect(result.extras.topLevel.tools).toEqual({
-      web_search: { params: { region: "us" } },
-    });
+    expect(result.extras.topLevel.tools).toBeUndefined();
+    expect(result.form.tools.map((t) => t.name)).toEqual(["web_search"]);
+    expect(result.form.tools[0]?.params.map(({ _uid, ...rest }) => rest)).toEqual([
+      { key: "region", valueType: "string", value: "us" },
+    ]);
   });
 
   it("preserves an unmapped 'channels' allowlist through extras on round-trip (#7742)", () => {
@@ -2578,6 +2582,10 @@ describe("every table the form owns keeps the keys it does not render", () => {
     // row rather than through the stash. What it holds the form to is the
     // rule that matters here — no key of this table is dropped on a save.
     ["metadata", "[metadata]\nzz_unknown = 7"],
+    // The marker sits beside `params` rather than inside it, so this entry
+    // sweeps the `preserved` half of a tool override. The nested `params`
+    // level is covered by the "keeps a key inside [tools.<name>]" test.
+    ["tools", "[tools.demo]\nzz_unknown = 7"],
   ];
 
   for (const [row, body] of ROWS) {
@@ -3369,5 +3377,114 @@ describe("metadata table", () => {
     const form = emptyManifestForm();
     form.metadata = [{ _uid: "1", key: "   ", valueType: "string", value: "orphan" }];
     expect(serializeManifestForm(form)).not.toContain("[metadata]");
+  });
+});
+
+// `tools` is `HashMap<String, ToolConfig>` and `ToolConfig` holds exactly one
+// field, `params: HashMap<String, serde_json::Value>`
+// (crates/librefang-types/src/agent.rs:1072). It is a different thing from
+// `capabilities.tools`, which is the list of names the agent may call: this
+// table configures a tool that is already available.
+describe("tools table", () => {
+  const withoutUids = <T extends { _uid: string }>(rows: T[]): Omit<T, "_uid">[] =>
+    rows.map(({ _uid, ...rest }) => rest);
+
+  it("writes no table when there are no overrides", () => {
+    const toml = serializeManifestForm(emptyManifestForm());
+    expect(toml).not.toContain("[tools");
+  });
+
+  it("round-trips a tool with params", () => {
+    const form = emptyManifestForm();
+    form.tools = [
+      {
+        _uid: "1",
+        name: "web_search",
+        params: [
+          { _uid: "p1", key: "max_results", valueType: "number", value: "5" },
+          { _uid: "p2", key: "engine", valueType: "string", value: "ddg" },
+        ],
+      },
+    ];
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[tools.web_search]");
+    expect(toml).toContain("[tools.web_search.params]");
+    expect(toml).toContain("max_results = 5");
+    expect(toml).toContain('engine = "ddg"');
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.tools).toHaveLength(1);
+    expect(parsed.form.tools[0]?.name).toBe("web_search");
+    expect(withoutUids(parsed.form.tools[0]?.params ?? [])).toEqual(
+      withoutUids(form.tools[0]?.params ?? []),
+    );
+  });
+
+  it("keeps a key inside [tools.<name>] that is not params", () => {
+    const source = [
+      'name = "x"',
+      "",
+      "[tools.web_search]",
+      "zz_unknown = 7",
+      "",
+      "[tools.web_search.params]",
+      "max_results = 5",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    // `zz_unknown` is not `params`, so it is not a row — it is stashed.
+    expect(Object.keys(parsed.form.tools[0]?.preserved ?? {})).toEqual(["zz_unknown"]);
+    expect(parsed.form.tools[0]?.params.map((r) => r.key)).toEqual(["max_results"]);
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("zz_unknown = 7");
+    expect(round).toContain("max_results = 5");
+  });
+
+  it("writes the tool table when only a preserved key is left", () => {
+    const form = emptyManifestForm();
+    form.tools = [{ _uid: "1", name: "web_search", params: [], preserved: { future: 1 } }];
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[tools.web_search]");
+    expect(toml).toContain("future = 1");
+  });
+
+  it("quotes a tool name TOML would not accept bare", () => {
+    const form = emptyManifestForm();
+    form.tools = [
+      {
+        _uid: "1",
+        name: "my tool",
+        params: [{ _uid: "p1", key: "k", valueType: "string", value: "v" }],
+      },
+    ];
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain('[tools."my tool".params]');
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.tools[0]?.name).toBe("my tool");
+    expect(parsed.form.tools[0]?.params[0]?.key).toBe("k");
+  });
+
+  it("drops an override with no tool name", () => {
+    const form = emptyManifestForm();
+    form.tools = [
+      {
+        _uid: "1",
+        name: "  ",
+        params: [{ _uid: "p1", key: "k", valueType: "string", value: "v" }],
+      },
+    ];
+    expect(serializeManifestForm(form)).not.toContain("[tools");
   });
 });

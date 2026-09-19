@@ -630,7 +630,7 @@ export type ConfigGroupId = (typeof CONFIG_GROUP_IDS)[number];
 export const CONFIG_GROUPS: Record<ConfigGroupId, readonly ManifestSectionId[]> = {
   general: ["identity", "metadata", "prompt", "lifecycle", "response_format"],
   model: ["model", "fallback_models", "thinking", "routing"],
-  tools: ["capabilities", "skills", "mcp_servers", "skill_workshop"],
+  tools: ["capabilities", "tools", "skills", "mcp_servers", "skill_workshop"],
   memory: ["proactive_memory", "auto_dream", "compaction"],
   limits: ["limits"],
   channels: ["channel_overrides"],
