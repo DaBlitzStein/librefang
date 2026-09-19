@@ -397,10 +397,43 @@ export interface ManifestFormState {
         preserved?: TomlTable;
       };
 
-  // Only the shorthand string variants are exposed here. Full ExecPolicy
-  // tables (`[exec_policy]` with mode/safe_bins/timeout_secs/…) stay in
-  // extras so they're preserved without complicating the form.
-  exec_policy_shorthand: "" | "allow" | "deny" | "full" | "allowlist";
+  /**
+   * `exec_policy` is `Option<ExecPolicy>` and `exec_policy_lenient`
+   * (crates/librefang-types/src/serde_compat.rs:244) reads a shorthand string
+   * as well as the table. Both spellings live here, because they are two ways
+   * of writing one policy: `mode` is the whole of the shorthand, and the other
+   * eight fields are the rest of the table.
+   *
+   * `mode` is `""` when the key is absent, which is not the same as any mode:
+   * `ExecPolicy::default()` supplies `allowlist` for the table form, and an
+   * absent key lets the kernel decide (`Kernel::spawn` promotes a standalone
+   * agent whose tools include `shell_exec` and which declares no policy).
+   */
+  exec_policy: {
+    /** `""` = no `mode` key, otherwise a serialised `ExecSecurityMode`. */
+    mode: "" | "deny" | "allowlist" | "full";
+    /**
+     * `null` is the absent key — the daemon then applies its built-in list of
+     * safe binaries — while `[]` is a declared empty list, which denies every
+     * bypass. The `Vec` has a non-empty Rust default, so the two are different
+     * statements and collapsing them would re-arm a bypass the operator had
+     * switched off.
+     */
+    safe_bins: string[] | null;
+    safe_bins_skip_approval: boolean;
+    /** The Rust default is `true` (`default_full_mode_skips_approval`). */
+    full_mode_skips_approval: boolean;
+    allowed_commands: string[];
+    allowed_env_vars: string[];
+    /** `""` inherits the Rust default (30s); otherwise a whole number. */
+    timeout_secs: string;
+    /** `""` inherits the Rust default (100 KiB). */
+    max_output_bytes: string;
+    /** `""` inherits the Rust default (30s). */
+    no_output_timeout_secs: string;
+    /** Keys inside the table the form has no widget for. */
+    preserved?: TomlTable;
+  };
 
   skills: string[];
   mcp_servers: string[];
@@ -508,6 +541,28 @@ export const emptyManifestExtras = (): ManifestExtras => ({
  * is not caught by any test unless a test was written for that field — which
  * is why the rule is to read, not to reason.
  */
+/**
+ * A policy with every key absent — the state an agent that never configured
+ * one is in, and the only one the serializer writes nothing from.
+ *
+ * Every value here is the *absent* marker (`""` or `null`), never the Rust
+ * default spelled out: `ExecPolicy` has defaults on both sides of `true`
+ * (`full_mode_skips_approval` is `true`, `safe_bins_skip_approval` is
+ * `false`), and a form that materialised them would write a decision the
+ * operator never made.
+ */
+const emptyExecPolicy = (): ManifestFormState["exec_policy"] => ({
+  mode: "",
+  safe_bins: null,
+  safe_bins_skip_approval: false,
+  full_mode_skips_approval: true,
+  allowed_commands: [],
+  allowed_env_vars: [],
+  timeout_secs: "",
+  max_output_bytes: "",
+  no_output_timeout_secs: "",
+});
+
 export const emptyManifestForm = (): ManifestFormState => ({
   name: "",
   description: "",
@@ -671,7 +726,7 @@ export const emptyManifestForm = (): ManifestFormState => ({
   },
   context_injection: [],
   response_format: { mode: "text" },
-  exec_policy_shorthand: "",
+  exec_policy: emptyExecPolicy(),
   metadata: [],
   tools: [],
   skills: [],
@@ -932,6 +987,25 @@ const FORM_AUTONOMOUS_KEYS = new Set([
  */
 const FORM_TOOL_CONFIG_KEYS = new Set(["params"]);
 
+/**
+ * The members of `[exec_policy]` the form renders. Anything else in the table
+ * is a key the form has no widget for, and rides in `preserved`.
+ */
+const FORM_EXEC_POLICY_KEYS = new Set([
+  "mode",
+  "safe_bins",
+  "safe_bins_skip_approval",
+  "full_mode_skips_approval",
+  "allowed_commands",
+  "allowed_env_vars",
+  "timeout_secs",
+  "max_output_bytes",
+  "no_output_timeout_secs",
+]);
+
+/** `ExecSecurityMode`'s `#[serde(rename_all = "lowercase")]` spellings. */
+const EXEC_SECURITY_MODES = ["deny", "allowlist", "full"] as const;
+
 const FORM_ROUTING_KEYS = new Set([
   "simple_model",
   "medium_model",
@@ -975,7 +1049,6 @@ const ROUTER_OVERRIDE_KEYS = new Set([
 const CONTEXT_INJECTION_KEYS = new Set(["name", "content", "position", "condition"]);
 /** The members of a [workspaces] path-form row the form renders. */
 const WORKSPACE_ROW_KEYS = new Set(["path", "mode"]);
-const EXEC_SHORTHANDS = ["allow", "deny", "full", "allowlist"] as const;
 // These three mirror `rename_all` on the Rust enums, not the variant names:
 // `ToolProfile` and `OrphanPolicy` are `snake_case`, `BackendKind` is
 // `lowercase`. The form has to speak the serialised form because that is what
@@ -1322,9 +1395,11 @@ export const serializeManifestForm = (
   const scheduleLine = renderSchedule(form.schedule, extras.schedule);
   if (scheduleLine) lines.push(scheduleLine);
 
-  if (form.exec_policy_shorthand) {
-    writeStringScalar(lines, "exec_policy", form.exec_policy_shorthand);
-  }
+  // The shorthand spelling, when the state is exactly one mode. The table
+  // spelling is a header, so it is emitted with the other table blocks below:
+  // a header here would scope every bare top-level key that follows it.
+  const execPolicyShorthand = renderExecPolicyShorthand(form.exec_policy);
+  if (execPolicyShorthand) lines.push(execPolicyShorthand);
 
   // response_format — only emit if non-default.
   const responseFormatLine = renderResponseFormat(form.response_format);
@@ -1333,13 +1408,11 @@ export const serializeManifestForm = (
   // Top-level extras — split scalars (BEFORE table headers) and tables (AFTER).
   // Drop any key the form is about to emit itself, otherwise we'd produce
   // a duplicate key that smol-toml (and the kernel) rejects:
-  //   - exec_policy: form emits the shorthand, extras may carry the full table
   //   - response_format: form emits text/json/json_schema, extras may carry
   //     an unmappable `type = "future_format"` table that survived parse
+  //     (`exec_policy` needed the same filter while its table was preserved in
+  //     extras; the form owns both spellings now, so it never reaches here)
   let filteredTopExtras = extras.topLevel;
-  if (form.exec_policy_shorthand) {
-    filteredTopExtras = omitKey(filteredTopExtras, "exec_policy");
-  }
   if (form.response_format.mode !== "text") {
     filteredTopExtras = omitKey(filteredTopExtras, "response_format");
   }
@@ -1481,6 +1554,9 @@ export const serializeManifestForm = (
       lines.push(`[tools.${quoted}.params]`, ...paramLines);
     }
   }
+
+  // [exec_policy] — the table spelling, when the state calls for it.
+  lines.push(...renderExecPolicyTable(form.exec_policy));
 
   // [model]
   const modelBody: string[] = [];
@@ -1923,6 +1999,76 @@ const renderSchedule = (
   return `schedule = { ${s.mode} = { ${inner.join(", ")} } }`;
 };
 
+/**
+ * The `[exec_policy]` body: every key the form writes, in file order.
+ *
+ * Each field is written only when it differs from the Rust default, so a policy
+ * the operator opened and did not touch produces no table at all — and a
+ * shorthand that parsed into a single mode stays a single mode.
+ */
+const execPolicyBody = (p: ManifestFormState["exec_policy"]): string[] => {
+  const body: string[] = [];
+  if (p.mode) writeStringScalar(body, "mode", p.mode);
+  // `null` is the absent key, which the daemon reads as its built-in safe
+  // list; `[]` is a declared empty list and has to be written as one.
+  if (p.safe_bins !== null) body.push(`safe_bins = ${tomlArray(p.safe_bins)}`);
+  // `false` is the Rust default, so `true` is the value worth writing.
+  if (p.safe_bins_skip_approval) writeBoolScalar(body, "safe_bins_skip_approval", true);
+  // `true` is the Rust default, so `false` is the value worth writing.
+  if (!p.full_mode_skips_approval) writeBoolScalar(body, "full_mode_skips_approval", false);
+  if (p.allowed_commands.length) {
+    body.push(`allowed_commands = ${tomlArray(p.allowed_commands)}`);
+  }
+  if (p.allowed_env_vars.length) {
+    body.push(`allowed_env_vars = ${tomlArray(p.allowed_env_vars)}`);
+  }
+  if (p.timeout_secs.trim()) {
+    writeNumberScalar(body, "timeout_secs", parseInteger(p.timeout_secs));
+  }
+  if (p.max_output_bytes.trim()) {
+    writeNumberScalar(body, "max_output_bytes", parseInteger(p.max_output_bytes));
+  }
+  if (p.no_output_timeout_secs.trim()) {
+    writeNumberScalar(body, "no_output_timeout_secs", parseInteger(p.no_output_timeout_secs));
+  }
+  // The un-widgeted keys of the table, rendered inline. A `[exec_policy.<key>]`
+  // header after this table would be legal TOML, but `jsonValueToInlineToml` is
+  // what the other preserved stashes use and one renderer for one job is the
+  // reason they can be compared.
+  for (const [key, value] of Object.entries(p.preserved ?? {})) {
+    if (value === null || value === undefined) continue;
+    body.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+  }
+  return body;
+};
+
+/**
+ * The shorthand spelling: `exec_policy = "deny"`.
+ *
+ * A policy that is one mode is what the shorthand exists for, and it is what
+ * such a policy already looks like on disk — writing the table instead would
+ * grow a one-word line into nine keys the first time anyone opened the editor
+ * and pressed save.
+ *
+ * `null` when the state needs the table instead: a knob away from its default,
+ * or a preserved key, has nowhere to live inside a string.
+ */
+const renderExecPolicyShorthand = (
+  p: ManifestFormState["exec_policy"],
+): string | null => {
+  const body = execPolicyBody(p);
+  return p.mode && body.length === 1 ? `exec_policy = ${escapeTomlString(p.mode)}` : null;
+};
+
+/** The table spelling: `[exec_policy]` and its body. */
+const renderExecPolicyTable = (p: ManifestFormState["exec_policy"]): string[] => {
+  const body = execPolicyBody(p);
+  if (!body.length) return [];
+  // Written as the shorthand instead; one `exec_policy` in the output.
+  if (p.mode && body.length === 1) return [];
+  return ["", "[exec_policy]", ...body];
+};
+
 const renderResponseFormat = (rf: ManifestFormState["response_format"]): string => {
   if (rf.mode === "text") return "";
   // Keys the form does not render merge back into the single inline table
@@ -2315,6 +2461,20 @@ export const validateManifestForm = (
     }
   }
 
+  // The exec policy's three numeric fields. Each is a Rust u64 / usize, so an
+  // empty box inherits and anything else has to be a whole number: `-5` and
+  // `1.5` used to reach the TOML and come back as a 400 from the whole
+  // document, which is a failure the operator cannot trace to this field.
+  for (const field of [
+    "timeout_secs",
+    "max_output_bytes",
+    "no_output_timeout_secs",
+  ] as const) {
+    if (!isBlankOrUnsignedTomlInteger(form.exec_policy[field])) {
+      errors.push(`exec_policy.${field}`);
+    }
+  }
+
   // Tool overrides. The tool name is the TOML key, so a duplicate is a
   // duplicate key the daemon refuses to parse, and a half-filled override —
   // params but no name — is dropped by the serializer, exactly like a
@@ -2526,7 +2686,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
       }
     }
   }
-  form.exec_policy_shorthand = parseExecPolicyShorthand(parsed.exec_policy);
+  form.exec_policy = parseExecPolicy(parsed.exec_policy);
   form.response_format = parseResponseFormatField(parsed.response_format);
 
   // [metadata] — one row per key, in file order. A scalar becomes a typed row;
@@ -2573,15 +2733,13 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   }
 
 
-  // Extras for top-level: capture exec_policy only when it's a table
-  // (the form owns the shorthand string form).
+  // Extras for top-level: everything the form does not claim by name. The form
+  // owns both spellings of `exec_policy` now, so neither reaches here.
   const topExtras: TomlTable = {};
   for (const [k, v] of Object.entries(parsed)) {
     if (FORM_TOP_LEVEL_KEYS.has(k)) continue;
     topExtras[k] = v;
   }
-  // exec_policy as a full table (not a shorthand string) is preserved in extras.
-  if (isTomlTable(parsed.exec_policy)) topExtras.exec_policy = parsed.exec_policy;
   // response_format the form cannot re-emit goes back into extras to avoid
   // silent loss. Mapped tables (`type = "json"` / `"json_schema"`) instead
   // stash their un-owned keys on the form state — parseResponseFormatField —
@@ -2902,12 +3060,16 @@ const parseScheduleField = (raw: unknown): ManifestFormState["schedule"] => {
   return { mode: "reactive" };
 };
 
-// exec_policy_lenient on the kernel side (serde_compat.rs) accepts
-// aliases for each canonical mode. The form's dropdown only knows the
-// canonical names, so normalize aliases at the parse boundary —
-// otherwise the alias spelling rounds-trips to an empty shorthand and
-// the user's intent (deny / allowlist / full) is silently lost.
-const EXEC_POLICY_ALIASES: Record<string, ManifestFormState["exec_policy_shorthand"]> = {
+// exec_policy_lenient on the kernel side (serde_compat.rs) accepts aliases for
+// each canonical mode. The form's dropdown only knows the canonical names, so
+// aliases are normalised at the parse boundary — otherwise the alias spelling
+// rounds-trips to "no policy at all" and the user's intent is silently lost.
+//
+// `allow` is in the list despite reading like the opposite of `deny`: it is
+// `ExecSecurityMode::Allowlist`'s own serde alias (`all`, `unrestricted` and
+// `restricted` are the others), not a fourth mode.
+const EXEC_POLICY_ALIASES: Record<string, ManifestFormState["exec_policy"]["mode"]> = {
+  allow: "allowlist",
   none: "deny",
   disabled: "deny",
   restricted: "allowlist",
@@ -2915,9 +3077,7 @@ const EXEC_POLICY_ALIASES: Record<string, ManifestFormState["exec_policy_shortha
   unrestricted: "full",
 };
 
-const parseExecPolicyShorthand = (
-  raw: unknown,
-): ManifestFormState["exec_policy_shorthand"] => {
+const normaliseExecMode = (raw: unknown): ManifestFormState["exec_policy"]["mode"] => {
   if (typeof raw !== "string") return "";
   // Lowercased first, because the kernel lowercases it: `exec_policy_lenient`
   // normalises through `to_lowercase()` before mapping
@@ -2929,10 +3089,41 @@ const parseExecPolicyShorthand = (
   // promoted to `Full` when none is present
   // (`kernel/spawn.rs:236-250`, `kernel/boot.rs:2690-2705`).
   const spelling = raw.toLowerCase();
-  if ((EXEC_SHORTHANDS as readonly string[]).includes(spelling)) {
-    return spelling as ManifestFormState["exec_policy_shorthand"];
+  if ((EXEC_SECURITY_MODES as readonly string[]).includes(spelling)) {
+    return spelling as ManifestFormState["exec_policy"]["mode"];
   }
   return EXEC_POLICY_ALIASES[spelling] ?? "";
+};
+
+/**
+ * `exec_policy` in both of its spellings, read into one state.
+ *
+ * The string form is `{ mode }` and nothing else — that is what
+ * `exec_policy_lenient` expands it to — so a shorthand parse leaves every
+ * other field absent rather than at its Rust default: writing those defaults
+ * out on the next save would turn a one-word policy into a nine-key table.
+ */
+const parseExecPolicy = (raw: unknown): ManifestFormState["exec_policy"] => {
+  const policy = emptyExecPolicy();
+  if (typeof raw === "string") {
+    policy.mode = normaliseExecMode(raw);
+    return policy;
+  }
+  if (!isTomlTable(raw)) return policy;
+
+  policy.mode = normaliseExecMode(raw.mode);
+  policy.safe_bins = Array.isArray(raw.safe_bins) ? asStringArray(raw.safe_bins) : null;
+  policy.safe_bins_skip_approval = asBoolean(raw.safe_bins_skip_approval, false);
+  policy.full_mode_skips_approval = asBoolean(raw.full_mode_skips_approval, true);
+  policy.allowed_commands = asStringArray(raw.allowed_commands);
+  policy.allowed_env_vars = asStringArray(raw.allowed_env_vars);
+  policy.timeout_secs = asNumberString(raw.timeout_secs);
+  policy.max_output_bytes = asNumberString(raw.max_output_bytes);
+  policy.no_output_timeout_secs = asNumberString(raw.no_output_timeout_secs);
+
+  const preserved = stripKnown(raw, FORM_EXEC_POLICY_KEYS);
+  if (Object.keys(preserved).length) policy.preserved = preserved;
+  return policy;
 };
 
 // The keys the form re-emits for each mapped mode. Everything else inside a

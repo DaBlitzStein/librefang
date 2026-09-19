@@ -228,6 +228,23 @@ export const AUTO_DREAM_MIN_SESSIONS_LADDER = [1, 5, 10, 25, 50, 100] as const;
 /** Wall-clock timeout for the async tasks an agent spawns. */
 export const ASYNC_TASK_TIMEOUT_LADDER = [30, 60, 300, 900, 1800, 3600] as const;
 
+// ------------------------------------------------------------- exec policy
+
+/**
+ * How long one `shell_exec` command may run, in seconds.
+ *
+ * Starts below the 30-second Rust default rather than at it: the point of the
+ * control is to let an operator tighten a limit, and a ladder whose first rung
+ * is the current value offers nothing but loosening.
+ */
+export const EXEC_TIMEOUT_LADDER = [10, 30, 60, 300, 900, 1800] as const;
+
+/** How long a command may produce no output before the runtime kills it. */
+export const EXEC_NO_OUTPUT_TIMEOUT_LADDER = [10, 30, 60, 300, 900] as const;
+
+/** How much output one command may return, in bytes. */
+export const EXEC_OUTPUT_BYTES_LADDER = [1024, 10_240, 102_400, 1_048_576, 10_485_760] as const;
+
 // ------------------------------------------------------------ autonomous
 
 /** Iterations per invocation. */

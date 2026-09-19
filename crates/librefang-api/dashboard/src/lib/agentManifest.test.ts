@@ -719,7 +719,7 @@ max_cost_per_hour_usd = 1
       );
       expect(parsed.ok).toBe(true);
       if (!parsed.ok) return;
-      expect(parsed.form.exec_policy_shorthand).toBe(canonical);
+      expect(parsed.form.exec_policy.mode).toBe(canonical);
     }
   });
 
@@ -745,7 +745,7 @@ max_cost_per_hour_usd = 1
       );
       expect(parsed.ok).toBe(true);
       if (!parsed.ok) return;
-      expect(parsed.form.exec_policy_shorthand).toBe(canonical);
+      expect(parsed.form.exec_policy.mode).toBe(canonical);
 
       // And the key survives the save — the failure this guards is the key
       // disappearing, not the dropdown reading the wrong label.
@@ -906,10 +906,13 @@ model = "gpt-4o"
 
   it("does not emit both exec_policy shorthand and [exec_policy] table", () => {
     // Codex P1 regression: when TOML carries a full [exec_policy] table
-    // and the user later picks a shorthand string in the form, the old
-    // serializer wrote BOTH `exec_policy = "allowlist"` and the
-    // preserved `[exec_policy]` table — TOML rejects this as a key/table
-    // redefinition conflict.
+    // and the user later picks a mode in the form, the old serializer wrote
+    // BOTH `exec_policy = "allowlist"` and the preserved `[exec_policy]`
+    // table — TOML rejects this as a key/table redefinition conflict.
+    //
+    // The table is no longer preserved now that the editor reads it, but the
+    // rule it guards is unchanged: one `exec_policy` in the output, whichever
+    // form the mode is written in.
     const toml = `name = "a"
 
 [model]
@@ -924,18 +927,23 @@ timeout_secs = 30
     const parsed = parseManifestToml(toml);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.extras.topLevel.exec_policy).toBeTruthy();
+    // Read into the form rather than preserved: the editor owns this table.
+    expect(parsed.extras.topLevel.exec_policy).toBeUndefined();
+    expect(parsed.form.exec_policy.mode).toBe("allowlist");
+    expect(parsed.form.exec_policy.allowed_commands).toEqual(["ls"]);
+    expect(parsed.form.exec_policy.timeout_secs).toBe("30");
 
-    // User picks a shorthand in the form.
-    parsed.form.exec_policy_shorthand = "deny";
+    // User changes the mode in the form. The knobs are still set, so the
+    // table survives — with the new mode in it.
+    parsed.form.exec_policy.mode = "deny";
     const reserialized = serializeManifestForm(parsed.form, parsed.extras);
-    // Output must still be valid TOML (no duplicate exec_policy key).
+    expect(reserialized.match(/exec_policy/g)).toHaveLength(1);
+
     const reparsed = parseManifestToml(reserialized);
     expect(reparsed.ok).toBe(true);
     if (!reparsed.ok) return;
-    expect(reparsed.form.exec_policy_shorthand).toBe("deny");
-    // The full table must be gone — the shorthand wins.
-    expect(reparsed.extras.topLevel.exec_policy).toBeUndefined();
+    expect(reparsed.form.exec_policy.mode).toBe("deny");
+    expect(reparsed.form.exec_policy.allowed_commands).toEqual(["ls"]);
   });
 
   it("preserves u64 resource limits above Number.MAX_SAFE_INTEGER", () => {
@@ -3486,5 +3494,115 @@ describe("tools table", () => {
       },
     ];
     expect(serializeManifestForm(form)).not.toContain("[tools");
+  });
+});
+
+// `exec_policy` is `Option<ExecPolicy>` and `exec_policy_lenient` accepts a
+// shorthand string as well as the table (serde_compat.rs:244). The form used
+// to own only the shorthand and preserve the table unread — which meant the
+// nine fields of the table were editable only by hand, and a table already in
+// the file was invisible from the dashboard.
+//
+// Both spellings now come from one form state. The shorthand is still what a
+// mode-only policy is written as, because it is what the file already holds.
+describe("exec_policy table", () => {
+  it("writes nothing while every field holds its default", () => {
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("exec_policy");
+  });
+
+  it("writes the shorthand when only the mode is set", () => {
+    const form = emptyManifestForm();
+    form.exec_policy.mode = "deny";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain('exec_policy = "deny"');
+    expect(toml).not.toContain("[exec_policy]");
+  });
+
+  it("writes the full table once one knob leaves its default", () => {
+    const form = emptyManifestForm();
+    form.exec_policy.mode = "allowlist";
+    form.exec_policy.timeout_secs = "60";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[exec_policy]");
+    expect(toml).toContain('mode = "allowlist"');
+    expect(toml).toContain("timeout_secs = 60");
+    // One `exec_policy` in the output, and it is the table.
+    expect(toml).not.toContain('exec_policy = "');
+  });
+
+  it("writes full_mode_skips_approval only when it is turned off", () => {
+    // The Rust default is `true` (`default_full_mode_skips_approval`), so
+    // `false` is the statement worth recording and `true` must write nothing.
+    const on = emptyManifestForm();
+    on.exec_policy.full_mode_skips_approval = true;
+    expect(serializeManifestForm(on)).not.toContain("full_mode_skips_approval");
+
+    const off = emptyManifestForm();
+    off.exec_policy.full_mode_skips_approval = false;
+    const toml = serializeManifestForm(off);
+    expect(toml).toContain("[exec_policy]");
+    expect(toml).toContain("full_mode_skips_approval = false");
+  });
+
+  it("tells a declared-empty safe_bins list from an absent one", () => {
+    // `null` is the absent key, which the daemon reads as its built-in list of
+    // 19 safe binaries; `[]` is a declared empty list, which denies every
+    // bypass. Collapsing `[]` to absent would silently re-arm a bypass the
+    // operator had switched off — on a security field.
+    const absent = emptyManifestForm();
+    absent.exec_policy.mode = "allowlist";
+    const absentToml = serializeManifestForm(absent);
+    expect(absentToml).toContain('exec_policy = "allowlist"');
+    expect(absentToml).not.toContain("safe_bins");
+
+    const declared = emptyManifestForm();
+    declared.exec_policy.safe_bins = [];
+    expect(serializeManifestForm(declared)).toContain("safe_bins = []");
+  });
+
+  it("round-trips every field away from its default", () => {
+    const form = emptyManifestForm();
+    form.exec_policy = {
+      mode: "full",
+      safe_bins: ["cat", "head"],
+      safe_bins_skip_approval: true,
+      full_mode_skips_approval: false,
+      allowed_commands: ["ls", "pwd"],
+      allowed_env_vars: ["PATH"],
+      timeout_secs: "90",
+      max_output_bytes: "2048",
+      no_output_timeout_secs: "45",
+    };
+
+    const parsed = parseManifestToml(serializeManifestForm(form));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.exec_policy).toEqual(form.exec_policy);
+  });
+
+  it("writes the table when the mode is unset but a knob is set", () => {
+    // `ExecPolicy::default()` supplies `mode = "allowlist"`, so leaving the
+    // key out is a statement of its own and the table is still the right form.
+    const form = emptyManifestForm();
+    form.exec_policy.timeout_secs = "60";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[exec_policy]");
+    expect(toml).toContain("timeout_secs = 60");
+    expect(toml).not.toContain("mode =");
+  });
+
+  it("keeps a key of the table it does not render", () => {
+    const parsed = parseManifestToml('[exec_policy]\nmode = "deny"\nzz_unknown = 7\n');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.exec_policy.mode).toBe("deny");
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("zz_unknown = 7");
+    // The preserved key forces the table: a shorthand has nowhere to carry it.
+    expect(round).not.toContain('exec_policy = "');
   });
 });
