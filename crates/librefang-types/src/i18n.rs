@@ -111,12 +111,35 @@ pub fn parse_accept_language(header: &str) -> &'static str {
     DEFAULT_LANGUAGE
 }
 
+/// A bundle over the English pack, for the fallback lookups.
+fn english_bundle() -> FluentBundle<FluentResource> {
+    let en_id: LanguageIdentifier = DEFAULT_LANGUAGE.parse().expect("en must parse");
+    let mut bundle = FluentBundle::new(vec![en_id]);
+    bundle.set_use_isolating(false);
+    let resource =
+        FluentResource::try_new(EN_FTL.to_string()).expect("English language pack must be valid");
+    let _ = bundle.add_resource(resource);
+    bundle
+}
+
 /// A translator instance for a specific language.
 ///
 /// Wraps a Fluent bundle and provides convenient methods for looking up
 /// translated error messages by key, optionally with arguments.
 pub struct ErrorTranslator {
     bundle: FluentBundle<FluentResource>,
+    /// English, consulted per key when the language's own pack does not define
+    /// one. `None` when the bundle *is* English.
+    ///
+    /// The pack-level fallback in [`ErrorTranslator::new`] only fires when a
+    /// language file fails to load. A pack that loads and is merely incomplete
+    /// — `de`, `es`, `fr` and `zh-CN` each define around 57 of the 245 keys —
+    /// is a valid resource, so every one of their missing keys answered with
+    /// the raw identifier: an operator on a German daemon read
+    /// `api-error-file-too-large` where the sentence should be. Per-key lookup
+    /// against English is what the type's own doc always promised ("falls back
+    /// to English"); it just was not what the code did.
+    fallback: Option<FluentBundle<FluentResource>>,
     language: &'static str,
 }
 
@@ -141,21 +164,21 @@ impl ErrorTranslator {
 
         if bundle.add_resource(resource).is_err() {
             // If adding the resource fails, create a fresh English bundle.
-            let en_id: LanguageIdentifier = DEFAULT_LANGUAGE.parse().expect("en must parse");
-            let mut en_bundle = FluentBundle::new(vec![en_id]);
-            en_bundle.set_use_isolating(false);
-            let en_resource = FluentResource::try_new(EN_FTL.to_string())
-                .expect("English language pack must be valid");
-            let _ = en_bundle.add_resource(en_resource);
             return Self {
-                bundle: en_bundle,
+                bundle: english_bundle(),
                 language: DEFAULT_LANGUAGE,
+                fallback: None,
             };
         }
+
+        // English itself needs no fallback, and giving it one would be a second
+        // lookup that can only ever miss.
+        let fallback = (resolved != DEFAULT_LANGUAGE).then(english_bundle);
 
         Self {
             bundle,
             language: resolved,
+            fallback,
         }
     }
 
@@ -165,8 +188,16 @@ impl ErrorTranslator {
     }
 
     /// Look up a translation by key with named arguments.
+    ///
+    /// A key the language's pack does not define resolves against English
+    /// before giving up; the raw key is returned only when neither has it,
+    /// which means the identifier is wrong rather than merely untranslated.
     pub fn t_args(&self, key: &str, args: &[(&str, &str)]) -> String {
-        let Some(message) = self.bundle.get_message(key) else {
+        let Some(message) = self
+            .bundle
+            .get_message(key)
+            .or_else(|| self.fallback.as_ref().and_then(|b| b.get_message(key)))
+        else {
             return key.to_string();
         };
         let Some(pattern) = message.value() else {
@@ -204,6 +235,40 @@ mod tests {
     fn english_translation() {
         let t = ErrorTranslator::new("en");
         assert_eq!(t.t("api-error-agent-not-found"), "Agent not found");
+    }
+
+    /// A key the language's pack does not define resolves to English rather
+    /// than to the identifier.
+    ///
+    /// `de`, `es`, `fr` and `zh-CN` define around 57 of the 245 keys between
+    /// them, and the pack-level fallback in `new` only fires when a pack fails
+    /// to *load* — an incomplete pack is a valid one. So every key those four
+    /// languages do not carry reached the operator as
+    /// `api-error-agent-clone-spawn-failed`, with nothing to read.
+    ///
+    /// The first assertion is the half that must not change: where German has
+    /// its own sentence, that sentence is what is returned. A fallback that
+    /// shadowed real translations would be a worse bug than the one it fixes.
+    #[test]
+    fn a_key_the_language_lacks_falls_back_to_english() {
+        let de = ErrorTranslator::new("de");
+        assert_eq!(de.t("api-error-agent-not-found"), "Agent nicht gefunden");
+        assert_eq!(
+            de.t_args("api-error-agent-clone-spawn-failed", &[("error", "boom")]),
+            "Failed to spawn clone: boom"
+        );
+    }
+
+    /// The raw key survives only for a key neither pack defines, which means
+    /// the identifier is wrong rather than merely untranslated — the one case
+    /// where it is the only thing left to say.
+    #[test]
+    fn a_key_no_pack_defines_still_answers_with_the_key() {
+        let de = ErrorTranslator::new("de");
+        assert_eq!(
+            de.t("api-error-no-pack-defines-this"),
+            "api-error-no-pack-defines-this"
+        );
     }
 
     #[test]
