@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { cn } from "../../lib/cn";
 
 /**
@@ -77,15 +77,33 @@ export function Field({
     </>
   );
 
-  // The group is only needed when there is no visible label; with one, the
-  // label already names what is inside it.
-  const groupLabel = !label && ariaLabel ? ariaLabel : undefined;
+  // The wrapper is a `<div>` and, without `htmlFor`, the visible label is a
+  // `<span>` — and a `<span>` names nothing. So a control inside a labelled
+  // Field used to have no accessible name at all: it could not come from the
+  // label (a span), and it could not come from the wrapper, which had no
+  // `role` unless the field was *unlabelled* with an `ariaLabel`.
+  //
+  // Naming the group is the `fieldset`/`legend` pattern and the same mechanism
+  // the finders already use through `ariaLabel`; the difference was only that
+  // a labelled Field never got one. Measured before this: 31 controls across
+  // the agent form had neither a name of their own nor a group's, and every
+  // one of them sat inside a labelled Field.
+  //
+  // `aria-labelledby` rather than `aria-label`: the name is the visible text,
+  // so pointing at it keeps the two in step and lets the required asterisk
+  // come along. `htmlFor` fields are left alone — there the label is a real
+  // `<label>` and already names the control.
+  const labelId = useId();
+  const groupFromLabel = Boolean(label) && !htmlFor;
+  const groupFromAria = !label && Boolean(ariaLabel);
+  const isGroup = groupFromLabel || groupFromAria;
 
   return (
     <div
       className="block"
-      role={groupLabel ? "group" : undefined}
-      aria-label={groupLabel}
+      role={isGroup ? "group" : undefined}
+      aria-label={groupFromAria ? ariaLabel : undefined}
+      aria-labelledby={groupFromLabel ? labelId : undefined}
     >
       {label &&
         (htmlFor ? (
@@ -93,7 +111,9 @@ export function Field({
             {labelNode}
           </label>
         ) : (
-          <span className={labelClass}>{labelNode}</span>
+          <span id={labelId} className={labelClass}>
+            {labelNode}
+          </span>
         ))}
       <span className={label ? "mt-1 block" : "block"}>{children}</span>
       {invalid && error && (
