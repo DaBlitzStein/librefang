@@ -652,6 +652,61 @@ describe("AgentManifestForm — section addressing", () => {
   });
 });
 
+// Each section bar reports how many fields it holds, counted from the
+// `data-field` markers the widgets carry. A control that belongs to no marker
+// is therefore a field the operator has and the bar does not report — the same
+// understatement the count exists to remove, with a number to make it look
+// authoritative. The rows are populated because that is where the markers are
+// easiest to forget: an empty repeatable editor renders no rows at all.
+describe("AgentManifestForm — every control belongs to a counted field", () => {
+  it("accounts for every input, select and textarea with a data-field marker", () => {
+    const state = emptyManifestForm();
+    state.metadata = [{ _uid: "m1", key: "k", valueType: "string", value: "v" }];
+    state.tools = [
+      {
+        _uid: "t1",
+        name: "shell",
+        params: [{ _uid: "p1", key: "a", valueType: "string", value: "b" }],
+      },
+    ];
+    state.fallback_models = [
+      { _uid: "f1", provider: "openai", model: "gpt-4o", api_key_env: "", base_url: "", extras: {} },
+      { _uid: "f2", provider: "openai", model: "gpt-4o", api_key_env: "", base_url: "", extras: {} },
+    ];
+    state.context_injection = [
+      { _uid: "c1", name: "n", content: "x", position: "system", condition: "" },
+    ];
+    state.workspaces = [
+      { _uid: "w1", name: "n", path: "p", mode: "rw" },
+      { _uid: "w2", name: "n2", path: "p2", mode: "r" },
+    ];
+
+    const { container } = render(<Harness initialState={state} />);
+    const orphans = Array.from(
+      container.querySelectorAll("input, select, textarea"),
+    )
+      .filter((element) => !element.closest("[data-field]"))
+      .map(
+        (element) =>
+          `${element.tagName.toLowerCase()} "${
+            element.getAttribute("aria-label") ??
+            element.getAttribute("placeholder") ??
+            element.getAttribute("type") ??
+            ""
+          }"`,
+      );
+
+    expect(
+      orphans,
+      `These controls sit outside every data-field marker, so the section bar ` +
+        `under-reports the fields its section holds. Wrap the control in ` +
+        `\`ui/Field\`, or mark the row it belongs to with \`data-field\` if the ` +
+        `row is one entry (see \`JsonRowEditor\`).\n\n` +
+        `Uncounted: ${orphans.join(", ")}`,
+    ).toEqual([]);
+  });
+});
+
 // A validation message that names a field on a tab the operator is not
 // looking at is indistinguishable from no message at all, and with the
 // sections split across tabs that became possible for the first time.

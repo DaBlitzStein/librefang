@@ -1218,6 +1218,9 @@ export function AgentManifestForm({
         {value.tools.map((entry, idx) => (
           <div
             key={entry._uid}
+            // One tool is one field, its parameter rows included: the entry is
+            // the row here, and the rows inside it are part of it.
+            data-field=""
             className="mb-2 space-y-2 rounded-lg border border-border-subtle/60 bg-main/40 p-2"
           >
             <div className="flex items-center gap-2">
@@ -1484,6 +1487,9 @@ export function AgentManifestForm({
         {(value.fallback_models ?? []).map((fb, idx) => (
           <div
             key={fb._uid}
+            // One row is one fallback, so it counts as one field however many
+            // boxes it holds — the same rule the row editors follow.
+            data-field=""
             className="rounded-lg border border-border-subtle/60 bg-main/40 p-2 mb-2 space-y-2"
           >
             <div className="flex items-center justify-between">
@@ -3003,6 +3009,9 @@ export function AgentManifestForm({
         {value.context_injection.map((ci, idx) => (
           <div
             key={ci._uid}
+            // One row is one injection, so it counts as one field however many
+            // boxes it holds — the same rule the row editors follow.
+            data-field=""
             className="rounded-lg border border-border-subtle/60 bg-main/40 p-2 mb-2 space-y-2"
           >
             <div className="flex items-center justify-between">
@@ -3535,6 +3544,9 @@ export function AgentManifestForm({
           return (
             <div
               key={ws._uid}
+              // One row is one folder, so it counts as one field however many
+              // boxes it holds — the same rule the row editors follow.
+              data-field=""
               className="rounded-lg border border-border-subtle/60 bg-main/40 p-2 mb-2"
             >
               <div className="flex items-center gap-2">
@@ -3927,7 +3939,11 @@ function Toggle({
   onChange: (next: boolean) => void;
 }) {
   return (
-    <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+    // A field in its own right, so it marks itself: the `Toggle`s the form
+    // wraps in a `Field` are counted through the wrapper, and the bare ones
+    // (thinking, autonomous, async tasks) would otherwise be invisible to the
+    // section counter.
+    <label className="flex items-center gap-2 text-xs cursor-pointer select-none" data-field="">
       <input
         type="checkbox"
         checked={checked}
@@ -3989,7 +4005,9 @@ function JsonRowEditor({
 }) {
   const { t } = useTranslation();
   return (
-    <div className="mb-2 flex items-center gap-2">
+    // One row is one entry — one metadata key, one tool parameter — so it
+    // counts as one field rather than as the three boxes it is made of.
+    <div className="mb-2 flex items-center gap-2" data-field="">
       <input
         type="text"
         value={row.key}

@@ -2606,6 +2606,7 @@
     "expand": "展开",
     "collapse": "折叠",
     "fields_unit": "个字段",
+    "fields_unit_other": "{{count}}个字段",
     "fld_alert_threshold": "告警阈值",
     "fld_allowed_commands": "允许的命令",
     "fld_allowed_domains": "允许的域名",
