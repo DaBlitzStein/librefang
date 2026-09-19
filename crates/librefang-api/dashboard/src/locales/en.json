@@ -333,6 +333,18 @@
       "tools": "Tools"
     },
     "form": {
+
+    "metadata": "Metadata",
+    "metadata_hint": "Free-form key/value pairs attached to the agent. Single values are edited here; a value that is a table or an array is kept exactly as written.",
+    "metadata_key": "Key",
+    "metadata_type": "Type",
+    "metadata_value": "Value",
+    "metadata_remove": "Remove metadata entry",
+    "metadata_preserved_hint": "Kept as written, not editable here:",
+    "metadata_add": "Add metadata entry",
+    "json_type_string": "Text",
+    "json_type_number": "Number",
+    "json_type_boolean": "Boolean",
       "basics": "Basics",
       "model": "Model",
       "resources": "Resources & Budgets",
