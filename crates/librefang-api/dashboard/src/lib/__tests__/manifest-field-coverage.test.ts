@@ -3,9 +3,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   AUTO_ROUTE_STRATEGIES,
+  COST_TIERS,
   DM_POLICIES,
   emptyManifestForm,
   GROUP_POLICIES,
+  MODEL_MODES,
   ORPHAN_POLICIES,
   OUTPUT_FORMATS,
   PREFIX_STYLES,
@@ -198,9 +200,17 @@ const MANIFEST_ENUM_CONSTANTS: Record<string, readonly string[]> = {
   SKILL_APPROVAL_POLICIES,
   SKILL_REVIEW_MODES,
   SKILL_EVOLUTION_MODES,
+  MODEL_MODES,
+  COST_TIERS,
 };
 
 const RUST_ENUMS: Array<{ file: string; enum: string; exported: string }> = [
+  // The routing engine's two enums: `[model] mode` and the router override's
+  // `cost_budget`, both written as bare strings the daemon deserialises
+  // strictly (a capitalised `mode = "Flexible"` is a hard parse error, not a
+  // silent downgrade — agent.rs documents that on `ModelMode`).
+  { file: "agent.rs", enum: "ModelMode", exported: "MODEL_MODES" },
+  { file: "model_profile.rs", enum: "CostTier", exported: "COST_TIERS" },
   { file: "agent.rs", enum: "ToolProfile", exported: "TOOL_PROFILES" },
   { file: "agent.rs", enum: "OrphanPolicy", exported: "ORPHAN_POLICIES" },
   { file: "tool_exec.rs", enum: "BackendKind", exported: "TOOL_EXEC_BACKENDS" },
