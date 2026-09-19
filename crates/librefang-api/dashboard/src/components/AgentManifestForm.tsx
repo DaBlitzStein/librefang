@@ -6,13 +6,15 @@ import {
   CAPABILITY_ROUTING_KEYS,
   DM_POLICIES,
   GROUP_POLICIES,
+  JSON_ROW_TYPES,
   OUTPUT_FORMATS,
   PREFIX_STYLES,
   TYPING_MODES,
   USAGE_FOOTERS,
+  formatPreservedValue,
   generateUid,
 } from "../lib/agentManifest";
-import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
+import type { JsonRowType, ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 
 /// The tri-state caption for a memory capability field (#7749 review):
 /// `null` is the omitted key (unrestricted), `[]` is the declared-empty deny.
@@ -258,6 +260,7 @@ interface AgentManifestFormProps {
  */
 export const MANIFEST_SECTION_IDS = [
   "identity",
+  "metadata",
   "model",
   "prompt",
   "limits",
@@ -300,6 +303,7 @@ export type ManifestSectionId = (typeof MANIFEST_SECTION_IDS)[number];
  */
 const FIELD_PREFIX_TO_SECTION: ReadonlyArray<readonly [RegExp, ManifestSectionId]> = [
   [/^name$/, "identity"],
+  [/^metadata\./, "metadata"],
   [/^model\./, "model"],
   [/^schedule\./, "scheduling"],
   [/^response_format\./, "response_format"],
@@ -540,6 +544,130 @@ export function AgentManifestForm({
           </Field>
         </AdvancedFields>
       </Section>
+
+      {/* A free-form table, so the editor is the table: one row per key with
+          the value's JSON type named by the operator. Inferring the type from
+          the text would rewrite `"5"` into `5` on the next save, and both are
+          legal values of `HashMap<String, serde_json::Value>`. */}
+      <FormSection
+        id="metadata"
+        shows={shows}
+        title={t("agents.form.metadata")}
+        defaultOpen={false}
+      >
+        <p className="text-[10px] text-text-dim/70 mb-2">
+          {t("agents.form.metadata_hint")}
+        </p>
+        {value.metadata.map((row, idx) => (
+          <div key={row._uid} className="mb-2 flex items-center gap-2">
+            <input
+              type="text"
+              value={row.key}
+              onChange={(e) =>
+                update({
+                  metadata: patchListItem(value.metadata, idx, {
+                    ...row,
+                    key: e.target.value,
+                  }),
+                })
+              }
+              placeholder={t("agents.form.metadata_key")}
+              aria-label={`${t("agents.form.metadata_key")} ${idx + 1}`}
+              className={inputClass}
+            />
+            <select
+              value={row.valueType}
+              onChange={(e) =>
+                update({
+                  metadata: patchListItem(value.metadata, idx, {
+                    ...row,
+                    valueType: e.target.value as JsonRowType,
+                  }),
+                })
+              }
+              aria-label={`${t("agents.form.metadata_type")} ${idx + 1}`}
+              className={`${inputClass} w-28 shrink-0`}
+            >
+              {JSON_ROW_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {t(`agents.form.json_type_${type}`)}
+                </option>
+              ))}
+            </select>
+            {row.valueType === "boolean" ? (
+              <select
+                value={row.value}
+                onChange={(e) =>
+                  update({
+                    metadata: patchListItem(value.metadata, idx, {
+                      ...row,
+                      value: e.target.value,
+                    }),
+                  })
+                }
+                aria-label={`${t("agents.form.metadata_value")} ${idx + 1}`}
+                className={inputClass}
+              >
+                <option value="true">{t("common.yes")}</option>
+                <option value="false">{t("common.no")}</option>
+              </select>
+            ) : (
+              <input
+                type="text"
+                value={row.value}
+                onChange={(e) =>
+                  update({
+                    metadata: patchListItem(value.metadata, idx, {
+                      ...row,
+                      value: e.target.value,
+                    }),
+                  })
+                }
+                placeholder={t("agents.form.metadata_value")}
+                aria-label={`${t("agents.form.metadata_value")} ${idx + 1}`}
+                className={inputClass}
+              />
+            )}
+            <button
+              type="button"
+              onClick={() =>
+                update({ metadata: value.metadata.filter((_, i) => i !== idx) })
+              }
+              className="shrink-0 text-text-dim hover:text-error"
+              aria-label={`${t("agents.form.metadata_remove")} ${idx + 1}`}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        ))}
+        {/* The half the rows cannot hold. Shown rather than hidden: a value the
+            operator cannot see is indistinguishable from one the editor ate. */}
+        {Object.entries(value.metadata_preserved ?? {}).map(([key, preserved]) => (
+          <p key={key} className="mb-1 font-mono text-[11px] text-text-dim">
+            {key} = {formatPreservedValue(preserved)}
+          </p>
+        ))}
+        {value.metadata_preserved && Object.keys(value.metadata_preserved).length > 0 && (
+          <p className="mb-2 text-[10px] text-text-dim/70">
+            {t("agents.form.metadata_preserved_hint")}
+          </p>
+        )}
+        <button
+          type="button"
+          onClick={() =>
+            update({
+              metadata: [
+                ...value.metadata,
+                { _uid: generateUid(), key: "", valueType: "string", value: "" },
+              ],
+            })
+          }
+          className="flex items-center gap-1 text-xs text-brand hover:underline"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          {t("agents.form.metadata_add")}
+        </button>
+      </FormSection>
 
       <Section when={shows("model")} id="model" title={t("agents.form.model")}>
         {/* No visible label: the card above is titled "Model" and the field
