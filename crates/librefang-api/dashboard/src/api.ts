@@ -1559,6 +1559,53 @@ export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
 
+// ── Workspace identity files (`GET|PUT /api/agents/{id}/files/{filename}`) ──
+//
+// The daemon reads and writes these as opaque bytes: `read_identity_file`
+// returns the file verbatim and the prompt builder injects it under
+// `## Identity` (capped at 500 chars), so nothing here is parsed as a schema.
+// `filename` is checked against the daemon's `KNOWN_IDENTITY_FILES` allowlist,
+// not against anything client-side — a name outside it comes back 400.
+//
+// A missing file is a 404 on the read (the daemon cannot distinguish "absent"
+// from an I/O failure for this route), while the write creates it, so callers
+// treat a 404 as "not written yet" rather than as an error to report.
+
+/** Response of `GET /api/agents/{id}/files/{filename}` — a whitelisted identity file's bytes. */
+export interface AgentIdentityFile {
+  name: string;
+  content: string;
+  size_bytes: number;
+}
+
+/** Response of `PUT /api/agents/{id}/files/{filename}`. */
+export interface AgentIdentityFileWriteResult {
+  status: string;
+  name: string;
+  size_bytes: number;
+}
+
+export async function getAgentFile(
+  agentId: string,
+  filename: string,
+): Promise<AgentIdentityFile> {
+  return get<AgentIdentityFile>(
+    `/api/agents/${encodeURIComponent(agentId)}/files/${encodeURIComponent(filename)}`,
+  );
+}
+
+/** Writes `content` as the whole file — the daemon replaces it, it does not merge. */
+export async function setAgentFile(
+  agentId: string,
+  filename: string,
+  content: string,
+): Promise<AgentIdentityFileWriteResult> {
+  return put<AgentIdentityFileWriteResult>(
+    `/api/agents/${encodeURIComponent(agentId)}/files/${encodeURIComponent(filename)}`,
+    { content },
+  );
+}
+
 /** 24-hour KPI rollup for one agent — backs the AgentsPage detail-panel
  *  KPI tiles. See `GET /api/agents/{id}/stats`. */
 export interface AgentStats24h {
