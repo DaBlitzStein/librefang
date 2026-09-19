@@ -2621,6 +2621,10 @@ export function AgentManifestForm({
                         .value as ManifestFormState["context_engine"]["hooks"]["on_hook_failure"],
                     })
                   }
+                  // The visible label is a `<span>`, so the control carries its
+                  // own name. A select is never named by a placeholder, which
+                  // is why every unlabelled select in this form is mute.
+                  aria-label={t("agents.form.context_engine_on_failure")}
                   className={inputClass}
                 >
                   {HOOK_FAILURE_POLICIES.map((policy) => (
@@ -2640,6 +2644,7 @@ export function AgentManifestForm({
                   type="text"
                   value={hook.ingest_filter}
                   onChange={(e) => updateHook({ ingest_filter: e.target.value })}
+                  aria-label={t("agents.form.context_engine_ingest_filter")}
                   className={inputClass}
                 />
               </Field>
@@ -2651,6 +2656,7 @@ export function AgentManifestForm({
                   type="text"
                   value={hook.ingest_regex}
                   onChange={(e) => updateHook({ ingest_regex: e.target.value })}
+                  aria-label={t("agents.form.context_engine_ingest_regex")}
                   className={inputClass}
                 />
               </Field>
