@@ -263,8 +263,12 @@ const pushLifecycleOverrides = (lines: string[], form: ManifestFormState): void 
   if (form.web_search_augmentation !== "auto") {
     items.push(`- **web_search_augmentation**: ${markdownCodeSpan(form.web_search_augmentation)}`);
   }
-  if (form.exec_policy_shorthand) {
-    items.push(`- **exec_policy**: ${markdownCodeSpan(form.exec_policy_shorthand)}`);
+  // The mode is the policy's headline and is what this list showed when the
+  // shorthand was the only spelling it knew. The table's eight knobs stay out
+  // for the same reason the compaction thresholds do: this is a summary of the
+  // agent, not a copy of its manifest.
+  if (form.exec_policy.mode) {
+    items.push(`- **exec_policy**: ${markdownCodeSpan(form.exec_policy.mode)}`);
   }
   if (form.pinned_model.trim()) {
     items.push(`- **Pinned model**: ${markdownCodeSpan(form.pinned_model.trim())}`);
