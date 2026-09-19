@@ -334,6 +334,19 @@
     },
     "form": {
 
+    "tool_overrides": "Per-tool overrides",
+    "tool_overrides_hint": "Parameters for one tool, keyed by the tool's name. This is not the capability list: it configures a tool the agent can already call.",
+    "tool_name": "Tool",
+    "tool_remove": "Remove tool override",
+    "tool_param_key": "Parameter",
+    "tool_param_type": "Type",
+    "tool_param_value": "Value",
+    "tool_param_remove": "Remove parameter",
+    "tool_param_add": "Add parameter",
+    "tool_add": "Add tool override",
+    "tool_params_preserved_hint": "Parameters kept as written, not editable here:",
+    "tool_preserved_hint": "Kept as written, not editable here:",
+
     "metadata": "Metadata",
     "metadata_hint": "Free-form key/value pairs attached to the agent. Single values are edited here; a value that is a table or an array is kept exactly as written.",
     "metadata_key": "Key",

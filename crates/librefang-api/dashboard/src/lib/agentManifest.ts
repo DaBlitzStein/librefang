@@ -206,6 +206,34 @@ export interface ManifestFormState {
    */
   metadata_preserved?: TomlTable;
 
+  /**
+   * Per-tool parameter overrides: `HashMap<String, ToolConfig>`, where
+   * `ToolConfig { params: HashMap<String, serde_json::Value> }`
+   * (crates/librefang-types/src/agent.rs:1072). Distinct from
+   * `capabilities.tools`, which lists the tools an agent may call; this table
+   * configures one that is already available.
+   *
+   * `params` is a named type rather than an inline `Array<{`: the row sweep in
+   * agentManifest.test.ts matches `(\w+): Array<{` against this file, and an
+   * inline declaration here would be read as a top-level manifest table named
+   * `params`, which does not exist. The nested level is exercised by the
+   * `tools` entry in that sweep.
+   */
+  tools: Array<{
+    _uid: string;
+    name: string;
+    params: JsonRow[];
+    /** Keys inside `[tools.<name>]` the form has no widget for. */
+    preserved?: TomlTable;
+    /**
+     * Entries of `[tools.<name>.params]` whose value is a table or an array.
+     * They keep their own slot rather than sharing `preserved`, because TOML
+     * will not let a `[tools.<name>.params]` header extend a table that a
+     * dotted `params.foo = …` key already defined.
+     */
+    params_preserved?: TomlTable;
+  }>;
+
   schedule:
     | { mode: "reactive" }
     | { mode: "periodic"; cron: string }
@@ -645,6 +673,7 @@ export const emptyManifestForm = (): ManifestFormState => ({
   response_format: { mode: "text" },
   exec_policy_shorthand: "",
   metadata: [],
+  tools: [],
   skills: [],
   mcp_servers: [],
   tags: [],
@@ -763,6 +792,7 @@ export const FORM_TOP_LEVEL_KEYS = new Set([
   "exec_policy",
   "workspaces",
   "metadata",
+  "tools",
 ]);
 const FORM_MODEL_KEYS = new Set([
   "provider",
@@ -895,6 +925,13 @@ const FORM_AUTONOMOUS_KEYS = new Set([
   "heartbeat_channel",
   "quiet_hours",
 ]);
+/**
+ * The members of a `[tools.<name>]` entry the form renders. `ToolConfig`
+ * declares exactly one field today, so the set is what tells the separate
+ * `params` table apart from a key the form would otherwise have to preserve.
+ */
+const FORM_TOOL_CONFIG_KEYS = new Set(["params"]);
+
 const FORM_ROUTING_KEYS = new Set([
   "simple_model",
   "medium_model",
@@ -1414,6 +1451,35 @@ export const serializeManifestForm = (
       metadataBody.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
     }
     if (metadataBody.length) lines.push("", "[metadata]", ...metadataBody);
+  }
+
+  // [tools.<name>] and its [tools.<name>.params] sub-table. Both headers, so
+  // they belong here with the other table blocks rather than in the scalar
+  // run above.
+  for (const entry of form.tools) {
+    const name = entry.name.trim();
+    // The name is the key. An override that has no name has no address, so it
+    // is dropped the way a blank metadata row is — validation is what tells
+    // the operator that a half-filled one will not be written.
+    if (!name) continue;
+
+    const head: string[] = [];
+    for (const [key, value] of Object.entries(entry.preserved ?? {})) {
+      if (value === null || value === undefined) continue;
+      head.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+    }
+    const paramLines = renderJsonRowLines(entry.params);
+    for (const [key, value] of Object.entries(entry.params_preserved ?? {})) {
+      if (value === null || value === undefined) continue;
+      paramLines.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+    }
+    if (!head.length && !paramLines.length) continue;
+
+    const quoted = tomlBareKeyOrQuoted(name);
+    lines.push("", `[tools.${quoted}]`, ...head);
+    if (paramLines.length) {
+      lines.push(`[tools.${quoted}.params]`, ...paramLines);
+    }
   }
 
   // [model]
@@ -2249,6 +2315,33 @@ export const validateManifestForm = (
     }
   }
 
+  // Tool overrides. The tool name is the TOML key, so a duplicate is a
+  // duplicate key the daemon refuses to parse, and a half-filled override —
+  // params but no name — is dropped by the serializer, exactly like a
+  // half-filled shared folder. A wholly blank entry is not an error: it is a
+  // row the operator just added and has not typed into yet.
+  const seenToolNames = new Set<string>();
+  for (const entry of form.tools) {
+    const toolName = entry.name.trim();
+    if (!toolName) {
+      const filled =
+        entry.params.some((row) => row.key.trim()) ||
+        Object.keys(entry.preserved ?? {}).length > 0 ||
+        Object.keys(entry.params_preserved ?? {}).length > 0;
+      if (filled) errors.push(`tools.${entry._uid}.name`);
+      continue;
+    }
+    if (seenToolNames.has(toolName)) errors.push(`tools.${entry._uid}.name`);
+    seenToolNames.add(toolName);
+
+    for (const row of entry.params) {
+      if (!row.key.trim()) continue;
+      if (row.valueType === "number" && !isTomlNumberLiteral(row.value.trim())) {
+        errors.push(`tools.${entry._uid}.params.${row._uid}.value`);
+      }
+    }
+  }
+
   // Folder rows: duplicate names produce a duplicate TOML key (hard parse
   // failure on the daemon), and `path` mirrors the kernel's rule — relative
   // to workspaces_dir, no `..`. A mount row carries an absolute host path
@@ -2449,6 +2542,34 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     }
     form.metadata = rows;
     if (Object.keys(preserved).length) form.metadata_preserved = preserved;
+  }
+
+  // [tools] — one entry per tool, each carrying its own `params` table.
+  if (isTomlTable(parsed.tools)) {
+    const entries: ManifestFormState["tools"] = [];
+    for (const [name, rawConfig] of Object.entries(parsed.tools)) {
+      // `ToolConfig` is a struct, so a non-table value here is a manifest the
+      // daemon cannot load at all — there is no shape to preserve it as.
+      if (!isTomlTable(rawConfig)) continue;
+      const entry: ManifestFormState["tools"][number] = {
+        _uid: generateParsedUid(),
+        name,
+        params: [],
+      };
+      if (isTomlTable(rawConfig.params)) {
+        const paramsPreserved: TomlTable = {};
+        for (const [key, value] of Object.entries(rawConfig.params)) {
+          const row = jsonRowFromValue(generateParsedUid(), key, value);
+          if (row) entry.params.push(row);
+          else paramsPreserved[key] = value;
+        }
+        if (Object.keys(paramsPreserved).length) entry.params_preserved = paramsPreserved;
+      }
+      const preserved = stripKnown(rawConfig, FORM_TOOL_CONFIG_KEYS);
+      if (Object.keys(preserved).length) entry.preserved = preserved;
+      entries.push(entry);
+    }
+    form.tools = entries;
   }
 
 

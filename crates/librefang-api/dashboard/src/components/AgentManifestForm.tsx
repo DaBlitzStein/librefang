@@ -265,6 +265,7 @@ export const MANIFEST_SECTION_IDS = [
   "prompt",
   "limits",
   "capabilities",
+  "tools",
   "skills",
   "mcp_servers",
   "scheduling",
@@ -304,6 +305,7 @@ export type ManifestSectionId = (typeof MANIFEST_SECTION_IDS)[number];
 const FIELD_PREFIX_TO_SECTION: ReadonlyArray<readonly [RegExp, ManifestSectionId]> = [
   [/^name$/, "identity"],
   [/^metadata\./, "metadata"],
+  [/^tools\./, "tools"],
   [/^model\./, "model"],
   [/^schedule\./, "scheduling"],
   [/^response_format\./, "response_format"],
@@ -559,99 +561,28 @@ export function AgentManifestForm({
           {t("agents.form.metadata_hint")}
         </p>
         {value.metadata.map((row, idx) => (
-          <div key={row._uid} className="mb-2 flex items-center gap-2">
-            <input
-              type="text"
-              value={row.key}
-              onChange={(e) =>
-                update({
-                  metadata: patchListItem(value.metadata, idx, {
-                    ...row,
-                    key: e.target.value,
-                  }),
-                })
-              }
-              placeholder={t("agents.form.metadata_key")}
-              aria-label={`${t("agents.form.metadata_key")} ${idx + 1}`}
-              className={inputClass}
-            />
-            <select
-              value={row.valueType}
-              onChange={(e) =>
-                update({
-                  metadata: patchListItem(value.metadata, idx, {
-                    ...row,
-                    valueType: e.target.value as JsonRowType,
-                  }),
-                })
-              }
-              aria-label={`${t("agents.form.metadata_type")} ${idx + 1}`}
-              className={`${inputClass} w-28 shrink-0`}
-            >
-              {JSON_ROW_TYPES.map((type) => (
-                <option key={type} value={type}>
-                  {t(`agents.form.json_type_${type}`)}
-                </option>
-              ))}
-            </select>
-            {row.valueType === "boolean" ? (
-              <select
-                value={row.value}
-                onChange={(e) =>
-                  update({
-                    metadata: patchListItem(value.metadata, idx, {
-                      ...row,
-                      value: e.target.value,
-                    }),
-                  })
-                }
-                aria-label={`${t("agents.form.metadata_value")} ${idx + 1}`}
-                className={inputClass}
-              >
-                <option value="true">{t("common.yes")}</option>
-                <option value="false">{t("common.no")}</option>
-              </select>
-            ) : (
-              <input
-                type="text"
-                value={row.value}
-                onChange={(e) =>
-                  update({
-                    metadata: patchListItem(value.metadata, idx, {
-                      ...row,
-                      value: e.target.value,
-                    }),
-                  })
-                }
-                placeholder={t("agents.form.metadata_value")}
-                aria-label={`${t("agents.form.metadata_value")} ${idx + 1}`}
-                className={inputClass}
-              />
-            )}
-            <button
-              type="button"
-              onClick={() =>
-                update({ metadata: value.metadata.filter((_, i) => i !== idx) })
-              }
-              className="shrink-0 text-text-dim hover:text-error"
-              aria-label={`${t("agents.form.metadata_remove")} ${idx + 1}`}
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          </div>
+          <JsonRowEditor
+            key={row._uid}
+            row={row}
+            index={idx}
+            labels={{
+              key: t("agents.form.metadata_key"),
+              type: t("agents.form.metadata_type"),
+              value: t("agents.form.metadata_value"),
+              remove: t("agents.form.metadata_remove"),
+            }}
+            onChange={(next) =>
+              update({ metadata: patchListItem(value.metadata, idx, next) })
+            }
+            onRemove={() =>
+              update({ metadata: value.metadata.filter((_, i) => i !== idx) })
+            }
+          />
         ))}
-        {/* The half the rows cannot hold. Shown rather than hidden: a value the
-            operator cannot see is indistinguishable from one the editor ate. */}
-        {Object.entries(value.metadata_preserved ?? {}).map(([key, preserved]) => (
-          <p key={key} className="mb-1 font-mono text-[11px] text-text-dim">
-            {key} = {formatPreservedValue(preserved)}
-          </p>
-        ))}
-        {value.metadata_preserved && Object.keys(value.metadata_preserved).length > 0 && (
-          <p className="mb-2 text-[10px] text-text-dim/70">
-            {t("agents.form.metadata_preserved_hint")}
-          </p>
-        )}
+        <PreservedValues
+          entries={value.metadata_preserved ?? {}}
+          hint={t("agents.form.metadata_preserved_hint")}
+        />
         <button
           type="button"
           onClick={() =>
@@ -1227,6 +1158,124 @@ export function AgentManifestForm({
         </div>
         </AdvancedFields>
       </Section>
+
+      {/* Not `capabilities.tools`, which lists the names an agent may call.
+          This is `[tools.<name>]` — the per-tool parameter overrides for a
+          tool that is already available. */}
+      <FormSection
+        id="tools"
+        shows={shows}
+        title={t("agents.form.tool_overrides")}
+        defaultOpen={false}
+      >
+        <p className="text-[10px] text-text-dim/70 mb-2">
+          {t("agents.form.tool_overrides_hint")}
+        </p>
+        {value.tools.map((entry, idx) => (
+          <div
+            key={entry._uid}
+            className="mb-2 space-y-2 rounded-lg border border-border-subtle/60 bg-main/40 p-2"
+          >
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={entry.name}
+                onChange={(e) =>
+                  update({
+                    tools: patchListItem(value.tools, idx, {
+                      ...entry,
+                      name: e.target.value,
+                    }),
+                  })
+                }
+                placeholder={t("agents.form.tool_name")}
+                aria-label={t("agents.form.tool_name")}
+                className={inputClass}
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  update({ tools: value.tools.filter((_, i) => i !== idx) })
+                }
+                className="shrink-0 text-text-dim hover:text-error"
+                aria-label={t("agents.form.tool_remove")}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            {entry.params.map((row, paramIdx) => (
+              <JsonRowEditor
+                key={row._uid}
+                row={row}
+                index={paramIdx}
+                labels={{
+                  key: t("agents.form.tool_param_key"),
+                  type: t("agents.form.tool_param_type"),
+                  value: t("agents.form.tool_param_value"),
+                  remove: t("agents.form.tool_param_remove"),
+                }}
+                onChange={(next) =>
+                  update({
+                    tools: patchListItem(value.tools, idx, {
+                      ...entry,
+                      params: patchListItem(entry.params, paramIdx, next),
+                    }),
+                  })
+                }
+                onRemove={() =>
+                  update({
+                    tools: patchListItem(value.tools, idx, {
+                      ...entry,
+                      params: entry.params.filter((_, i) => i !== paramIdx),
+                    }),
+                  })
+                }
+              />
+            ))}
+            <PreservedValues
+              entries={entry.params_preserved ?? {}}
+              hint={t("agents.form.tool_params_preserved_hint")}
+            />
+            <PreservedValues
+              entries={entry.preserved ?? {}}
+              hint={t("agents.form.tool_preserved_hint")}
+            />
+            <button
+              type="button"
+              onClick={() =>
+                update({
+                  tools: patchListItem(value.tools, idx, {
+                    ...entry,
+                    params: [
+                      ...entry.params,
+                      { _uid: generateUid(), key: "", valueType: "string", value: "" },
+                    ],
+                  }),
+                })
+              }
+              className="flex items-center gap-1 text-xs text-brand hover:underline"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              {t("agents.form.tool_param_add")}
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() =>
+            update({
+              tools: [
+                ...value.tools,
+                { _uid: generateUid(), name: "", params: [] },
+              ],
+            })
+          }
+          className="flex items-center gap-1 text-xs text-brand hover:underline"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          {t("agents.form.tool_add")}
+        </button>
+      </FormSection>
 
       <Section when={shows("skills")} id="skills" title={t("agents.form.skills")}>
         <Field hint={t("agents.form.skills_hint")} ariaLabel={t("agents.form.skills")}>
@@ -2999,6 +3048,130 @@ function Toggle({
       />
       {label ? <span>{label}</span> : null}
     </label>
+  );
+}
+
+/** The four accessible names a `JsonRowEditor` needs, resolved by the caller. */
+interface JsonRowLabels {
+  key: string;
+  type: string;
+  value: string;
+  remove: string;
+}
+
+/**
+ * One `key = value` row of a JSON-valued table.
+ *
+ * Shared by `[metadata]` and `[tools.<name>.params]`: both are
+ * `HashMap<String, serde_json::Value>`, so both need the same three scalar
+ * arms and the same explicit type choice. One component rather than two copies
+ * means the type list cannot drift between them.
+ *
+ * Module scope for the same reason as `FormSection`: a component declared in
+ * the render body is a new function on every render, and React compares
+ * element types by reference — so the subtree unmounts on every keystroke and
+ * each controlled input keeps only its first character.
+ *
+ * No visible labels. The row is a grid of near-identical controls, so a label
+ * above each one would repeat the same word down the column; the accessible
+ * name carries the row number instead, which is what tells a screen reader
+ * which of the five "Key" boxes it is in.
+ */
+function JsonRowEditor({
+  row,
+  index,
+  labels,
+  onChange,
+  onRemove,
+}: {
+  row: { _uid: string; key: string; valueType: JsonRowType; value: string };
+  index: number;
+  labels: JsonRowLabels;
+  onChange: (next: { _uid: string; key: string; valueType: JsonRowType; value: string }) => void;
+  onRemove: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="mb-2 flex items-center gap-2">
+      <input
+        type="text"
+        value={row.key}
+        onChange={(e) => onChange({ ...row, key: e.target.value })}
+        placeholder={labels.key}
+        aria-label={`${labels.key} ${index + 1}`}
+        className={inputClass}
+      />
+      <select
+        value={row.valueType}
+        onChange={(e) => onChange({ ...row, valueType: e.target.value as JsonRowType })}
+        aria-label={`${labels.type} ${index + 1}`}
+        className={`${inputClass} w-28 shrink-0`}
+      >
+        {JSON_ROW_TYPES.map((type) => (
+          <option key={type} value={type}>
+            {t(`agents.form.json_type_${type}`)}
+          </option>
+        ))}
+      </select>
+      {row.valueType === "boolean" ? (
+        // A boolean row cannot hold free text: `yes`, `1` and `TRUE` are all
+        // things an operator types and none of them is a TOML boolean.
+        <select
+          value={row.value}
+          onChange={(e) => onChange({ ...row, value: e.target.value })}
+          aria-label={`${labels.value} ${index + 1}`}
+          className={inputClass}
+        >
+          <option value="true">{t("common.yes")}</option>
+          <option value="false">{t("common.no")}</option>
+        </select>
+      ) : (
+        <input
+          type="text"
+          value={row.value}
+          onChange={(e) => onChange({ ...row, value: e.target.value })}
+          placeholder={labels.value}
+          aria-label={`${labels.value} ${index + 1}`}
+          className={inputClass}
+        />
+      )}
+      <button
+        type="button"
+        onClick={onRemove}
+        className="shrink-0 text-text-dim hover:text-error"
+        aria-label={`${labels.remove} ${index + 1}`}
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The half of a JSON-valued table a row cannot hold: values that are tables or
+ * arrays, shown as the file holds them.
+ *
+ * Rendered rather than hidden on purpose — a value the operator cannot see is
+ * indistinguishable from one the editor ate.
+ */
+function PreservedValues({
+  entries,
+  hint,
+}: {
+  entries: Record<string, unknown>;
+  hint: string;
+}) {
+  const keys = Object.keys(entries);
+  if (!keys.length) return null;
+  return (
+    <div className="mb-2">
+      {keys.map((key) => (
+        <p key={key} className="font-mono text-[11px] text-text-dim">
+          {key} = {formatPreservedValue(entries[key])}
+        </p>
+      ))}
+      <p className="text-[10px] text-text-dim/70">{hint}</p>
+    </div>
   );
 }
 
