@@ -270,6 +270,64 @@ describe("AgentManifestForm — the routing engine selector", () => {
     expect(simpleTier()).toBeInTheDocument();
   });
 
+  it("names the daemon's defaults for the effort engine's blank slots", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["routing"]} />);
+    await openRouting(user);
+    await user.selectOptions(engineSelect(), "effort");
+
+    // A blank picker reads as "no model" and is not one: the `[routing]` table
+    // arms the router by its presence and the daemon fills every slot the
+    // manifest leaves out, so the block has to say so. (The harness echoes the
+    // key rather than the sentence; the values it interpolates are pinned by
+    // `routing-engine.test.ts` against the Rust `Default`.)
+    expect(screen.getByText("agents.form.routing_tier_blank_defaults")).toBeInTheDocument();
+  });
+
+  it("says what an unmatched turn runs on under the profile engine", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | undefined;
+    render(
+      <Harness
+        sections={["routing"]}
+        onState={(next) => {
+          latest = next;
+        }}
+      />,
+    );
+    await openRouting(user);
+
+    await user.selectOptions(engineSelect(), "effort");
+    await user.selectOptions(engineSelect(), "profile");
+
+    // With a tier table the profile router falls back to it, and those models
+    // are not editable from this engine — so this line is the only place they
+    // are visible.
+    expect(latest!.routing.enabled).toBe(true);
+    expect(screen.getByText("agents.form.routing_engine_profile_fallback")).toBeInTheDocument();
+    expect(
+      screen.queryByText("agents.form.routing_engine_profile_fallback_none"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says so when the profile engine has no tier table to fall back to", () => {
+    // The state this engine no longer creates, and still has to describe: a
+    // manifest that was flexible before the editor ever saw it.
+    render(
+      <Harness
+        sections={["routing"]}
+        initialState={applyRoutingEngine(emptyManifestForm(), "profile")}
+      />,
+    );
+
+    expect(
+      screen.getByText("agents.form.routing_engine_profile_fallback_none"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("agents.form.routing_engine_profile_fallback"),
+    ).not.toBeInTheDocument();
+  });
+
   it("does not offer the profile settings while the effort engine runs", () => {
     render(
       <Harness
