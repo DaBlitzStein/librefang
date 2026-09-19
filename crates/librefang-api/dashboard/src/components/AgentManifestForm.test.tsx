@@ -18,6 +18,7 @@ import {
   serializeManifestForm,
   type ManifestFormState,
 } from "../lib/agentManifest";
+import { applyRoutingEngine } from "../lib/routingEngine";
 
 // Spread the real module rather than replacing it. The identity section now
 // renders the `IDENTITY.md` editor, which reads the UI store, and `lib/store`
@@ -107,7 +108,10 @@ describe("AgentManifestForm — complexity routing tiers", () => {
 
   async function openRouting(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByText("agents.form.routing"));
-    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+    // The tiers belong to the effort engine and are not rendered under any
+    // other one, so opening the section is not enough — the engine has to be
+    // chosen, which is the same two clicks an operator makes.
+    await user.selectOptions(screen.getByLabelText("agents.form.routing_engine"), "effort");
   }
 
   // The tier fields hold a bare model name — the daemon resolves it against the
@@ -157,6 +161,125 @@ describe("AgentManifestForm — complexity routing tiers", () => {
     expect(
       screen.getByRole("button", { name: "agents.form.complex_model: llama-3.3-70b" }),
     ).toBeInTheDocument();
+  });
+});
+
+// Four controls across two sections used to describe one decision — a "Router
+// mode" select and an "Opt out of routing" toggle in the model section, an
+// enable toggle in the routing one — and one of the states they could describe
+// is a state the kernel never runs: the profile router takes every turn it
+// applies to, so a `[routing]` table left enabled underneath it never decides
+// anything. The selector is now the only place the choice is made, and it
+// writes the three fields together (lib/routingEngine.ts).
+describe("AgentManifestForm — the routing engine selector", () => {
+  async function openRouting(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByText("agents.form.routing"));
+  }
+
+  const engineSelect = () => screen.getByLabelText("agents.form.routing_engine");
+
+  it("no longer offers the mode select or the opt-out toggle", () => {
+    render(<Harness sections={["model", "routing"]} />);
+
+    expect(screen.queryByLabelText("agents.form.router_mode")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("agents.form.router_fixed")).not.toBeInTheDocument();
+  });
+
+  // A manifest that arrives from the API carries no engine field, so the
+  // selector reads the state it is given — the same three fields the kernel
+  // resolves — and not the last option anyone clicked. One case per engine,
+  // with the note that says what the engine does.
+  it.each([
+    ["fixed", "agents.form.routing_engine_fixed_note"],
+    ["effort", "agents.form.routing_engine_effort_note"],
+    ["profile", "agents.form.routing_engine_profile_note"],
+  ] as const)("shows %s for a manifest in that state", (engine, noteKey) => {
+    render(
+      <Harness
+        sections={["routing"]}
+        initialState={applyRoutingEngine(emptyManifestForm(), engine)}
+      />,
+    );
+
+    expect(engineSelect()).toHaveValue(engine);
+    expect(screen.getByText(noteKey)).toBeInTheDocument();
+  });
+
+  it("writes each engine's three fields together, in the file the daemon reads", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | undefined;
+    render(
+      <Harness
+        sections={["routing"]}
+        onState={(next) => {
+          latest = next;
+        }}
+      />,
+    );
+    await openRouting(user);
+
+    expect(engineSelect()).toHaveValue("fixed");
+
+    await user.selectOptions(engineSelect(), "effort");
+    expect(latest!.model.mode).toBe("fixed");
+    expect(latest!.model.router_fixed).toBe(true);
+    expect(latest!.routing.enabled).toBe(true);
+    const effort = serializeManifestForm(latest!);
+    expect(effort).toContain("[routing]");
+    expect(effort).toContain("router_override = { fixed = true }");
+
+    await user.selectOptions(engineSelect(), "profile");
+    expect(latest!.model.mode).toBe("flexible");
+    expect(latest!.model.router_fixed).toBe(false);
+    expect(latest!.routing.enabled).toBe(false);
+    const profile = serializeManifestForm(latest!);
+    // No `[routing]` table: with the tiers off, a turn that matches no profile
+    // keeps this manifest's model instead of falling into another engine.
+    expect(profile).not.toContain("[routing]");
+    // `fixed = false` is what the absent key means, so the override is not
+    // written at all — and its absence is the profile router being armed.
+    expect(profile).not.toContain("router_override");
+
+    await user.selectOptions(engineSelect(), "fixed");
+    expect(latest!.model.mode).toBe("fixed");
+    expect(latest!.model.router_fixed).toBe(true);
+    expect(latest!.routing.enabled).toBe(false);
+    expect(serializeManifestForm(latest!)).not.toContain("[routing]");
+  });
+
+  it("shows the tiers only while the effort engine runs", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["routing"]} />);
+    await openRouting(user);
+
+    const simpleTier = () =>
+      screen.queryByRole("button", { name: /agents\.form\.simple_model/ });
+
+    // The default form is the fixed engine, and the three tier slots are inert
+    // under it and under the profile engine alike.
+    expect(simpleTier()).not.toBeInTheDocument();
+
+    await user.selectOptions(engineSelect(), "profile");
+    expect(simpleTier()).not.toBeInTheDocument();
+
+    await user.selectOptions(engineSelect(), "effort");
+    expect(simpleTier()).toBeInTheDocument();
+  });
+
+  it("does not offer the profile settings while the effort engine runs", () => {
+    render(
+      <Harness
+        sections={["model"]}
+        initialState={applyRoutingEngine(emptyManifestForm(), "effort")}
+      />,
+    );
+
+    // Rendered only for the profile engine; under the effort engine the kernel
+    // never consults them, and a control that writes what nothing reads lies.
+    expect(
+      screen.queryByPlaceholderText("agents.form.router_allowed_profiles_placeholder"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("agents.form.router_cost_budget")).not.toBeInTheDocument();
   });
 });
 
@@ -1016,15 +1139,38 @@ describe("AgentManifestForm — the router's profile picker", () => {
     { name: "research", description: "anthropic/claude-sonnet-5 · expensive" },
   ];
 
+  /**
+   * A form on the profile engine — the only state these fields are rendered
+   * in. They are manifest fields under any engine, but the kernel consults
+   * them only when the agent is `flexible` and not opted out
+   * (lib/routingEngine.ts), so under any other engine the form does not offer
+   * controls that would write values nothing reads.
+   */
+  function profileState(build?: (state: ManifestFormState) => void): ManifestFormState {
+    const state = applyRoutingEngine(emptyManifestForm(), "profile");
+    build?.(state);
+    return state;
+  }
+
   async function openRouterFields(user: ReturnType<typeof userEvent.setup>) {
     const group = advancedGroup("model");
     if (!group) throw new Error("model advanced group not found");
     await user.click(group.querySelector("summary")!);
   }
 
+  it("does not offer the profile settings under any other engine", () => {
+    // The default form is the fixed engine. A closed `<details>` still renders
+    // its children in jsdom, so this is the fields' absence, not the fold's.
+    render(<Harness routerProfileCatalog={PROFILES} />);
+
+    expect(screen.queryByPlaceholderText("Search model profiles…")).not.toBeInTheDocument();
+    expect(screen.queryByText("agents.form.router_hint")).not.toBeInTheDocument();
+    expect(screen.queryByText("agents.form.router_kernel_off")).not.toBeInTheDocument();
+  });
+
   it("offers the server-backed catalog for allowed_profiles", async () => {
     const user = userEvent.setup();
-    render(<Harness routerProfileCatalog={PROFILES} />);
+    render(<Harness routerProfileCatalog={PROFILES} initialState={profileState()} />);
     await openRouterFields(user);
     const group = advancedGroup("model")!;
 
@@ -1044,11 +1190,9 @@ describe("AgentManifestForm — the router's profile picker", () => {
     render(
       <Harness
         routerProfileCatalog={PROFILES}
-        initialState={(() => {
-          const s = emptyManifestForm();
+        initialState={profileState((s) => {
           s.model.router_allowed_profiles = ["hand-written-profile"];
-          return s;
-        })()}
+        })}
       />,
     );
     await openRouterFields(user);
@@ -1066,7 +1210,7 @@ describe("AgentManifestForm — the router's profile picker", () => {
 
   it("keeps the plain tag box when the caller carries no catalog", async () => {
     const user = userEvent.setup();
-    render(<Harness />);
+    render(<Harness initialState={profileState()} />);
     await openRouterFields(user);
 
     // No catalog prop, no picker — the TagInput the field had before, so a
@@ -1080,7 +1224,13 @@ describe("AgentManifestForm — the router's profile picker", () => {
 
   it("says when the router is off kernel-wide, instead of offering choices silently", async () => {
     const user = userEvent.setup();
-    render(<Harness routerProfileCatalog={PROFILES} routerProfilesEnabled={false} />);
+    render(
+      <Harness
+        routerProfileCatalog={PROFILES}
+        routerProfilesEnabled={false}
+        initialState={profileState()}
+      />,
+    );
     await openRouterFields(user);
 
     expect(screen.getByText("agents.form.router_kernel_off")).toBeInTheDocument();
