@@ -76,7 +76,6 @@ const NO_SURFACE: Record<string, string> = {
   owner: "readonly: the API stamps it from the authenticated caller (routes/agents/lifecycle.rs:652) as the principal an unattended turn acts for. A form field would let a manifest claim an owner it was not created by, and the point of the field is that it is the one the request carried.",
   source_template: "readonly: provenance, written by the create flow to record which template the agent came from, and displayed in the drawer header. There is no value an operator could set it to that would be true.",
   channels: "elsewhere: the drawer's own Channels section edits this allowlist (useSetAgentChannels). It is a set-membership list the channel bridge reads to decide which channels an agent may serve (channels/src/bridge.rs:3839), and a second control for one list is the redundancy requirement 2 exists to remove.",
-  metadata: "preserved: arbitrary key/value table, no widget",
   exec_policy:
     "partial: only the shorthand string form has a widget; the full table is preserved",
   tools:

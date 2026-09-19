@@ -628,7 +628,7 @@ export type ConfigGroupId = (typeof CONFIG_GROUP_IDS)[number];
  * with the cron jobs it governs.
  */
 export const CONFIG_GROUPS: Record<ConfigGroupId, readonly ManifestSectionId[]> = {
-  general: ["identity", "prompt", "lifecycle", "response_format"],
+  general: ["identity", "metadata", "prompt", "lifecycle", "response_format"],
   model: ["model", "fallback_models", "thinking", "routing"],
   tools: ["capabilities", "skills", "mcp_servers", "skill_workshop"],
   memory: ["proactive_memory", "auto_dream", "compaction"],

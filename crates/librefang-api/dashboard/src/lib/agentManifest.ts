@@ -14,6 +14,29 @@ import { MODEL_PARAM_RANGES } from "../components/ui/ModelParamField";
 let _nextUid = 1;
 export const generateUid = (): string => String(_nextUid++);
 
+/**
+ * The JSON types a free-form override row can hold, named by the operator.
+ *
+ * `metadata` and `[tools.<name>.params]` are both
+ * `HashMap<String, serde_json::Value>`, so the text alone does not say which
+ * value is meant: `5` and `"5"` are both legal, and a form that guessed from
+ * the text would rewrite one into the other on the next save.
+ *
+ * Arrays and tables are deliberately absent. They have no scalar spelling, so
+ * a row cannot carry one; they are preserved verbatim instead of being put
+ * behind a JSON box that would re-parse on every keystroke.
+ */
+export const JSON_ROW_TYPES = ["string", "number", "boolean"] as const;
+export type JsonRowType = (typeof JSON_ROW_TYPES)[number];
+
+/** One `key = value` row of a JSON-valued table. See `JSON_ROW_TYPES`. */
+export interface JsonRow {
+  _uid: string;
+  key: string;
+  valueType: JsonRowType;
+  value: string;
+}
+
 // Numeric inputs are stored as raw strings so empty fields stay empty
 // (instead of becoming 0 and silently overriding kernel defaults).
 export interface ManifestFormState {
@@ -158,6 +181,30 @@ export interface ManifestFormState {
   };
   pinned_model: string;
   workspace: string;
+
+  /**
+   * `metadata` is `HashMap<String, serde_json::Value>` (agent.rs:1322) and
+   * carries no declared shape, so the editor is one row per key with the
+   * value's JSON type named by the operator rather than inferred from the
+   * text: `5` the number and `"5"` the string are different values and both
+   * are legal in the same table.
+   *
+   * Only scalars are rows. A value that is a table or an array has no scalar
+   * spelling, so it is carried through untouched instead of being rendered as
+   * a JSON box that would have to re-parse on every keystroke — see
+   * `metadata_preserved`. Declared inline as `Array<{` on purpose: the sweep
+   * in agentManifest.test.ts reads the declaration to catch a row collection
+   * that has no preservation entry, and a named type would hide this one.
+   */
+  metadata: Array<{ _uid: string; key: string; valueType: JsonRowType; value: string }>;
+  /**
+   * `[metadata]` entries whose value is a table or an array, kept verbatim.
+   * Optional and left out of `emptyManifestForm` on purpose, exactly like
+   * `model.router_override_preserved`: the sweep's meta-guard treats an
+   * object-valued form field as a table the form owns, and this is not one —
+   * it is a stash belonging to `metadata`.
+   */
+  metadata_preserved?: TomlTable;
 
   schedule:
     | { mode: "reactive" }
@@ -597,6 +644,7 @@ export const emptyManifestForm = (): ManifestFormState => ({
   context_injection: [],
   response_format: { mode: "text" },
   exec_policy_shorthand: "",
+  metadata: [],
   skills: [],
   mcp_servers: [],
   tags: [],
@@ -714,6 +762,7 @@ export const FORM_TOP_LEVEL_KEYS = new Set([
   "response_format",
   "exec_policy",
   "workspaces",
+  "metadata",
 ]);
 const FORM_MODEL_KEYS = new Set([
   "provider",
@@ -1352,6 +1401,21 @@ export const serializeManifestForm = (
     if (wsBody.length) lines.push("", "[workspaces]", ...wsBody);
   }
 
+  // [metadata] — a table header too, so it is emitted here rather than in the
+  // scalar block above.
+  {
+    const metadataBody = renderJsonRowLines(form.metadata);
+    // The guard covers the preserved half as well as the rows. A table whose
+    // only content is a nested value has no row to emit, so without this the
+    // block would be dropped whole, preserved entries included — the
+    // `[rl_export]` bug in miniature.
+    for (const [key, value] of Object.entries(form.metadata_preserved ?? {})) {
+      if (value === null || value === undefined) continue;
+      metadataBody.push(`${tomlBareKeyOrQuoted(key)} = ${jsonValueToInlineToml(value)}`);
+    }
+    if (metadataBody.length) lines.push("", "[metadata]", ...metadataBody);
+  }
+
   // [model]
   const modelBody: string[] = [];
   writeStringScalar(modelBody, "provider", form.model.provider.trim());
@@ -1850,9 +1914,96 @@ const jsonValueToInlineToml = (value: unknown): string => {
 const tomlBareKeyOrQuoted = (key: string): string =>
   /^[A-Za-z0-9_-]+$/.test(key) ? key : escapeTomlString(key);
 
+/**
+ * A preserved value rendered the way the file holds it, for read-only display.
+ *
+ * Exported for the editor: a value the form does not edit still has to be
+ * visible, because "preserved" and "dropped" look identical to an operator who
+ * cannot see it.
+ */
+export const formatPreservedValue = (value: unknown): string =>
+  jsonValueToInlineToml(value);
+
 const stringifyExtras = (extras: TomlTable): string => {
   if (Object.keys(extras).length === 0) return "";
   return stringify(extras);
+};
+
+/**
+ * A TOML integer or float literal, matched so the row's own text can be
+ * emitted verbatim.
+ *
+ * Deliberately not parse-and-reprint: smol-toml hands integers past 2^53 back
+ * as BigInt, and `String(Number(raw))` would round one the operator typed —
+ * the same corruption `jsonValueToInlineToml` avoids for the preserved
+ * stashes. `inf` and `nan` are valid TOML but not JSON, and the field these
+ * rows hold is a `serde_json::Value`, so neither is reachable here.
+ */
+const TOML_NUMBER_LITERAL = /^[+-]?\d+(\.\d+)?([eE][+-]?\d+)?$/;
+
+/** Whether `raw` is a number literal a `serde_json::Value` row can hold. */
+const isTomlNumberLiteral = (raw: string): boolean => TOML_NUMBER_LITERAL.test(raw);
+
+/**
+ * A parsed TOML value as a row, or `null` when it has no scalar spelling.
+ *
+ * `null` is the signal for the caller to preserve the value verbatim: an
+ * array or a table cannot be written by a text box, and flattening one into
+ * JSON text would make the form re-parse on every keystroke.
+ */
+const jsonRowFromValue = (uid: string, key: string, value: unknown): JsonRow | null => {
+  if (typeof value === "string") return { _uid: uid, key, valueType: "string", value };
+  if (typeof value === "boolean") {
+    return { _uid: uid, key, valueType: "boolean", value: String(value) };
+  }
+  // Before the `number` arm: a big integer arrives as BigInt, and its digits
+  // are the value.
+  if (typeof value === "bigint") {
+    return { _uid: uid, key, valueType: "number", value: value.toString() };
+  }
+  if (typeof value === "number") {
+    return { _uid: uid, key, valueType: "number", value: String(value) };
+  }
+  return null;
+};
+
+/**
+ * The `key = value` lines of a JSON-valued table, with blank rows dropped.
+ *
+ * Shared by `[metadata]` and `[tools.<name>.params]`: both are
+ * `HashMap<String, serde_json::Value>`, so both need the same arms and the
+ * same refusal to guess a type from the text.
+ */
+const renderJsonRowLines = (rows: readonly JsonRow[]): string[] => {
+  const lines: string[] = [];
+  for (const row of rows) {
+    const key = row.key.trim();
+    // A freshly added row is blank, not an error: the serializer drops it the
+    // same way it drops a half-filled shared folder.
+    if (!key) continue;
+    const rendered = renderJsonRowValue(row);
+    if (rendered === null) continue;
+    lines.push(`${tomlBareKeyOrQuoted(key)} = ${rendered}`);
+  }
+  return lines;
+};
+
+const renderJsonRowValue = (row: JsonRow): string | null => {
+  switch (row.valueType) {
+    case "string":
+      return escapeTomlString(row.value);
+    case "boolean":
+      return row.value === "true" ? "true" : "false";
+    case "number": {
+      const raw = row.value.trim();
+      return isTomlNumberLiteral(raw) ? raw : null;
+    }
+    // Total on purpose. A `valueType` this build does not know is a row the
+    // serializer cannot honestly write, and falling through to `undefined`
+    // would put the string `undefined` in the file.
+    default:
+      return null;
+  }
 };
 
 const renderExtraScalars = (extras: TomlTable): string[] => {
@@ -2087,6 +2238,17 @@ export const validateManifestForm = (
     if (max === undefined) continue;
     if (!isInRange(form.model[param], min, max)) errors.push(`model.${param}`);
   }
+  // Metadata rows. A blank row is dropped by the serializer, not an error —
+  // but a row with a key and a value the row's own type cannot hold is a
+  // half-filled row of the shared-folder kind: the serializer would drop it
+  // and the operator would believe a metadata key had been set.
+  for (const row of form.metadata) {
+    if (!row.key.trim()) continue;
+    if (row.valueType === "number" && !isTomlNumberLiteral(row.value.trim())) {
+      errors.push(`metadata.${row._uid}.value`);
+    }
+  }
+
   // Folder rows: duplicate names produce a duplicate TOML key (hard parse
   // failure on the daemon), and `path` mirrors the kernel's rule — relative
   // to workspaces_dir, no `..`. A mount row carries an absolute host path
@@ -2273,6 +2435,22 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   }
   form.exec_policy_shorthand = parseExecPolicyShorthand(parsed.exec_policy);
   form.response_format = parseResponseFormatField(parsed.response_format);
+
+  // [metadata] — one row per key, in file order. A scalar becomes a typed row;
+  // a table or an array has no scalar spelling, so it is stashed and re-emitted
+  // verbatim rather than being flattened into text the form would re-parse.
+  if (isTomlTable(parsed.metadata)) {
+    const rows: ManifestFormState["metadata"] = [];
+    const preserved: TomlTable = {};
+    for (const [key, value] of Object.entries(parsed.metadata)) {
+      const row = jsonRowFromValue(generateParsedUid(), key, value);
+      if (row) rows.push(row);
+      else preserved[key] = value;
+    }
+    form.metadata = rows;
+    if (Object.keys(preserved).length) form.metadata_preserved = preserved;
+  }
+
 
   // Extras for top-level: capture exec_policy only when it's a table
   // (the form owns the shorthand string form).

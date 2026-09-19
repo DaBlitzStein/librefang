@@ -2573,6 +2573,11 @@ describe("every table the form owns keeps the keys it does not render", () => {
       '[[context_injection]]\nname = "n"\ncontent = "c"\ncondition = "always"\nzz_unknown = 7',
     ],
     ["workspaces", '[workspaces]\nmine = { path = "sub", zz_unknown = 7 }'],
+    // A `[metadata]` entry is not "rendered or preserved" the way the other
+    // rows are: every key becomes a row, so the sweep's marker survives as a
+    // row rather than through the stash. What it holds the form to is the
+    // rule that matters here — no key of this table is dropped on a save.
+    ["metadata", "[metadata]\nzz_unknown = 7"],
   ];
 
   for (const [row, body] of ROWS) {
@@ -3227,4 +3232,142 @@ describe("every integer count validates against its Rust type", () => {
       expect(round).toContain("context_window = 9223372036854775806");
     });
   }
+});
+
+// `metadata` is `HashMap<String, serde_json::Value>` on the Rust side
+// (crates/librefang-types/src/agent.rs:1322): the manifest declares no shape
+// for it, so the only honest editor is one row per key with the value's JSON
+// type named explicitly. A bare text box would have to guess between `5` the
+// number and `"5"` the string, and both are legal in the same table.
+describe("metadata table", () => {
+  it("writes no table when it has no rows", () => {
+    expect(serializeManifestForm(emptyManifestForm())).not.toContain("[metadata]");
+  });
+
+  // `_uid` is an ephemeral React key rather than manifest data.
+  const withoutUids = <T extends { _uid: string }>(rows: T[]): Omit<T, "_uid">[] =>
+    rows.map(({ _uid, ...rest }) => rest);
+
+  it("round-trips a scalar of every JSON type", () => {
+    const form = emptyManifestForm();
+    form.metadata = [
+      { _uid: "1", key: "owner", valueType: "string", value: "ops" },
+      { _uid: "2", key: "revision", valueType: "number", value: "7" },
+      { _uid: "3", key: "pinned", valueType: "boolean", value: "true" },
+    ];
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[metadata]");
+    expect(toml).toContain('owner = "ops"');
+    expect(toml).toContain("revision = 7");
+    expect(toml).toContain("pinned = true");
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(withoutUids(parsed.form.metadata)).toEqual(withoutUids(form.metadata));
+  });
+
+  it("keeps a number past JavaScript's safe range as the digits typed", () => {
+    const form = emptyManifestForm();
+    form.metadata = [
+      { _uid: "1", key: "revision", valueType: "number", value: "9223372036854775806" },
+    ];
+
+    const toml = serializeManifestForm(form);
+    // Verbatim, not `String(Number(...))`: that would print …776000.
+    expect(toml).toContain("revision = 9223372036854775806");
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.metadata[0]?.value).toBe("9223372036854775806");
+  });
+
+  // A table or an array has no scalar spelling, so the row editor does not
+  // pretend to offer one: it is carried through untouched and shown read-only.
+  // The alternative — a JSON text box — would re-parse on every keystroke and
+  // silently drop the value the moment it was half-typed.
+  it("preserves a table or array value verbatim instead of editing it", () => {
+    const source = [
+      'name = "x"',
+      "",
+      "[metadata]",
+      'owner = "ops"',
+      "limits = { cpu = 2 }",
+      'tags = ["a", "b"]',
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    // The scaled values are not rows; the scalar beside them is.
+    expect(parsed.form.metadata.map((r) => r.key)).toEqual(["owner"]);
+    expect(Object.keys(parsed.form.metadata_preserved ?? {}).sort()).toEqual([
+      "limits",
+      "tags",
+    ]);
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("limits = { cpu = 2 }");
+    expect(round).toContain('tags = ["a", "b"]');
+
+    // And the preserved half alone is enough to keep the table alive.
+    const reparsed = parseManifestToml(round);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(Object.keys(reparsed.form.metadata_preserved ?? {}).sort()).toEqual([
+      "limits",
+      "tags",
+    ]);
+  });
+
+  it("writes the table when only a preserved value is left", () => {
+    const form = emptyManifestForm();
+    form.metadata_preserved = { limits: { cpu: 2 } };
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("[metadata]");
+    expect(toml).toContain("limits = { cpu = 2 }");
+  });
+
+  it("keeps a key it reads, since every key becomes a row", () => {
+    const source = [
+      'name = "x"',
+      "",
+      "[metadata]",
+      'owner = "ops"',
+      "count = 3",
+      "flag = true",
+    ].join("\n");
+
+    const parsed = parseManifestToml(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain('owner = "ops"');
+    expect(round).toContain("count = 3");
+    expect(round).toContain("flag = true");
+  });
+
+  it("quotes a key TOML would not accept bare", () => {
+    const form = emptyManifestForm();
+    form.metadata = [{ _uid: "1", key: "my key", valueType: "string", value: "v" }];
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain('"my key" = "v"');
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(withoutUids(parsed.form.metadata)).toEqual(withoutUids(form.metadata));
+  });
+
+  it("drops a blank row rather than writing a keyless entry", () => {
+    const form = emptyManifestForm();
+    form.metadata = [{ _uid: "1", key: "   ", valueType: "string", value: "orphan" }];
+    expect(serializeManifestForm(form)).not.toContain("[metadata]");
+  });
 });
