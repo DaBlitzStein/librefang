@@ -1,7 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { emptyManifestForm, MODEL_MODES, type ManifestFormState } from "../agentManifest";
+import {
+  emptyManifestExtras,
+  emptyManifestForm,
+  MODEL_MODES,
+  serializeManifestForm,
+  type ManifestFormState,
+} from "../agentManifest";
 import {
   applyRoutingEngine,
   ROUTING_ENGINES,
@@ -131,11 +137,13 @@ describe("the routing engine mapping is anchored to the kernel's own rules", () 
   it("arms the tier router by the presence of `AgentManifest::routing`", () => {
     expect(AGENT_RS).toMatch(/pub routing: Option<ModelRoutingConfig>,/);
 
-    // Exactly one engine writes `[routing]`: under the profile engine a turn
-    // that matched no profile would otherwise fall through into the tiers.
-    expect(ROUTING_ENGINE_SETTINGS.fixed.routing_enabled).toBe(false);
-    expect(ROUTING_ENGINE_SETTINGS.effort.routing_enabled).toBe(true);
-    expect(ROUTING_ENGINE_SETTINGS.profile.routing_enabled).toBe(false);
+    // The table's presence is the tier router's whole configuration, so the
+    // engine that must not speak for the tiers says "unchanged" rather than
+    // `false`: writing `false` would delete the block — and with it the
+    // fallback the kernel runs when no profile matches.
+    expect(ROUTING_ENGINE_SETTINGS.fixed.routing_table).toBe(false);
+    expect(ROUTING_ENGINE_SETTINGS.effort.routing_table).toBe(true);
+    expect(ROUTING_ENGINE_SETTINGS.profile.routing_table).toBe("unchanged");
   });
 
   it("gates profile routing on the flexible mode the profile engine writes", () => {
@@ -161,7 +169,9 @@ describe("the routing engine mapping is anchored to the kernel's own rules", () 
       profile < tier,
       "The profile router is no longer resolved before the tier router. Every " +
         "cell of the engine table assumes it wins when it applies: the effort " +
-        "engine relies on being ineligible for it, not on coming first.",
+        "engine relies on being ineligible for it, not on coming first, and " +
+        "the profile engine relies on the tiers running when no profile " +
+        "matches — which is why it leaves the table alone instead of removing it.",
     ).toBe(true);
 
     // The call site passes the two candidates positionally, so their order is
@@ -267,16 +277,35 @@ describe("applyRoutingEngine writes the documented triple", () => {
   it.each([
     ["fixed", "fixed", true, false],
     ["effort", "fixed", true, true],
-    ["profile", "flexible", false, false],
+    ["profile", "flexible", false, "unchanged"],
   ] as const)(
-    "%s sets mode=%s, router_fixed=%s, routing.enabled=%s",
-    (engine, mode, router_fixed, routing_enabled) => {
-      const next = applyRoutingEngine(emptyManifestForm(), engine);
+    "%s sets mode=%s, router_fixed=%s and leaves the tier table %s",
+    (engine, mode, router_fixed, routing_table) => {
+      const from = emptyManifestForm();
+      const next = applyRoutingEngine(from, engine);
       expect(next.model.mode).toBe(mode);
       expect(next.model.router_fixed).toBe(router_fixed);
-      expect(next.routing.enabled).toBe(routing_enabled);
+      if (routing_table === "unchanged") {
+        // Identity, not just equality: "the engine makes no statement about
+        // the tiers" has to mean the very object is carried over, or a later
+        // edit to the copy could still diverge from what is on disk.
+        expect(next.routing).toBe(from.routing);
+      } else {
+        expect(next.routing.enabled).toBe(routing_table);
+      }
     },
   );
+
+  it("carries a `[routing]` table the form did not write straight through", () => {
+    // An agent that arrived with tiers: the profile engine must not be read as
+    // an instruction about them, in either direction.
+    const from = emptyManifestForm();
+    from.routing = { ...from.routing, enabled: true, simple_model: "haiku" };
+    const next = applyRoutingEngine(from, "profile");
+    expect(next.routing).toBe(from.routing);
+    expect(next.routing.enabled).toBe(true);
+    expect(routingEngineOf(next)).toBe("profile");
+  });
 
   it.each([...ROUTING_ENGINES])("round-trips %s through the classifier", (engine) => {
     expect(routingEngineOf(applyRoutingEngine(emptyManifestForm(), engine))).toBe(engine);
@@ -318,5 +347,66 @@ describe("applyRoutingEngine writes the documented triple", () => {
     expect(next.name).toBe("router-test");
     expect(next.reconcile_orphans).toBe("keep");
     expect(next.model.provider).toBe("openai");
+  });
+});
+
+// The tier table is not a switch the engine flips; it is the block the
+// serializer writes when `routing.enabled` is true, and the fallback the kernel
+// runs when the profile router matches nothing. Choosing "profile" therefore
+// has to leave it alone on disk — including the keys this form has no widget
+// for, which reach it only as `preserved` extras and would go with the block.
+// Asserted against the serialized TOML rather than the form state because the
+// file is what the daemon reads, and because a state-level assertion would not
+// have caught the `extras` half.
+describe("changing to the profile engine never drops the tier table", () => {
+  /** A form as the effort engine leaves it, with tiers nobody would call defaults. */
+  function withTiers(): ManifestFormState {
+    const form = emptyManifestForm();
+    form.routing = {
+      enabled: true,
+      simple_model: "gpt-4o-mini",
+      medium_model: "gpt-4o",
+      complex_model: "claude-opus-5",
+      simple_threshold: "120",
+      complex_threshold: "900",
+    };
+    return form;
+  }
+
+  it("keeps `[routing]` and every tier in the TOML", () => {
+    const toml = serializeManifestForm(applyRoutingEngine(withTiers(), "profile"));
+
+    expect(toml).toContain("[routing]");
+    expect(toml).toContain('simple_model = "gpt-4o-mini"');
+    expect(toml).toContain('medium_model = "gpt-4o"');
+    expect(toml).toContain('complex_model = "claude-opus-5"');
+    expect(toml).toContain("simple_threshold = 120");
+    expect(toml).toContain("complex_threshold = 900");
+  });
+
+  it("keeps the `[routing]` keys the form has no widget for", () => {
+    const extras = emptyManifestExtras();
+    extras.routing = { block_stall_degrade_after: 7 };
+
+    const toml = serializeManifestForm(applyRoutingEngine(withTiers(), "profile"), extras);
+
+    expect(toml).toContain("block_stall_degrade_after = 7");
+  });
+
+  it("does not invent a `[routing]` table for an agent that never had one", () => {
+    // The other direction: a manifest with no tiers must not come back with a
+    // block built from this form's own defaults, which would arm a router the
+    // operator never asked for.
+    const toml = serializeManifestForm(applyRoutingEngine(emptyManifestForm(), "profile"));
+
+    expect(toml).not.toContain("[routing]");
+  });
+
+  it("still removes the table when an engine without tiers is chosen outright", () => {
+    // "Fixed" is an explicit statement about routing, and `false` is how it is
+    // made; only "profile" declines to make one.
+    const toml = serializeManifestForm(applyRoutingEngine(withTiers(), "fixed"));
+
+    expect(toml).not.toContain("[routing]");
   });
 });

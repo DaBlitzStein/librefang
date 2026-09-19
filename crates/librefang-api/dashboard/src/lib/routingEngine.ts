@@ -1,24 +1,26 @@
 import type { ManifestFormState } from "./agentManifest";
 
 /**
- * The routing engine an agent runs on: one choice, three manifest fields.
+ * The routing engine an agent runs on: one choice, and the fields that have to
+ * move together to make it the engine the kernel resolves.
  *
  * The kernel has two routers and they are not a merge of settings — they are
  * ordered, and the first that applies takes the turn
  * (`model_selection_path` in
  * crates/librefang-kernel/src/kernel/agent_execution.rs resolves
- * Stable → Profile → Tier → the manifest's own model). Loose controls can
- * describe a state the kernel never runs: `mode = "flexible"` together with a
- * `[routing]` table is a profile router that wins every turn while the tier
- * configuration sits underneath, inert. The engine writes the three fields
- * together, so what lands on disk is always a state the kernel resolves to the
- * engine named here.
+ * Stable → Profile → Tier → the manifest's own model). Read as loose controls
+ * they describe engines other than the ones their names suggest: a manifest
+ * saying `mode = "flexible"` with the router override on runs the *tiers*,
+ * because the override bypasses the profile router before any profile is
+ * matched, and one with no `[routing]` table runs neither router. The engine
+ * writes the fields together, so what lands on disk is always a state the
+ * kernel resolves to the engine named here.
  *
- * | engine  | `model.mode` | `model.router_fixed` | `routing.enabled` |
- * | ------- | ------------ | -------------------- | ----------------- |
- * | fixed   | `fixed`      | `true`               | `false`           |
- * | effort  | `fixed`      | `true`               | `true`            |
- * | profile | `flexible`   | `false`              | `false`           |
+ * | engine  | `model.mode` | `model.router_fixed` | `[routing]` table      |
+ * | ------- | ------------ | -------------------- | ---------------------- |
+ * | fixed   | `fixed`      | `true`               | removed                |
+ * | effort  | `fixed`      | `true`               | written                |
+ * | profile | `flexible`   | `false`              | left exactly as it was |
  *
  * Why each cell, because the table is the whole design:
  *
@@ -26,10 +28,18 @@ import type { ManifestFormState } from "./agentManifest";
  *   unless the manifest is `ModelMode::Flexible`; leaving it flexible would
  *   hand every turn to the profile router and the three tiers would decide
  *   nothing.
- * - **profile** sets `routing.enabled = false` — writes no `[routing]` table —
- *   because the tier router is what a turn that matched no profile falls
- *   through to. Left on, a miss would silently continue in a *different*
- *   engine than the one chosen here.
+ * - **profile** does not touch the tier table, in either direction. The two
+ *   routers are a chain rather than alternatives: `model_selection_path`
+ *   resolves Profile before Tier, so on a flexible manifest a turn that
+ *   matches a profile is routed by it and a turn that matches none falls
+ *   through to the tiers. Writing `false` there would therefore not switch an
+ *   engine off — it would delete the fallback, because `routing.enabled` *is*
+ *   the table's presence in the file: `serializeManifestForm` writes the whole
+ *   `[routing]` block or none of it, so the three models, the two thresholds
+ *   and every key of the table the form has no widget for would go with it.
+ *   Leaving it alone is the only cell that is honest in both directions: an
+ *   agent that had tiers keeps them, and one that never had a `[routing]`
+ *   table does not get one invented from this form's own defaults.
  * - Both non-profile engines set `router_fixed = true`. `mode = "fixed"`
  *   already rules the profile router out, but the override is the flag the
  *   model router API reads and writes for this agent
@@ -53,17 +63,23 @@ export interface RoutingEngineSetting {
   /** `[model] router_override.fixed` — `AgentRouterOverride::fixed`. */
   router_fixed: boolean;
   /**
-   * Whether the form writes a `[routing]` table at all. The Rust field is
-   * `AgentManifest::routing: Option<ModelRoutingConfig>`, and the table's
-   * presence is what arms the tier router for this agent.
+   * What the engine does to the `[routing]` table, which is the tier router's
+   * whole configuration.
+   *
+   * `true` and `false` are the value written into `form.routing.enabled` — the
+   * flag the serializer reads to emit the block or drop it. `"unchanged"`
+   * means the engine makes no statement about the tiers at all and the table
+   * is carried over as it was; that is not the same as `false`, which deletes
+   * it. The Rust field is `AgentManifest::routing: Option<ModelRoutingConfig>`,
+   * and the table's presence is what arms the tier router for this agent.
    */
-  routing_enabled: boolean;
+  routing_table: boolean | "unchanged";
 }
 
 export const ROUTING_ENGINE_SETTINGS: Record<RoutingEngine, RoutingEngineSetting> = {
-  fixed: { mode: "fixed", router_fixed: true, routing_enabled: false },
-  effort: { mode: "fixed", router_fixed: true, routing_enabled: true },
-  profile: { mode: "flexible", router_fixed: false, routing_enabled: false },
+  fixed: { mode: "fixed", router_fixed: true, routing_table: false },
+  effort: { mode: "fixed", router_fixed: true, routing_table: true },
+  profile: { mode: "flexible", router_fixed: false, routing_table: "unchanged" },
 };
 
 /**
@@ -87,11 +103,13 @@ export function routingEngineOf(form: ManifestFormState): RoutingEngine {
  * is carried over untouched.
  *
  * The tier models, the thresholds and the profile settings all survive a
- * switch: they belong to the engine being switched *away from*, and clearing
- * them would turn a look at the other engine into data loss. Inert while the
- * other engine runs, and still on disk for the turn it comes back — the same
- * reason the serializer preserves fixed-mode router overrides rather than
- * clearing them.
+ * switch: they belong to the engine being switched away from, and clearing
+ * them would turn a look at the other engine into data loss. Under the profile
+ * engine that is not a courtesy but the design — the tier table is the
+ * fallback the kernel runs when no profile matches, so it is left exactly as
+ * it was (see `routing_table`) rather than rewritten, and the same reason is
+ * why the serializer preserves fixed-mode router overrides instead of reading
+ * a missing key as a decision.
  */
 export function applyRoutingEngine(
   form: ManifestFormState,
@@ -101,6 +119,9 @@ export function applyRoutingEngine(
   return {
     ...form,
     model: { ...form.model, mode: setting.mode, router_fixed: setting.router_fixed },
-    routing: { ...form.routing, enabled: setting.routing_enabled },
+    routing:
+      setting.routing_table === "unchanged"
+        ? form.routing
+        : { ...form.routing, enabled: setting.routing_table },
   };
 }
