@@ -2272,6 +2272,7 @@ export function AgentManifestForm({
               value={ce.engine}
               options={CONTEXT_ENGINE_NAMES}
               inheritLabel={t("agents.form.inherit_default")}
+              ariaLabel={t("agents.form.context_engine_engine")}
               onChange={(next) => updateContextEngine({ engine: next })}
             />
           </Field>
@@ -2542,6 +2543,7 @@ export function AgentManifestForm({
                   value={hook.runtime}
                   options={HOOK_RUNTIMES}
                   inheritLabel={t("agents.form.inherit_default")}
+                  ariaLabel={t("agents.form.context_engine_runtime")}
                   onChange={(next) => updateHook({ runtime: next })}
                 />
               </Field>
@@ -3261,6 +3263,11 @@ export function AgentManifestForm({
                     mode: e.target.value as ManifestFormState["exec_policy"]["mode"],
                   })
                 }
+                // The visible label is a `<span>` (Field only draws a real
+                // `<label>` when it is given an `htmlFor`), so the control
+                // carries its own name. Without it the operator's screen
+                // reader announces an unnamed combo box.
+                aria-label={t("agents.form.exec_policy")}
                 className={inputClass}
               >
                 <option value="">{t("agents.form.exec_policy_global")}</option>
@@ -3964,14 +3971,22 @@ function JsonRowEditor({
         onChange={(e) => onChange({ ...row, key: e.target.value })}
         placeholder={labels.key}
         aria-label={`${labels.key} ${index + 1}`}
-        className={inputClass}
+        // `flex-1 min-w-0` on both the key and the value: `inputClass` carries
+        // `w-full`, and three width-100% children in a flex row collapse the
+        // two flexible ones to nothing beside the fixed-width type select.
+        className={`${inputClass} flex-1 min-w-0`}
       />
       {types.length > 1 && (
         <select
           value={row.valueType}
           onChange={(e) => onChange({ ...row, valueType: e.target.value as JsonRowType })}
           aria-label={`${labels.type} ${index + 1}`}
-          className={`${inputClass} w-28 shrink-0`}
+          // `basis-28` rather than `w-28`: `inputClass` carries `w-full`, and
+          // two conflicting width utilities are resolved by their order in the
+          // generated stylesheet — which put `w-full` last and gave this
+          // select the whole row, collapsing the two inputs beside it to a
+          // sliver. `flex-basis` is a different property, so it wins outright.
+          className={`${inputClass} basis-28 grow-0 shrink-0`}
         >
           {types.map((type) => (
             <option key={type} value={type}>
@@ -3987,7 +4002,7 @@ function JsonRowEditor({
           value={row.value}
           onChange={(e) => onChange({ ...row, value: e.target.value })}
           aria-label={`${labels.value} ${index + 1}`}
-          className={inputClass}
+          className={`${inputClass} flex-1 min-w-0`}
         >
           <option value="true">{t("common.yes")}</option>
           <option value="false">{t("common.no")}</option>
@@ -3999,7 +4014,7 @@ function JsonRowEditor({
           onChange={(e) => onChange({ ...row, value: e.target.value })}
           placeholder={labels.value}
           aria-label={`${labels.value} ${index + 1}`}
-          className={inputClass}
+          className={`${inputClass} flex-1 min-w-0`}
         />
       )}
       <button
