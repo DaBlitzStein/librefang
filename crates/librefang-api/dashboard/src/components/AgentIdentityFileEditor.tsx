@@ -166,7 +166,7 @@ export function AgentIdentityFileEditor({
   };
 
   const title = t("agents.identity_file.title", {
-    defaultValue: "Identity file ({{name}})",
+    defaultValue: "Personality ({{name}})",
     name: filename,
   });
 
@@ -228,7 +228,7 @@ export function AgentIdentityFileEditor({
         <p className="text-[10px] text-text-dim/70">
           {t("agents.identity_file.hint", {
             defaultValue:
-              "Injected into this agent's prompt under “## Identity”, cut off at 500 characters. The rest of the file is written back untouched.",
+              "This agent's personality. Injected into its prompt under “## Identity”, cut off at 500 characters. The rest of the file is written back untouched.",
           })}
         </p>
       </div>
@@ -349,46 +349,57 @@ export function AgentIdentityFileEditor({
 /**
  * `emoji`, `avatar_url` and `color` sit in the same block but belong to the
  * Appearance section, which stores them on the agent record rather than in this
- * file — which is why they read empty here on a deployed agent.
+ * file. A file generated today does not carry them at all; a file written
+ * before the split does, and its value is shown even when it is empty.
  *
- * They are shown rather than omitted so the operator can see that the editor
- * knows about them and is deliberately leaving them alone; a second editable
+ * A key is listed only when the block actually has a line for it. Three rows
+ * reading "empty" about keys that are not in the file describe a problem the
+ * operator does not have, and the operator cannot act on any of them from here.
+ * What is in the file is shown rather than omitted, so they can see that the
+ * editor knows about it and is deliberately leaving it alone; a second editable
  * control for a value that lives in another store is exactly the confusion this
  * panel exists to avoid.
  */
 function ForeignKeysNote({ document }: { document: IdentityFrontMatter }) {
   const { t } = useTranslation();
+
+  // `readIdentityField` answers `null` for a key with no line — an empty value
+  // reads as `""`. A malformed block answers `null` for every key, which is
+  // consistent with the read-only state the rest of the panel takes there: no
+  // value in that block can be read at all.
+  const present = IDENTITY_FOREIGN_KEYS.flatMap((key) => {
+    const value = readIdentityField(document, key);
+    return value === null ? [] : [{ key, value }];
+  });
+
+  if (present.length === 0) return null;
+
   return (
     <div className="mt-4">
       <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">
         {t("agents.identity_file.foreign_title", {
-          defaultValue: "Managed elsewhere",
+          defaultValue: "Appearance",
         })}
       </p>
       <ul className="mt-1 flex flex-col gap-0.5">
-        {IDENTITY_FOREIGN_KEYS.map((key) => {
-          // `null` covers both "no block to read" and "block with no such key";
-          // both render as empty, which is what the operator sees in the file.
-          const value = readIdentityField(document, key);
-          return (
-            <li key={key} className="text-[10px] text-text-dim">
-              <span className="font-mono text-text-dim/80">{key}</span>
-              {": "}
-              {value === null || value === "" ? (
-                <span className="text-text-dim/50">
-                  {t("agents.identity_file.foreign_empty", { defaultValue: "empty" })}
-                </span>
-              ) : (
-                <span className="font-mono">{value}</span>
-              )}
-            </li>
-          );
-        })}
+        {present.map(({ key, value }) => (
+          <li key={key} className="text-[10px] text-text-dim">
+            <span className="font-mono text-text-dim/80">{key}</span>
+            {": "}
+            {value === "" ? (
+              <span className="text-text-dim/50">
+                {t("agents.identity_file.foreign_empty", { defaultValue: "empty" })}
+              </span>
+            ) : (
+              <span className="font-mono">{value}</span>
+            )}
+          </li>
+        ))}
       </ul>
       <p className="mt-1 text-[10px] text-text-dim/70">
         {t("agents.identity_file.foreign_hint", {
           defaultValue:
-            "Set from Appearance, which stores them with the agent. Left untouched here.",
+            "Set in Appearance, which stores them with the agent. Left untouched here.",
         })}
       </p>
     </div>

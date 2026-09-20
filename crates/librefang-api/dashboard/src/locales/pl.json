@@ -300,8 +300,8 @@
       "avatar_too_large": "Ten obraz ma {{size}} MB, a limit to {{limit}} MB."
     },
     "identity_file": {
-      "title": "Plik tożsamości ({{name}})",
-      "hint": "Wstrzykiwany do podpowiedzi tego agenta jako sekcja „## Identity”, ucinany po 500 znakach. Reszta pliku jest zapisywana z powrotem bez zmian.",
+      "title": "Osobowość ({{name}})",
+      "hint": "Osobowość tego agenta. Wstrzykiwana do jego podpowiedzi jako sekcja „## Identity”, ucinana po 500 znakach. Reszta pliku jest zapisywana z powrotem bez zmian.",
       "loading": "Wczytywanie {{name}}…",
       "load_failed": "Nie udało się odczytać {{name}}",
       "missing": "Ten agent nie ma jeszcze pliku {{name}}. Zapis go utworzy.",
@@ -320,7 +320,7 @@
       "unchanged": "Brak zmian od ostatniego odczytu.",
       "body_title": "Treść poniżej nagłówka",
       "body_hint": "Nie można jej tu edytować; jest zapisywana z powrotem dokładnie tak, jak jest.",
-      "foreign_title": "Zarządzane gdzie indziej",
+      "foreign_title": "Wygląd",
       "foreign_empty": "puste",
       "foreign_hint": "Ustawiane w sekcji „Wygląd”, która przechowuje je razem z agentem. Tutaj pozostają nietknięte.",
       "too_large": "Ten plik miałby {{size}} bajtów, a demon przyjmuje najwyżej {{limit}}. Skróć pole powyżej albo treść poniżej nagłówka."
