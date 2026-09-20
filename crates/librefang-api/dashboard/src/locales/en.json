@@ -3032,7 +3032,10 @@
     "evaluator_model": "Evaluator model",
     "evaluator_model_placeholder": "Evaluator model (optional)",
     "run_pause": "Pause autonomous run",
-    "run_resume": "Resume autonomous run"
+    "run_resume": "Resume autonomous run",
+    "tick_interval": "Tick interval",
+    "tick_interval_placeholder": "Seconds between loop iterations (default {{defaultSecs}})",
+    "tick_interval_out_of_range": "Tick interval must be an integer between {{min}} and {{max}} seconds."
   },
   "sessions": {
     "title": "Sessions",
