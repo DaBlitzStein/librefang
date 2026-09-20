@@ -947,7 +947,7 @@ fn json_diff_count(a: &serde_json::Value, b: &serde_json::Value) -> usize {
     operation_id = "get_agent_type_registry_diff",
     params(("name" = String, Path, description = "Agent type name")),
     responses(
-        (status = 200, description = "Diff between local and registry versions"),
+        (status = 200, description = "Diff between local and registry versions", body = crate::types::JsonObject),
         (status = 404, description = "Agent type or registry version not found"),
         (status = 409, description = "The name belongs to a live agent"),
     )
@@ -1055,7 +1055,7 @@ pub async fn get_registry_diff(
     operation_id = "restore_agent_type_from_registry",
     params(("name" = String, Path, description = "Agent type name")),
     responses(
-        (status = 200, description = "Agent type restored from registry"),
+        (status = 200, description = "Agent type restored from registry", body = crate::types::JsonObject),
         (status = 404, description = "Agent type or registry version not found"),
         (status = 409, description = "The name belongs to a live agent"),
         (status = 500, description = "The pre-restore snapshot could not be recorded; nothing was overwritten"),
