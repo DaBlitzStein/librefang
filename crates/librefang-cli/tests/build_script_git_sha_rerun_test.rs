@@ -35,9 +35,21 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 fn init_repo(root: &Path) {
     git(root, &["init", "--quiet"]);
-    // The fixture commits, so it needs an identity of its own rather than whatever the machine happens to have.
+    // The fixture commits, so it needs an identity of its own rather than whatever the machine happens to have, and it must not inherit the ambient git configuration: a global `commit.gpgsign`, `core.hooksPath` or `init.templateDir` aborts `commit_all` inside `git()`, which panics with a git error that says nothing about the build script under test.
     git(root, &["config", "user.email", "fixture@example.invalid"]);
     git(root, &["config", "user.name", "Build Script Fixture"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+    // An empty hooks directory is what makes the setting a no-op rather than a redirect to whatever the machine has installed; a template directory lands its hooks in `.git/hooks`, which this then bypasses.
+    let hooks = root.join("no-hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    git(
+        root,
+        &[
+            "config",
+            "core.hooksPath",
+            hooks.to_str().expect("the fixture path should be UTF-8"),
+        ],
+    );
 }
 
 fn commit_all(root: &Path, message: &str) {
@@ -53,9 +65,29 @@ fn write_package(root: &Path) {
     fs::write(root.join("build.rs"), include_str!("../build.rs")).unwrap();
 }
 
+/// Locate the fixture's build-output directory.
+///
+/// Cargo writes it under `<target>/debug/build`, but a `build.target` in the ambient cargo configuration inserts the target triple and moves it to `<target>/<triple>/debug/build`.
+/// Hardcoding the first shape panics the whole test on a machine configured the second way, with a message about a missing build directory that has nothing to do with the commit being asserted.
+fn build_dir(target: &Path) -> std::path::PathBuf {
+    let plain = target.join("debug").join("build");
+    if plain.is_dir() {
+        return plain;
+    }
+    if let Ok(entries) = fs::read_dir(target) {
+        for entry in entries.flatten() {
+            let nested = entry.path().join("debug").join("build");
+            if nested.is_dir() {
+                return nested;
+            }
+        }
+    }
+    plain
+}
+
 /// The commit id the build script last reported, read from the output cargo cached for it.
 fn reported_sha(target: &Path) -> String {
-    let build_dir = target.join("debug").join("build");
+    let build_dir = build_dir(target);
     let mut reported = Vec::new();
     for entry in fs::read_dir(&build_dir).expect("cargo should have created a build directory") {
         let entry = entry.expect("readable build directory entry");
@@ -86,6 +118,11 @@ fn build_and_report(package: &Path, target: &Path) -> String {
         .arg("--manifest-path")
         .arg(package.join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", target)
+        // The fixture's build script prefers a CI-supplied commit and returns before it ever reads the fixture repository, so an inherited `GITHUB_SHA` / `CI_COMMIT_SHA` would make every assertion below compare the reported id against the CI commit instead of the fixture's — a green on a developer machine and a red on CI, which is the opposite of a regression guard.
+        .env_remove("GITHUB_SHA")
+        .env_remove("CI_COMMIT_SHA")
+        // Removed so the fixture stays on the documented `<target>/debug/build` layout; `build_dir` still resolves the triple-nested shape a `build.target` in the ambient cargo configuration would produce.
+        .env_remove("CARGO_BUILD_TARGET")
         .output()
         .expect("run the build-script fixture");
     assert!(

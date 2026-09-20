@@ -26,7 +26,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     println!("cargo:rerun-if-env-changed=CI_COMMIT_SHA");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
-    rerun_when_commit_changes();
+    // Declared only when the checkout is what decides the commit id: with a CI-supplied SHA present `resolve_git_sha` returns before it looks at the repository, so these inputs could not change the output and declaring them would spend three `git` invocations plus their PATH lookups on every build for nothing.
+    if !ci_supplied_sha() {
+        rerun_when_commit_changes();
+    }
 
     // Capture git commit hash at build time.
     //
@@ -110,11 +113,28 @@ fn rerun_when_commit_changes() {
     }
 }
 
+/// Whether a CI-supplied commit id is what [`resolve_git_sha`] is going to return.
+///
+/// The two variables are read in the same order and with the same emptiness rule there, so `false` here means the checkout is genuinely what decides the reported commit.
+fn ci_supplied_sha() -> bool {
+    ["GITHUB_SHA", "CI_COMMIT_SHA"]
+        .iter()
+        .any(|key| std::env::var(key).is_ok_and(|sha| !sha.trim().is_empty()))
+}
+
+/// The `git` binary, resolved once per run.
+///
+/// `which` walks `PATH` on every call and this script calls [`git_stdout`] up to three times, so resolving it once keeps the walk from repeating for an answer that cannot change while the script runs (refs #5667).
+fn git_binary() -> Option<&'static std::path::PathBuf> {
+    static GIT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    GIT.get_or_init(|| which::which("git").ok()).as_ref()
+}
+
 /// Run `git <args>` and return its trimmed stdout, or `None` when git is missing, the command fails, or it prints nothing.
 ///
 /// The binary is resolved through `which` rather than relying on shell PATH lookup semantics (refs #5667).
 fn git_stdout(args: &[&str]) -> Option<String> {
-    let git = which::which("git").ok()?;
+    let git = git_binary()?;
     let output = Command::new(git).args(args).output().ok()?;
     if !output.status.success() {
         return None;
