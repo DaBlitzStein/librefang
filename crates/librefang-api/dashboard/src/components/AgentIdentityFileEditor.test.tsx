@@ -96,6 +96,16 @@ describe("AgentIdentityFileEditor", () => {
     expect(screen.getByLabelText("Greeting style")).toHaveProperty("value", "warm");
   });
 
+  // The heading names what the block holds, and keeps the file's own name in
+  // view so the operator can still find it on disk — the file is not renamed.
+  it("names the block after the personality, keeping the file name visible", () => {
+    render(<AgentIdentityFileEditor agentId="agent-1" />);
+
+    expect(
+      screen.getByRole("heading", { name: "Personality (IDENTITY.md)" }),
+    ).toBeTruthy();
+  });
+
   it("shows the body it does not edit, so the operator can see what is preserved", () => {
     render(<AgentIdentityFileEditor agentId="agent-1" />);
 
@@ -116,7 +126,49 @@ describe("AgentIdentityFileEditor", () => {
     expect(screen.getByText("emoji")).toBeTruthy();
     expect(screen.getByText("avatar_url")).toBeTruthy();
     expect(screen.getByText("color")).toBeTruthy();
-    expect(screen.getByText(/Set from Appearance/i)).toBeTruthy();
+    expect(screen.getByText("Appearance")).toBeTruthy();
+    expect(screen.getByText(/Set in Appearance/i)).toBeTruthy();
+  });
+
+  // A generated file carries personality only, so a block of three "empty"
+  // rows would describe keys the operator does not have and cannot act on.
+  it("omits the appearance block when the file carries none of the keys", () => {
+    const personalityOnly = `---\nname: deannatroi\narchetype: assistant\nvibe: helpful\ngreeting_style: warm\n---\n# Identity\n`;
+    mockQuery({
+      data: {
+        name: "IDENTITY.md",
+        content: personalityOnly,
+        size_bytes: personalityOnly.length,
+      },
+    });
+
+    render(<AgentIdentityFileEditor agentId="agent-1" />);
+
+    expect(screen.queryByText("emoji")).toBeNull();
+    expect(screen.queryByText("avatar_url")).toBeNull();
+    expect(screen.queryByText("color")).toBeNull();
+    expect(screen.queryByText(/Appearance/i)).toBeNull();
+  });
+
+  // An older file keeps whatever it has — an empty value shows as empty, and a
+  // key the file does not carry stays out, so the list is the file's contents
+  // rather than the set of keys the format allows.
+  it("lists only the appearance keys the file carries", () => {
+    const partially = `---\nname: deannatroi\narchetype: assistant\nemoji:\ncolor: orange\n---\n# Identity\n`;
+    mockQuery({
+      data: {
+        name: "IDENTITY.md",
+        content: partially,
+        size_bytes: partially.length,
+      },
+    });
+
+    render(<AgentIdentityFileEditor agentId="agent-1" />);
+
+    expect(screen.getByText("emoji")).toBeTruthy();
+    expect(screen.getByText("empty")).toBeTruthy();
+    expect(screen.getByText("orange")).toBeTruthy();
+    expect(screen.queryByText("avatar_url")).toBeNull();
   });
 
 

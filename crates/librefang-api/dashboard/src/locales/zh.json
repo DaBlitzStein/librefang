@@ -300,8 +300,8 @@
       "avatar_too_large": "该图片为 {{size}} MB，上限为 {{limit}} MB。"
     },
     "identity_file": {
-      "title": "身份文件（{{name}}）",
-      "hint": "会以「## Identity」段落注入该智能体的提示词，超过 500 个字符会被截断。文件其余部分会原样写回。",
+      "title": "个性（{{name}}）",
+      "hint": "该智能体的个性。会以「## Identity」段落注入其提示词，超过 500 个字符会被截断。文件其余部分会原样写回。",
       "loading": "正在读取 {{name}}……",
       "load_failed": "无法读取 {{name}}",
       "missing": "该智能体还没有 {{name}}。保存即会创建。",
@@ -320,7 +320,7 @@
       "unchanged": "自上次读取以来没有变化。",
       "body_title": "前言区块下方的内容",
       "body_hint": "此处不可编辑，会原样写回。",
-      "foreign_title": "由其他位置管理",
+      "foreign_title": "外观",
       "foreign_empty": "空",
       "foreign_hint": "由「外观」设置写入并随智能体保存。此处不做改动。",
       "too_large": "该文件将达 {{size}} 字节，而守护进程最多接受 {{limit}} 字节。请精简上方字段或前言下方的内容。"
