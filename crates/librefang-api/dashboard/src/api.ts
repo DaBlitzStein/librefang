@@ -282,7 +282,7 @@ export interface SkillDetail {
   license: string;
   tags: string[];
   runtime: string;
-  /** Tools the skill provides. */
+  /** Tools this skill *provides*. Its needs are in `required_tools`. */
   tools: SkillToolInfo[];
   /** Built-in tools the skill needs granted (manifest `[requirements]`); empty when it declares none. */
   required_tools: string[];
