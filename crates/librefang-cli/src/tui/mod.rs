@@ -758,14 +758,19 @@ impl App {
                     }
                 };
             }
-            AppEvent::AgentWorkspacesLoaded(id, entries) => {
-                // `!ws_loaded` accepts only the first response of the
-                // current edit session. `w` → `Esc` → `w` fires a second
-                // fetch for the same agent; without this, a late #1
-                // landing after #2 has already loaded (or after the
-                // operator has started editing) would replace the table
-                // out from under them and reset `ws_cursor` to 0.
-                if !self.agents.ws_loaded
+            AppEvent::AgentWorkspacesLoaded(id, generation, entries) => {
+                // Two conditions answering two different questions.
+                // `generation == ws_generation` is the late-response guard:
+                // `w` → `Esc` → `w` bumps the generation, so a reply to the
+                // first `w` carries a stale one and is dropped even when it
+                // arrives first — which `!ws_loaded` alone could not do,
+                // because the second `w` had already reset that to `false`.
+                // `!ws_loaded` then rejects a duplicate reply from the
+                // session that does match. Either one accepted would replace
+                // the table out from under an operator who has started
+                // editing, and reset `ws_cursor` to 0.
+                if generation == self.agents.ws_generation
+                    && !self.agents.ws_loaded
                     && self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id)
                 {
                     self.agents.workspaces = entries;
@@ -2047,7 +2052,12 @@ impl App {
         match action {
             agents::AgentAction::FetchAgentWorkspaces(id) => {
                 if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_fetch_agent_workspaces(backend, id, self.event_tx.clone());
+                    event::spawn_fetch_agent_workspaces(
+                        backend,
+                        id,
+                        self.agents.ws_generation,
+                        self.event_tx.clone(),
+                    );
                 }
             }
             agents::AgentAction::UpdateWorkspaces { id, workspaces } => {
@@ -3711,10 +3721,9 @@ mod agent_workspaces_event_tests {
         assert_eq!(app.agents.status_msg, "daemon unreachable");
     }
 
-    /// `w` → `Esc` → `w` fires a second fetch for the same agent. A late
-    /// first response landing after the second has already loaded — or
-    /// after the operator has started editing — must not replace the
-    /// table out from under them.
+    /// A duplicate reply *within* one edit session — a retry, or a transport
+    /// that delivered the same response twice — must not replace a table the
+    /// operator has already started editing.
     #[test]
     fn second_workspaces_loaded_response_does_not_clobber_the_first() {
         let (tx, _rx) = mpsc::channel();
@@ -3726,6 +3735,7 @@ mod agent_workspaces_event_tests {
 
         app.handle_event(AppEvent::AgentWorkspacesLoaded(
             "agent-1".to_string(),
+            app.agents.ws_generation,
             vec![(
                 "library".to_string(),
                 "shared/library".to_string(),
@@ -3741,6 +3751,7 @@ mod agent_workspaces_event_tests {
 
         app.handle_event(AppEvent::AgentWorkspacesLoaded(
             "agent-1".to_string(),
+            app.agents.ws_generation,
             vec![
                 ("a".to_string(), "p".to_string(), "readwrite".to_string()),
                 ("b".to_string(), "q".to_string(), "readwrite".to_string()),
@@ -3755,6 +3766,64 @@ mod agent_workspaces_event_tests {
                 "readwrite".to_string()
             )],
             "a second response for the same edit session must not replace the loaded table"
+        );
+    }
+
+    /// The case `!ws_loaded` alone could not catch: `w` → `Esc` → `w` bumps
+    /// the generation, so the reply to the *first* `w` is stale even when it
+    /// is the first one to arrive. Under the old guard the second `w` had
+    /// already reset `ws_loaded` to `false`, which made that stale reply the
+    /// accepted one and the current session's own reply the discarded one.
+    /// The editor then seeds from a manifest the daemon has since moved on
+    /// from, and the next save writes it back — the lost update the PR
+    /// documents elsewhere.
+    #[test]
+    fn a_reply_from_a_superseded_edit_session_is_dropped() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+
+        // Two `w` presses: the first spawned its fetch under generation 1,
+        // the second bumped to 2 and is the session the operator is in now.
+        app.agents.ws_loaded = false;
+        app.agents.ws_generation = 2;
+
+        app.handle_event(AppEvent::AgentWorkspacesLoaded(
+            "agent-1".to_string(),
+            1,
+            vec![(
+                "stale".to_string(),
+                "shared/stale".to_string(),
+                "readwrite".to_string(),
+            )],
+        ));
+        assert!(
+            app.agents.workspaces.is_empty(),
+            "a reply to a superseded `w` must not populate the table"
+        );
+        assert!(!app.agents.ws_loaded);
+
+        app.handle_event(AppEvent::AgentWorkspacesLoaded(
+            "agent-1".to_string(),
+            2,
+            vec![(
+                "current".to_string(),
+                "shared/current".to_string(),
+                "readwrite".to_string(),
+            )],
+        ));
+        assert!(app.agents.ws_loaded);
+        assert_eq!(
+            app.agents.workspaces,
+            vec![(
+                "current".to_string(),
+                "shared/current".to_string(),
+                "readwrite".to_string()
+            )],
+            "the current session's reply is the one that must land"
         );
     }
 }

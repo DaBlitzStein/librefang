@@ -2106,6 +2106,7 @@ tui-agents-workspaces-help = a add · d delete · Enter edit · s save · Esc ba
 tui-agents-workspaces-empty = No shared folders yet. Press a to add one.
 tui-agents-workspaces-loading = Loading shared folders…
 tui-agents-workspaces-row-dropped = A row with an empty name or path was not saved.
+tui-agents-workspaces-row-invalid = The shared folder "{ $name }" was not saved: the name allows only letters, digits, "-" and "_", and the path must be relative with no "..".
 tui-event-workspaces-update-failed = Failed to update shared folders
 tui-event-workspaces-manifest-read-failed = Failed to read the agent's manifest
 tui-event-workspaces-duplicate-name = Duplicate folder name { $name }; each shared folder needs a unique name

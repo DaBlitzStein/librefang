@@ -112,6 +112,12 @@ pub struct AgentSelectState {
     /// `Esc`, so a slow or failed fetch can't be saved over the wrong
     /// agent's manifest (or an empty one).
     pub ws_loaded: bool,
+    /// Bumped every time `w` opens the editor, and stamped into the fetch it
+    /// spawns so the reply can be matched to the session that asked for it.
+    /// `ws_loaded` alone cannot do that: the second `w` resets it to `false`,
+    /// which makes whichever reply arrives first the accepted one and the
+    /// newer one the discarded one.
+    pub ws_generation: u64,
     pub available_mcp: Vec<(String, bool)>,
     pub mcp_cursor: usize,
     // Channel allowlist editor. Detail-only: agent creation writes no `channels`
@@ -331,6 +337,7 @@ impl AgentSelectState {
             ws_editing: None,
             ws_buf: String::new(),
             ws_loaded: false,
+            ws_generation: 0,
         }
     }
 
@@ -684,6 +691,11 @@ impl AgentSelectState {
                     self.ws_editing = None;
                     self.ws_buf.clear();
                     self.ws_loaded = false;
+                    // Bumping here, not at the reply, is what makes the guard
+                    // a late-response one: this `w` and the fetch it spawns
+                    // share the new value, and every earlier fetch keeps the
+                    // one it was spawned under.
+                    self.ws_generation = self.ws_generation.wrapping_add(1);
                     self.sub = AgentSubScreen::EditWorkspaces;
                     return AgentAction::FetchAgentWorkspaces(id);
                 }
@@ -1258,6 +1270,26 @@ impl AgentSelectState {
             }
             KeyCode::Char('s') => {
                 if let Some(ref detail) = self.detail {
+                    // A row that is not an abandoned edit but still cannot
+                    // become a declaration the kernel resolves is refused here,
+                    // before the two-request round trip. `resolve_workspace_decl`
+                    // skips an absolute or `..`-bearing `path` with nothing but
+                    // a daemon `WARN`, and `expand_workspace_alias` can never
+                    // match a name carrying punctuation — either way the PATCH
+                    // would answer 200, the TUI would report the folders saved,
+                    // and the agent would silently never get the folder.
+                    if let Some((name, _, _)) = self.workspaces.iter().find(|(n, p, _)| {
+                        let (n, p) = (n.trim(), p.trim());
+                        !n.is_empty()
+                            && !p.is_empty()
+                            && crate::tui::event::workspace_row_is_invalid(n, p)
+                    }) {
+                        self.status_msg = crate::i18n::t_args(
+                            "tui-agents-workspaces-row-invalid",
+                            &[("name", name.trim())],
+                        );
+                        return AgentAction::Continue;
+                    }
                     // A row with an empty name or path is an abandoned edit,
                     // not a declaration: sending it would write a broken
                     // `[workspaces]` entry the kernel then fails to resolve.
@@ -2771,6 +2803,47 @@ mod workspaces_tests {
             rendered.contains(state.status_msg.trim()),
             "the status message must actually be painted, not just set: {rendered:?}"
         );
+    }
+
+    /// A row that is not a half-typed edit but still cannot become a
+    /// declaration is refused outright rather than sent. Sending it is the
+    /// worse outcome: the kernel answers `resolve_workspace_decl` with a
+    /// `WARN` and a `None`, so the PATCH returns 200, the TUI reports the
+    /// folders saved, and the agent silently never gets the folder.
+    #[test]
+    fn save_refuses_a_row_whose_name_or_path_the_kernel_would_skip() {
+        for (name, path) in [
+            ("library", "../shared"),
+            ("library", "/srv/data"),
+            ("lib/rary", "shared/library"),
+        ] {
+            let mut state = editing_state();
+            state
+                .workspaces
+                .push((name.into(), path.into(), "readwrite".into()));
+            match state.handle_key(key(KeyCode::Char('s'))) {
+                AgentAction::Continue => {}
+                other => panic!("{name:?} + {path:?} must not be sent, got {other:?}"),
+            }
+            assert!(
+                !state.status_msg.is_empty(),
+                "{name:?} + {path:?} must surface a message, not fail silently"
+            );
+            assert!(
+                state.status_msg.contains(name.trim()),
+                "the message must name the offending folder, not print a Fluent placeholder: {:?}",
+                state.status_msg
+            );
+            // The status line is clipped to the panel width, so comparing the
+            // whole message would fail for the longer locales; a leading
+            // fragment is enough to prove it was painted and not merely set.
+            let painted: String = state.status_msg.trim().chars().take(24).collect();
+            let rendered = rendered_edit_workspaces(&state);
+            assert!(
+                rendered.contains(&painted),
+                "the status message must actually be painted, not just set: {rendered:?}"
+            );
+        }
     }
 
     #[test]

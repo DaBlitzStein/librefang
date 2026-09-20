@@ -1157,6 +1157,7 @@ tui-agents-workspaces-help = a 添加 · d 删除 · Enter 编辑 · s 保存 ·
 tui-agents-workspaces-empty = 还没有共享文件夹。按 a 添加一个。
 tui-agents-workspaces-loading = 正在加载共享文件夹…
 tui-agents-workspaces-row-dropped = 名称或路径为空的行未保存。
+tui-agents-workspaces-row-invalid = 共享文件夹 "{ $name }" 未保存：名称只能使用字母、数字、"-" 和 "_"，路径必须是相对路径且不含 ".."。
 tui-event-workspaces-update-failed = 更新共享文件夹失败
 tui-event-workspaces-manifest-read-failed = 读取代理的清单失败
 tui-event-workspaces-duplicate-name = 重复的文件夹名称 { $name }；每个共享文件夹需要唯一的名称

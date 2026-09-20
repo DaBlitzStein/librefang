@@ -222,7 +222,13 @@ pub enum AppEvent {
     /// from an empty config from a request that never went out (#8141).
     MemoryConfigFailed(FetchFailure),
     /// The agent's `[workspaces]` table, as `(name, path, mode)` rows.
-    AgentWorkspacesLoaded(String, Vec<(String, String, String)>),
+    ///
+    /// The middle field is the edit session the fetch was spawned for.
+    /// Without it the handler could only ask "is this the first reply since
+    /// the last `w`", which `w` → `Esc` → `w` resets — so a reply to the
+    /// first `w` that arrived after the second one had loaded was accepted
+    /// and the newer one discarded (#7835).
+    AgentWorkspacesLoaded(String, u64, Vec<(String, String, String)>),
     /// The shared-folders write came back 2xx.
     AgentWorkspacesUpdated(String),
     /// Memory KV pairs loaded.
@@ -2060,9 +2066,12 @@ pub fn spawn_fetch_agent_mcp_servers(
 /// so it is hidden here and carried through verbatim by
 /// [`spawn_update_agent_workspaces`] instead of being silently rewritten as
 /// an empty `path`.
+/// `generation` is the caller's edit session, echoed back on the reply so a
+/// late response to an earlier `w` can be told apart from this one's.
 pub fn spawn_fetch_agent_workspaces(
     backend: BackendRef,
     agent_id: String,
+    generation: u64,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
@@ -2088,7 +2097,9 @@ pub fn spawn_fetch_agent_workspaces(
             match parsed {
                 Ok(value) => {
                     let entries = workspaces_editor_rows(&value);
-                    let _ = tx.send(AppEvent::AgentWorkspacesLoaded(agent_id, entries));
+                    let _ = tx.send(AppEvent::AgentWorkspacesLoaded(
+                        agent_id, generation, entries,
+                    ));
                 }
                 Err(message) => {
                     let _ = tx.send(AppEvent::FetchError(message));
@@ -2182,6 +2193,10 @@ pub fn spawn_update_agent_workspaces(
                             "tui-event-workspaces-duplicate-name",
                             &[("name", &name)],
                         ),
+                        WorkspacesRebuildError::RejectedRow(name) => crate::i18n::t_args(
+                            "tui-agents-workspaces-row-invalid",
+                            &[("name", &name)],
+                        ),
                     })?;
                 daemon_response(
                     client
@@ -2217,6 +2232,45 @@ enum WorkspacesRebuildError {
     /// Two rows (or a row and a preserved declaration) claim the same name;
     /// saving would make one silently win, so the write is refused.
     DuplicateName(String),
+    /// A row's name or path cannot become a declaration the kernel resolves,
+    /// so the write is refused rather than persisted and quietly skipped.
+    RejectedRow(String),
+}
+
+/// Whether an editor row cannot become a `[workspaces]` declaration.
+///
+/// The authority is `resolve_workspace_decl` on the kernel side
+/// (`crates/librefang-kernel/src/kernel/workspace_setup.rs`): a `path` that is
+/// absolute or carries `..` is answered with a `tracing::warn!` and a `None`,
+/// so the declaration is written to `agent.toml` and then skipped — the agent
+/// never gets the folder and the only trace is a daemon log line.
+/// A *name* is unusable for the same reason when the runtime cannot address it:
+/// `expand_workspace_alias` matches `@name/rest` on the segment before the
+/// first `/`, so a name carrying punctuation serializes to a manifest the
+/// kernel accepts and the agent can never reach. Mirrors the dashboard's
+/// `WORKSPACE_ALIAS_SAFE_NAME` and `isAbsoluteWorkspacePath` checks.
+pub(crate) fn workspace_row_is_invalid(name: &str, path: &str) -> bool {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return true;
+    }
+    if path.is_empty() {
+        return true;
+    }
+    // `Prefix` covers `C:foo`, which `is_absolute()` reports as false on a
+    // non-Windows host while `<root>.join(rel)` still yields a path outside
+    // the root — the same trap the kernel's own component walk guards.
+    std::path::Path::new(path).components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::Prefix(_)
+                | std::path::Component::RootDir
+                | std::path::Component::ParentDir
+        )
+    })
 }
 
 /// Rebuild the manifest with its `[workspaces]` table replaced by the
@@ -2252,6 +2306,9 @@ fn rebuild_manifest_with_workspaces(
         .unwrap_or_default();
     let mut ws = toml::map::Map::new();
     for (name, path, mode) in workspaces {
+        if workspace_row_is_invalid(name, path) {
+            return Err(WorkspacesRebuildError::RejectedRow(name.clone()));
+        }
         let mut entry = toml::map::Map::new();
         entry.insert("path".to_string(), toml::Value::String(path.clone()));
         let mode = canonical_workspace_mode(mode);
@@ -6682,6 +6739,66 @@ mount = "/data/vault"
         .err()
         .unwrap();
         assert!(matches!(err, WorkspacesRebuildError::DuplicateName(n) if n == "vault"));
+    }
+
+    /// The shapes `resolve_workspace_decl` answers with a `tracing::warn!` and
+    /// a `None`: the row is written to `agent.toml` and then skipped, so the
+    /// PATCH returns 200, the TUI reports the folders saved, and the agent
+    /// silently never gets the folder. Refusing here is what turns that into a
+    /// message instead.
+    #[test]
+    fn rebuild_refuses_a_row_the_kernel_would_only_warn_about() {
+        let manifest = "name = \"deanna\"\n";
+        for (name, path) in [
+            ("library", "/srv/data"),
+            ("library", "../shared"),
+            ("library", "a/../b"),
+            ("lib/rary", "shared/library"),
+            ("lib rary", "shared/library"),
+        ] {
+            let err = rebuild_manifest_with_workspaces(
+                manifest,
+                &[(name.to_string(), path.to_string(), "rw".to_string())],
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{name:?} + {path:?} must be refused"));
+            assert!(
+                matches!(err, WorkspacesRebuildError::RejectedRow(ref n) if n == name),
+                "{name:?} + {path:?} produced {err:?}"
+            );
+        }
+    }
+
+    /// The two rules the dashboard applies to the same field
+    /// (`WORKSPACE_ALIAS_SAFE_NAME` and `isAbsoluteWorkspacePath`), pinned on
+    /// the CLI side so the two surfaces cannot drift apart. The CLI is the
+    /// looser of the two today, and this is the check that closes it.
+    #[test]
+    fn workspace_row_validity_matches_the_dashboard() {
+        for (name, path) in [
+            ("library", "shared/library"),
+            ("my-folder_2", "a/b"),
+            ("A1", "x"),
+        ] {
+            assert!(
+                !workspace_row_is_invalid(name, path),
+                "{name:?}/{path:?} must be accepted"
+            );
+        }
+        for (name, path) in [
+            ("", "shared"),
+            ("library", ""),
+            ("lib rary", "shared"),
+            ("lib/rary", "shared"),
+            ("library", "/abs"),
+            ("library", "../up"),
+            ("library", "a/../b"),
+        ] {
+            assert!(
+                workspace_row_is_invalid(name, path),
+                "{name:?}/{path:?} must be refused"
+            );
+        }
     }
 
     /// `GET /api/channels` mixes configured instances and catalog adapters in

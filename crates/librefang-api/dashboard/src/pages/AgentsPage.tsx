@@ -1257,7 +1257,16 @@ export function AgentsPage() {
 
   const saveManifestEditor = () => {
     if (!detailAgent) return;
-    const errors = validateManifestForm(manifestEditorFormState);
+    // Same preserved-name list the create dialog passes: `[workspaces]` entries
+    // the form can't render (mount-based declarations) are invisible here, so a
+    // form row reusing one of their names validates clean and then serializes a
+    // duplicate key, which the daemon rejects as an unattributable TOML parse
+    // error. `manifestEditorExtras`, not `formExtras` — this handler edits the
+    // detail drawer's state.
+    const errors = validateManifestForm(
+      manifestEditorFormState,
+      preservedWorkspaceNamesFromExtras(manifestEditorExtras),
+    );
     setManifestEditorErrors(new Set(errors));
     if (errors.length > 0) return;
     const toml = serializeManifestForm(manifestEditorFormState, manifestEditorExtras);

@@ -2122,6 +2122,7 @@ tui-agents-workspaces-help = a додати · d видалити · Enter ре�
 tui-agents-workspaces-empty = Спільних папок ще немає. Натисніть a, щоб додати.
 tui-agents-workspaces-loading = Завантаження спільних папок…
 tui-agents-workspaces-row-dropped = Рядок з порожньою назвою або шляхом не збережено.
+tui-agents-workspaces-row-invalid = Спільну теку "{ $name }" не збережено: у назві дозволені лише літери, цифри, "-" і "_", а шлях має бути відносним без "..".
 tui-event-workspaces-update-failed = Не вдалося оновити спільні папки
 tui-event-workspaces-manifest-read-failed = Не вдалося прочитати маніфест агента
 tui-event-workspaces-duplicate-name = Дублікат назви папки { $name }; кожній спільній папці потрібна унікальна назва
