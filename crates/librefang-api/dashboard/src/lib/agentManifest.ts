@@ -394,7 +394,10 @@ export interface ManifestFormState {
     // per-agent settings, read and written inside the agent's own manifest
     // (#8424). They are manifest fields, so this form is where they are
     // edited; the routing panel that shared them was removed rather than
-    // kept as a second writer.
+    // kept as a second writer. The override is not only a routing knob: the
+    // spawn gate reads its `fixed` pin and its two caps whatever `mode` says
+    // (crates/librefang-runtime/src/tool_runner/agent.rs), which is why the
+    // form renders them under every routing engine.
     mode: "fixed" | "flexible";
     // `AgentRouterOverride` is `Option` in Rust: every field below is only
     // meaningful once at least one of them is set, and the table is left out
