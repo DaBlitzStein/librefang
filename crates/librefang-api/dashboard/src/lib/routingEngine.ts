@@ -13,14 +13,15 @@ import type { ManifestFormState } from "./agentManifest";
  * saying `mode = "flexible"` with the router override on runs the *tiers*,
  * because the override bypasses the profile router before any profile is
  * matched, and one with no `[routing]` table runs neither router. The engine
- * writes the fields together, so what lands on disk is always a state the
- * kernel resolves to the engine named here.
+ * writes the fields it decides together and leaves the rest alone, so what
+ * lands on disk is always a state the kernel resolves to the engine named
+ * here — and never a capability the operator did not ask to change.
  *
- * | engine  | `model.mode` | `model.router_fixed` | `[routing]` table      |
- * | ------- | ------------ | -------------------- | ---------------------- |
- * | fixed   | `fixed`      | `true`               | removed                |
- * | effort  | `fixed`      | `true`               | written                |
- * | profile | `flexible`   | `false`              | left exactly as it was |
+ * | engine  | `model.mode` | `model.router_fixed`      | `[routing]` table      |
+ * | ------- | ------------ | ------------------------- | ---------------------- |
+ * | fixed   | `fixed`      | left alone                | removed                |
+ * | effort  | `fixed`      | left alone                | written                |
+ * | profile | `flexible`   | `false`                   | left exactly as it was |
  *
  * Why each cell, because the table is the whole design:
  *
@@ -40,13 +41,17 @@ import type { ManifestFormState } from "./agentManifest";
  *   Leaving it alone is the only cell that is honest in both directions: an
  *   agent that had tiers keeps them, and one that never had a `[routing]`
  *   table does not get one invented from this form's own defaults.
- * - Both non-profile engines set `router_fixed = true`. `mode = "fixed"`
- *   already rules the profile router out, but the override is the flag the
- *   model router API reads and writes for this agent
- *   (`AgentRouterOverride::fixed`, crates/librefang-types/src/model_profile.rs)
- *   and it bypasses the router *even in `flexible` mode* — so an external
- *   writer that flips `mode` back cannot re-arm a router the operator
- *   switched off.
+ * - **router_fixed is written by the profile engine alone, and never to
+ *   `true`.** The pin is not a routing flag with a routing meaning: `true`
+ *   opts the agent out of profiles for its own turns *and* refuses every
+ *   profile to the agents it spawns — `check_profile_against_parent`
+ *   (crates/librefang-runtime/src/tool_runner/agent.rs) reads it on the spawn
+ *   path without consulting `mode` at all. An engine writing `true` would
+ *   revoke a capability the operator never touched, which is why neither
+ *   non-profile engine writes it: they do not need it, because
+ *   `mode = "fixed"` is already what keeps the profile router off. The
+ *   profile engine writes `false` because a pinned agent cannot route by
+ *   profile, so the choice would otherwise do nothing at all.
  *
  * The three values are the serialised spellings, not the Rust variant names:
  * `ModelMode` is `rename_all = "snake_case"`, so `Fixed` reaches the file as
@@ -74,8 +79,18 @@ export const ROUTING_ENGINE_LABELS: Record<RoutingEngine, string> = {
 export interface RoutingEngineSetting {
   /** `[model] mode` — `ModelMode` in crates/librefang-types/src/agent.rs. */
   mode: ManifestFormState["model"]["mode"];
-  /** `[model] router_override.fixed` — `AgentRouterOverride::fixed`. */
-  router_fixed: boolean;
+  /**
+   * What the engine does to `[model] router_override.fixed` —
+   * `AgentRouterOverride::fixed` in crates/librefang-types/src/model_profile.rs.
+   *
+   * `"unchanged"` leaves the pin exactly as the manifest had it; a boolean
+   * writes it. No engine writes `true`: the pin is not a routing knob but a
+   * capability, refusing profiles both to this agent's own turns and to the
+   * agents it spawns, so switching engines must not set it. Only the profile
+   * engine writes anything, and only `false` — a pinned agent cannot route by
+   * profile at all, and the choice would be a dead control without that.
+   */
+  router_fixed: boolean | "unchanged";
   /**
    * What the engine does to the `[routing]` table, which is the tier router's
    * whole configuration.
@@ -91,8 +106,8 @@ export interface RoutingEngineSetting {
 }
 
 export const ROUTING_ENGINE_SETTINGS: Record<RoutingEngine, RoutingEngineSetting> = {
-  fixed: { mode: "fixed", router_fixed: true, routing_table: false },
-  effort: { mode: "fixed", router_fixed: true, routing_table: true },
+  fixed: { mode: "fixed", router_fixed: "unchanged", routing_table: false },
+  effort: { mode: "fixed", router_fixed: "unchanged", routing_table: true },
   profile: { mode: "flexible", router_fixed: false, routing_table: "unchanged" },
 };
 
@@ -106,6 +121,11 @@ export const ROUTING_ENGINE_SETTINGS: Record<RoutingEngine, RoutingEngineSetting
  * after it, because the override bypasses the profile router even in
  * `flexible` mode — a manifest carrying both is not profile routing, it is the
  * tier engine with the profile router disarmed, or no routing at all.
+ *
+ * The pin means a second thing — it refuses profiles to the agents this one
+ * spawns — and that is not a routing decision, so this classifier does not
+ * read it as one. A pinned agent keeps its engine; it just cannot spawn onto
+ * a profile.
  */
 export function routingEngineOf(form: ManifestFormState): RoutingEngine {
   if (form.model.mode === "flexible" && !form.model.router_fixed) return "profile";
@@ -113,7 +133,7 @@ export function routingEngineOf(form: ManifestFormState): RoutingEngine {
 }
 
 /**
- * The form state `engine` describes. Every field outside the three it decides
+ * The form state `engine` describes. Every field outside the ones it decides
  * is carried over untouched.
  *
  * The tier models, the thresholds and the profile settings all survive a
@@ -124,6 +144,10 @@ export function routingEngineOf(form: ManifestFormState): RoutingEngine {
  * it was (see `routing_table`) rather than rewritten, and the same reason is
  * why the serializer preserves fixed-mode router overrides instead of reading
  * a missing key as a decision.
+ *
+ * `router_fixed` follows the same rule for the same kind of reason: it is a
+ * capability, not a routing preference (see `RoutingEngineSetting`), so both
+ * engines that do not need it leave it exactly as they found it.
  */
 export function applyRoutingEngine(
   form: ManifestFormState,
@@ -132,7 +156,13 @@ export function applyRoutingEngine(
   const setting = ROUTING_ENGINE_SETTINGS[engine];
   return {
     ...form,
-    model: { ...form.model, mode: setting.mode, router_fixed: setting.router_fixed },
+    model: {
+      ...form.model,
+      mode: setting.mode,
+      ...(setting.router_fixed === "unchanged"
+        ? {}
+        : { router_fixed: setting.router_fixed }),
+    },
     routing:
       setting.routing_table === "unchanged"
         ? form.routing

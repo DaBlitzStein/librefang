@@ -50,6 +50,7 @@ const MODEL_PROFILE_RS = read(TYPES_SRC, "model_profile.rs");
 const KERNEL_SRC = join(CRATES, "librefang-kernel", "src");
 const AGENT_EXECUTION_RS = read(KERNEL_SRC, "kernel", "agent_execution.rs");
 const MODEL_ROUTER_RS = read(KERNEL_SRC, "model_router.rs");
+const SPAWN_RS = read(CRATES, "librefang-runtime", "src", "tool_runner", "agent.rs");
 
 /**
  * The serialised spellings of a Rust enum, honouring its `rename_all` — the
@@ -146,22 +147,38 @@ describe("the routing engine mapping is anchored to the kernel's own rules", () 
     expect([...MODEL_MODES]).toEqual(spellings);
   });
 
-  it("keeps `router_fixed` on a real `AgentRouterOverride::fixed`, still bypassing the router", () => {
+  it("only ever clears `router_fixed`, which is a capability as well as a routing flag", () => {
     // The field the form writes as `router_override = { fixed = true }`.
     expect(MODEL_PROFILE_RS).toMatch(
       /pub struct AgentRouterOverride \{[\s\S]*?pub fixed: bool,/,
     );
-    // And the arm that gives it meaning: an agent whose override is fixed is
-    // Bypassed *before* any profile is matched, which is what makes `true` the
-    // right value for the two engines that must not be profile-routed, and
-    // `false` the right value for the one that must.
+    // The routing half: an agent whose override is fixed is Bypassed *before*
+    // any profile is matched, which is why the profile engine has to clear it —
+    // otherwise choosing that engine would do nothing.
     expect(MODEL_ROUTER_RS).toMatch(
       /if !config\.enabled \|\| agent_override\.is_some_and\(\|o\| o\.fixed\)/,
     );
 
-    expect(ROUTING_ENGINE_SETTINGS.fixed.router_fixed).toBe(true);
-    expect(ROUTING_ENGINE_SETTINGS.effort.router_fixed).toBe(true);
+    // The half that makes writing `true` wrong for the other engines: the
+    // spawn path refuses a profile for an agent pinned with this flag, and it
+    // never looks at `mode`. An engine that set the pin would revoke a
+    // capability the operator never touched.
+    const spawnGate = rustFunctionBody(SPAWN_RS, "check_profile_against_parent");
+    expect(
+      spawnGate,
+      "The spawn gate no longer reads the parent's `fixed` pin. If it stopped, " +
+        "the reason the non-profile engines must not write `true` is gone and " +
+        "this table has to be re-derived.",
+    ).toMatch(/override_\.fixed/);
+    expect(spawnGate).not.toMatch(/\.mode\b/);
+
+    expect(ROUTING_ENGINE_SETTINGS.fixed.router_fixed).toBe("unchanged");
+    expect(ROUTING_ENGINE_SETTINGS.effort.router_fixed).toBe("unchanged");
     expect(ROUTING_ENGINE_SETTINGS.profile.router_fixed).toBe(false);
+    // No row may ever write the pin on.
+    for (const engine of ROUTING_ENGINES) {
+      expect(ROUTING_ENGINE_SETTINGS[engine].router_fixed).not.toBe(true);
+    }
   });
 
   it("arms the tier router by the presence of `AgentManifest::routing`", () => {
@@ -305,16 +322,20 @@ describe("routingEngineOf classifies a manifest the way the kernel resolves it",
 
 describe("applyRoutingEngine writes the documented triple", () => {
   it.each([
-    ["fixed", "fixed", true, false],
-    ["effort", "fixed", true, true],
+    ["fixed", "fixed", "unchanged", false],
+    ["effort", "fixed", "unchanged", true],
     ["profile", "flexible", false, "unchanged"],
   ] as const)(
-    "%s sets mode=%s, router_fixed=%s and leaves the tier table %s",
+    "%s sets mode=%s, leaves router_fixed %s and the tier table %s",
     (engine, mode, router_fixed, routing_table) => {
       const from = emptyManifestForm();
       const next = applyRoutingEngine(from, engine);
       expect(next.model.mode).toBe(mode);
-      expect(next.model.router_fixed).toBe(router_fixed);
+      if (router_fixed === "unchanged") {
+        expect(next.model.router_fixed).toBe(from.model.router_fixed);
+      } else {
+        expect(next.model.router_fixed).toBe(router_fixed);
+      }
       if (routing_table === "unchanged") {
         // Identity, not just equality: "the engine makes no statement about
         // the tiers" has to mean the very object is carried over, or a later
@@ -325,6 +346,28 @@ describe("applyRoutingEngine writes the documented triple", () => {
       }
     },
   );
+
+  it("does not revoke a pin the operator set elsewhere when the engine changes", () => {
+    // `fixed = true` is not a routing preference: it also refuses every profile
+    // to the agents this one spawns, and the spawn gate reads it without
+    // consulting `mode` (see the guard above). Choosing an engine must not
+    // touch it, which is the whole reason no row writes `true`.
+    const pinned = emptyManifestForm();
+    pinned.model.router_fixed = true;
+
+    for (const engine of ["fixed", "effort"] as const) {
+      const next = applyRoutingEngine(pinned, engine);
+      expect(next.model.router_fixed, `${engine} cleared the pin`).toBe(true);
+      expect(serializeManifestForm(next)).toContain("router_override = { fixed = true }");
+    }
+
+    // The one engine that has to speak about the pin, and only to clear it: a
+    // pinned agent cannot route by profile at all, so the choice would be
+    // dead without it.
+    const asProfile = applyRoutingEngine(pinned, "profile");
+    expect(asProfile.model.router_fixed).toBe(false);
+    expect(serializeManifestForm(asProfile)).not.toContain("router_override");
+  });
 
   it("carries a `[routing]` table the form did not write straight through", () => {
     // An agent that arrived with tiers: the profile engine must not be read as
