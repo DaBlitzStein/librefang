@@ -206,6 +206,23 @@ describe("generateManifestMarkdown", () => {
     expect(md).toContain("kernel-wide `[default_routing]`");
   });
 
+  it("says when the agent is pinned out of profiles, and at whose cost", () => {
+    // The pin is not a routing flag: it refuses every profile to the agents
+    // this one spawns, so a reader who cannot see it cannot explain a refused
+    // `agent_spawn` that names one.
+    const form = emptyManifestForm();
+    form.model.router_fixed = true;
+
+    const md = generateManifestMarkdown(form);
+
+    expect(md).toContain("**Pinned**");
+    expect(md).toContain("fixed = true");
+  });
+
+  it("says nothing about a pin when there is none", () => {
+    expect(generateManifestMarkdown(emptyManifestForm())).not.toContain("**Pinned**");
+  });
+
   it("prints the daemon's model for a blank tier, marked as the daemon's", () => {
     // The table arms the router whether or not it names models, so a reader
     // shown nothing where the model belongs would be reading a table that
