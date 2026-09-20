@@ -2101,6 +2101,7 @@ tui-agents-workspaces-help = a 추가 · d 삭제 · Enter 편집 · s 저장 ·
 tui-agents-workspaces-empty = 아직 공유 폴더가 없습니다. a를 눌러 추가하세요.
 tui-agents-workspaces-loading = 공유 폴더를 불러오는 중…
 tui-agents-workspaces-row-dropped = 이름 또는 경로가 비어 있는 행은 저장되지 않았습니다.
+tui-agents-workspaces-row-invalid = 공유 폴더 "{ $name }"을(를) 저장하지 않았습니다: 이름에는 문자, 숫자, "-", "_"만 쓸 수 있고 경로는 ".." 없는 상대 경로여야 합니다.
 tui-event-workspaces-update-failed = 공유 폴더 업데이트 실패
 tui-event-workspaces-manifest-read-failed = 에이전트 매니페스트를 읽지 못했습니다
 tui-event-workspaces-duplicate-name = 중복된 폴더 이름 { $name }입니다. 공유 폴더 이름은 고유해야 합니다

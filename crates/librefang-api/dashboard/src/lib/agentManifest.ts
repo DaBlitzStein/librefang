@@ -1262,7 +1262,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   // a declared empty array is the disable-all statement and must stay `[]` (#7749).
   form.fallback_models = parsed.fallback_models === undefined
     ? null
-    : (parsed.fallback_models as unknown[])
+    : (Array.isArray(parsed.fallback_models) ? parsed.fallback_models : [])
         .filter(isTomlTable)
         .map((fb) => ({
       _uid: generateParsedUid(),
