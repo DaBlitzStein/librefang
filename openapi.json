@@ -13471,7 +13471,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Diff between local and registry versions"
+            "description": "Diff between local and registry versions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           },
           "404": {
             "description": "Agent type or registry version not found"
@@ -13503,7 +13510,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Agent type restored from registry"
+            "description": "Agent type restored from registry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           },
           "404": {
             "description": "Agent type or registry version not found"
