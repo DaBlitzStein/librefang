@@ -623,6 +623,7 @@
       "router_allowed_profiles": "Allowed profiles",
       "router_allowed_profiles_hint": "Empty = the router may pick any profile. Also the list a spawned agent's profile request is checked against.",
       "router_kernel_off": "The model router is off in config.toml, so this agent's own turns are not routed by profile. The spawn gate still applies: an `agent_spawn` naming a profile is checked against these settings either way.",
+      "routing_kernel_stable": "The kernel is in stable mode in config.toml, so neither routing engine runs: this agent's own turns use its pinned model, or this manifest's model when none is pinned. The settings above still gate what this agent may spawn — an `agent_spawn` naming a profile is checked against them either way.",
       "router_profiles_search_placeholder": "Search model profiles…",
       "router_allowed_profiles_placeholder": "e.g. coding",
       "router_cost_budget": "Cost budget",

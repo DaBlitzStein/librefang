@@ -10,6 +10,7 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useMcpServers } from "../lib/queries/mcp";
 import { useModelRouterProfiles } from "../lib/queries/modelRouter";
+import { useKernelMode } from "../lib/queries/config";
 import {
   useCreateAgentTypeFromToml,
   useDeleteAgentType,
@@ -88,6 +89,10 @@ function AgentTypeEditor({
   const skillsQuery = useSkills();
   const mcpServersQuery = useMcpServers();
   const routerProfilesQuery = useModelRouterProfiles();
+  // This editor is mounted only while the dialog is open, so the query is
+  // scoped by the mount — no `enabled` gate is needed the way the agents page
+  // needs one.
+  const kernelModeQuery = useKernelMode();
 
   const [newName, setNewName] = useState("");
   const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
@@ -244,6 +249,7 @@ function AgentTypeEditor({
             mcpCatalog={mcpCatalog}
             routerProfileCatalog={routerProfileCatalog}
             routerProfilesEnabled={routerProfilesQuery.data?.enabled}
+            kernelMode={kernelModeQuery.data}
             nameField={isCreate ? "hidden" : "readonly"}
           />
 

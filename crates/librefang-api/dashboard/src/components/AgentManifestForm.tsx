@@ -18,6 +18,7 @@ import {
   generateUid,
 } from "../lib/agentManifest";
 import type { JsonRowType, ManifestExtras, ManifestFormState } from "../lib/agentManifest";
+import type { KernelMode } from "../lib/queries/config";
 import {
   applyRoutingEngine,
   ROUTING_TIER_DEFAULTS,
@@ -219,6 +220,14 @@ interface AgentManifestFormProps {
   /** Whether the router is enabled kernel-wide; `undefined` is unknown. */
   routerProfilesEnabled?: boolean;
   /**
+   * The kernel's operating mode from `GET /api/config`; `undefined` is
+   * unknown. `"stable"` outranks both routers — the kernel resolves
+   * `model_selection_path` to `Stable` and neither the profile nor the tier
+   * router runs for this agent's own turns — so the engine picker is inert
+   * there and says so. Absent or unrecognized, no claim is made.
+   */
+  kernelMode?: KernelMode;
+  /**
    * How the "Name" field behaves for this caller (#8028).
    *
    * - `"editable"` (default): the field a caller spawning a brand-new agent
@@ -402,6 +411,7 @@ export function AgentManifestForm({
   mcpCatalog,
   routerProfileCatalog,
   routerProfilesEnabled,
+  kernelMode,
   nameField = "editable",
   agentId,
   sections,
@@ -3012,6 +3022,18 @@ export function AgentManifestForm({
             <option value="profile">{t("agents.form.routing_engine_profile")}</option>
           </select>
         </Field>
+        {/* Stable mode outranks every engine here: `model_selection_path`
+            resolves it to `Stable` before either router is consulted, so the
+            choice above is inert for this agent's own turns and the notes
+            below describe something that will not run. Stated rather than
+            hidden — the setting is still saved, and it takes effect the
+            moment the operator switches `mode` back, so a disabled control
+            would misrepresent the file. */}
+        {kernelMode === "stable" && (
+          <p className="text-[11px] text-text-dim">
+            {t("agents.form.routing_kernel_stable")}
+          </p>
+        )}
         <p className="text-[10px] text-text-dim/70 mt-1">
           {routingEngine === "fixed" && t("agents.form.routing_engine_fixed_note")}
           {routingEngine === "effort" && t("agents.form.routing_engine_effort_note")}
