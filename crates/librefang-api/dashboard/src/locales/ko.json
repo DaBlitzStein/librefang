@@ -619,6 +619,7 @@
       "routing_engine_profile_fallback": "맞는 프로필이 없는 턴은 이 에이전트의 등급 표로 넘어갑니다: {{simple}} / {{medium}} / {{complex}}. 보고 고치려면 엔진을 '난이도 기준'으로 바꾸세요.",
       "routing_engine_profile_fallback_none": "이 에이전트에는 등급 표가 없어, 맞는 프로필이 없는 턴은 이 매니페스트의 모델을 그대로 씁니다(커널 전역 기본 라우팅이 설정된 경우는 예외).",
       "router_hint": "모델 라우터의 에이전트별 설정입니다. 두 가지를 제한합니다 — 이 에이전트 자신의 턴이 어떻게 라우팅되는지, 그리고 이 에이전트가 스폰하는 에이전트가 어떤 프로필을 쓸 수 있는지.",
+      "router_pinned_note": "프로필 라우터에서 제외되어 있습니다(pinned): `[model.router_override] fixed = true`는 이 에이전트 자신의 턴에서 프로필을 포기하고, 이 에이전트가 스폰하는 에이전트에게도 프로필을 금지합니다. '프로필 기준' 라우팅 엔진을 고르면 이 고정이 해제됩니다.",
       "router_allowed_profiles": "허용할 프로필",
       "router_allowed_profiles_hint": "비워 두면 라우터가 모든 프로필을 고를 수 있습니다. 스폰된 에이전트가 요청한 프로필도 이 목록과 대조됩니다.",
       "router_kernel_off": "config.toml에서 모델 라우터가 꺼져 있어, 이 에이전트 자신의 턴은 프로필로 라우팅되지 않습니다. 그래도 스폰 게이트는 적용됩니다 — 프로필을 지정한 agent_spawn은 이 설정과 대조됩니다.",

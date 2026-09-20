@@ -51,6 +51,7 @@ const KERNEL_SRC = join(CRATES, "librefang-kernel", "src");
 const AGENT_EXECUTION_RS = read(KERNEL_SRC, "kernel", "agent_execution.rs");
 const MODEL_ROUTER_RS = read(KERNEL_SRC, "model_router.rs");
 const SPAWN_RS = read(CRATES, "librefang-runtime", "src", "tool_runner", "agent.rs");
+const CATALOG_QUERY_RS = read(CRATES, "librefang-kernel-handle", "src", "catalog_query.rs");
 
 /**
  * The serialised spellings of a Rust enum, honouring its `rename_all` — the
@@ -161,8 +162,13 @@ describe("the routing engine mapping is anchored to the kernel's own rules", () 
 
     // The half that makes writing `true` wrong for the other engines: the
     // spawn path refuses a profile for an agent pinned with this flag, and it
-    // never looks at `mode`. An engine that set the pin would revoke a
-    // capability the operator never touched.
+    // never looks at `mode`. Two files carry that: the gate that consults the
+    // pin (`check_profile_against_parent` in tool_runner/agent.rs, reached
+    // through `gate_spawn_profile`) and the accessor the gate gets the
+    // override from (`model_router_override_for` in
+    // kernel-handle/src/catalog_query.rs, whose default impl returns `None`
+    // and whose kernel impl reads the manifest). An engine that set the pin
+    // would revoke a capability the operator never touched.
     const spawnGate = rustFunctionBody(SPAWN_RS, "check_profile_against_parent");
     expect(
       spawnGate,
@@ -171,6 +177,12 @@ describe("the routing engine mapping is anchored to the kernel's own rules", () 
         "this table has to be re-derived.",
     ).toMatch(/override_\.fixed/);
     expect(spawnGate).not.toMatch(/\.mode\b/);
+    expect(
+      CATALOG_QUERY_RS,
+      "The kernel-handle accessor the spawn gate fetches the override through " +
+        "is gone, so nothing carries the pin to the spawn path any more.",
+    ).toMatch(/fn model_router_override_for\(/);
+    expect(SPAWN_RS).toMatch(/fn gate_spawn_profile\([\s\S]*?check_profile_against_parent\(/);
 
     expect(ROUTING_ENGINE_SETTINGS.fixed.router_fixed).toBe("unchanged");
     expect(ROUTING_ENGINE_SETTINGS.effort.router_fixed).toBe("unchanged");

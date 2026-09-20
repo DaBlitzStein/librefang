@@ -377,6 +377,35 @@ describe("AgentManifestForm — the routing engine selector", () => {
   });
 });
 
+// The pin is a capability, not a routing preference, and since the engine
+// table stopped writing it nothing in the editor mentioned it either: an agent
+// that arrived with `fixed = true` — by hand, from an older editor, from the
+// API — kept it invisibly, and the operator met it as a refused `agent_spawn`
+// naming `[model.router_override] fixed`. The line names the pin, what it
+// costs, and how it is cleared; it does not offer to set it, because a control
+// for that would reopen a state range the engine table just closed.
+describe("AgentManifestForm — a pinned agent says so", () => {
+  const pinned = (): ManifestFormState => {
+    const state = emptyManifestForm();
+    state.model.router_fixed = true;
+    return state;
+  };
+
+  it("names the pin wherever the routing engine is", () => {
+    render(<Harness sections={["model"]} initialState={pinned()} />);
+
+    // Asserted on the rendered sentence, which the harness echoes as its key;
+    // the wording itself is pinned by the locale coverage guards.
+    expect(screen.getByText("agents.form.router_pinned_note")).toBeInTheDocument();
+  });
+
+  it("says nothing when the pin is not set", () => {
+    render(<Harness sections={["model"]} />);
+
+    expect(screen.queryByText("agents.form.router_pinned_note")).not.toBeInTheDocument();
+  });
+});
+
 describe("AgentManifestForm — provider selection", () => {
   // The caller passes only providers that can serve a request, so an agent
   // assigned to one whose key was rejected (or whose local service is down) is

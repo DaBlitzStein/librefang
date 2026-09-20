@@ -884,14 +884,26 @@ export function AgentManifestForm({
           Rendered under every engine, because they are live under every
           engine. `allowed_profiles` and `cost_budget` are not routing
           preferences: the spawn gate checks them against every profile an
-          `agent_spawn` names, whatever `mode` says
-          (crates/librefang-runtime/src/tool_runner/agent.rs,
-          `check_profile_against_parent`). Hiding them behind the profile
-          engine would put a live cap out of reach — editable only by
-          switching engines, editing, and switching back.
+          `agent_spawn` names, whatever `mode` says —
+          `check_profile_against_parent`
+          (crates/librefang-runtime/src/tool_runner/agent.rs), over the
+          override the kernel hands it through `model_router_override_for`
+          (crates/librefang-kernel-handle/src/catalog_query.rs). Hiding them
+          behind the profile engine would put a live cap out of reach —
+          editable only by switching engines, editing, and switching back.
         */}
         <div className="space-y-2">
           <p className="text-[11px] text-text-dim">{t("agents.form.router_hint")}</p>
+          {/* Deliberately a statement and not a control. The engine table
+              never writes the pin — writing it would revoke a capability — so
+              the only way an operator meets one is by arriving with it on
+              disk, and the alternative to stating it is meeting it as a
+              refused `agent_spawn`. Offering to set it would reopen the state
+              range the table closed; clearing it is already reachable, by
+              choosing the profile engine. */}
+          {value.model.router_fixed && (
+            <p className="text-[11px] text-warning">{t("agents.form.router_pinned_note")}</p>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <Field
               label={t("agents.form.router_cost_budget")}
