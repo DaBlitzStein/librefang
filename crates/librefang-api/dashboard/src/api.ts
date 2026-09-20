@@ -221,6 +221,27 @@ export interface ChannelItem {
   agent?: string | null;
 }
 
+/**
+ * What a skill declares it needs from its host (`SkillRequirements` in
+ * `librefang-skills`), as `GET /api/skills` and `GET /api/skills/{name}` now
+ * serve it.
+ *
+ * Distinct from `SkillItem.tools_count` / the detail endpoint's `tools`, which
+ * are the tools the skill *provides*. This is the other direction: the
+ * built-in tools it needs an agent to have granted before it can run.
+ *
+ * Every key is optional because the field is optional on the payload — a
+ * daemon predating it omits `requirements` entirely — and absent is not the
+ * same as empty. Empty lists are a declaration ("needs none"); an absent
+ * object is an absence of information, and the only honest rendering of that
+ * is silence.
+ */
+export interface SkillRequirements {
+  tools?: string[];
+  capabilities?: string[];
+  timeout_secs?: number | null;
+}
+
 export interface SkillItem {
   name: string;
   version?: string;
@@ -229,6 +250,7 @@ export interface SkillItem {
   enabled?: boolean;
   author?: string;
   tools_count?: number;
+  requirements?: SkillRequirements;
   tags?: string[];
   source?: {
     type?: string;
@@ -276,7 +298,10 @@ export interface SkillDetail {
   license: string;
   tags: string[];
   runtime: string;
+  /** Tools this skill *provides*. Its needs are in `requirements`. */
   tools: SkillToolInfo[];
+  /** What the skill declares it needs — optional, like the list endpoint's. */
+  requirements?: SkillRequirements;
   has_prompt_context: boolean;
   prompt_context_length: number;
   prompt_context?: string | null;

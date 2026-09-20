@@ -19,6 +19,8 @@ import {
 } from "../lib/agentManifest";
 import type { JsonRowType, ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 import type { KernelMode } from "../lib/queries/config";
+import type { SkillRequirements } from "../api";
+import { isToolAdmittedByCapabilities } from "../lib/toolGrants";
 import {
   applyRoutingEngine,
   ROUTING_TIER_DEFAULTS,
@@ -161,6 +163,16 @@ const asModelName = (name: string) => (name ? { provider: "", model: name } : nu
 export interface ManifestCatalogEntry {
   name: string;
   description?: string;
+  /**
+   * What the entry declares it needs, when the catalog carries it.
+   *
+   * Only the skill catalog supplies this today (`GET /api/skills` →
+   * `requirements`), and it is what lets the skills field name the tools an
+   * assigned skill needs and flag the ones the agent's `capabilities.tools`
+   * does not admit. Absent means the caller's catalog predates the field or
+   * does not model it — not that the entry needs nothing.
+   */
+  requirements?: SkillRequirements;
 }
 
 interface AgentManifestFormProps {
@@ -515,6 +527,35 @@ export function AgentManifestForm({
     () => mergeCatalog(skillCatalog, value.skills),
     [skillCatalog, value.skills],
   );
+
+  const skillNeeds = useMemo(
+    () =>
+      skillNeedsAgainstGrants(
+        value.skills,
+        skillCatalog,
+        value.capabilities.tools,
+        value.tools_disabled,
+      ),
+    [skillCatalog, value.skills, value.capabilities.tools, value.tools_disabled],
+  );
+
+  // The finder's per-option descriptions with each skill's needs appended: the
+  // picker is where the choice is made, so the needs belong beside it rather
+  // than only in the notice that appears after the fact.
+  const skillOptionMeta = useMemo(() => {
+    if (!skillFinder) return undefined;
+    const meta: Record<string, { description?: string }> = { ...skillFinder.meta };
+    for (const entry of skillCatalog ?? []) {
+      const needs = entry.requirements?.tools ?? [];
+      if (!entry.name || needs.length === 0) continue;
+      const needsLine = t("agents.form.skills_needs", { tools: needs.join(", ") });
+      const existing = meta[entry.name]?.description;
+      meta[entry.name] = {
+        description: existing ? `${existing} · ${needsLine}` : needsLine,
+      };
+    }
+    return meta;
+  }, [skillFinder, skillCatalog, t]);
   const toolFinder = useMemo(
     () => mergeCatalog(toolCatalog, value.capabilities.tools),
     [toolCatalog, value.capabilities.tools],
@@ -1134,6 +1175,14 @@ export function AgentManifestForm({
 
     capabilities: (
       <Section id="capabilities" title={t("agents.form.capabilities")}>
+        {/* The gate is an intersection, and this section edits one layer of
+            it. Stated first, before any field, because an operator who reads
+            only the controls below will believe a grant here is the decision —
+            and the layer that most often subtracts from it (the per-user
+            policy) is configured somewhere this editor cannot show. */}
+        <p className="text-[11px] text-text-dim">
+          {t("agents.form.capabilities_layers_note")}
+        </p>
         <Field label={t("agents.form.network_hosts")} hint={t("agents.form.network_hosts_hint")}>
           <TagInput
             value={value.capabilities.network}
@@ -1410,7 +1459,7 @@ export function AgentManifestForm({
           {skillFinder ? (
             <MultiSelectCmdk
               options={skillFinder.options}
-              optionMeta={skillFinder.meta}
+              optionMeta={skillOptionMeta}
               value={value.skills}
               onChange={(next) => {
                 const nextValue =
@@ -1430,6 +1479,29 @@ export function AgentManifestForm({
             />
           )}
         </Field>
+        {/* What each assigned skill asks for, and the ones this agent cannot
+            give it. Rendered for every skill that declares needs, not only the
+            broken ones: the line is why the warning below it can be believed,
+            and a notice that appeared from nowhere would read as noise. */}
+        {skillNeeds.length > 0 && (
+          <div className="mt-1 space-y-0.5">
+            {skillNeeds.map(({ name, needs, missing }) => (
+              <p key={name} className="text-[11px] text-text-dim">
+                <span className="font-mono">{name}</span>
+                {" — "}
+                <span>{t("agents.form.skills_needs", { tools: needs.join(", ") })}</span>
+                {missing.length > 0 && (
+                  <span className="text-warning">
+                    {" "}
+                    {t("agents.form.skills_missing_tools", {
+                      tools: missing.join(", "),
+                    })}
+                  </span>
+                )}
+              </p>
+            ))}
+          </div>
+        )}
       </Section>
     ),
 
@@ -3840,6 +3912,57 @@ function patchListItem<T>(list: T[], idx: number, patch: T | ((item: T) => T)): 
  *
  * The returned `options` list is sorted for stable rendering order.
  */
+/** One assigned skill's declared needs, and the ones the agent does not grant. */
+export interface SkillNeedGap {
+  name: string;
+  needs: string[];
+  missing: string[];
+}
+
+/**
+ * What each assigned skill declares it needs, and which of those the agent's
+ * grants do not cover.
+ *
+ * A skill carries its `[requirements] tools` with it and nothing checks them
+ * against the agent it lands on — the check exists but only for hands
+ * (`hands_lifecycle`'s `check_requirements`) — so a skill can stay assigned
+ * while being unable to run, with no sign that anything is wrong.
+ *
+ * Three rules keep the answer from ever overstating what it knows:
+ *
+ * - Only skills the catalog vouches for are reported. An entry the catalog does
+ *   not carry has unknown needs, and unknown must not become a notice.
+ * - `capabilities.tools` is read the way the kernel reads it
+ *   (`isToolAdmittedByCapabilities`): empty means *unrestricted*, so it can
+ *   never produce a gap.
+ * - `toolsDisabled` is the second way a tool goes missing and the easier one to
+ *   overlook: the kernel hands such an agent an empty tool set before any
+ *   allowlist is consulted (`available_tools`), so an empty
+ *   `capabilities.tools` — which otherwise grants everything — grants nothing
+ *   here. Without that branch the warning would be silent in exactly the case
+ *   where no skill can run at all.
+ *
+ * A skill that declares nothing is omitted rather than reported with an empty
+ * `needs`: "declares no needs" and "needs nothing" are the same fact, and
+ * listing every skill with a blank line would bury the ones that do declare.
+ */
+export function skillNeedsAgainstGrants(
+  skills: readonly string[],
+  catalog: readonly ManifestCatalogEntry[] | undefined,
+  declaredTools: readonly string[],
+  toolsDisabled: boolean,
+): SkillNeedGap[] {
+  const byName = new Map((catalog ?? []).map((s) => [s.name, s]));
+  return skills.flatMap((name) => {
+    const needs = byName.get(name)?.requirements?.tools ?? [];
+    if (needs.length === 0) return [];
+    const missing = toolsDisabled
+      ? needs
+      : needs.filter((tool) => !isToolAdmittedByCapabilities(tool, declaredTools));
+    return [{ name, needs, missing }];
+  });
+}
+
 function mergeCatalog(
   catalog: ManifestCatalogEntry[] | undefined,
   selected: string[],
