@@ -623,6 +623,7 @@
       "router_allowed_profiles": "허용할 프로필",
       "router_allowed_profiles_hint": "비워 두면 라우터가 모든 프로필을 고를 수 있습니다. 스폰된 에이전트가 요청한 프로필도 이 목록과 대조됩니다.",
       "router_kernel_off": "config.toml에서 모델 라우터가 꺼져 있어, 이 에이전트 자신의 턴은 프로필로 라우팅되지 않습니다. 그래도 스폰 게이트는 적용됩니다 — 프로필을 지정한 agent_spawn은 이 설정과 대조됩니다.",
+      "routing_kernel_stable": "커널이 config.toml에서 stable 모드이므로 두 라우팅 엔진 모두 실행되지 않습니다: 이 에이전트 자신의 턴은 고정된 모델을, 고정된 모델이 없으면 이 매니페스트의 모델을 사용합니다. 위 설정은 이 에이전트가 생성할 수 있는 범위에는 여전히 적용됩니다 — 프로필을 지정한 agent_spawn은 어느 쪽이든 이 설정과 대조됩니다.",
       "router_profiles_search_placeholder": "모델 프로필 검색…",
       "router_allowed_profiles_placeholder": "예: coding",
       "router_cost_budget": "비용 예산",

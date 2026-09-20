@@ -623,6 +623,7 @@
       "router_allowed_profiles": "允许的 Profile",
       "router_allowed_profiles_hint": "留空 = 路由器可以选择任意 Profile。被创建代理所请求的 Profile 也要与此列表核对。",
       "router_kernel_off": "config.toml 中已关闭模型路由器，因此此代理自身的轮次不会按 Profile 路由。但创建代理的关卡仍然生效：指定 Profile 的 agent_spawn 依然会按这些设置校验。",
+      "routing_kernel_stable": "内核在 config.toml 中处于 stable 模式，因此两个路由引擎都不会运行：此代理自身的轮次使用其固定模型；未固定时使用本清单中的模型。上面的设置仍然约束此代理可以创建什么——指定 Profile 的 agent_spawn 依然会按它们校验。",
       "router_profiles_search_placeholder": "搜索模型 Profile…",
       "router_allowed_profiles_placeholder": "例如 coding",
       "router_cost_budget": "成本上限",

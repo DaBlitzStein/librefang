@@ -19,6 +19,7 @@ import {
   type ManifestFormState,
 } from "../lib/agentManifest";
 import { applyRoutingEngine } from "../lib/routingEngine";
+import type { KernelMode } from "../lib/queries/config";
 
 // Spread the real module rather than replacing it. The identity section now
 // renders the `IDENTITY.md` editor, which reads the UI store, and `lib/store`
@@ -55,6 +56,7 @@ function Harness({
   mcpCatalog,
   routerProfileCatalog,
   routerProfilesEnabled,
+  kernelMode,
   initialState,
   invalidFields = new Set(),
   models = [{ provider: "openai", id: "gpt-4o" }],
@@ -68,6 +70,7 @@ function Harness({
   mcpCatalog?: ManifestCatalogEntry[];
   routerProfileCatalog?: ManifestCatalogEntry[];
   routerProfilesEnabled?: boolean;
+  kernelMode?: KernelMode;
   initialState?: ManifestFormState;
   invalidFields?: Set<string>;
   models?: HarnessModel[];
@@ -94,6 +97,7 @@ function Harness({
       mcpCatalog={mcpCatalog}
       routerProfileCatalog={routerProfileCatalog}
       routerProfilesEnabled={routerProfilesEnabled}
+      kernelMode={kernelMode}
       nameField={nameField}
       sections={sections}
     />
@@ -1355,6 +1359,56 @@ describe("AgentManifestForm — the router's profile picker", () => {
     await openRouterFields(user);
 
     expect(screen.getByText("agents.form.router_kernel_off")).toBeInTheDocument();
+  });
+});
+
+// Stable mode outranks both routers: `model_selection_path`
+// (crates/librefang-kernel/src/kernel/agent_execution.rs) resolves it to
+// `Stable` before the profile router or the tier router is consulted, so the
+// engine picker is inert. The panel said nothing, which let an operator pick
+// an engine and believe it would run.
+describe("AgentManifestForm — stable mode is named at the engine picker", () => {
+  async function openRoutingSection(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByText("agents.form.routing"));
+  }
+
+  it("says the engines do not run when the kernel is stable", async () => {
+    const user = userEvent.setup();
+    render(<Harness kernelMode="stable" />);
+    await openRoutingSection(user);
+
+    expect(screen.getByText("agents.form.routing_kernel_stable")).toBeInTheDocument();
+  });
+
+  // The warning's whole value is that it is absent when it would be false:
+  // `default` and `dev` route normally, and an absent mode means the caller
+  // could not read one. Any of the three rendering the line would train the
+  // operator to ignore it.
+  it.each<KernelMode | undefined>(["default", "dev", undefined])(
+    "stays silent for mode %s",
+    async (mode) => {
+      const user = userEvent.setup();
+      render(<Harness kernelMode={mode} />);
+      await openRoutingSection(user);
+
+      expect(
+        screen.queryByText("agents.form.routing_kernel_stable"),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  // The settings the engine writes are still saved and still gate spawns, so
+  // the mode warning is a statement about routing, not a reason to hide the
+  // control — a disabled picker would misdescribe the file.
+  it("leaves the engine select operable", async () => {
+    const user = userEvent.setup();
+    render(<Harness kernelMode="stable" />);
+    await openRoutingSection(user);
+
+    const select = screen.getByLabelText("agents.form.routing_engine");
+    expect(select).toBeEnabled();
+    await user.selectOptions(select, "profile");
+    expect((select as HTMLSelectElement).value).toBe("profile");
   });
 });
 

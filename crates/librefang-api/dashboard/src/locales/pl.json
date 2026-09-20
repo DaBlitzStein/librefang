@@ -623,6 +623,7 @@
       "router_allowed_profiles": "Dozwolone profile",
       "router_allowed_profiles_hint": "Puste = router może wybrać dowolny profil. To także lista, wobec której sprawdzane jest żądanie profilu tworzonego agenta.",
       "router_kernel_off": "Router modeli jest wyłączony w config.toml, więc własne tury tego agenta nie są routowane po profilu. Brama tworzenia agentów nadal działa: `agent_spawn` wskazujący profil jest sprawdzany wobec tych ustawień tak czy inaczej.",
+      "routing_kernel_stable": "Kernel jest w trybie stable w config.toml, więc żaden z dwóch silników routingu nie działa: własne tury tego agenta używają przypiętego modelu, a gdy go nie ma — modelu z tego manifestu. Ustawienia powyżej nadal ograniczają to, co ten agent może utworzyć — `agent_spawn` wskazujący profil jest i tak sprawdzany wobec nich.",
       "router_profiles_search_placeholder": "Szukaj profili modeli…",
       "router_allowed_profiles_placeholder": "np. coding",
       "router_cost_budget": "Budżet kosztów",

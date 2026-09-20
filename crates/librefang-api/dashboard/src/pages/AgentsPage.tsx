@@ -66,6 +66,7 @@ import type { ManifestSectionId } from "../components/AgentManifestForm";
 import { sectionForInvalidField } from "../components/AgentManifestForm";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
 import { useModelRouterProfiles } from "../lib/queries/modelRouter";
+import { useKernelMode } from "../lib/queries/config";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
   emptyManifestExtras,
@@ -1058,6 +1059,15 @@ export function AgentsPage() {
   // allowed_profiles finder — the capability the routing panel used to own
   // exclusively, ported when the panel died.
   const routerProfilesQuery = useModelRouterProfiles();
+  // The kernel's operating mode, for the manifest editor's routing panel: in
+  // stable mode neither router runs, so the engine picker there says so
+  // instead of offering an inert choice silently. Gated on the same condition
+  // as the form that reads it — `enabled` is what keeps the whole-config
+  // fetch (`GET /api/config`, which this is a `select` over) off the page
+  // load.
+  const kernelModeQuery = useKernelMode({
+    enabled: (showCreate && createMode === "form") || manifestEditorLive,
+  });
   const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
   const routerProfileCatalog = useMemo(
     () =>
@@ -1974,6 +1984,7 @@ export function AgentsPage() {
             mcpCatalog={mcpCatalogForForm}
             routerProfileCatalog={routerProfileCatalog}
             routerProfilesEnabled={routerProfilesQuery.data?.enabled}
+            kernelMode={kernelModeQuery.data}
             // Identity is decided by the panel header's rename control; a
             // second editable Name field here would be a second answer to the
             // same question.
@@ -3896,6 +3907,7 @@ export function AgentsPage() {
                 mcpCatalog={mcpCatalogForForm}
                 routerProfileCatalog={routerProfileCatalog}
                 routerProfilesEnabled={routerProfilesQuery.data?.enabled}
+                kernelMode={kernelModeQuery.data}
               />
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">
