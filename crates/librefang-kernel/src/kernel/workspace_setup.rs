@@ -737,18 +737,19 @@ pub(super) fn generate_identity_files(
         name = manifest.name
     );
 
+    // Personality only. `emoji:`, `avatar_url:` and `color:` used to be written
+    // here as empty keys, but they are stored on the agent record and set from
+    // the dashboard's Appearance section — never from this file — so they were
+    // three permanently blank lines inside the prompt.
     let identity_content = format!(
         "---\n\
          name: {name}\n\
          archetype: assistant\n\
          vibe: helpful\n\
-         emoji:\n\
-         avatar_url:\n\
          greeting_style: warm\n\
-         color:\n\
          ---\n\
          # Identity\n\
-         <!-- Visual identity and personality at a glance. Edit these fields freely. -->\n",
+         <!-- This agent's personality. Edit these fields freely; the file is injected into the prompt. -->\n",
         name = manifest.name
     );
 

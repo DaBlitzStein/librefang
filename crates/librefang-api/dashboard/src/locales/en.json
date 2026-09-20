@@ -300,8 +300,8 @@
       "avatar_too_large": "That image is {{size}} MB; the limit is {{limit}} MB."
     },
     "identity_file": {
-      "title": "Identity file ({{name}})",
-      "hint": "Injected into this agent's prompt under “## Identity”, cut off at 500 characters. The rest of the file is written back untouched.",
+      "title": "Personality ({{name}})",
+      "hint": "This agent's personality. Injected into its prompt under “## Identity”, cut off at 500 characters. The rest of the file is written back untouched.",
       "loading": "Reading {{name}}…",
       "load_failed": "Could not read {{name}}",
       "missing": "This agent has no {{name}} yet. Saving creates it.",
@@ -320,9 +320,9 @@
       "unchanged": "No changes since the last read.",
       "body_title": "Content below the front-matter",
       "body_hint": "Not editable here, and written back exactly as it is.",
-      "foreign_title": "Managed elsewhere",
+      "foreign_title": "Appearance",
       "foreign_empty": "empty",
-      "foreign_hint": "Set from Appearance, which stores them with the agent. Left untouched here.",
+      "foreign_hint": "Set in Appearance, which stores them with the agent. Left untouched here.",
       "too_large": "This file would be {{size}} bytes; the daemon accepts at most {{limit}}. Shorten a field above, or the content below the front-matter."
     },
     "no_matching": "No agents matching your search.",
