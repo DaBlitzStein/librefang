@@ -488,9 +488,13 @@ fn write_identity_file(
     // back to it would aim the write at a directory and fail with a 500 where
     // the old code simply wrote `.identity/`. Only a regular file is the
     // fallback the read path can actually have served.
+    // Evaluated before the move, not inside it: `file_path` takes ownership of
+    // whichever path it selects, and the branch below has to know that the root
+    // fallback is what got chosen.
+    let root_is_file = root_file.is_file();
     let file_path = if identity_file.exists() {
         identity_file
-    } else if root_file.is_file() {
+    } else if root_is_file {
         root_file
     } else {
         std::fs::create_dir_all(&identity_dir).map_err(IdentityFileMutationError::Io)?;
@@ -524,6 +528,25 @@ fn write_identity_file(
             return Err(IdentityFileMutationError::Forbidden);
         }
         canonical_target
+    } else if root_is_file {
+        // The root copy was the write target one statement ago and is gone now:
+        // `migrate_identity_files` renames it into `.identity/` and runs on every
+        // spawn, so it can land in between. Writing to the root regardless would
+        // leave two copies — one `resolve_identity_file` never prefers, so the
+        // edit would answer 200 and never be read, and one the next migration
+        // deletes as the stale duplicate, losing it outright. Follow the move.
+        let migrated = identity_dir.join(filename);
+        if migrated.exists() {
+            let canonical_migrated = migrated
+                .canonicalize()
+                .map_err(|_| IdentityFileMutationError::NotFound)?;
+            if !canonical_migrated.starts_with(&ws_canonical) {
+                return Err(IdentityFileMutationError::Forbidden);
+            }
+            canonical_migrated
+        } else {
+            file_path
+        }
     } else {
         file_path
     };
