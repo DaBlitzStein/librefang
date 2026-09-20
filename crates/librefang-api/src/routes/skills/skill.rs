@@ -82,6 +82,16 @@ pub async fn list_skills(
                 "author": s.manifest.skill.author,
                 "runtime": format!("{:?}", s.manifest.runtime.runtime_type),
                 "tools_count": s.manifest.tools.provided.len(),
+                // `tools_count` and `requirements.tools` point in opposite
+                // directions and were easy to confuse while only the former
+                // existed: `tools_count` is what the skill *provides*
+                // (`manifest.tools.provided`), `requirements.tools` is the
+                // built-in tools the skill *needs* from its host. Serialised
+                // from the struct rather than restated field by field, so a
+                // new `SkillRequirements` field reaches the wire without an
+                // edit here and cannot drift out of the payload silently.
+                "requirements": serde_json::to_value(&s.manifest.requirements)
+                    .unwrap_or_else(|_| serde_json::json!({})),
                 "tags": s.manifest.skill.tags,
                 "enabled": s.enabled,
                 "source": source,
@@ -957,7 +967,13 @@ pub async fn get_skill_detail(
             "license": manifest.skill.license,
             "tags": manifest.skill.tags,
             "runtime": format!("{:?}", manifest.runtime.runtime_type),
+            // `tools` is what the skill provides, `requirements.tools` is what
+            // it needs. Both are served, under names that say which is which —
+            // a detail endpoint that carried only one of them would let the
+            // same skill describe itself differently here and in the list.
             "tools": tools,
+            "requirements": serde_json::to_value(&manifest.requirements)
+                .unwrap_or_else(|_| serde_json::json!({})),
             "has_prompt_context": manifest.prompt_context.is_some(),
             "prompt_context_length": manifest.prompt_context.as_ref().map(|c| c.len()).unwrap_or(0),
             "source": manifest.source,

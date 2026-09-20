@@ -96,6 +96,18 @@ async fn json_request(
 /// `librefang_skills::registry::tests::create_test_skill` so the schema
 /// is guaranteed to match what `SkillRegistry::load_all` accepts.
 fn install_skill(home: &Path, name: &str, tags: &[&str]) {
+    install_skill_requiring(home, name, tags, &[]);
+}
+
+/// [`install_skill`] plus a `[requirements]` table naming the built-in tools
+/// the skill needs.
+///
+/// The table is emitted only when the caller names tools, so a skill with no
+/// declarations — the shape most of the catalog has — keeps reporting an empty
+/// list rather than an absent one. The dashboard reads that difference as
+/// "declares none" rather than "unknown", and only the empty case can be
+/// trusted not to raise a false "this skill cannot work here" notice.
+fn install_skill_requiring(home: &Path, name: &str, tags: &[&str], required_tools: &[&str]) {
     let skill_dir = home.join("skills").join(name);
     std::fs::create_dir_all(&skill_dir).expect("mkdir skill dir");
     let tags_toml = if tags.is_empty() {
@@ -103,6 +115,12 @@ fn install_skill(home: &Path, name: &str, tags: &[&str]) {
     } else {
         let quoted: Vec<String> = tags.iter().map(|t| format!("\"{t}\"")).collect();
         format!("tags = [{}]\n", quoted.join(", "))
+    };
+    let requirements_toml = if required_tools.is_empty() {
+        String::new()
+    } else {
+        let quoted: Vec<String> = required_tools.iter().map(|t| format!("\"{t}\"")).collect();
+        format!("\n[requirements]\ntools = [{}]\n", quoted.join(", "))
     };
     let manifest = format!(
         r#"[skill]
@@ -118,7 +136,7 @@ entry = "main.py"
 name = "{name}_tool"
 description = "A test tool"
 input_schema = {{ type = "object" }}
-"#
+{requirements_toml}"#
     );
     std::fs::write(skill_dir.join("skill.toml"), manifest).expect("write skill.toml");
 }
@@ -185,6 +203,89 @@ async fn skills_list_returns_installed_skill_metadata() {
     // Categories list is sorted (BTreeSet) and non-empty.
     let cats = body["categories"].as_array().unwrap();
     assert!(!cats.is_empty(), "categories should be derived: {body:?}");
+}
+
+/// A skill's declared needs and its provided tools are two different lists,
+/// and the payload has to keep them apart.
+///
+/// The dashboard compares `requirements.tools` against the agent's
+/// `capabilities.tools` to warn that an assigned skill cannot run, so a
+/// payload that folded the two together — or reported only `tools_count` —
+/// would leave it unable to tell a skill that needs `web_fetch` from one that
+/// *is* `web_fetch`.
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_list_separates_declared_requirements_from_provided_tools() {
+    let h = boot().await;
+    install_skill_requiring(h.home(), "needy", &["data"], &["web_fetch", "file_read"]);
+    h._state.kernel.reload_skills();
+
+    let (status, body) = json_request(&h, Method::GET, "/api/skills", None).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let mut entry = None;
+    for s in body["items"].as_array().unwrap() {
+        if s["name"] == "needy" {
+            entry = Some(s);
+            break;
+        }
+    }
+    let entry = entry.unwrap_or_else(|| panic!("needy must be listed: {body:?}"));
+
+    // Provides one, needs two — in that order, and under names that say which
+    // direction each one points in.
+    assert_eq!(entry["tools_count"], 1, "{body:?}");
+    assert_eq!(
+        entry["requirements"]["tools"],
+        serde_json::json!(["web_fetch", "file_read"]),
+        "{body:?}"
+    );
+}
+
+/// The shape, pinned: a skill that declares no requirements reports empty
+/// lists, not a missing key and not `null`.
+///
+/// This is the case the dashboard must be able to trust. An absent field would
+/// read as "unknown", and the only safe rendering of "unknown" is silence —
+/// which would silently retire the notice for every skill that declares
+/// nothing, the majority of the catalog.
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_list_reports_undeclared_requirements_as_empty_lists() {
+    let h = boot().await;
+    install_skill(h.home(), "plain", &["data"]);
+    h._state.kernel.reload_skills();
+
+    let (status, body) = json_request(&h, Method::GET, "/api/skills", None).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let mut entry = None;
+    for s in body["items"].as_array().unwrap() {
+        if s["name"] == "plain" {
+            entry = Some(s);
+            break;
+        }
+    }
+    let entry = entry.unwrap_or_else(|| panic!("plain must be listed: {body:?}"));
+
+    assert!(
+        entry["requirements"].is_object(),
+        "requirements must be an object even with nothing declared: {body:?}"
+    );
+    assert_eq!(
+        entry["requirements"]["tools"],
+        serde_json::json!([]),
+        "{body:?}"
+    );
+    assert_eq!(
+        entry["requirements"]["capabilities"],
+        serde_json::json!([]),
+        "{body:?}"
+    );
+    // `SkillRequirements::timeout_secs` is an `Option` with no
+    // `skip_serializing_if`, so an unset timeout is an explicit `null` — the
+    // same "declared, and it is nothing" reading the two lists carry.
+    assert_eq!(
+        entry["requirements"]["timeout_secs"],
+        serde_json::json!(null),
+        "{body:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -280,6 +381,32 @@ async fn skills_detail_returns_full_manifest() {
     // Evolution metadata block is always present, even for fresh installs.
     assert!(body["evolution"].is_object(), "{body:?}");
     assert_eq!(body["evolution"]["use_count"], 0);
+}
+
+/// The detail endpoint carries the same requirements the list does.
+///
+/// Both serve one skill, so a payload that described it in one place and not
+/// the other would let the same skill disagree with itself depending on which
+/// screen asked — the drawer saying nothing while the picker warned.
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_detail_returns_declared_requirements() {
+    let h = boot().await;
+    install_skill_requiring(h.home(), "detail-needy", &["data"], &["shell_exec"]);
+    h._state.kernel.reload_skills();
+
+    let (status, body) = json_request(&h, Method::GET, "/api/skills/detail-needy", None).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["requirements"]["tools"],
+        serde_json::json!(["shell_exec"]),
+        "{body:?}"
+    );
+    // `tools` keeps its own meaning on this endpoint — the provided ones —
+    // and is not the list above it.
+    assert_eq!(
+        body["tools"][0]["name"], "detail-needy_tool",
+        "the provided-tools list must not have been replaced: {body:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
