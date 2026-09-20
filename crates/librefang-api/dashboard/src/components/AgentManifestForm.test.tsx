@@ -205,7 +205,7 @@ describe("AgentManifestForm — the routing engine selector", () => {
     expect(screen.getByText(noteKey)).toBeInTheDocument();
   });
 
-  it("writes each engine's three fields together, in the file the daemon reads", async () => {
+  it("writes each engine's fields together, in the file the daemon reads", async () => {
     const user = userEvent.setup();
     let latest: ManifestFormState | undefined;
     render(
@@ -222,11 +222,12 @@ describe("AgentManifestForm — the routing engine selector", () => {
 
     await user.selectOptions(engineSelect(), "effort");
     expect(latest!.model.mode).toBe("fixed");
-    expect(latest!.model.router_fixed).toBe(true);
     expect(latest!.routing.enabled).toBe(true);
     const effort = serializeManifestForm(latest!);
     expect(effort).toContain("[routing]");
-    expect(effort).toContain("router_override = { fixed = true }");
+    // No `router_override`: the pin is not a routing field, and writing it here
+    // would refuse every profile to the agents this one spawns.
+    expect(effort).not.toContain("router_override");
 
     await user.selectOptions(engineSelect(), "profile");
     expect(latest!.model.mode).toBe("flexible");
@@ -244,7 +245,6 @@ describe("AgentManifestForm — the routing engine selector", () => {
 
     await user.selectOptions(engineSelect(), "fixed");
     expect(latest!.model.mode).toBe("fixed");
-    expect(latest!.model.router_fixed).toBe(true);
     expect(latest!.routing.enabled).toBe(false);
     expect(serializeManifestForm(latest!)).not.toContain("[routing]");
   });
@@ -328,7 +328,7 @@ describe("AgentManifestForm — the routing engine selector", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("does not offer the profile settings while the effort engine runs", () => {
+  it("offers the override settings under the effort engine too", () => {
     render(
       <Harness
         sections={["model"]}
@@ -336,12 +336,44 @@ describe("AgentManifestForm — the routing engine selector", () => {
       />,
     );
 
-    // Rendered only for the profile engine; under the effort engine the kernel
-    // never consults them, and a control that writes what nothing reads lies.
+    // They are not the profile engine's own settings: `allowed_profiles` and
+    // `cost_budget` bound what this agent's spawns may ask for in any mode, so
+    // hiding them here would put a live cap behind an engine switch.
     expect(
-      screen.queryByPlaceholderText("agents.form.router_allowed_profiles_placeholder"),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText("agents.form.router_cost_budget")).not.toBeInTheDocument();
+      screen.getByPlaceholderText("agents.form.router_allowed_profiles_placeholder"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("agents.form.router_cost_budget")).toBeInTheDocument();
+    expect(screen.getByText("agents.form.router_hint")).toBeInTheDocument();
+  });
+
+  it("leaves a pin alone when the engine changes, and clears it only for profile", async () => {
+    // `fixed = true` is a capability, not a routing preference: the spawn gate
+    // refuses every profile to an agent pinned with it, without consulting
+    // `mode`. So no engine may set it — and the one that needs it clear has to
+    // say so, or choosing that engine would do nothing.
+    const pinned = emptyManifestForm();
+    pinned.model.router_fixed = true;
+
+    const user = userEvent.setup();
+    let latest: ManifestFormState | undefined;
+    render(
+      <Harness
+        sections={["routing"]}
+        initialState={pinned}
+        onState={(next) => {
+          latest = next;
+        }}
+      />,
+    );
+    await openRouting(user);
+
+    await user.selectOptions(engineSelect(), "effort");
+    expect(latest!.model.router_fixed).toBe(true);
+    expect(serializeManifestForm(latest!)).toContain("router_override = { fixed = true }");
+
+    await user.selectOptions(engineSelect(), "profile");
+    expect(latest!.model.router_fixed).toBe(false);
+    expect(serializeManifestForm(latest!)).not.toContain("router_override");
   });
 });
 
@@ -1202,15 +1234,14 @@ describe("AgentManifestForm — the router's profile picker", () => {
   ];
 
   /**
-   * A form on the profile engine — the only state these fields are rendered
-   * in. They are manifest fields under any engine, but the kernel consults
-   * them only when the agent is `flexible` and not opted out
-   * (lib/routingEngine.ts), so under any other engine the form does not offer
-   * controls that would write values nothing reads.
+   * A form carrying an allowlist — the state these fields are about. Its
+   * engine is deliberately irrelevant: the override's settings render under
+   * every engine, because the spawn gate reads them in every mode (see
+   * lib/routingEngine.ts and `check_profile_against_parent`).
    */
-  function profileState(build?: (state: ManifestFormState) => void): ManifestFormState {
-    const state = applyRoutingEngine(emptyManifestForm(), "profile");
-    build?.(state);
+  function withAllowedProfiles(...profiles: string[]): ManifestFormState {
+    const state = emptyManifestForm();
+    state.model.router_allowed_profiles = profiles;
     return state;
   }
 
@@ -1220,19 +1251,20 @@ describe("AgentManifestForm — the router's profile picker", () => {
     await user.click(group.querySelector("summary")!);
   }
 
-  it("does not offer the profile settings under any other engine", () => {
-    // The default form is the fixed engine. A closed `<details>` still renders
-    // its children in jsdom, so this is the fields' absence, not the fold's.
+  it("offers the override settings under the default engine too", () => {
+    // They are not the profile engine's controls: `allowed_profiles` and
+    // `cost_budget` are checked against every profile an `agent_spawn` names,
+    // whatever `mode` says, so the fixed engine has to show them as well. (A
+    // closed `<details>` still renders its children in jsdom.)
     render(<Harness routerProfileCatalog={PROFILES} />);
 
-    expect(screen.queryByPlaceholderText("Search model profiles…")).not.toBeInTheDocument();
-    expect(screen.queryByText("agents.form.router_hint")).not.toBeInTheDocument();
-    expect(screen.queryByText("agents.form.router_kernel_off")).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Search model profiles…")).toBeInTheDocument();
+    expect(screen.getByText("agents.form.router_hint")).toBeInTheDocument();
   });
 
   it("offers the server-backed catalog for allowed_profiles", async () => {
     const user = userEvent.setup();
-    render(<Harness routerProfileCatalog={PROFILES} initialState={profileState()} />);
+    render(<Harness routerProfileCatalog={PROFILES} initialState={withAllowedProfiles()} />);
     await openRouterFields(user);
     const group = advancedGroup("model")!;
 
@@ -1252,9 +1284,7 @@ describe("AgentManifestForm — the router's profile picker", () => {
     render(
       <Harness
         routerProfileCatalog={PROFILES}
-        initialState={profileState((s) => {
-          s.model.router_allowed_profiles = ["hand-written-profile"];
-        })}
+        initialState={withAllowedProfiles("hand-written-profile")}
       />,
     );
     await openRouterFields(user);
@@ -1272,7 +1302,7 @@ describe("AgentManifestForm — the router's profile picker", () => {
 
   it("keeps the plain tag box when the caller carries no catalog", async () => {
     const user = userEvent.setup();
-    render(<Harness initialState={profileState()} />);
+    render(<Harness initialState={withAllowedProfiles()} />);
     await openRouterFields(user);
 
     // No catalog prop, no picker — the TagInput the field had before, so a
@@ -1290,7 +1320,7 @@ describe("AgentManifestForm — the router's profile picker", () => {
       <Harness
         routerProfileCatalog={PROFILES}
         routerProfilesEnabled={false}
-        initialState={profileState()}
+        initialState={withAllowedProfiles()}
       />,
     );
     await openRouterFields(user);
