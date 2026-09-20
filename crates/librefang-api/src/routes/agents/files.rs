@@ -186,6 +186,38 @@ mod identity_file_list_tests {
         );
     }
 
+    /// A symlink that stays inside the workspace is written *through*, not
+    /// replaced.
+    ///
+    /// `GET` and `DELETE` both resolve the link — `resolve_identity_file`
+    /// canonicalises — so a `PUT` that renamed onto the link path disagreed
+    /// with the other two verbs: the link became a regular file, a shared file
+    /// it pointed at silently stopped receiving the operator's edits, and the
+    /// response was still 200. An operator who shares one identity file
+    /// between agents edits a file nobody reads from that moment.
+    #[cfg(unix)]
+    #[test]
+    fn write_follows_a_symlink_that_stays_inside_the_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().to_path_buf();
+        let shared = workspace.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::write(shared.join("SOUL.md"), "legacy").unwrap();
+        std::os::unix::fs::symlink(shared.join("SOUL.md"), workspace.join("SOUL.md")).unwrap();
+
+        write_identity_file(&workspace, "SOUL.md", "edited").expect("write must succeed");
+
+        assert_eq!(
+            std::fs::read_to_string(shared.join("SOUL.md")).unwrap(),
+            "edited",
+            "the write must land in the file the read serves"
+        );
+        assert!(
+            workspace.join("SOUL.md").is_symlink(),
+            "the link must survive: replacing it cuts the shared file off with no warning"
+        );
+    }
+
     /// A directory that shares the file's name at the workspace root is not a
     /// fallback the read path can have served, so the write must not aim at it.
     ///
@@ -478,14 +510,23 @@ fn write_identity_file(
     if !canonical_parent.starts_with(&ws_canonical) {
         return Err(IdentityFileMutationError::Forbidden);
     }
-    if file_path.exists() {
+    // Resolved once and kept: the guard needs the target to decide whether the
+    // write is allowed, and the write needs it to land where the read reads.
+    // `GET` and `DELETE` both operate on the canonical path, so a `PUT` that
+    // renamed onto the link instead would disagree with them — the symlink
+    // would be replaced by a regular file, any shared file it pointed at would
+    // silently stop receiving edits, and the response would still be 200.
+    let write_path = if file_path.exists() {
         let canonical_target = file_path
             .canonicalize()
             .map_err(|_| IdentityFileMutationError::NotFound)?;
         if !canonical_target.starts_with(&ws_canonical) {
             return Err(IdentityFileMutationError::Forbidden);
         }
-    }
+        canonical_target
+    } else {
+        file_path
+    };
 
     // Staging through `.{filename}.tmp` gave every writer of the same identity
     // file the same staging path, so two concurrent `PUT`s truncated each
@@ -495,7 +536,7 @@ fn write_identity_file(
     // per-process counter, and additionally fsyncs the staged file before the
     // rename and the parent directory after it, which the plain
     // `fs::write` + `rename` here did neither of.
-    crate::atomic_write(&file_path, content.as_bytes()).map_err(IdentityFileMutationError::Io)
+    crate::atomic_write(&write_path, content.as_bytes()).map_err(IdentityFileMutationError::Io)
 }
 
 fn delete_identity_file(
