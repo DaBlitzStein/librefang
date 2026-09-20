@@ -888,6 +888,18 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn get_agent_manifest_toml(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "manifest"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn list_agent_manifest_history(
         &self,
         id: &str,
@@ -900,18 +912,6 @@ impl AgentsResource {
             &["api", "agents", id, "manifest-history"],
             None,
             &[("limit", limit)],
-        )
-        .await
-    }
-
-    pub async fn get_agent_manifest_toml(&self, id: &str) -> Result<Value> {
-        do_req(
-            &self.client,
-            &self.base_url,
-            reqwest::Method::GET,
-            &["api", "agents", id, "manifest"],
-            None,
-            &[],
         )
         .await
     }
