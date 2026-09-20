@@ -619,6 +619,7 @@
       "routing_engine_profile_fallback": "Tura bez pasującego profilu przechodzi na tablicę progów tego agenta: {{simple}} / {{medium}} / {{complex}}. Aby je zobaczyć i edytować, przełącz silnik na „Według złożoności”.",
       "routing_engine_profile_fallback_none": "Ten agent nie ma tablicy progów, więc tura bez pasującego profilu zachowuje model z tego manifestu — chyba że ustawiono globalny routing domyślny.",
       "router_hint": "Ustawienia routera modeli dla tego agenta. Ograniczają dwie rzeczy: sposób routingu jego własnych tur oraz to, których profili mogą użyć agenci, których on tworzy.",
+      "router_pinned_note": "Wypięty z routera profili: `[model.router_override] fixed = true` odbiera profile własnym turom tego agenta i odmawia ich agentom, które on tworzy. Wybór silnika „Według profilu” zdejmuje to przypięcie.",
       "router_allowed_profiles": "Dozwolone profile",
       "router_allowed_profiles_hint": "Puste = router może wybrać dowolny profil. To także lista, wobec której sprawdzane jest żądanie profilu tworzonego agenta.",
       "router_kernel_off": "Router modeli jest wyłączony w config.toml, więc własne tury tego agenta nie są routowane po profilu. Brama tworzenia agentów nadal działa: `agent_spawn` wskazujący profil jest sprawdzany wobec tych ustawień tak czy inaczej.",

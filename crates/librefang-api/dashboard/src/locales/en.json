@@ -619,6 +619,7 @@
       "routing_engine_profile_fallback": "A turn that matches no profile falls back to this agent's tier table: {{simple}} / {{medium}} / {{complex}}. Switch the engine to By effort to see and edit them.",
       "routing_engine_profile_fallback_none": "This agent has no tier table, so a turn that matches no profile keeps this manifest's model, unless a kernel-wide default routing is configured.",
       "router_hint": "The model router's per-agent settings. They bound two things: how this agent's own turns are routed, and which profiles the agents it spawns may use.",
+      "router_pinned_note": "Pinned out of the profile router: `[model.router_override] fixed = true` gives up profiles for this agent's own turns and refuses them to the agents it spawns. Choosing the By profile routing engine clears the pin.",
       "router_allowed_profiles": "Allowed profiles",
       "router_allowed_profiles_hint": "Empty = the router may pick any profile. Also the list a spawned agent's profile request is checked against.",
       "router_kernel_off": "The model router is off in config.toml, so this agent's own turns are not routed by profile. The spawn gate still applies: an `agent_spawn` naming a profile is checked against these settings either way.",

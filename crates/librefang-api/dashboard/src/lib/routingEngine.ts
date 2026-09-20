@@ -44,11 +44,14 @@ import type { ManifestFormState } from "./agentManifest";
  * - **router_fixed is written by the profile engine alone, and never to
  *   `true`.** The pin is not a routing flag with a routing meaning: `true`
  *   opts the agent out of profiles for its own turns *and* refuses every
- *   profile to the agents it spawns — `check_profile_against_parent`
- *   (crates/librefang-runtime/src/tool_runner/agent.rs) reads it on the spawn
- *   path without consulting `mode` at all. An engine writing `true` would
- *   revoke a capability the operator never touched, which is why neither
- *   non-profile engine writes it: they do not need it, because
+ *   profile to the agents it spawns. The spawn path consults it in
+ *   `check_profile_against_parent`
+ *   (crates/librefang-runtime/src/tool_runner/agent.rs) without looking at
+ *   `mode` at all, and the override it consults is fetched from the kernel
+ *   through `model_router_override_for`
+ *   (crates/librefang-kernel-handle/src/catalog_query.rs). An engine writing
+ *   `true` would revoke a capability the operator never touched, which is why
+ *   neither non-profile engine writes it: they do not need it, because
  *   `mode = "fixed"` is already what keeps the profile router off. The
  *   profile engine writes `false` because a pinned agent cannot route by
  *   profile, so the choice would otherwise do nothing at all.

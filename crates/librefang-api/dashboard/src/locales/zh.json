@@ -619,6 +619,7 @@
       "routing_engine_profile_fallback": "没有匹配到 Profile 的一轮会回退到此代理的档位表：{{simple}} / {{medium}} / {{complex}}。要查看或修改，请把引擎切到「按难度」。",
       "routing_engine_profile_fallback_none": "此代理没有档位表，因此没有匹配到 Profile 的一轮会沿用此清单中的模型（除非配置了内核级默认路由）。",
       "router_hint": "模型路由器的按代理设置。它们约束两件事：此代理自身各轮如何路由，以及它创建的代理可以使用哪些 Profile。",
+      "router_pinned_note": "已固定在 Profile 路由器之外：`[model.router_override] fixed = true` 会让此代理自身的轮次放弃 Profile，并禁止它创建的代理使用 Profile。选择「按 Profile」路由引擎即可解除该固定。",
       "router_allowed_profiles": "允许的 Profile",
       "router_allowed_profiles_hint": "留空 = 路由器可以选择任意 Profile。被创建代理所请求的 Profile 也要与此列表核对。",
       "router_kernel_off": "config.toml 中已关闭模型路由器，因此此代理自身的轮次不会按 Profile 路由。但创建代理的关卡仍然生效：指定 Profile 的 agent_spawn 依然会按这些设置校验。",

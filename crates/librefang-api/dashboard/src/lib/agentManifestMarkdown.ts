@@ -247,6 +247,14 @@ const pushAdvancedFormSections = (lines: string[], form: ManifestFormState): voi
     lines.push("## Model Routing");
     lines.push("");
     pushBullet(lines, "Engine", `${ROUTING_ENGINE_LABELS[engine]}${unmatched}`);
+    if (form.model.router_fixed) {
+      // Not a routing preference the engine line can be read as covering: the
+      // pin refuses profiles to the agents this one spawns, which is what a
+      // reader needs in hand to explain a refused `agent_spawn`.
+      lines.push(
+        "- **Pinned**: `[model.router_override] fixed = true` — this agent takes no profile for its own turns and refuses every profile to the agents it spawns",
+      );
+    }
     if (form.routing.enabled) {
       // The table is present when the manifest has one, whatever engine runs:
       // it is the kernel's fallback, and a reader who cannot see it cannot
