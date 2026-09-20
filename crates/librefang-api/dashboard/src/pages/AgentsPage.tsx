@@ -1223,7 +1223,13 @@ export function AgentsPage() {
   >(
     () =>
       skillsQuery.data
-        ? skillsQuery.data.map((s) => ({ name: s.name, description: s.description }))
+        ? skillsQuery.data.map((s) => ({
+            name: s.name,
+            description: s.description,
+            // Carried so the skills field can name what each skill needs and
+            // flag the needs this agent's grants do not cover.
+            requirements: s.requirements,
+          }))
         : undefined,
     [skillsQuery.data],
   );

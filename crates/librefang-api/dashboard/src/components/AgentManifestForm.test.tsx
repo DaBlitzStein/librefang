@@ -10,6 +10,7 @@ import {
   type ManifestSectionId,
   MANIFEST_SECTION_IDS,
   sectionForInvalidField,
+  skillNeedsAgainstGrants,
 } from "./AgentManifestForm";
 import {
   emptyManifestExtras,
@@ -1409,6 +1410,110 @@ describe("AgentManifestForm — stable mode is named at the engine picker", () =
     expect(select).toBeEnabled();
     await user.selectOptions(select, "profile");
     expect((select as HTMLSelectElement).value).toBe("profile");
+  });
+});
+
+// A skill declares the built-in tools it needs (`requirements.tools`), and
+// nothing checks them against the agent it lands on — the check exists, but
+// only for hands. So the skill stays assigned, silently unable to work. These
+// pin both directions: the notice fires when a tool is genuinely missing, and
+// it does not fire when the grants are merely unrestricted, which is what an
+// empty `capabilities.tools` means.
+describe("AgentManifestForm — a skill's declared needs against the agent's grants", () => {
+  const CATALOG: ManifestCatalogEntry[] = [
+    {
+      name: "scraper",
+      description: "Fetches pages",
+      requirements: { tools: ["web_fetch", "file_read"] },
+    },
+    { name: "quiet", description: "Declares no needs", requirements: { tools: [] } },
+    // An older catalog, or a daemon predating the field: no `requirements`.
+    { name: "silent" },
+  ];
+
+  it("reports only the needs the declared list does not cover", () => {
+    expect(skillNeedsAgainstGrants(["scraper"], CATALOG, ["file_read"], false)).toEqual([
+      { name: "scraper", needs: ["web_fetch", "file_read"], missing: ["web_fetch"] },
+    ]);
+  });
+
+  // The false-positive guard, and the reason this must be read the kernel's
+  // way: `capabilities.tools = []` grants every tool (`tools_and_skills.rs`),
+  // so a check that read it as "nothing granted" would warn on every agent
+  // that never wrote a `[capabilities]` block.
+  //
+  // The entry survives with an empty `missing`, not as no entry at all: the
+  // skill still declares what it needs and the section still names it — that
+  // line is what the notice means, and hiding it when all is well would leave
+  // the notice unexplained when it appears.
+  it("reports no missing tools when the declared tool list is empty", () => {
+    expect(skillNeedsAgainstGrants(["scraper"], CATALOG, [], false)).toEqual([
+      { name: "scraper", needs: ["web_fetch", "file_read"], missing: [] },
+    ]);
+  });
+
+  it("reports no missing tools when globs cover every need", () => {
+    expect(skillNeedsAgainstGrants(["scraper"], CATALOG, ["web_*", "file_*"], false)).toEqual([
+      { name: "scraper", needs: ["web_fetch", "file_read"], missing: [] },
+    ]);
+  });
+
+  // `tools_disabled` empties the agent's tool set before any allowlist is
+  // consulted, so the empty list that otherwise grants everything grants
+  // nothing here — and the notice must not be silent in that case.
+  it("reports every need when the agent's tools are disabled outright", () => {
+    expect(skillNeedsAgainstGrants(["scraper"], CATALOG, [], true)).toEqual([
+      { name: "scraper", needs: ["web_fetch", "file_read"], missing: ["web_fetch", "file_read"] },
+    ]);
+  });
+
+  it("omits a skill that declares no needs", () => {
+    expect(skillNeedsAgainstGrants(["quiet"], CATALOG, ["file_read"], false)).toEqual([]);
+  });
+
+  // Unknown is not "needs nothing" and not "cannot run" — it is not a fact the
+  // notice can be built on, so it makes no claim either way.
+  it("omits a skill the catalog does not carry, or carries without requirements", () => {
+    expect(skillNeedsAgainstGrants(["unlisted"], CATALOG, ["file_read"], false)).toEqual([]);
+    expect(skillNeedsAgainstGrants(["silent"], CATALOG, ["file_read"], false)).toEqual([]);
+  });
+
+  it("renders the needs line and the notice for an assigned skill", () => {
+    const state = emptyManifestForm();
+    state.skills = ["scraper"];
+    state.capabilities.tools = ["file_read"];
+    render(<Harness skillCatalog={CATALOG} initialState={state} sections={["skills"]} />);
+
+    // This file's i18n stub returns the key without interpolating, so the
+    // per-skill names and the missing tools are asserted through the pure
+    // function above; what the render proves is that the block reaches the
+    // DOM, and that the needs line and the notice are separate elements.
+    expect(screen.getByText("agents.form.skills_needs")).toBeInTheDocument();
+    expect(screen.getByText("agents.form.skills_missing_tools")).toBeInTheDocument();
+  });
+
+  it("renders no block at all when no assigned skill declares a need", () => {
+    const state = emptyManifestForm();
+    state.skills = ["quiet", "silent"];
+    render(<Harness skillCatalog={CATALOG} initialState={state} sections={["skills"]} />);
+
+    expect(screen.queryByText("agents.form.skills_needs")).not.toBeInTheDocument();
+  });
+});
+
+// The grant fields edit one layer of a four-layer intersection, and the layer
+// most likely to subtract from them — the per-user policy — is configured
+// somewhere this editor cannot show. An operator reading only the controls
+// would believe a grant here is the decision.
+describe("AgentManifestForm — the capabilities section names the intersection", () => {
+  it("states it inside the section, ahead of the grant fields", () => {
+    render(<Harness sections={["capabilities"]} />);
+
+    const section = document.querySelector('[data-section="capabilities"]');
+    expect(section, "the capabilities section renders").toBeTruthy();
+    expect(
+      within(section as HTMLElement).getByText("agents.form.capabilities_layers_note"),
+    ).toBeInTheDocument();
   });
 });
 
