@@ -4277,10 +4277,6 @@
     "no_agents_hint": "尚未注册任何智能体。请先创建智能体再分配任务。",
     "field_description_hint": "智能体会逐字读取此内容。请写明目标、约束以及完成标准。",
     "field_assignee_placeholder": "智能体名称或 ID"
-    "status_failed": "失败",
-    "assignee_none": "未分配 — 任何智能体都可认领",
-    "no_agents_hint": "尚未注册任何智能体。请先创建智能体再分配任务。",
-    "field_description_hint": "智能体会逐字读取此内容。请写明目标、约束以及完成标准。"
   },
   "prompts": {
     "title": "提示词",

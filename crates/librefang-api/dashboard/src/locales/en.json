@@ -4278,10 +4278,6 @@
     "no_agents_hint": "No agents registered yet. Create an agent before assigning tasks.",
     "field_description_hint": "The agent reads this verbatim. Include the goal, the constraints, and what \"done\" looks like.",
     "field_assignee_placeholder": "Agent name or ID"
-    "status_failed": "Failed",
-    "assignee_none": "Unassigned — any agent may claim it",
-    "no_agents_hint": "No agents registered yet. Create an agent before assigning tasks.",
-    "field_description_hint": "The agent reads this verbatim. Include the goal, the constraints, and what \"done\" looks like."
   },
   "prompts": {
     "title": "Prompts",
