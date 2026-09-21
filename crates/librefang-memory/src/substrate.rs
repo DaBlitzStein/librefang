@@ -3476,13 +3476,13 @@ mod tests {
 
         for i in 0..2 {
             substrate
-                .task_post(&format!("t{i}"), "d", None, None, caps)
+                .task_post(&format!("t{i}"), "d", None, None, 0, None, caps)
                 .await
                 .unwrap_or_else(|e| panic!("post {i} should be accepted: {e}"));
         }
 
         let err = substrate
-            .task_post("over", "d", None, None, caps)
+            .task_post("over", "d", None, None, 0, None, caps)
             .await
             .expect_err("the third post exceeds the cap");
         assert!(
@@ -3502,17 +3502,17 @@ mod tests {
         };
 
         substrate
-            .task_post("alice-1", "d", Some("alice"), None, caps)
+            .task_post("alice-1", "d", Some("alice"), None, 0, None, caps)
             .await
             .unwrap();
         let err = substrate
-            .task_post("alice-2", "d", Some("alice"), None, caps)
+            .task_post("alice-2", "d", Some("alice"), None, 0, None, caps)
             .await
             .expect_err("alice is at her cap");
         assert!(matches!(err, LibreFangError::QuotaExceeded(_)), "{err:?}");
 
         substrate
-            .task_post("bob-1", "d", Some("bob"), None, caps)
+            .task_post("bob-1", "d", Some("bob"), None, 0, None, caps)
             .await
             .expect("bob's own queue is empty");
     }
@@ -3528,7 +3528,7 @@ mod tests {
 
         for i in 0..5 {
             substrate
-                .task_post(&format!("pool-{i}"), "d", None, None, caps)
+                .task_post(&format!("pool-{i}"), "d", None, None, 0, None, caps)
                 .await
                 .unwrap_or_else(|e| panic!("unassigned post {i}: {e}"));
         }
@@ -3545,11 +3545,11 @@ mod tests {
         };
 
         substrate
-            .task_post("first", "d", Some("worker"), None, caps)
+            .task_post("first", "d", Some("worker"), None, 0, None, caps)
             .await
             .unwrap();
         substrate
-            .task_post("second", "d", Some("worker"), None, caps)
+            .task_post("second", "d", Some("worker"), None, 0, None, caps)
             .await
             .expect_err("the queue is full while the first is pending");
 
@@ -3560,7 +3560,7 @@ mod tests {
             .expect("a pending task to claim");
 
         substrate
-            .task_post("second", "d", Some("worker"), None, caps)
+            .task_post("second", "d", Some("worker"), None, 0, None, caps)
             .await
             .expect("the claimed task has left the pending set");
     }
@@ -3581,7 +3581,7 @@ mod tests {
             let substrate = std::sync::Arc::clone(&substrate);
             handles.push(tokio::spawn(async move {
                 substrate
-                    .task_post(&format!("racer-{i}"), "d", None, None, caps)
+                    .task_post(&format!("racer-{i}"), "d", None, None, 0, None, caps)
                     .await
                     .is_ok()
             }));
@@ -3608,6 +3608,8 @@ mod tests {
                     "d",
                     Some("worker"),
                     None,
+                    0,
+                    None,
                     TaskQueueCaps::UNLIMITED,
                 )
                 .await
@@ -3626,7 +3628,15 @@ mod tests {
     async fn ttl_expiry_cancels_the_row_and_leaves_it_prunable() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let id = substrate
-            .task_post("unclaimed", "d", None, None, TaskQueueCaps::UNLIMITED)
+            .task_post(
+                "unclaimed",
+                "d",
+                None,
+                None,
+                0,
+                None,
+                TaskQueueCaps::UNLIMITED,
+            )
             .await
             .unwrap();
 
@@ -3660,7 +3670,7 @@ mod tests {
     async fn a_zero_ttl_expires_nothing() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         substrate
-            .task_post("keep", "d", None, None, TaskQueueCaps::UNLIMITED)
+            .task_post("keep", "d", None, None, 0, None, TaskQueueCaps::UNLIMITED)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -3677,6 +3687,8 @@ mod tests {
                 "claim me",
                 "d",
                 Some("worker"),
+                None,
+                0,
                 None,
                 TaskQueueCaps::UNLIMITED,
             )
@@ -3702,7 +3714,15 @@ mod tests {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         for i in 0..7 {
             substrate
-                .task_post(&format!("t{i}"), "d", None, None, TaskQueueCaps::UNLIMITED)
+                .task_post(
+                    &format!("t{i}"),
+                    "d",
+                    None,
+                    None,
+                    0,
+                    None,
+                    TaskQueueCaps::UNLIMITED,
+                )
                 .await
                 .unwrap();
         }
@@ -3742,13 +3762,23 @@ mod tests {
                     "d",
                     Some("alice"),
                     None,
+                    0,
+                    None,
                     TaskQueueCaps::UNLIMITED,
                 )
                 .await
                 .unwrap();
         }
         substrate
-            .task_post("b0", "d", Some("bob"), None, TaskQueueCaps::UNLIMITED)
+            .task_post(
+                "b0",
+                "d",
+                Some("bob"),
+                None,
+                0,
+                None,
+                TaskQueueCaps::UNLIMITED,
+            )
             .await
             .unwrap();
 
