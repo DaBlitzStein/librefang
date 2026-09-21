@@ -13,7 +13,6 @@ import {
 import { CollapsibleSection } from "./ui/CollapsibleSection";
 import { Field } from "./ui/Field";
 import { ModelPicker } from "./ui/ModelPicker";
-import { formatTokens } from "../lib/modelParamLadders";
 
 /**
  * The routing tiers and `pinned_model` hold a bare model name — the daemon
