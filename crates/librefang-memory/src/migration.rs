@@ -4680,7 +4680,7 @@ mod tests {
         assert!(!try_column_exists(&conn, "template_versions", "manifest_toml").unwrap());
 
         run_migrations(&conn).expect("a stamped-past-58 database must still open");
-        assert_eq!(get_schema_version(&conn).unwrap(), 60);
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
 
         for (table, column) in [
             ("manifest_versions", "agent_name"),
@@ -4873,14 +4873,14 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // v58: per-task claim TTL override (task_queue.timeout_secs)
+    // v61: per-task claim TTL override (task_queue.timeout_secs)
     // ---------------------------------------------------------------------
 
     /// The column has to arrive on a board that already holds tasks — a
     /// migration that only works on a fresh file has never run where it
-    /// matters. A pre-v58 row means "use the global TTL", which is `NULL`.
+    /// matters. A pre-v61 row means "use the global TTL", which is `NULL`.
     #[test]
-    fn migrate_v58_adds_timeout_column_to_an_existing_board() {
+    fn migrate_v61_adds_timeout_column_to_an_existing_board() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         conn.execute(
@@ -4892,7 +4892,7 @@ mod tests {
 
         assert!(
             column_exists(&conn, "task_queue", "timeout_secs"),
-            "v58 must add task_queue.timeout_secs"
+            "v61 must add task_queue.timeout_secs"
         );
         let timeout: Option<i64> = conn
             .query_row(
@@ -4908,11 +4908,19 @@ mod tests {
     }
 
     #[test]
-    fn migrate_v58_is_idempotent() {
+    fn migrate_v61_is_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         // The runner can legitimately replay a step after an interrupted
         // upgrade, so a duplicate-column rerun must not fail.
-        migrate_v58(&conn).expect("v58 must survive a rerun");
+        //
+        // The guard this exercises is `try_column_exists` at the top of
+        // `migrate_v61`, which is the only thing standing between a replay
+        // and `duplicate column name: timeout_secs`. A database that has
+        // climbed past 61 through a caller other than the ladder is stamped
+        // against a table that already has the column, and `run_migrations`
+        // will not call this again — so the rerun has to be issued directly.
+        migrate_v61(&conn).expect("v61 must survive a rerun");
+        assert!(column_exists(&conn, "task_queue", "timeout_secs"));
     }
 }
