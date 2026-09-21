@@ -1495,8 +1495,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         | AgentSubScreen::EditMcpServers
         | AgentSubScreen::EditChannels
         | AgentSubScreen::EditModelParams
-        | AgentSubScreen::EditModelRouting => unreachable!(),
-        | AgentSubScreen::EditModelParams
+        | AgentSubScreen::EditModelRouting
         | AgentSubScreen::EditWorkspaces => unreachable!(),
         AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
         AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
