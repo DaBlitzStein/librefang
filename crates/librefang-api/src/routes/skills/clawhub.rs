@@ -1,5 +1,39 @@
 use super::*;
 
+/// How long a ClawHub route waits for the hub before answering without it.
+///
+/// The client is patient by design — 30 s per attempt and five attempts, with backoff between them —
+/// because a hub that answers slowly is worth more than a hub that is not asked twice. But patience
+/// is not what a route owes its caller: `GET /api/clawhub/browse` can spend ~270 s inside the client,
+/// and a caller who waits that long has learned nothing they would not have learned from the answer
+/// this family already knows how to give.
+///
+/// Deliberately short enough to sit under the budget `route_smoke` gives every GET it walks
+/// (`REQUEST_TIMEOUT`, 10 s), so an unreachable hub is a 503 rather than a failed test.
+const CLAWHUB_ROUTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Run one ClawHub round trip under [`CLAWHUB_ROUTE_BUDGET`].
+///
+/// A timeout maps to [`SkillError::MarketplaceUnavailable`] and not to `Network`, which is what the
+/// client raises for its own failures, because the condition is the one that variant documents: the
+/// daemon is healthy, the request was well-formed, and the upstream is not answering as a marketplace.
+/// That is the same `503` the rest of the family returns for a hub serving a webpage, so the dashboard
+/// renders one offline state for both rather than two.
+async fn within_route_budget<T>(
+    what: &str,
+    future: impl std::future::Future<Output = Result<T, librefang_skills::SkillError>>,
+) -> Result<T, librefang_skills::SkillError> {
+    match tokio::time::timeout(CLAWHUB_ROUTE_BUDGET, future).await {
+        Ok(result) => result,
+        Err(_) => Err(librefang_skills::SkillError::MarketplaceUnavailable(
+            format!(
+                "{what} did not answer within {}s",
+                CLAWHUB_ROUTE_BUDGET.as_secs()
+            ),
+        )),
+    }
+}
+
 fn patch_skill_provenance(
     manifest_path: &std::path::Path,
     source: librefang_skills::SkillSource,
@@ -89,7 +123,7 @@ async fn fetch_skill_source(
     slug: &str,
 ) -> Result<Option<(String, String)>, librefang_skills::SkillError> {
     for filename in ["SKILL.md", "package.json", "skill.toml"] {
-        match client.get_file(slug, filename).await {
+        match within_route_budget("ClawHub file", client.get_file(slug, filename)).await {
             Ok(content) if !content.is_empty() => return Ok(Some((filename.to_string(), content))),
             Ok(_) => continue,
             Err(error) if is_marketplace_unavailable(&error) => return Err(error),
@@ -146,7 +180,7 @@ pub async fn clawhub_search(
     let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub");
     let client = librefang_skills::clawhub::ClawHubClient::new(cache_dir);
 
-    match client.search(&query, limit).await {
+    match within_route_budget("ClawHub search", client.search(&query, limit)).await {
         Ok(results) => {
             let items: Vec<serde_json::Value> = results
                 .results
@@ -230,7 +264,7 @@ pub async fn clawhub_browse(
     let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub");
     let client = librefang_skills::clawhub::ClawHubClient::new(cache_dir);
 
-    match client.browse(sort, limit, cursor).await {
+    match within_route_budget("ClawHub browse", client.browse(sort, limit, cursor)).await {
         Ok(results) => {
             let items: Vec<serde_json::Value> = results
                 .items
@@ -280,7 +314,7 @@ pub async fn clawhub_skill_detail(
     let skills_dir = state.kernel.home_dir().join("skills");
     let is_installed = client.is_installed(&slug, &skills_dir);
 
-    match client.get_skill(&slug).await {
+    match within_route_budget("ClawHub skill detail", client.get_skill(&slug)).await {
         Ok(detail) => {
             let version = detail
                 .latest_version
@@ -435,7 +469,7 @@ pub async fn clawhub_install(
         );
     }
 
-    match client.install(&req.slug, &skills_dir).await {
+    match within_route_budget("ClawHub install", client.install(&req.slug, &skills_dir)).await {
         Ok(result) => {
             // #4689 — patch source provenance to ClawHub. Without this, the
             // installed skill's manifest.source stays None and `listSkills()`
@@ -550,7 +584,7 @@ pub async fn clawhub_cn_search(
     let client =
         librefang_skills::clawhub::ClawHubClient::with_url(&clawhub_cn_base_url(), cache_dir);
 
-    match client.search(&query, limit).await {
+    match within_route_budget("ClawHub search", client.search(&query, limit)).await {
         Ok(results) => {
             let items: Vec<serde_json::Value> = results
                 .results
@@ -615,7 +649,7 @@ pub async fn clawhub_cn_browse(
     let client =
         librefang_skills::clawhub::ClawHubClient::with_url(&clawhub_cn_base_url(), cache_dir);
 
-    match client.browse(sort, limit, cursor).await {
+    match within_route_budget("ClawHub browse", client.browse(sort, limit, cursor)).await {
         Ok(results) => {
             let items: Vec<serde_json::Value> = results
                 .items
@@ -655,7 +689,7 @@ pub async fn clawhub_cn_skill_detail(
     let skills_dir = state.kernel.home_dir().join("skills");
     let is_installed = client.is_installed(&slug, &skills_dir);
 
-    match client.get_skill(&slug).await {
+    match within_route_budget("ClawHub skill detail", client.get_skill(&slug)).await {
         Ok(detail) => {
             let version = detail
                 .latest_version
@@ -787,7 +821,7 @@ pub async fn clawhub_cn_install(
         );
     }
 
-    match client.install(&req.slug, &skills_dir).await {
+    match within_route_budget("ClawHub install", client.install(&req.slug, &skills_dir)).await {
         Ok(result) => {
             // Patch source provenance to ClawHubCn so the skill registry knows
             // this skill was installed from ClawHub and can surface update/version info.
@@ -860,5 +894,63 @@ pub async fn clawhub_cn_install(
             };
             (status, Json(serde_json::json!({"error": body})))
         }
+    }
+}
+
+#[cfg(test)]
+mod route_budget_tests {
+    use super::{within_route_budget, CLAWHUB_ROUTE_BUDGET};
+
+    /// A round trip that never settles must give up on the route's clock, not on the caller's.
+    ///
+    /// A hub that accepts the connection and then says nothing is the case this exists for: before the
+    /// budget, the only bound was the client's own patience — 30 s per attempt across five attempts,
+    /// with backoff between them — so the caller learned the hub was unreachable ~270 s later, or never,
+    /// because the test that walks every GET route gives up at ten.
+    #[tokio::test]
+    async fn a_round_trip_that_never_answers_gives_up_inside_the_budget() {
+        let started = std::time::Instant::now();
+        // A round trip that is never bounded does not fail this test, it hangs it, so the call is
+        // given a hard ceiling of its own: a helper that stopped bounding would then fail here with a
+        // message that says which property broke, rather than stalling the suite until CI kills it.
+        let result = tokio::time::timeout(
+            CLAWHUB_ROUTE_BUDGET * 4,
+            within_route_budget(
+                "test hub",
+                std::future::pending::<Result<(), librefang_skills::SkillError>>(),
+            ),
+        )
+        .await
+        .expect("within_route_budget never gave up: it must bound the round trip");
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(
+                result,
+                Err(librefang_skills::SkillError::MarketplaceUnavailable(_))
+            ),
+            "a hub that never answers is unavailable, not a network fault: {result:?}"
+        );
+        assert!(
+            elapsed >= CLAWHUB_ROUTE_BUDGET,
+            "gave up before the budget had elapsed: {elapsed:?}"
+        );
+        assert!(
+            elapsed < CLAWHUB_ROUTE_BUDGET + std::time::Duration::from_secs(3),
+            "gave up long after the budget: {elapsed:?}"
+        );
+    }
+
+    /// The budget has to stay under the bound `route_smoke` gives every GET it walks.
+    ///
+    /// That relationship is the whole point — it is what makes an unreachable hub a `503` instead of a
+    /// failed test — and it is invisible to the compiler, so it is asserted here rather than left in a
+    /// comment on the constant. Raising it past ten seconds silently restores the failure this removes.
+    #[test]
+    fn the_budget_stays_under_the_smoke_tests_own_bound() {
+        assert!(
+            CLAWHUB_ROUTE_BUDGET < std::time::Duration::from_secs(10),
+            "the route budget ({CLAWHUB_ROUTE_BUDGET:?}) must stay under route_smoke's REQUEST_TIMEOUT (10s)"
+        );
     }
 }
