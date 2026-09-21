@@ -887,10 +887,7 @@
       "tools": "도구",
       "schedule": "일정",
       "logs": "로그",
-      "routing": "라우팅"
       "routing": "라우팅",
-      "history": "기록"
-      "logs": "로그",
       "history": "기록"
     },
     "configure": "구성",
