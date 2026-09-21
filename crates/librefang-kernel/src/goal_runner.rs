@@ -55,7 +55,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use tokio::sync::{watch, Mutex};
+use parking_lot::RwLock;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -760,7 +761,7 @@ struct RunHandle {
     /// between registering the handle and backfilling the join handle; and a
     /// run whose loop finished before that backfill could happen.
     task: Option<JoinHandle<()>>,
-    state: Arc<Mutex<GoalRunState>>,
+    state: Arc<RwLock<GoalRunState>>,
     stop: Arc<StopFlag>,
     /// Cooperative pause flag. Distinct from `stop` because the two mean
     /// opposite things to the durable row: `stop` deletes it, `pause`
@@ -833,6 +834,10 @@ impl GoalRunner {
 
     /// Snapshot the observable state of a goal's run, if one exists.
     ///
+    /// A registered run is never reported as absent: the read waits for the loop's own bookkeeping lock, which the loop holds for a few field writes and never across I/O, so `None` out of the registry branch means the entry is genuinely gone.
+    /// The checkpoint fallback described below does not carry that guarantee — `load_pause_checkpoint` collapses a substrate read error into `None` exactly as it collapses a missing row, so a paused run whose substrate is erroring reads as absent even though it exists.
+    /// That collapse belongs to the checkpoint read rather than to this one, and `stop_locked` documents it for the same reason: there, `None` means "no readable checkpoint", not "no run".
+    ///
     /// Falls back to a persisted pause checkpoint when the registry has no
     /// live entry. A paused run's loop task exits and self-cleans its
     /// registry slot, so without this fallback pausing a goal would make it
@@ -842,8 +847,19 @@ impl GoalRunner {
     /// Minting them per call made two consecutive `GET /api/goals/{id}/run` on a motionless goal disagree, and any client computing "paused for how long" got approximately zero every time.
     pub fn state(&self, goal_id: GoalId) -> Option<GoalRunState> {
         if let Some(handle) = self.runs.get(&goal_id) {
-            // try_lock: None → `running:false`; run_loop must never hold this lock across I/O.
-            return handle.state.try_lock().ok().map(|s| s.clone());
+            // A registered run IS a run that exists, so this read must not be able to miss one.
+            // It waits for the loop's in-memory bookkeeping instead of giving up on it.
+            //
+            // It used to `try_lock` and collapse a lost race into `None`, which every caller above renders as "this run does not exist": `GET /api/goals/{id}/run` answered without a `run` key, and `POST /api/goals/{id}/start` read its own new run as a failed start (#8388, #8391).
+            // The wait is bounded because `run_loop` holds this lock for a handful of field writes and releases it before any I/O — see the lock discipline at each of its write sites.
+            // The guard type is `!Send`, so the async half of that discipline is now enforced by the compiler rather than promised by a comment.
+            //
+            // `parking_lot::RwLock` does not poison, so a panic in the loop cannot turn a live run into an absent one either.
+            //
+            // The registry shard guard is still held while this waits (the `get` above is in scope), which is safe only because the loop's write sites hold the state lock for in-memory work alone.
+            // If one of them ever held it across I/O, this read would hold the shard for the length of that I/O — stalling every other registry access, the loop's own `remove_if` included, and deadlocking outright if that I/O ever came back through the registry.
+            // That is the residual this read accepts in exchange for never reporting a live run as absent, and `!Send` enforces the await half of the contract only.
+            return Some(handle.state.read().clone());
         }
         let substrate = self.substrate.as_ref()?;
         let checkpoint = load_pause_checkpoint(substrate, goal_id)?;
@@ -1114,7 +1130,7 @@ impl GoalRunner {
         // new-run upsert also atomically replaces a terminal predecessor's
         // start time if one survived an earlier daemon restart.
         persist_new_run(&self.store, &initial);
-        let state = Arc::new(Mutex::new(initial));
+        let state = Arc::new(RwLock::new(initial));
         let stop = Arc::new(StopFlag::default());
         let pause = Arc::new(AtomicBool::new(false));
         let generation = self.next_gen.fetch_add(1, Ordering::SeqCst);
@@ -1319,7 +1335,7 @@ impl GoalRunner {
                         goal_id,
                         RunHandle {
                             task: None,
-                            state: Arc::new(Mutex::new(state)),
+                            state: Arc::new(RwLock::new(state)),
                             stop: Arc::new(StopFlag::raised()),
                             pause: Arc::new(AtomicBool::new(false)),
                             generation: self.next_gen.fetch_add(1, Ordering::SeqCst),
@@ -1360,7 +1376,7 @@ async fn run_loop<F, Fut, L, E, Efut>(
     on_learnings_captured: L,
     evaluate_goal: E,
     loop_engineering: bool,
-    state: Arc<Mutex<GoalRunState>>,
+    state: Arc<RwLock<GoalRunState>>,
     stop: Arc<StopFlag>,
     pause: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -1374,9 +1390,7 @@ async fn run_loop<F, Fut, L, E, Efut>(
     Efut: std::future::Future<Output = Result<bool, String>> + Send,
 {
     // Read the loop-engineering configuration once. It is fixed for the run —
-    // `start()` writes it before spawning and nothing mutates it afterwards —
-    // so re-locking per iteration would only add contention with `state()`,
-    // whose `try_lock` reports `running: false` whenever it loses the race.
+    // `start()` writes it before spawning and nothing mutates it afterwards — so re-locking per iteration would only add contention with `state()`, which now waits on this lock rather than reporting the run missing.
     //
     // `iteration` is read from the same snapshot rather than hardcoded to 0:
     // `start()` seeds `state.iteration` from the resume checkpoint before this
@@ -1384,7 +1398,7 @@ async fn run_loop<F, Fut, L, E, Efut>(
     // would make a resumed run re-count from scratch while still reporting
     // the checkpointed value to every observer until the first tick landed.
     let (verify_agent_id, verify_max_retries, has_evaluator, started_at, mut iteration) = {
-        let s = state.lock().await;
+        let s = state.read();
         (
             s.verify_agent_id,
             s.verify_max_retries.max(1),
@@ -1681,9 +1695,9 @@ async fn run_loop<F, Fut, L, E, Efut>(
                     patch_goal(&substrate, goal_id, new_progress, new_status);
                 }
 
-                // Release before persist_run: state()'s try_lock returns None (→ running:false) while held.
+                // Release before persist_run: state() waits on this lock, so a guard held across the store write would stall every reader for the length of that write.
                 let snapshot = {
-                    let mut s = state.lock().await;
+                    let mut s = state.write();
                     s.iteration = iteration + 1;
                     if let Some(p) = new_progress {
                         s.last_progress = p;
@@ -1751,7 +1765,7 @@ async fn run_loop<F, Fut, L, E, Efut>(
                 }
                 // Same lock discipline as success path: release before persist_run.
                 let snapshot = {
-                    let mut s = state.lock().await;
+                    let mut s = state.write();
                     s.last_error = Some(e);
                     s.updated_at = Utc::now();
                     s.clone()
@@ -1807,7 +1821,7 @@ async fn run_loop<F, Fut, L, E, Efut>(
     };
 
     let snapshot = {
-        let mut s = state.lock().await;
+        let mut s = state.write();
         s.phase = final_phase;
         s.updated_at = Utc::now();
         s.clone()
@@ -1874,6 +1888,9 @@ async fn run_loop<F, Fut, L, E, Efut>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Only the tests still need a `tokio` mutex — the run state's own lock is `parking_lot::RwLock`, whose guard can be held by the synchronous read path.
+    /// The two remaining uses are test-only channels.
+    use tokio::sync::Mutex;
 
     #[test]
     fn poisoned_goal_run_start_stop_lock_recovers_and_clears_poison() {
@@ -2013,7 +2030,7 @@ mod tests {
         let goal_id = goal.id;
 
         let (_tx, rx) = watch::channel(false);
-        let state = Arc::new(Mutex::new(GoalRunState {
+        let state = Arc::new(RwLock::new(GoalRunState {
             goal_id,
             agent_id,
             phase: GoalRunPhase::Running,
@@ -2049,7 +2066,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         assert_eq!(s.phase, GoalRunPhase::Finished);
         let stored = load_goal(&substrate, goal_id).unwrap();
         assert_eq!(stored.status, GoalStatus::Completed);
@@ -2065,7 +2082,7 @@ mod tests {
         let goal_id = goal.id;
 
         let (_tx, rx) = watch::channel(false);
-        let state = Arc::new(Mutex::new(GoalRunState {
+        let state = Arc::new(RwLock::new(GoalRunState {
             goal_id,
             agent_id,
             phase: GoalRunPhase::Running,
@@ -2101,7 +2118,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         assert_eq!(s.phase, GoalRunPhase::MaxIterationsReached);
         assert_eq!(s.iteration, 2);
         // Goal stays in progress, not completed.
@@ -2111,8 +2128,8 @@ mod tests {
 
     /// The store key a run's learnings land under — derived from the run
     /// state's `started_at` exactly as `run_loop` derives it.
-    fn learnings_key_for(state: &Arc<Mutex<GoalRunState>>) -> String {
-        let s = state.try_lock().unwrap();
+    fn learnings_key_for(state: &Arc<RwLock<GoalRunState>>) -> String {
+        let s = state.read();
         format!(
             "{LEARNINGS_KEY_PREFIX}{}_{}",
             s.goal_id,
@@ -2124,8 +2141,8 @@ mod tests {
         goal_id: GoalId,
         agent_id: AgentId,
         max_iterations: u32,
-    ) -> Arc<Mutex<GoalRunState>> {
-        Arc::new(Mutex::new(GoalRunState {
+    ) -> Arc<RwLock<GoalRunState>> {
+        Arc::new(RwLock::new(GoalRunState {
             goal_id,
             agent_id,
             phase: GoalRunPhase::Running,
@@ -2148,8 +2165,8 @@ mod tests {
         verifier: AgentId,
         max_iterations: u32,
         verify_max_retries: u32,
-    ) -> Arc<Mutex<GoalRunState>> {
-        Arc::new(Mutex::new(GoalRunState {
+    ) -> Arc<RwLock<GoalRunState>> {
+        Arc::new(RwLock::new(GoalRunState {
             goal_id,
             agent_id,
             phase: GoalRunPhase::Running,
@@ -2195,7 +2212,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(state.lock().await.phase, GoalRunPhase::Stopped);
+        assert_eq!(state.read().phase, GoalRunPhase::Stopped);
         // Blocked must NOT mark the goal completed.
         assert_eq!(
             load_goal(&substrate, goal.id).unwrap().status,
@@ -2246,7 +2263,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            state.lock().await.phase,
+            state.read().phase,
             GoalRunPhase::Stopped,
             "a blocked claim must stop the run on the first iteration, verified or not"
         );
@@ -2290,7 +2307,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         assert_eq!(s.phase, GoalRunPhase::Stopped);
         assert_eq!(s.iteration, 0, "no tick should run");
     }
@@ -2328,7 +2345,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(state.lock().await.phase, GoalRunPhase::Stopped);
+        assert_eq!(state.read().phase, GoalRunPhase::Stopped);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2367,7 +2384,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         assert_eq!(s.phase, GoalRunPhase::RateLimited);
         assert!(
             s.iteration < 100,
@@ -2496,7 +2513,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(state.lock().await.phase, GoalRunPhase::Finished);
+        assert_eq!(state.read().phase, GoalRunPhase::Finished);
         assert!(
             store.get_run(&goal.id.to_string()).unwrap().is_none(),
             "a completed run must be removed from the durable store"
@@ -3094,7 +3111,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         assert_eq!(
             s.phase,
             GoalRunPhase::MaxIterationsReached,
@@ -3165,7 +3182,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         // The verifier rejected every iteration, so the run must exhaust its
         // iteration budget rather than being closed out by the agent's own
         // unclamped progress claim reaching the goal's 100% completion check.
@@ -3231,7 +3248,7 @@ mod tests {
             GoalStatus::InProgress,
             "the goal cannot be finished by the work its own verifier rejected"
         );
-        let s = state.lock().await;
+        let s = state.read();
         assert_ne!(
             s.phase,
             GoalRunPhase::Finished,
@@ -3303,7 +3320,7 @@ mod tests {
             "a tool-written progress of 100 must not let the top-of-loop check \
              short-circuit the run after the first rejected iteration"
         );
-        let s = state.lock().await;
+        let s = state.read();
         assert_eq!(
             s.phase,
             GoalRunPhase::MaxIterationsReached,
@@ -3388,7 +3405,7 @@ mod tests {
              short-circuit the run after the first rejected iteration"
         );
         assert_eq!(
-            state.lock().await.phase,
+            state.read().phase,
             GoalRunPhase::MaxIterationsReached,
             "the run must spend its full budget, not finish through a status \
              the verifier never saw"
@@ -3443,7 +3460,7 @@ mod tests {
             0,
             "a cancelled goal must never tick"
         );
-        assert_eq!(state.lock().await.phase, GoalRunPhase::Finished);
+        assert_eq!(state.read().phase, GoalRunPhase::Finished);
     }
 
     /// #7785 review: the clamp on rejected progress must not reach the plain
@@ -3496,7 +3513,7 @@ mod tests {
         );
         let stored = load_goal(&substrate, goal.id).unwrap();
         assert_eq!(stored.progress, 100);
-        assert_eq!(state.lock().await.phase, GoalRunPhase::Finished);
+        assert_eq!(state.read().phase, GoalRunPhase::Finished);
     }
 
     #[tokio::test]
@@ -3535,7 +3552,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         assert_eq!(s.phase, GoalRunPhase::Finished);
         assert_eq!(s.last_error, None);
         let stored = load_goal(&substrate, goal.id).unwrap();
@@ -3619,7 +3636,7 @@ mod tests {
             "the generator must be re-prompted after a rejection"
         );
         assert_eq!(verifier_calls.load(Ordering::SeqCst), 2);
-        let s = state.lock().await;
+        let s = state.read();
         assert_eq!(s.phase, GoalRunPhase::Finished);
     }
 
@@ -3662,7 +3679,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         assert_ne!(s.phase, GoalRunPhase::Finished);
         let stored = load_goal(&substrate, goal.id).unwrap();
         assert_eq!(stored.status, GoalStatus::InProgress);
@@ -3734,7 +3751,7 @@ mod tests {
         let goal = test_goal(agent_id);
         seed_goal(&substrate, &goal);
         let (_tx, rx) = watch::channel(false);
-        let state = Arc::new(Mutex::new(GoalRunState {
+        let state = Arc::new(RwLock::new(GoalRunState {
             goal_id: goal.id,
             agent_id,
             phase: GoalRunPhase::Running,
@@ -3770,7 +3787,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         assert_eq!(s.phase, GoalRunPhase::Finished);
         assert_eq!(s.iteration, 1, "the first evaluated turn ends the run");
         let stored = load_goal(&substrate, goal.id).unwrap();
@@ -3786,7 +3803,7 @@ mod tests {
         let goal = test_goal(agent_id);
         seed_goal(&substrate, &goal);
         let (_tx, rx) = watch::channel(false);
-        let state = Arc::new(Mutex::new(GoalRunState {
+        let state = Arc::new(RwLock::new(GoalRunState {
             goal_id: goal.id,
             agent_id,
             phase: GoalRunPhase::Running,
@@ -3824,7 +3841,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(state.lock().await.phase, GoalRunPhase::Finished);
+        assert_eq!(state.read().phase, GoalRunPhase::Finished);
     }
 
     /// Lessons are only worth capturing if they outlive the run. They must
@@ -3927,7 +3944,7 @@ mod tests {
         let (_tx, rx) = watch::channel(false);
 
         let state = mk_state(goal.id, agent_id, 1);
-        state.try_lock().unwrap().started_at = Utc::now() - chrono::Duration::hours(1);
+        state.write().started_at = Utc::now() - chrono::Duration::hours(1);
         let send = |_a: AgentId, _p: String| async move {
             // No GOAL_DONE marker: completing the goal would end the second
             // run before its first tick (the loop breaks on Completed status).
@@ -3955,7 +3972,7 @@ mod tests {
         // Simulate the operator re-running the same goal: a fresh run state
         // (new started_at) against the same goal id.
         let state2 = mk_state(goal.id, agent_id, 1);
-        state2.try_lock().unwrap().started_at = Utc::now() + chrono::Duration::hours(1);
+        state2.write().started_at = Utc::now() + chrono::Duration::hours(1);
         let send2 = |_a: AgentId, _p: String| async move {
             Ok("GOAL_LEARNED: second run lesson\nGOAL_DONE".to_string())
         };
@@ -4094,7 +4111,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(state.lock().await.phase, GoalRunPhase::Stopped);
+        assert_eq!(state.read().phase, GoalRunPhase::Stopped);
         assert_eq!(
             turns.load(Ordering::SeqCst) as u32,
             MAX_ERROR_STREAK,
@@ -4150,7 +4167,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         assert_eq!(s.phase, GoalRunPhase::Stopped);
         assert_eq!(
             s.last_error.as_deref(),
@@ -4248,9 +4265,9 @@ mod tests {
             stored.progress, 100,
             "nor its own progress, which would leave the 100/in_progress pair incoherent"
         );
-        assert_eq!(state.lock().await.phase, GoalRunPhase::Stopped);
+        assert_eq!(state.read().phase, GoalRunPhase::Stopped);
         assert_eq!(
-            state.lock().await.iteration,
+            state.read().iteration,
             1,
             "the turn was paid for, so the run row still records it"
         );
@@ -4318,9 +4335,9 @@ mod tests {
             GoalStatus::InProgress,
             "and the run's own status write is not overriding anyone here"
         );
-        assert_eq!(state.lock().await.phase, GoalRunPhase::Stopped);
+        assert_eq!(state.read().phase, GoalRunPhase::Stopped);
         assert_eq!(
-            state.lock().await.iteration,
+            state.read().iteration,
             1,
             "the run row records the iteration the goal document now agrees with"
         );
@@ -4376,7 +4393,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         assert_eq!(
             s.phase,
             GoalRunPhase::RateLimited,
@@ -4449,7 +4466,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         assert_eq!(
             s.phase,
             GoalRunPhase::Stopped,
@@ -4673,7 +4690,7 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        let s = state.read();
         assert_ne!(
             s.phase,
             GoalRunPhase::Stopped,
@@ -4804,7 +4821,7 @@ mod tests {
         seed_goal(&substrate, &goal);
         let (_tx, rx) = watch::channel(false);
         let state = mk_state(goal.id, agent_id, 5);
-        state.lock().await.iteration = 3;
+        state.write().iteration = 3;
 
         // Never finishes on its own — only the iteration cap ends this run.
         // `s.iteration == 5` at MaxIterationsReached is reached identically
@@ -4846,7 +4863,14 @@ mod tests {
         )
         .await;
 
-        let s = state.lock().await;
+        // Taken before the state read rather than after it: the read guard must not be live across this await, because the run loop's own reads wait on that lock rather than skipping it.
+        let prompt = first_prompt
+            .lock()
+            .await
+            .clone()
+            .expect("a turn must have run");
+
+        let s = state.read();
         // Resumed at iteration 3 under a cap of 5: only 2 more ticks are
         // allowed. A reset to 0 would instead run all 5 — this is the
         // assertion a reverted seeding fails, unlike the final iteration
@@ -4858,11 +4882,6 @@ mod tests {
             2,
             "resumed at iteration 3 under a cap of 5: only 2 ticks remain, not 5"
         );
-        let prompt = first_prompt
-            .lock()
-            .await
-            .clone()
-            .expect("a turn must have run");
         assert!(
             prompt.contains("Iteration: 4 of 5"),
             "the first resumed prompt must report iteration 4, not iteration 1: {prompt}"
@@ -4915,7 +4934,7 @@ mod tests {
         .await;
         let elapsed = tokio::time::Instant::now() - started;
 
-        assert_eq!(state.lock().await.phase, GoalRunPhase::Paused);
+        assert_eq!(state.read().phase, GoalRunPhase::Paused);
         assert!(
             elapsed < Duration::from_secs(10),
             "pause took {elapsed:?} to be observed against a {MAX_GOAL_TICK_INTERVAL_SECS}s tick interval"
@@ -4966,7 +4985,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            state.lock().await.phase,
+            state.read().phase,
             GoalRunPhase::Paused,
             "pause and shutdown signalled together must resolve to Paused, per the \
              pause-before-shutdown check at the top of the loop"
@@ -5458,15 +5477,15 @@ mod tests {
         assert!(runner.stop(goal_id));
     }
 
-    /// `state()` reports `None` for a run that is alive and well, whenever the loop happens to hold the state mutex.
+    /// `state()` must never report a live run as missing, however the loop's own bookkeeping interleaves with the read.
     ///
-    /// It reads the live run under `try_lock`, deliberately — `state()` is sync, so it cannot await a tokio mutex, and blocking here would let a slow reader stall the loop.
-    /// The cost is that "no state" and "could not read the state right now" are the same answer, and a caller that reads the second as the first will report a healthy run as a failure.
-    /// `POST /api/goals/{id}/start` did exactly that and took `main` red twice on the macOS lane (#8388, #8391), which is why it now retries instead of believing the first empty read.
+    /// It used to `try_lock` and collapse a lost race into `None`, so "no state" and "could not read the state right now" were the same answer, and a caller that read the second as the first reported a healthy run as a failure.
+    /// `GET /api/goals/{id}/run` renders that as `{"running": false}` with no `run` key, and `POST /api/goals/{id}/start` read its own new run as a failed start — which took `main` red twice on the macOS lane (#8388, #8391).
     ///
-    /// Holding the lock explicitly is what makes this deterministic: the real contention window is a few instructions wide and cannot be hit on purpose.
+    /// The read now waits for the writer instead of skipping it, so the lock is taken from a separate thread: a guard held by this task would deadlock the very read being observed.
+    /// Holding it explicitly is what makes the race deterministic — the real contention window is a few instructions wide and cannot be hit on purpose.
     #[tokio::test(flavor = "multi_thread")]
-    async fn state_is_empty_while_the_run_loop_holds_the_state_lock() {
+    async fn a_state_read_waits_for_the_run_loop_lock_instead_of_reporting_no_run() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
         let store = store_from(&substrate);
         let agent_id = AgentId::new();
@@ -5503,16 +5522,32 @@ mod tests {
             .expect("the run must be registered")
             .state
             .clone();
-        let held = handle_state.lock().await;
-        assert!(
-            runner.state(goal_id).is_none(),
-            "state() cannot read a locked run, so callers must not read its None as `did not start`"
-        );
-        drop(held);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = handle_state.write();
+            locked_tx
+                .send(())
+                .expect("the observer must still be waiting for the lock");
+            // Held long enough that a read which gives up rather than waits has demonstrably given up, then released here rather than by the observer — the observer is the one blocked on it.
+            std::thread::sleep(Duration::from_millis(50));
+        });
+        locked_rx
+            .recv()
+            .expect("the holder thread must acquire the write lock");
 
+        // The write lock is provably held at this instant, so a `state()` that only tries and gives up answers `None` here — the shape every caller renders as "this run does not exist".
+        let observed = runner.state(goal_id);
+        assert_eq!(
+            observed.map(|run| run.phase),
+            Some(GoalRunPhase::Running),
+            "a read taken while the loop holds the lock must wait for the lock, \
+             not report the run missing"
+        );
+
+        holder.join().expect("the holder thread must not panic");
         assert!(
             runner.state(goal_id).is_some(),
-            "the same run must be readable again once the lock is released"
+            "the same run must still be readable once the lock is released"
         );
         assert!(runner.stop(goal_id));
     }
@@ -5691,7 +5726,7 @@ mod tests {
         .await;
         let elapsed = began.elapsed();
 
-        assert_eq!(state.lock().await.phase, GoalRunPhase::MaxIterationsReached);
+        assert_eq!(state.read().phase, GoalRunPhase::MaxIterationsReached);
         assert!(
             elapsed >= Duration::from_secs(MIN_GOAL_TICK_INTERVAL_SECS),
             "expected at least {MIN_GOAL_TICK_INTERVAL_SECS}s of tick sleep, took {elapsed:?}"
