@@ -747,8 +747,8 @@ class _KnowledgeResource(_Resource):
     def list_documents(self, name: str):
         return self._c._request("GET", f"/api/knowledge/{name}/documents")
 
-    def put_document(self, name: str, filename: str, **data):
-        return self._c._request("PUT", f"/api/knowledge/{name}/documents/{filename}", data)
+    def put_document(self, name: str, filename: str, body: bytes, content_type: str = "application/octet-stream"):
+        return self._c._request("PUT", f"/api/knowledge/{name}/documents/{filename}", body, content_type=content_type)
 
     def delete_document(self, name: str, filename: str):
         return self._c._request("DELETE", f"/api/knowledge/{name}/documents/{filename}")

@@ -871,8 +871,8 @@ class KnowledgeResource {
     return this._c._request("GET", `/api/knowledge/${name}/documents`);
   }
 
-  async putDocument(name, filename, data) {
-    return this._c._request("PUT", `/api/knowledge/${name}/documents/${filename}`, data, undefined);
+  async putDocument(name, filename, body, contentType) {
+    return this._c._request("PUT", `/api/knowledge/${name}/documents/${filename}`, body, undefined, contentType || "application/octet-stream");
   }
 
   async deleteDocument(name, filename) {

@@ -2657,14 +2657,21 @@ impl KnowledgeResource {
         .await
     }
 
-    pub async fn put_document(&self, name: &str, filename: &str, data: Value) -> Result<Value> {
-        do_req(
+    /// Sends a raw `application/octet-stream` body; `content_type` overrides that default.
+    pub async fn put_document(
+        &self,
+        name: &str,
+        filename: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<Value> {
+        do_req_raw(
             &self.client,
             &self.base_url,
             reqwest::Method::PUT,
             &["api", "knowledge", name, "documents", filename],
-            Some(data),
-            &[],
+            body,
+            content_type.unwrap_or("application/octet-stream"),
         )
         .await
     }
