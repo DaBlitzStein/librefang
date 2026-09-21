@@ -256,6 +256,20 @@ async fn upload_png(h: &Harness, name: &str, bytes: &[u8]) -> (StatusCode, serde
     .await
 }
 
+/// Upload an avatar and require it to have worked.
+///
+/// Most of this file uses an upload as a setup step and then asserts on a
+/// later read. When the upload is what failed, that shape reports it as a
+/// puzzling failure of the *reader* — which is exactly what happened while
+/// #8459 was being chased: a mid-test reload handed the kernel a different
+/// `home_dir`, the bytes went somewhere the assertions were not looking, and
+/// the failure surfaced two calls later as `has_avatar` being false. A setup
+/// step should fail as itself.
+async fn upload_png_ok(h: &Harness, name: &str, bytes: &[u8]) {
+    let (status, body) = upload_png(h, name, bytes).await;
+    assert_eq!(status, StatusCode::OK, "upload failed: {body:?}");
+}
+
 // ---------------------------------------------------------------------------
 // Round trip
 // ---------------------------------------------------------------------------
@@ -314,7 +328,7 @@ async fn avatar_upload_round_trips_and_shows_on_the_user_view() {
 #[tokio::test(flavor = "multi_thread")]
 async fn avatar_serves_a_304_for_a_matching_if_none_match() {
     let h = boot(vec![]).await;
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
 
     let (_, headers, _) = send_raw(h.app.clone(), get("/api/users/Alice/avatar", TEST_TOKEN)).await;
     let etag = headers["etag"].to_str().expect("etag").to_string();
@@ -328,7 +342,7 @@ async fn avatar_serves_a_304_for_a_matching_if_none_match() {
 
     // A validator that survives a content change would pin the old image in
     // every browser that had seen it.
-    upload_png(&h, "Alice", TINY_GIF).await;
+    upload_png_ok(&h, "Alice", TINY_GIF).await;
     let mut req = get("/api/users/Alice/avatar", TEST_TOKEN);
     req.headers_mut()
         .insert("if-none-match", etag.parse().expect("header value"));
@@ -344,7 +358,7 @@ async fn avatar_serves_a_304_for_a_matching_if_none_match() {
 #[tokio::test(flavor = "multi_thread")]
 async fn avatar_replacement_removes_the_previous_format() {
     let h = boot(vec![]).await;
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
     let (status, _) = upload_png(&h, "Alice", TINY_GIF).await;
     assert_eq!(status, StatusCode::OK);
 
@@ -398,7 +412,7 @@ async fn avatar_ignores_the_content_type_the_client_claims() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_me_segment_is_literal_and_does_not_fall_through_to_a_user_named_me() {
     let h = boot(vec![]).await;
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
     // The row named `me` is given an image by writing it straight to disk,
     // because the route that would upload one is shadowed — see
     // `the_row_named_me_cannot_be_written_to` for that half.
@@ -654,7 +668,7 @@ async fn a_device_name_is_not_a_file_name() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_user_avatar_is_not_an_agent_avatar() {
     let h = boot(vec![]).await;
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
 
     let dir = users_avatar_dir(&h);
     let agents = agent_avatar_dir(&h);
@@ -851,7 +865,7 @@ async fn non_owner_write_roles_are_refused_and_reads_are_not() {
 
     // Reads are on the generic authenticated-GET rule, so the lowest role sees
     // the avatar of a user it is not.
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
     for (label, token) in [
         ("viewer", VIEWER_KEY),
         ("user", USER_KEY),
@@ -1005,7 +1019,7 @@ async fn whoami_reports_the_callers_emoji_and_avatar() {
         ),
     )
     .await;
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
 
     // Asked as Alice, with Alice's own key — the credential that most needs
     // this and the one least able to reach a user-management endpoint.
@@ -1038,7 +1052,7 @@ async fn whoami_reports_the_callers_emoji_and_avatar() {
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_an_avatar_makes_it_404_and_clears_has_avatar() {
     let h = boot(vec![]).await;
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
 
     let (status, body) = send(
         h.app.clone(),
