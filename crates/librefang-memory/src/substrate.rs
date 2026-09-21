@@ -2836,7 +2836,15 @@ mod tests {
     async fn test_task_complete_stamps_finished_at() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None, 0, None, TaskQueueCaps::UNLIMITED)
+            .task_post(
+                "t",
+                "d",
+                Some("worker"),
+                None,
+                0,
+                None,
+                TaskQueueCaps::UNLIMITED,
+            )
             .await
             .unwrap();
         let _ = substrate
@@ -2863,7 +2871,15 @@ mod tests {
     async fn test_task_complete_cannot_revive_cancelled_claim() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None, 0, None, TaskQueueCaps::UNLIMITED)
+            .task_post(
+                "t",
+                "d",
+                Some("worker"),
+                None,
+                0,
+                None,
+                TaskQueueCaps::UNLIMITED,
+            )
             .await
             .unwrap();
         substrate
@@ -2947,7 +2963,15 @@ mod tests {
     async fn test_task_cancel_stamps_finished_at() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None, 0, None, TaskQueueCaps::UNLIMITED)
+            .task_post(
+                "t",
+                "d",
+                Some("worker"),
+                None,
+                0,
+                None,
+                TaskQueueCaps::UNLIMITED,
+            )
             .await
             .unwrap();
 
@@ -2982,7 +3006,15 @@ mod tests {
     async fn test_task_reset_to_pending_clears_finished_at() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None, 0, None, TaskQueueCaps::UNLIMITED)
+            .task_post(
+                "t",
+                "d",
+                Some("worker"),
+                None,
+                0,
+                None,
+                TaskQueueCaps::UNLIMITED,
+            )
             .await
             .unwrap();
 
@@ -3021,7 +3053,15 @@ mod tests {
     async fn test_task_reset_rejects_in_progress_to_prevent_duplicate_execution() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let task_id = substrate
-            .task_post("t", "d", Some("worker"), None, 0, None, TaskQueueCaps::UNLIMITED)
+            .task_post(
+                "t",
+                "d",
+                Some("worker"),
+                None,
+                0,
+                None,
+                TaskQueueCaps::UNLIMITED,
+            )
             .await
             .unwrap();
         {
