@@ -1183,6 +1183,37 @@ impl AgentSelectState {
         }
     }
 
+    /// Commit the field editor's buffer into `row`'s declaration.
+    ///
+    /// Shared by the advance (`Tab` / `Enter`) and the retreat (`Shift+Tab`)
+    /// so the two cannot drift on what a commit means — including the rule
+    /// that unrecognized mode input keeps the previous mode rather than
+    /// escalating a read-only folder to read-write by default.
+    fn commit_workspace_field(&mut self, row: usize, field: u8) {
+        let v = std::mem::take(&mut self.ws_buf);
+        if let Some(entry) = self.workspaces.get_mut(row) {
+            match field {
+                0 => entry.0 = v,
+                1 => entry.1 = v,
+                _ => {
+                    if let Some(m) = Self::parse_mode_input(&v) {
+                        entry.2 = m.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Open `field` on `row`, seeding the buffer from the stored value.
+    fn open_workspace_field(&mut self, row: usize, field: u8) {
+        self.ws_editing = Some((row, field));
+        self.ws_buf = self
+            .workspaces
+            .get(row)
+            .map(|e| Self::workspace_field(e, field))
+            .unwrap_or_default();
+    }
+
     fn handle_edit_workspaces(&mut self, key: KeyEvent) -> AgentAction {
         if let Some((row, field)) = self.ws_editing {
             match key.code {
@@ -1192,32 +1223,24 @@ impl AgentSelectState {
                 }
                 KeyCode::Enter | KeyCode::Tab => {
                     // Commit the buffer to the field, then move on.
-                    let v = self.ws_buf.clone();
-                    if let Some(entry) = self.workspaces.get_mut(row) {
-                        match field {
-                            0 => entry.0 = v,
-                            1 => entry.1 = v,
-                            // Unrecognized input keeps the previous mode
-                            // rather than escalating a read-only folder to
-                            // read-write by default.
-                            _ => {
-                                if let Some(m) = Self::parse_mode_input(&v) {
-                                    entry.2 = m.to_string();
-                                }
-                            }
-                        }
-                    }
-                    self.ws_buf.clear();
+                    self.commit_workspace_field(row, field);
                     if field == 2 {
                         self.ws_editing = None;
                     } else {
-                        self.ws_editing = Some((row, field + 1));
-                        self.ws_buf = self
-                            .workspaces
-                            .get(row)
-                            .map(|e| Self::workspace_field(e, field + 1))
-                            .unwrap_or_default();
+                        self.open_workspace_field(row, field + 1);
                     }
+                }
+                KeyCode::BackTab => {
+                    // The reverse of `Tab`, and the reason the global
+                    // handler exempts this key too: `Tab` is the advance
+                    // documented in `tui-agents-workspaces-help`, so the
+                    // key beside it is the retreat — not a tab switch that
+                    // abandons the buffer mid-edit (#7835).
+                    // Stepping back past the first field stays on it rather
+                    // than closing the editor, because `Tab` off the last
+                    // field means "done" and there is no matching "not yet".
+                    self.commit_workspace_field(row, field);
+                    self.open_workspace_field(row, field.saturating_sub(1));
                 }
                 KeyCode::Backspace => {
                     self.ws_buf.pop();
@@ -2671,6 +2694,12 @@ mod workspaces_tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    /// What a terminal sends for Shift+Tab: crossterm reports the shifted
+    /// tab as its own code, carrying the modifier rather than a plain `Tab`.
+    fn back_tab() -> KeyEvent {
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)
+    }
+
     /// Renders `draw_edit_workspaces` to an in-memory buffer and returns its
     /// text content, so a test can assert on what an operator would actually
     /// see rather than on internal state alone (#7835).
@@ -2738,6 +2767,42 @@ mod workspaces_tests {
         }
         state.handle_key(key(KeyCode::Tab));
         assert_eq!(state.workspaces[0].1, "shared/library");
+    }
+
+    #[test]
+    fn back_tab_steps_back_and_keeps_what_was_typed() {
+        let mut state = editing_state();
+        state.handle_key(key(KeyCode::Char('a')));
+        for c in "library".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Tab));
+        for c in "shared/library".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(back_tab());
+
+        assert_eq!(state.workspaces[0].0, "library");
+        assert_eq!(state.workspaces[0].1, "shared/library");
+        assert!(matches!(state.ws_editing, Some((0, 0))));
+        // The buffer belongs to the field focus landed on, not to the one
+        // it just committed: leaving the path in it would overwrite the
+        // name on the next keystroke.
+        assert_eq!(state.ws_buf, "library");
+    }
+
+    #[test]
+    fn back_tab_on_the_first_field_stays_on_it() {
+        let mut state = editing_state();
+        state.handle_key(key(KeyCode::Char('a')));
+        assert!(matches!(state.ws_editing, Some((0, 0))));
+
+        state.handle_key(back_tab());
+
+        // `Tab` off the last field means "done", so there is no matching
+        // "not done yet" to step back into — staying put is the only answer
+        // that does not close an editor the operator is still typing in.
+        assert!(matches!(state.ws_editing, Some((0, 0))));
     }
 
     #[test]

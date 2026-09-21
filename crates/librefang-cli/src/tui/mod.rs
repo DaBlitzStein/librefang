@@ -1316,9 +1316,13 @@ impl App {
             }
             // Tab cycling: Tab / Shift+Tab
             //
-            // Exempted while the shared-folders editor has a field open —
-            // there, Tab is the field-to-field advance documented in
+            // Both are exempted while the shared-folders editor has a field
+            // open — there they are the field-to-field steps documented in
             // `tui-agents-workspaces-help`, not a tab switch (#7835).
+            // Exempting `Tab` alone left `Shift+Tab` switching tabs and
+            // abandoning the buffer mid-edit, which is the same defect one
+            // key over, and it is the key an operator reaches for when they
+            // overshoot a field.
             let editing_workspace_field = matches!(self.active_tab, Tab::Agents)
                 && matches!(self.agents.sub, agents::AgentSubScreen::EditWorkspaces)
                 && self.agents.ws_editing.is_some();
@@ -1326,7 +1330,7 @@ impl App {
                 self.next_tab();
                 return;
             }
-            if key.code == KeyCode::BackTab {
+            if key.code == KeyCode::BackTab && !editing_workspace_field {
                 self.prev_tab();
                 return;
             }
@@ -3864,6 +3868,54 @@ mod agent_workspaces_tab_exemption_tests {
         assert!(
             matches!(app.agents.ws_editing, Some((0, 1))),
             "Tab must advance to the next field, not fall through to tab-cycling"
+        );
+        assert!(
+            matches!(app.active_tab, Tab::Agents),
+            "the global Tab-cycling handler must not fire while a field is open"
+        );
+    }
+
+    /// `Shift+Tab` while a shared-folders field is open must step back a
+    /// field, not switch tabs.
+    ///
+    /// Exempting `Tab` alone left the key beside it switching tabs and
+    /// abandoning the buffer mid-edit — the same defect one key over, on
+    /// the key an operator presses precisely because they overshot a field.
+    /// Both halves are asserted, because either one alone passes with the
+    /// bug still in place: the step-back would be invisible if the global
+    /// handler still consumed the key, and the exemption would be invisible
+    /// if `BackTab` did nothing once it arrived (#7835).
+    #[test]
+    fn back_tab_steps_back_a_field_instead_of_switching_tabs() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.phase = Phase::Main;
+        app.active_tab = Tab::Agents;
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+        app.agents.ws_loaded = true;
+        app.agents.handle_key(key(KeyCode::Char('a')));
+        assert!(matches!(app.agents.ws_editing, Some((0, 0))));
+
+        for c in "library".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Tab));
+        assert!(matches!(app.agents.ws_editing, Some((0, 1))));
+
+        for c in "/srv/docs".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+
+        assert_eq!(app.agents.workspaces[0].0, "library");
+        assert_eq!(app.agents.workspaces[0].1, "/srv/docs");
+        assert!(
+            matches!(app.agents.ws_editing, Some((0, 0))),
+            "Shift+Tab must step back to the previous field"
         );
         assert!(
             matches!(app.active_tab, Tab::Agents),
