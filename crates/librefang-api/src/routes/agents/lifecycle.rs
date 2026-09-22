@@ -40,26 +40,48 @@ async fn resolve_manifest(
                     message: t.t("api-error-template-invalid-name"),
                 });
             }
-            let tmpl_path = state
-                .kernel
-                .config_ref()
-                .home_dir
+            let home = state.kernel.config_ref().home_dir.clone();
+            // The **agent type** is what a deployment copies from, and it lives
+            // in its own store (`<home>/agent-types/<name>.toml`). The agent
+            // instance of the same name is only a fallback, for deployments
+            // that keep their templates in the workspaces tree.
+            //
+            // Reading the type first is not a preference: a type is a spec — the
+            // API never writes a `workspace` into one (`AgentTypeSpec` has no
+            // such field) — whereas an instance is a live agent's own manifest,
+            // and spawn has written its resolved absolute workspace into it.
+            // The type is what a template is supposed to be; the instance is a
+            // copy of an agent, sessions and memory included.
+            //
+            // A hand-written file in either store can still carry a `workspace`,
+            // which is why the decision about honouring one is made in the
+            // kernel, where every caller passes. See `kernel/spawn.rs`.
+            let type_path =
+                librefang_types::agent_type_store::agent_type_path_in(&home, &safe_name);
+            let instance_path = home
                 .join("workspaces")
                 .join("agents")
                 .join(&safe_name)
                 .join("agent.toml");
             // Use tokio::fs to avoid blocking in an async context
-            match tokio::fs::read_to_string(&tmpl_path).await {
+            match tokio::fs::read_to_string(&type_path).await {
                 Ok(content) => {
                     used_template = Some(safe_name.clone());
                     content
                 }
-                Err(_) => {
-                    let t = ErrorTranslator::new(lang);
-                    return Err(ManifestError {
-                        message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
-                    });
-                }
+                Err(_) => match tokio::fs::read_to_string(&instance_path).await {
+                    Ok(content) => {
+                        used_template = Some(safe_name.clone());
+                        content
+                    }
+                    Err(_) => {
+                        let t = ErrorTranslator::new(lang);
+                        return Err(ManifestError {
+                            message: t
+                                .t_args("api-error-template-not-found", &[("name", &safe_name)]),
+                        });
+                    }
+                },
             }
         } else {
             let t = ErrorTranslator::new(lang);
@@ -126,8 +148,14 @@ async fn resolve_manifest(
             manifest.name = custom_name.trim().to_string();
         }
     }
-    if used_template.is_some() {
-        manifest.source_template = used_template;
+    if let Some(template_name) = used_template {
+        // A workspace the template carried is *not* dropped here. Whether it
+        // may be honoured is a question about where the path points, and only
+        // the kernel can answer it — it is the one place every door passes
+        // through, and a caller that supplies `manifest_toml` directly (the CLI
+        // expands a template before posting it) never reaches this function at
+        // all. See the guard in `kernel/spawn.rs`.
+        manifest.source_template = Some(template_name);
     }
 
     let name = manifest.name.clone();

@@ -275,6 +275,52 @@ impl LibreFangKernel {
         // Apply global budget defaults to agent resource quotas
         apply_budget_defaults(&self.current_budget(), &mut manifest.resources);
 
+        // An agent must never be handed *another agent's* directory as its workspace.
+        //
+        // Spawn writes the resolved absolute workspace back into `agent.toml`
+        // (`manifest.workspace = Some(workspace_dir)`, below), so every live
+        // agent's file carries its own path — and that path is where its
+        // `.identity/IDENTITY.md`, its sessions and its memory live. Anything
+        // that copies such a manifest forward hands all three over: a template
+        // instantiation from an agent instance, a clone, the CLI's
+        // `agent spawn --template`, or any caller posting a `manifest_toml`.
+        // The new agent then reads the other agent's identity file and presents
+        // itself as the agent it was copied from.
+        //
+        // The check is deliberately here rather than at the template lookup,
+        // because the lookup is only one of those doors: `resolve_manifest`
+        // never sees a caller that supplies `manifest_toml` directly.
+        //
+        // It is also about where the path *points*, not what the agent is
+        // called. `resolved_workspace_dir` honours an absolute path under the
+        // workspaces root on purpose (#4991, so a recreate or a restart reuses
+        // the same directory), and another agent's directory is under that
+        // root — so the question has to be "is this mine?", answered against
+        // the directory this agent would otherwise get. A shared directory is
+        // reached through the sibling `[workspaces]` table and lives under the
+        // named-workspaces root, so it is left alone, as is a hand's relative
+        // `hands/<hand>/<role>`.
+        if let Some(requested) = manifest.workspace.as_ref() {
+            let agents_root = cfg.effective_agent_workspaces_dir();
+            // A path carrying `..` is deliberately left for
+            // `resolve_workspace_dir` to *reject*: clearing it here would turn a
+            // traversal attempt into a quiet 201, which is a different contract
+            // from the one that check enforces and the one
+            // `agents_routes_integration.rs` pins.
+            if requested.starts_with(&agents_root) && !has_unsafe_relative_components(requested) {
+                let own = resolved_workspace_dir(&agents_root, None, &name, agent_id)?;
+                if *requested != own {
+                    tracing::warn!(
+                        agent = %name,
+                        requested_workspace = %requested.display(),
+                        own_workspace = %own.display(),
+                        "manifest names another agent's workspace directory; using this agent's own"
+                    );
+                    manifest.workspace = None;
+                }
+            }
+        }
+
         // Create workspace directory for the agent.
         // Hand agents set a relative workspace path (hands/<hand>/<role>) resolved
         // against the workspaces root. Standalone agents go to workspaces/agents/<name>.
