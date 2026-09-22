@@ -785,6 +785,23 @@ pub(super) fn generate_identity_files(
         create_new_or_cleanup(&path, content.as_bytes(), "identity file");
     }
 
+    // `IDENTITY.md`'s front-matter `name:` is derived from the manifest for the same reason
+    // `TOOLS.md`'s paths are, and it had the staleness problem those paths were rewritten to avoid:
+    // the file is `create_new`, so renaming an agent left the old name inside it — and that file is
+    // injected **verbatim** into the system prompt, so the agent went on introducing itself by the
+    // name it was created with, with no re-spawn able to correct it.
+    //
+    // Only the `name:` line between the front-matter fences is touched. Every other line stays
+    // exactly as the operator left it, which is the promise `create_new` exists to keep.
+    let identity_path = identity_dir.join("IDENTITY.md");
+    if let Err(e) = reconcile_identity_name(&identity_path, &manifest.name) {
+        tracing::warn!(
+            path = %identity_path.display(),
+            error = %e,
+            "Failed to reconcile the name in IDENTITY.md; the prompt may carry a stale name"
+        );
+    }
+
     // TOOLS.md is auto-generated config — always rewrite so named workspace
     // paths stay current. Write-then-rename atomically: the previous
     // `truncate(true)` + swallowed `write_all` left an empty or half-written
@@ -865,6 +882,50 @@ fn build_tools_content(resolved_workspaces: &HashMap<String, (PathBuf, Workspace
     }
 
     content
+}
+
+/// Make `IDENTITY.md`'s front-matter `name:` agree with the manifest, and touch nothing else.
+///
+/// A no-op when the file is absent (it is about to be created with the right name), when its front
+/// matter has no `name:` key, or when it already agrees.
+///
+/// The search is bounded to the block between the first two `---` fences. An identity file's *body*
+/// is prose, and a body line beginning `name:` is the operator's sentence, not the agent's name.
+fn reconcile_identity_name(path: &Path, name: &str) -> std::io::Result<()> {
+    let Ok(source) = std::fs::read_to_string(path) else {
+        return Ok(());
+    };
+
+    let mut lines: Vec<String> = source.lines().map(str::to_owned).collect();
+    let mut fence = 0usize;
+    let mut replaced = false;
+    for line in &mut lines {
+        if line.trim() == "---" {
+            fence += 1;
+            // Past the closing fence is body: stop looking.
+            if fence >= 2 {
+                break;
+            }
+            continue;
+        }
+        if fence == 1 && line.trim_start().starts_with("name:") {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            *line = format!("{indent}name: {name}");
+            replaced = true;
+        }
+    }
+    if !replaced {
+        return Ok(());
+    }
+
+    let mut out = lines.join("\n");
+    if source.ends_with('\n') {
+        out.push('\n');
+    }
+    if out == source {
+        return Ok(());
+    }
+    super::cron_script::atomic_write_toml(path, &out)
 }
 
 /// One-shot migration: move identity files from the workspace root into `.identity/`.
@@ -1609,5 +1670,113 @@ mod non_ascii_fallback_tests {
             "fallback component must match the spawned workspace directory"
         );
         assert_eq!(fallback_component, agent_id.to_string());
+    }
+}
+
+#[cfg(test)]
+mod identity_name_reconcile_tests {
+    use super::reconcile_identity_name;
+
+    fn write(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let path = dir.join("IDENTITY.md");
+        std::fs::write(&path, body).expect("write");
+        path
+    }
+
+    /// The rename that used to be impossible: the file is `create_new`, so the only way the name
+    /// inside it could ever change was for nothing — and that file is injected verbatim into the
+    /// prompt, so the agent introduced itself by its creation-time name forever.
+    #[test]
+    fn a_stale_name_in_the_front_matter_is_replaced() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = write(
+            tmp.path(),
+            "---\nname: orchestrator\narchetype: assistant\n---\n# Identity\nWho I am.\n",
+        );
+
+        reconcile_identity_name(&path, "laforge").expect("reconcile");
+
+        let after = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(
+            after, "---\nname: laforge\narchetype: assistant\n---\n# Identity\nWho I am.\n",
+            "only the name line may move"
+        );
+    }
+
+    /// The body is the operator's prose. A sentence there that happens to begin `name:` is not the
+    /// agent's name, and rewriting it would be the same class of damage `create_new` exists to
+    /// prevent.
+    #[test]
+    fn a_name_line_in_the_body_is_left_alone() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let original = "---\nname: laforge\n---\n# Identity\nMy name: is a sentence about naming.\nname: not a key\n";
+        let path = write(tmp.path(), original);
+
+        reconcile_identity_name(&path, "laforge").expect("reconcile");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            original,
+            "a body line beginning `name:` is prose, not the key"
+        );
+    }
+
+    #[test]
+    fn a_missing_file_is_a_no_op_not_an_error() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("IDENTITY.md");
+
+        reconcile_identity_name(&path, "laforge").expect("absent file must not fail");
+
+        assert!(!path.exists(), "and must not create it");
+    }
+
+    /// The call site, which is where the fix actually lives.
+    ///
+    /// The helper tests above pass with the call removed, so they custody the function and not the
+    /// behaviour. This one goes through `generate_identity_files` — the spawn path — which is what
+    /// a rename actually runs.
+    #[test]
+    fn a_spawn_rewrites_a_name_the_manifest_no_longer_agrees_with() {
+        use super::generate_identity_files;
+        use librefang_types::agent::AgentManifest;
+        use std::collections::HashMap;
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let identity_dir = tmp.path().join(".identity");
+        std::fs::create_dir_all(&identity_dir).expect("identity dir");
+        let path = identity_dir.join("IDENTITY.md");
+        std::fs::write(
+            &path,
+            "---\nname: orchestrator\narchetype: assistant\n---\n# Identity\nWho I am.\n",
+        )
+        .expect("write");
+
+        let manifest = AgentManifest {
+            name: "laforge".to_string(),
+            ..AgentManifest::default()
+        };
+        generate_identity_files(tmp.path(), &manifest, &HashMap::new());
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "---\nname: laforge\narchetype: assistant\n---\n# Identity\nWho I am.\n",
+            "a spawn must reconcile the name the prompt is about to carry"
+        );
+    }
+
+    #[test]
+    fn front_matter_without_a_name_key_is_left_alone() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let original = "---\narchetype: assistant\n---\n# Identity\n";
+        let path = write(tmp.path(), original);
+
+        reconcile_identity_name(&path, "laforge").expect("reconcile");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            original,
+            "no `name:` key means nothing to reconcile"
+        );
     }
 }
