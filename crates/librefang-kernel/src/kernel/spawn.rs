@@ -310,12 +310,30 @@ impl LibreFangKernel {
             if requested.starts_with(&agents_root) && !has_unsafe_relative_components(requested) {
                 let own = resolved_workspace_dir(&agents_root, None, &name, agent_id)?;
                 if *requested != own {
-                    tracing::warn!(
-                        agent = %name,
-                        requested_workspace = %requested.display(),
-                        own_workspace = %own.display(),
-                        "manifest names another agent's workspace directory; using this agent's own"
-                    );
+                    // Whether the directory being left behind holds anything is
+                    // the difference between correcting a manifest and
+                    // abandoning an agent's identity, sessions and memory, so
+                    // say which one it is rather than emitting the same line
+                    // for both.
+                    let abandoned = requested.is_dir() && directory_has_entries(requested);
+                    if abandoned {
+                        tracing::warn!(
+                            agent = %name,
+                            requested_workspace = %requested.display(),
+                            own_workspace = %own.display(),
+                            "manifest names another agent's workspace directory, and that \
+                             directory is not empty — this agent is moving to its own, and \
+                             whatever it kept there stays behind under the other agent's"
+                        );
+                    } else {
+                        tracing::warn!(
+                            agent = %name,
+                            requested_workspace = %requested.display(),
+                            own_workspace = %own.display(),
+                            "manifest names another agent's workspace directory; using this \
+                             agent's own"
+                        );
+                    }
                     manifest.workspace = None;
                 }
             }
@@ -646,4 +664,17 @@ impl LibreFangKernel {
         }
         Ok(keys)
     }
+}
+
+/// Whether a directory holds anything worth keeping.
+///
+/// Used by the spawn guard to tell "this manifest names the wrong directory"
+/// from "and moving on would leave an agent's identity, sessions and memory
+/// behind", so the two read differently in the log. A read error answers
+/// `false`: the guard's own decision does not depend on it, and a directory it
+/// cannot read is not evidence that something was abandoned there.
+fn directory_has_entries(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
 }
