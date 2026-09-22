@@ -679,11 +679,19 @@ pub async fn set_agent_file(
                 Json(serde_json::json!({"error": scrub_500(&error, &t)})),
             );
         }
+        // `NotFound` reaches a write the same way it reaches a read: `resolve_identity_file` maps
+        // every `canonicalize` failure to it, and a file removed between the `.exists()` check and
+        // that call lands here without anything having gone wrong on this side.
+        //
+        // It answered `500` with "unexpectedly resolved as not found" while the `GET` and `DELETE`
+        // on the same resource answer `404` from the same variant — one resource, one error, three
+        // verbs, and the write was the only one calling a missing file a server fault. The caller
+        // can act on a 404; a 500 tells them to retry something that will not come back.
         Ok(Err(IdentityFileMutationError::NotFound)) => {
-            return ApiErrorResponse::internal_scrub(
-                "identity-file write unexpectedly resolved as not found",
-            )
-            .into_json_tuple();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
+            );
         }
         Err(error) => {
             return (
