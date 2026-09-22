@@ -78,8 +78,24 @@ export interface ManifestFormState {
     network: string[];
     shell: string[];
     tools: string[];
-    memory_read: string[];
-    memory_write: string[];
+    /**
+     * `null` when the manifest never declared the key.
+     *
+     * These two are the only capability lists where the kernel tells the two
+     * apart, and the difference is load-bearing (#7605): an absent key is
+     * permissive, while `memory_read = []` is a **declared** empty list that
+     * grants nothing — so it denies. Everywhere else an empty list reads as
+     * "undeclared, therefore unrestricted" (`capabilities.tools = []` grants
+     * every tool), which is exactly why these two are `Option<Vec<String>>`
+     * kernel-side (`librefang-types/src/agent.rs:1888`).
+     *
+     * Collapsing both to `[]` loses the deny: the emitter would then have no
+     * way to tell "never declared" from "declared and empty", and it omits
+     * empty lists — silently turning an agent locked out of memory into an
+     * unrestricted one the first time anyone saves the form.
+     */
+    memory_read: string[] | null;
+    memory_write: string[] | null;
     agent_message: string[];
     ofp_connect: string[];
     agent_spawn: boolean;
@@ -239,8 +255,11 @@ export const emptyManifestForm = (): ManifestFormState => ({
     network: [],
     shell: [],
     tools: [],
-    memory_read: [],
-    memory_write: [],
+    // `null`, not `[]`: a manifest that never had a `[capabilities]` block
+    // declares neither, and `[]` would emit a deny the operator never asked
+    // for. See the field doc on `ManifestFormState["capabilities"]`.
+    memory_read: null,
+    memory_write: null,
     agent_message: [],
     ofp_connect: [],
     agent_spawn: false,
@@ -734,8 +753,11 @@ export const serializeManifestForm = (
   if (form.capabilities.network.length) capabilityBody.push(`network = ${tomlArray(form.capabilities.network)}`);
   if (form.capabilities.shell.length) capabilityBody.push(`shell = ${tomlArray(form.capabilities.shell)}`);
   if (form.capabilities.tools.length) capabilityBody.push(`tools = ${tomlArray(form.capabilities.tools)}`);
-  if (form.capabilities.memory_read.length) capabilityBody.push(`memory_read = ${tomlArray(form.capabilities.memory_read)}`);
-  if (form.capabilities.memory_write.length) capabilityBody.push(`memory_write = ${tomlArray(form.capabilities.memory_write)}`);
+  // Not `if (….length)`: an empty-but-declared list is a deny, and emitting
+  // nothing would silently lift it. `null` is the only value that means
+  // "never declared", and only it is omitted.
+  if (form.capabilities.memory_read !== null) capabilityBody.push(`memory_read = ${tomlArray(form.capabilities.memory_read)}`);
+  if (form.capabilities.memory_write !== null) capabilityBody.push(`memory_write = ${tomlArray(form.capabilities.memory_write)}`);
   if (form.capabilities.agent_message.length) capabilityBody.push(`agent_message = ${tomlArray(form.capabilities.agent_message)}`);
   if (form.capabilities.ofp_connect.length) capabilityBody.push(`ofp_connect = ${tomlArray(form.capabilities.ofp_connect)}`);
   if (form.capabilities.agent_spawn) writeBoolScalar(capabilityBody, "agent_spawn", true);
@@ -1149,6 +1171,17 @@ const asStringArray = (v: unknown): string[] => {
   if (!Array.isArray(v)) return [];
   return v.filter((x): x is string => typeof x === "string");
 };
+/**
+ * Like {@link asStringArray}, but keeps "the key was not there" apart from
+ * "the key was there and held nothing".
+ *
+ * Only `memory_read` / `memory_write` need it: the kernel reads those two as
+ * `Option<Vec<String>>`, where absent is permissive and `[]` denies (#7605).
+ * For every other list the two collapse to the same meaning, which is why
+ * they are plain `string[]`.
+ */
+const asDeclaredStringArray = (v: unknown): string[] | null =>
+  v === undefined || v === null ? null : asStringArray(v);
 const containsBigInt = (value: unknown): boolean => {
   if (typeof value === "bigint") return true;
   if (Array.isArray(value)) return value.some(containsBigInt);
@@ -1288,8 +1321,10 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.capabilities.network = asStringArray(capTable.network);
   form.capabilities.shell = asStringArray(capTable.shell);
   form.capabilities.tools = asStringArray(capTable.tools);
-  form.capabilities.memory_read = asStringArray(capTable.memory_read);
-  form.capabilities.memory_write = asStringArray(capTable.memory_write);
+  // Not `asStringArray`: `memory_read = []` is a deny the kernel honours, so
+  // the form has to carry it forward rather than flatten it into "absent".
+  form.capabilities.memory_read = asDeclaredStringArray(capTable.memory_read);
+  form.capabilities.memory_write = asDeclaredStringArray(capTable.memory_write);
   form.capabilities.agent_message = asStringArray(capTable.agent_message);
   form.capabilities.ofp_connect = asStringArray(capTable.ofp_connect);
   form.capabilities.agent_spawn = asBoolean(capTable.agent_spawn, false);
