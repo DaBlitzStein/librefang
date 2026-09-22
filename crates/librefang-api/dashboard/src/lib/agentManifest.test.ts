@@ -1274,3 +1274,48 @@ describe("agentManifest capability routing", () => {
     expect(parsed.form.capabilities.image_understanding).toBe("openai/gpt-4o");
   });
 });
+
+/**
+ * `memory_read` and `memory_write` are the two capability lists the kernel
+ * reads as `Option<Vec<String>>`, where an absent key is permissive but a
+ * declared empty list grants nothing (#7605). The form has to keep all three
+ * states apart, because the one it used to lose was the deny.
+ */
+describe("declared-empty memory capability lists", () => {
+  const withMemoryRead = (value: string): string =>
+    ['name = "locked"', "", "[capabilities]", `memory_read = ${value}`].join("\n");
+
+  it("keeps a declared empty list empty instead of dropping the deny", () => {
+    const parsed = parseManifestToml(withMemoryRead("[]"));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.capabilities.memory_read).toEqual([]);
+
+    // The whole point: `[]` denies, and emitting nothing would grant.
+    expect(serializeManifestForm(parsed.form)).toContain("memory_read = []");
+  });
+
+  it("leaves the key off disk when the manifest never declared it", () => {
+    const parsed = parseManifestToml(['name = "open"', "", "[capabilities]", 'tools = ["*"]'].join("\n"));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.capabilities.memory_read).toBeNull();
+
+    // Absent stays absent — the operator must not gain a deny by saving.
+    expect(serializeManifestForm(parsed.form)).not.toContain("memory_read");
+  });
+
+  it("round-trips a populated list unchanged", () => {
+    const parsed = parseManifestToml(withMemoryRead('["user/*"]'));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    expect(serializeManifestForm(parsed.form)).toContain('memory_read = ["user/*"]');
+  });
+
+  it("tells the two empty states apart on a fresh form", () => {
+    // A brand-new agent declares nothing, so it must not be written as a deny.
+    expect(emptyManifestForm().capabilities.memory_read).toBeNull();
+    expect(emptyManifestForm().capabilities.memory_write).toBeNull();
+  });
+});
