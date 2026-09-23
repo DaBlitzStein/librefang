@@ -1802,6 +1802,9 @@ tui-templates-restore-invalid-name = Invalid template name
 tui-templates-restore-success = Restored from registry
 tui-templates-restore-daemon-only = Registry restore requires daemon mode
 tui-templates-restore-custom-only = Restore from registry is only available for custom templates
+
+tui-templates-confirm-restore = Overwrite this agent type with the registry copy? [y] Yes  [any] Cancel
+tui-templates-confirm-restore-version = Roll this agent type back to the selected version? [y] Yes  [any] Cancel
 tui-templates-restore-ok = ✓ { $name }: { $message }
 tui-templates-restore-fail = ✗ { $name }: { $message }
 tui-templates-restoring = Restoring { $name } from registry…

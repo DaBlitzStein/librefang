@@ -853,6 +853,9 @@ tui-templates-restore-invalid-name = 无效的模板名称
 tui-templates-restore-success = 已从注册表还原
 tui-templates-restore-daemon-only = 从注册表还原需要守护进程模式
 tui-templates-restore-custom-only = 仅自定义模板支持从注册表还原
+
+tui-templates-confirm-restore = 用注册表中的副本覆盖此 agent 类型？[y] 是  [任意键] 取消
+tui-templates-confirm-restore-version = 将此 agent 类型回滚到所选版本？[y] 是  [任意键] 取消
 tui-templates-restore-ok = ✓ { $name }: { $message }
 tui-templates-restore-fail = ✗ { $name }: { $message }
 tui-templates-restoring = 正在从注册表还原 { $name }…

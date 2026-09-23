@@ -1797,6 +1797,9 @@ tui-templates-restore-invalid-name = 잘못된 템플릿 이름입니다
 tui-templates-restore-success = 레지스트리에서 복원했습니다
 tui-templates-restore-daemon-only = 레지스트리 복원은 데몬 모드가 필요합니다
 tui-templates-restore-custom-only = 레지스트리 복원은 사용자 정의 템플릿에만 사용할 수 있습니다
+
+tui-templates-confirm-restore = 이 에이전트 유형을 레지스트리 사본으로 덮어쓰시겠습니까? [y] 예  [any] 취소
+tui-templates-confirm-restore-version = 이 에이전트 유형을 선택한 버전으로 되돌리시겠습니까? [y] 예  [any] 취소
 tui-templates-restore-ok = ✓ { $name }: { $message }
 tui-templates-restore-fail = ✗ { $name }: { $message }
 tui-templates-restoring = { $name }을(를) 레지스트리에서 복원하는 중…

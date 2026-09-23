@@ -1818,6 +1818,9 @@ tui-templates-restore-invalid-name = Недійсна назва шаблону
 tui-templates-restore-success = Відновлено з реєстру
 tui-templates-restore-daemon-only = Відновлення з реєстру потребує режиму демона
 tui-templates-restore-custom-only = Відновлення з реєстру доступне лише для власних шаблонів
+
+tui-templates-confirm-restore = Перезаписати цей тип агента копією з реєстру? [y] Так  [будь-яка клавіша] Скасувати
+tui-templates-confirm-restore-version = Відкотити цей тип агента до вибраної версії? [y] Так  [будь-яка клавіша] Скасувати
 tui-templates-restore-ok = ✓ { $name }: { $message }
 tui-templates-restore-fail = ✗ { $name }: { $message }
 tui-templates-restoring = Відновлення { $name } з реєстру…

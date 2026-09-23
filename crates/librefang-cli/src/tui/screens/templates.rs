@@ -211,6 +211,14 @@ pub struct TemplatesState {
     pub showing_history: bool,
     pub history_list: ListState,
     pub history_name: String,
+    /// Armed by `R` on a registry-backed row. The overwrite it stages is not
+    /// undoable from here, so it waits for an explicit `y`.
+    pub confirm_restore: bool,
+    /// Armed by `Enter` in the history overlay, which overwrites the agent
+    /// type's manifest with one historical version. `Enter` is the key an
+    /// operator presses to *open* a row, so arming rather than firing is what
+    /// keeps "look at a version" from being "roll back to it".
+    pub confirm_restore_version: bool,
 }
 
 pub enum TemplatesAction {
@@ -256,6 +264,8 @@ impl TemplatesState {
             showing_history: false,
             history_list: ListState::default(),
             history_name: String::new(),
+            confirm_restore: false,
+            confirm_restore_version: false,
         };
         state.list_state.select(Some(0));
         state
@@ -317,6 +327,27 @@ impl TemplatesState {
 
         if self.showing_history {
             let total = self.version_history.len();
+            // An armed restore owns the next key: `y` fires it and anything else
+            // cancels. Consuming the key matters as much as the ask does —
+            // letting `↓` through would move the selection under the prompt and
+            // roll back to a version the operator never looked at.
+            if self.confirm_restore_version {
+                if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                    self.confirm_restore_version = false;
+                    if let Some(row) = self
+                        .history_list
+                        .selected()
+                        .and_then(|i| self.version_history.get(i))
+                    {
+                        return TemplatesAction::RestoreTemplateVersion {
+                            name: self.history_name.clone(),
+                            version_id: row.id.clone(),
+                        };
+                    }
+                }
+                self.confirm_restore_version = false;
+                return TemplatesAction::Continue;
+            }
             match key.code {
                 KeyCode::Esc => {
                     self.showing_history = false;
@@ -333,19 +364,39 @@ impl TemplatesState {
                     self.history_list.select(Some(next));
                 }
                 KeyCode::Enter if total > 0 => {
-                    if let Some(row) = self
+                    // Arm, don't fire. `Enter` is how an operator inspects a row,
+                    // and this one overwrites the agent type's manifest with the
+                    // version under the cursor.
+                    if self
                         .history_list
                         .selected()
                         .and_then(|i| self.version_history.get(i))
+                        .is_some()
                     {
-                        return TemplatesAction::RestoreTemplateVersion {
-                            name: self.history_name.clone(),
-                            version_id: row.id.clone(),
-                        };
+                        self.confirm_restore_version = true;
                     }
                 }
                 _ => {}
             }
+            return TemplatesAction::Continue;
+        }
+
+        // Same two-step as the overlay above, for the `R` on a registry-backed
+        // row: it replaces the agent type's manifest with the registry copy, and
+        // it is one Shift away from `r` (refresh).
+        if self.confirm_restore {
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                self.confirm_restore = false;
+                if let Some(&idx) = self
+                    .list_state
+                    .selected()
+                    .and_then(|s| self.filtered.get(s))
+                {
+                    let name = self.templates[idx].name.clone();
+                    return TemplatesAction::RestoreFromRegistry { name };
+                }
+            }
+            self.confirm_restore = false;
             return TemplatesAction::Continue;
         }
 
@@ -402,11 +453,10 @@ impl TemplatesState {
                     if let Some(&idx) = self.filtered.get(sel) {
                         let t = &self.templates[idx];
                         if t.source == TemplateSource::Manifest {
-                            return TemplatesAction::RestoreFromRegistry {
-                                name: t.name.clone(),
-                            };
+                            self.confirm_restore = true;
+                        } else {
+                            self.status_msg = crate::i18n::t("tui-templates-restore-custom-only");
                         }
-                        self.status_msg = crate::i18n::t("tui-templates-restore-custom-only");
                     }
                 }
             }
@@ -607,7 +657,12 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
         );
     } else {
         f.render_widget(
-            widgets::hint_bar(&crate::i18n::t("tui-templates-hints")),
+            widgets::confirm_or_status_or_hint(
+                state.confirm_restore,
+                &crate::i18n::t("tui-templates-confirm-restore"),
+                "",
+                &crate::i18n::t("tui-templates-hints"),
+            ),
             chunks[3],
         );
     }
@@ -687,7 +742,12 @@ fn draw_version_history(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
     }
 
     f.render_widget(
-        widgets::hint_bar(&crate::i18n::t("tui-templates-history-hints")),
+        widgets::confirm_or_status_or_hint(
+            state.confirm_restore_version,
+            &crate::i18n::t("tui-templates-confirm-restore-version"),
+            "",
+            &crate::i18n::t("tui-templates-history-hints"),
+        ),
         chunks[2],
     );
 }
@@ -957,10 +1017,87 @@ mod tests {
             .position(|&i| i == idx)
             .expect("payroll is reachable");
         state.list_state.select(Some(pos));
+        // `R` arms; it does not overwrite on its own. The registry copy replaces
+        // the agent type's manifest, and `R` is one Shift away from `r`.
         assert!(matches!(
             state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE)),
+            TemplatesAction::Continue
+        ));
+        assert!(state.confirm_restore, "R did not arm the confirmation");
+
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
             TemplatesAction::RestoreFromRegistry { .. }
         ));
+        assert!(
+            !state.confirm_restore,
+            "the armed flag survived the restore"
+        );
+    }
+
+    #[test]
+    fn a_restore_armed_but_not_confirmed_writes_nothing() {
+        let mut state = TemplatesState::new();
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "payroll".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let idx = state
+            .templates
+            .iter()
+            .position(|t| t.name == "payroll")
+            .expect("manifest row exists");
+        let pos = state
+            .filtered
+            .iter()
+            .position(|&i| i == idx)
+            .expect("payroll is reachable");
+        state.list_state.select(Some(pos));
+        state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+
+        // Every key except `y` cancels — `n`, `Esc`, and the arrow keys alike.
+        for cancel in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Down] {
+            state.confirm_restore = true;
+            let action = state.handle_key(KeyEvent::new(cancel, KeyModifiers::NONE));
+            assert!(
+                matches!(action, TemplatesAction::Continue),
+                "{cancel:?} fired the restore instead of cancelling it"
+            );
+            assert!(!state.confirm_restore, "{cancel:?} left the flag armed");
+        }
+    }
+
+    #[test]
+    fn a_key_that_arms_a_restore_still_consumes_the_selection() {
+        // The armed prompt owns the next key. If `Down` reached the list, the
+        // confirmation would land on a row the operator never chose.
+        let mut state = TemplatesState::new();
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "payroll".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let idx = state
+            .templates
+            .iter()
+            .position(|t| t.name == "payroll")
+            .expect("manifest row exists");
+        let pos = state
+            .filtered
+            .iter()
+            .position(|&i| i == idx)
+            .expect("payroll is reachable");
+        state.list_state.select(Some(pos));
+        state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(state.list_state.selected(), Some(pos), "the cursor moved");
     }
 
     #[test]
@@ -1059,7 +1196,16 @@ mod tests {
             },
         ];
         state.history_list.select(Some(1));
+        // `Enter` opens a row everywhere else in the TUI; here it used to
+        // overwrite the agent type's manifest on the same tick. It arms now.
         let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, TemplatesAction::Continue));
+        assert!(
+            state.confirm_restore_version,
+            "Enter did not arm the rollback"
+        );
+
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         match action {
             TemplatesAction::RestoreTemplateVersion { name, version_id } => {
                 assert_eq!(name, "payroll");
@@ -1069,6 +1215,36 @@ mod tests {
         }
         // The overlay stays open until the daemon confirms the restore.
         assert!(state.showing_history);
+        assert!(!state.confirm_restore_version);
+    }
+
+    #[test]
+    fn an_armed_rollback_survives_no_key_but_y() {
+        let mut state = TemplatesState::new();
+        state.showing_history = true;
+        state.history_name = "payroll".to_string();
+        state.version_history = vec![TemplateVersionRow {
+            id: "2".to_string(),
+            timestamp: "t2".to_string(),
+            change_source: "update".to_string(),
+        }];
+        state.history_list.select(Some(0));
+
+        for cancel in [KeyCode::Esc, KeyCode::Up, KeyCode::Down, KeyCode::Char('n')] {
+            state.confirm_restore_version = true;
+            let action = state.handle_key(KeyEvent::new(cancel, KeyModifiers::NONE));
+            assert!(
+                matches!(action, TemplatesAction::Continue),
+                "{cancel:?} rolled the type back instead of cancelling"
+            );
+            assert!(
+                !state.confirm_restore_version,
+                "{cancel:?} left the rollback armed"
+            );
+        }
+        // `Esc` still closes the overlay, one key after the cancel above.
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!state.showing_history);
     }
 
     #[test]
