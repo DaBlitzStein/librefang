@@ -1895,6 +1895,71 @@ export async function updateAgentIdentity(
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/identity`, identity);
 }
 
+// --- Agent visual identity: emoji, colour, avatar image (#8339) ------------
+
+/** Largest avatar the daemon stores, mirroring `MAX_AVATAR_BYTES` in
+ *  `crates/librefang-api/src/routes/agents/avatar.rs`.
+ *
+ *  Duplicated here to fail before spending the upload, not to decide: a stale
+ *  copy of this number can only be wrong in the direction of sending bytes the
+ *  server then rejects with a 413 that names the real cap. */
+
+/** Image types the daemon accepts as an avatar, mirroring
+ *  `librefang_types::media::ALLOWED_IMAGE_TYPES`.
+ *
+ *  SVG is absent on purpose and its absence is load-bearing: an SVG is XML that
+ *  can carry script, and the daemon serves avatars back to a browser. Note the
+ *  server decides by sniffing the bytes and ignores both the `Content-Type` we
+ *  send and the name of the file, so this list is a courtesy to the person
+ *  picking the file — never the check that matters. */
+
+/** The one path an agent's avatar can live at, mirroring
+ *  `librefang_types::media::agent_avatar_url`.
+ *
+ *  Derived from the id rather than read out of the stored `avatar_url` on
+ *  purpose. #8349 closed that field to exactly this value or nothing, but it is
+ *  validated on write and not on read, so a row written before that change — or
+ *  restored from an old backup — could still hold an external URL. Building the
+ *  path here means such a row renders the initials instead of sending this
+ *  origin's bearer token somewhere nobody chose. */
+
+export interface AgentAvatarUploadResult {
+  status: string;
+  /** Always `/api/agents/{id}/avatar` — the one value `avatar_url` may hold. */
+  avatar_url: string;
+  content_type: string;
+  bytes: number;
+}
+
+/** POST /api/agents/{id}/avatar — store an image as this agent's avatar.
+ *
+ *  The body is the raw bytes and nothing else: no multipart, no filename in a
+ *  header, no name in the path. That is the route's design, not an omission —
+ *  what lands on disk is `{agent_id}.{ext}` where the id is a UUID the daemon
+ *  minted and the extension comes from sniffing the bytes.
+ *
+ *  Rejects with 403 for an agent the deployment provisions, because setting an
+ *  avatar writes `avatar_url` into the manifest identity and the next reconcile
+ *  would overwrite it (#6695). */
+
+/** DELETE /api/agents/{id}/avatar — drop the image and clear `avatar_url`.
+ *
+ *  Succeeds whether or not a file was there: a stored `avatar_url` whose file
+ *  is gone renders as a broken image, and clearing the reference is how that
+ *  state is escaped. */
+
+/** PATCH /api/agents/{id}/identity — emoji and colour.
+ *
+ *  Partial by contract since #6608: a field this body omits keeps its stored
+ *  value rather than being cleared, so sending `{ emoji }` alone cannot lose a
+ *  colour someone set. Clearing a field is therefore sending it empty, not
+ *  omitting it.
+ *
+ *  `avatar_url` is deliberately not in the accepted payload here. It may only
+ *  ever hold `/api/agents/{id}/avatar` or nothing, and the upload and delete
+ *  routes above are what write it — an editor for it would be a way to point
+ *  the dashboard's own origin at a URL the operator never asked for. */
+
 export interface AgentToolsResponse {
   capabilities_tools?: string[] | null;
   tool_allowlist?: string[] | null;
