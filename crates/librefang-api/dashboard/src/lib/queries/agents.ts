@@ -327,3 +327,23 @@ export function useAgentAvatarUrl(agentId: string, hasAvatar: boolean): string |
  * exactly what `Avatar`'s `src` wants — it falls back to the initials on its
  * own, so there is no separate loading state to thread through the UI.
  */
+
+/**
+ * An agent's avatar as an object URL, ready for an `<img src>` (#8339).
+ *
+ * Two things are being kept apart here. The query caches the *Blob*, which is
+ * shared and lives as long as the cache entry does; this hook owns the *object
+ * URL*, which is a document-scoped handle that leaks until revoked. So the URL
+ * is minted in an effect keyed on the Blob and revoked in that effect's
+ * cleanup — on unmount, and on every switch to another agent, which is the
+ * case a drawer that stays mounted while the selection changes would otherwise
+ * leak on.
+ *
+ * `hasAvatar` is the caller's answer to "is `identity.avatar_url` set", and it
+ * gates the request: an agent without one would otherwise cost a 404 on every
+ * render of the row that shows its initials.
+ *
+ * Returns `undefined` while loading and when there is nothing to show, which is
+ * exactly what `Avatar`'s `src` wants — it falls back to the initials on its
+ * own, so there is no separate loading state to thread through the UI.
+ */

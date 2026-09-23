@@ -3537,6 +3537,17 @@ export function AgentsPage() {
                 onChanged={() => { void refreshDetailAgent(detailAgent.id); }}
               />
 
+              {/* Appearance — the emoji and the avatar image (#8339).
+                  Its own component, and exported, for the reason the file header
+                  gives for `SystemPromptSection`: `AgentsPage` has ~20 hooks and no
+                  render harness, so anything that has to be tested has to be
+                  reachable without mounting the page. */}
+              <AgentAppearanceSection
+                agentId={detailAgent.id}
+                identity={detailIdentity}
+                onChanged={() => { void refreshDetailAgent(detailAgent.id); }}
+              />
+
               {/* Model */}
               {detailAgent.model && (
                 <section>
