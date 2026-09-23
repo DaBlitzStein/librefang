@@ -114,6 +114,29 @@ export function isMcpGroupCardActionable(state: McpGroupCardState): boolean {
 }
 
 /**
+ * Whether a Tools-tab group counts as assigned to the agent.
+ *
+ * For a builtin group the active tool count is the answer. For an MCP group it
+ * is not, and reading it as if it were is what put a granted server under
+ * "Available": `isToolActive` also requires each tool to survive
+ * `tool_allowlist` / `tool_blocklist`, so a granted server whose tools are all
+ * filtered has zero active tools. The card then offered a `+`, whose handler
+ * (`isMcpGroupCardActionable("granted")` is true, correctly — the assigned list
+ * is where you click to revoke) staged a *revoke*. The server also vanished
+ * from "Assigned", so the grant went unmentioned on the whole tab.
+ */
+export function isGroupAssigned(args: {
+  /** Whether the group is an MCP server rather than a builtin capability group. */
+  isMcp: boolean;
+  /** `isMcpGroupGranted` — the grant is a per-server pin in `mcp_servers`. */
+  granted: boolean;
+  /** Tools in the group that are active for display, allow/blocklist included. */
+  activeTools: number;
+}): boolean {
+  return args.isMcp ? args.granted : args.activeTools > 0;
+}
+
+/**
  * Add or remove `server` from a staged `mcp_servers` grant list, comparing
  * names after `normalizeMcpName` so a draft that already carries
  * `"Brave-Search"` recognizes a toggle of `"brave_search"` as "already
