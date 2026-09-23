@@ -37,6 +37,7 @@ function Harness({
   models = [{ provider: "openai", id: "gpt-4o" }],
   providers = [{ name: "openai" }],
   nameField,
+  routingInertReason,
 }: {
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
@@ -46,6 +47,7 @@ function Harness({
   models?: HarnessModel[];
   providers?: { name: string }[];
   nameField?: "editable" | "readonly" | "hidden";
+  routingInertReason?: "stable_mode" | null;
 }) {
   const [state, setState] = useState<ManifestFormState>(() => initialState ?? emptyManifestForm());
   return (
@@ -60,6 +62,7 @@ function Harness({
       toolCatalog={toolCatalog}
       mcpCatalog={mcpCatalog}
       nameField={nameField}
+      routingInertReason={routingInertReason}
     />
   );
 }
@@ -385,6 +388,9 @@ describe("AgentManifestForm — inference parameters", () => {
       "model_param.top_p",
       "model_param.frequency_penalty",
       "model_param.presence_penalty",
+      "model_param.top_k",
+      "model_param.min_p",
+      "model_param.repeat_penalty",
     ]) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
@@ -416,6 +422,9 @@ describe("AgentManifestForm — inference parameters", () => {
       "top_p",
       "frequency_penalty",
       "presence_penalty",
+      "top_k",
+      "min_p",
+      "repeat_penalty",
     ]) {
       const field = screen.getByText(`model_param.${param}`).closest("div") as HTMLElement;
       expect(within(field).getByRole("button", { name: "model_param.inherit" })).toHaveAttribute(
@@ -461,7 +470,7 @@ describe("AgentManifestForm — inference parameters", () => {
     const user = userEvent.setup();
     render(<Harness />);
 
-    // Scoped to the response-length field: the form now renders seven ladders,
+    // Scoped to the response-length field: the form now renders ten ladders,
     // so an unscoped "first custom button" is whichever one the layout happens
     // to put first.
     const lengthField = screen.getByText("model_param.max_tokens").closest("div") as HTMLElement;
@@ -582,5 +591,20 @@ describe("AgentManifestForm — nameField", () => {
     const input = screen.getByRole("textbox", { name: "agents.form.name" });
     expect(input).toBeDisabled();
     expect(input).toHaveValue("existing-type");
+  });
+});
+
+// #8446: Stable mode runs no router, so a `[routing]` block written here is saved and never applied.
+describe("AgentManifestForm — routing in Stable mode", () => {
+  it("warns in the Routing section that routing has no effect in Stable mode", () => {
+    render(<Harness routingInertReason="stable_mode" />);
+
+    expect(screen.getByText("agents.form.routing_stable_inert")).toBeInTheDocument();
+  });
+
+  it("shows no Stable-mode warning while routing is live", () => {
+    render(<Harness routingInertReason={null} />);
+
+    expect(screen.queryByText("agents.form.routing_stable_inert")).not.toBeInTheDocument();
   });
 });

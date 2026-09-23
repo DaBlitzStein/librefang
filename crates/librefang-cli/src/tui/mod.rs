@@ -488,6 +488,8 @@ impl App {
                 default_profile,
                 fixed,
                 available,
+                stable_mode,
+                pinned_model,
             } => {
                 // Populate the routing editor from the agent's real stored
                 // state, not from whatever the previous screen left behind.
@@ -506,6 +508,8 @@ impl App {
                     .unwrap_or(0);
                 self.agents.router_default_profile = default_profile;
                 self.agents.router_fixed = fixed;
+                self.agents.routing_stable_mode = stable_mode;
+                self.agents.router_pinned_model = pinned_model;
                 self.agents.routing_loaded = true;
             }
             AppEvent::AgentModelRoutingUpdated(id) => {
@@ -1503,25 +1507,31 @@ impl App {
                 }
                 _ => {}
             }
-            // Tab cycling: Tab / Shift+Tab
+            // Tab cycling: Tab / Shift+Tab — except on a screen that moves field focus with them.
             //
-            // Both are exempted while the shared-folders editor has a field
-            // open — there they are the field-to-field steps documented in
-            // `tui-agents-workspaces-help`, not a tab switch (#7835).
-            // Exempting `Tab` alone left `Shift+Tab` switching tabs and
-            // abandoning the buffer mid-edit, which is the same defect one
-            // key over, and it is the key an operator reaches for when they
+            // The workflow step editor owns them (#7724): F-keys, Alt+digit and
+            // Ctrl+arrows still switch tabs there.
+            //
+            // The shared-folders editor owns them while a field is open — there they
+            // are the field-to-field steps documented in `tui-agents-workspaces-help`,
+            // not a tab switch (#7835). Exempting `Tab` alone left `Shift+Tab`
+            // switching tabs and abandoning the buffer mid-edit, which is the same
+            // defect one key over, and it is the key an operator reaches for when they
             // overshoot a field.
             let editing_workspace_field = matches!(self.active_tab, Tab::Agents)
                 && matches!(self.agents.sub, agents::AgentSubScreen::EditWorkspaces)
                 && self.agents.ws_editing.is_some();
-            if key.code == KeyCode::Tab && key.modifiers.is_empty() && !editing_workspace_field {
-                self.next_tab();
-                return;
-            }
-            if key.code == KeyCode::BackTab && !editing_workspace_field {
-                self.prev_tab();
-                return;
+            let screen_owns_tab =
+                self.active_tab == Tab::Workflows && self.workflows.owns_tab_key();
+            if !screen_owns_tab && !editing_workspace_field {
+                if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+                    self.next_tab();
+                    return;
+                }
+                if key.code == KeyCode::BackTab {
+                    self.prev_tab();
+                    return;
+                }
             }
             // Tab cycling: Ctrl+Left/Right
             if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -4417,5 +4427,51 @@ mod agent_workspaces_tab_exemption_tests {
             matches!(app.active_tab, Tab::Agents),
             "the global Tab-cycling handler must not fire while a field is open"
         );
+    }
+}
+
+#[cfg(test)]
+mod workflow_step_editor_tab_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn app_on_the_workflows_tab() -> App {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.phase = Phase::Main;
+        app.active_tab = Tab::Workflows;
+        app
+    }
+
+    /// The step editor moves field focus with Tab and Shift-Tab and has no other way to reach the agent and prompt fields, so the global tab cycling must not swallow those keys on the steps page (#7724).
+    /// Driving `App::handle_key` rather than `WorkflowState::handle_key` is the point: the screen-level tests never pass through the global handler.
+    #[test]
+    fn tab_moves_focus_in_the_step_editor_instead_of_switching_tabs() {
+        let mut app = app_on_the_workflows_tab();
+        app.workflows.list_state.select(Some(0)); // no workflows, so row 0 is "Create new"
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.workflows.create_step, 2, "must be on the steps page");
+        assert_eq!(app.workflows.step_focus, workflows::StepEditorFocus::Name);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(
+            app.active_tab == Tab::Workflows,
+            "Tab on the steps page must not leave the Workflows tab"
+        );
+        assert_eq!(app.workflows.step_focus, workflows::StepEditorFocus::Source);
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert!(app.active_tab == Tab::Workflows);
+        assert_eq!(app.workflows.step_focus, workflows::StepEditorFocus::Name);
+    }
+
+    /// Off the steps page Tab still cycles tabs, so the exemption is scoped to the one page that needs it.
+    #[test]
+    fn tab_still_switches_tabs_from_the_workflow_list() {
+        let mut app = app_on_the_workflows_tab();
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(app.active_tab != Tab::Workflows);
     }
 }

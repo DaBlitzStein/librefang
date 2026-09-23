@@ -1167,6 +1167,9 @@ pub async fn get_agent(
                 "top_p": entry.manifest.model.top_p,
                 "frequency_penalty": entry.manifest.model.frequency_penalty,
                 "presence_penalty": entry.manifest.model.presence_penalty,
+                "top_k": entry.manifest.model.top_k,
+                "min_p": entry.manifest.model.min_p,
+                "repeat_penalty": entry.manifest.model.repeat_penalty,
                 "context_window": entry.manifest.model.context_window,
                 "max_output_tokens": entry.manifest.model.max_output_tokens,
             },
@@ -1208,6 +1211,8 @@ pub async fn get_agent(
             // Without this the dashboard showed `mcp_servers = ["*"]` on an `mcp_disabled` agent as a live grant (#6565).
             "mcp_disabled": entry.manifest.mcp_disabled,
             "fallback_models": entry.manifest.fallback_models,
+            // `"stable_mode"` when the kernel mode stops both routers (profile and tier) from choosing this agent's model, so the manifest's `pinned_model` (else `model` above) is what runs; `null` when routing is live (#8446).
+            "routing_inert_reason": super::model_routing_inert_reason(&state),
             "auto_evolve": entry.manifest.auto_evolve,
             "web_search_augmentation": entry.manifest.web_search_augmentation,
             "injected_footprint_tokens": injected_footprint_tokens,

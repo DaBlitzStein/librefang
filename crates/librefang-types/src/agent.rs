@@ -918,7 +918,7 @@ pub const DEFAULT_MODEL_TEMPERATURE: f32 = 0.7;
 
 /// LLM model configuration for an agent.
 ///
-/// The five sampling knobs (`max_tokens`, `temperature`, `top_p`, `frequency_penalty`, `presence_penalty`) are **preferences**, and each is tri-state.
+/// The sampling knobs (`max_tokens`, `temperature`, `top_p`, `frequency_penalty`, `presence_penalty`, `top_k`, `min_p`, `repeat_penalty`) are **preferences**, and each is tri-state.
 /// `Some(v)` is an explicit agent-level choice and beats the per-model override in [`crate::model_catalog::ModelOverrides`]; `None` means "inherit", so the model override applies, and failing that the system default.
 /// The specific setting winning over the general one is what lets two instances of the same agent type run the same model at different temperatures.
 ///
@@ -971,6 +971,38 @@ pub struct ModelConfig {
     /// Same contract as [`Self::top_p`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>,
+    /// Top-k sampling: consider only the `k` most likely tokens (≥ 1). `None` = inherit.
+    ///
+    /// Anthropic, Gemini and llama.cpp-derived runtimes have it; OpenAI does not, so the OpenAI-format driver sends it only to the local servers and gateways known to read it (see `LocalSamplerDialect`) (#8290).
+    ///
+    /// Parsing is lenient (see [`crate::serde_compat::top_k_lenient`]) because this key used to live in the untyped `extra_params`: an integral float such as `40.0` is `40`, and `0` or a negative value such as vLLM's / llama.cpp's `-1` ("disabled") reads as `None`.
+    /// `None` omits `top_k` from every request, which on vLLM is the runtime's own "disabled" default; llama.cpp and Ollama instead fall back to their built-in default (`40`), so turning top-k off there takes a `k` at least the vocabulary size.
+    /// A non-integral float or a non-number is dropped to `None` with a `WARN` rather than failing the whole manifest.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::top_k_lenient"
+    )]
+    pub top_k: Option<u32>,
+    /// Minimum-probability (min-p) sampling (0.0–1.0): drop tokens less likely than this fraction of the top token's probability. `None` = inherit.
+    ///
+    /// A llama.cpp / Ollama / vLLM parameter; hosted APIs other than those do not have it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::f32_lenient"
+    )]
+    pub min_p: Option<f32>,
+    /// Repetition penalty (0.01–2.0, `1.0` = off), applied over recently generated tokens. `None` = inherit.
+    ///
+    /// Distinct from [`Self::frequency_penalty`]: it is multiplicative and llama.cpp applies it over a sliding window, so the two are not interchangeable.
+    /// The stored key is llama.cpp's name; the drivers translate it where a runtime spells it differently (vLLM's `repetition_penalty`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_compat::f32_lenient"
+    )]
+    pub repeat_penalty: Option<f32>,
     /// System prompt for the agent.
     pub system_prompt: String,
     /// Optional API key environment variable name.
@@ -1024,6 +1056,9 @@ impl Default for ModelConfig {
             top_p: None,
             frequency_penalty: None,
             presence_penalty: None,
+            top_k: None,
+            min_p: None,
+            repeat_penalty: None,
             system_prompt: "You are a helpful AI agent.".to_string(),
             api_key_env: None,
             base_url: None,
@@ -2193,7 +2228,11 @@ impl std::fmt::Display for SessionLabel {
     }
 }
 
-/// Visual identity for an agent — emoji, avatar, color, personality.
+/// An agent's appearance — emoji, avatar, colour — as the registry stores it and the dashboard draws it.
+///
+/// Personality is deliberately not here (#8447).
+/// It lives in the front matter of `{workspace}/.identity/IDENTITY.md`, the file the prompt injects, so a copy in the registry could only ever disagree with what the agent sees; see [`AgentPersonality`].
+/// Rows persisted before that split still carry `archetype` / `vibe` / `greeting_style` keys, which deserialize fine and are ignored.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentIdentity {
@@ -2203,12 +2242,43 @@ pub struct AgentIdentity {
     pub avatar_url: Option<String>,
     /// Hex color code (e.g., "#FF5C00") for UI accent.
     pub color: Option<String>,
+}
+
+/// An agent's personality: the keys of `{workspace}/.identity/IDENTITY.md`'s front matter that the identity PATCH routes write (#8447).
+///
+/// Unlike [`AgentIdentity`] this is not stored in the registry, because the file is injected into the system prompt and is therefore the only place a personality value has any effect.
+/// `None` means "not provided" and leaves the file's current line alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentPersonality {
     /// Archetype: "researcher", "coder", "assistant", "writer", "devops", "support", "analyst".
     pub archetype: Option<String>,
     /// Personality vibe: "professional", "friendly", "technical", "creative", "concise", "mentor".
     pub vibe: Option<String>,
     /// Greeting style: "warm", "formal", "playful", "brief".
     pub greeting_style: Option<String>,
+}
+
+impl AgentPersonality {
+    /// The provided fields as `(front-matter key, value)` pairs, always in the same order so the same request produces the same file.
+    pub fn front_matter_fields(&self) -> Vec<(&'static str, &str)> {
+        [
+            ("archetype", &self.archetype),
+            ("vibe", &self.vibe),
+            ("greeting_style", &self.greeting_style),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| value.as_deref().map(|value| (key, value)))
+        .collect()
+    }
+
+    /// The first provided field whose value contains a line break, which would smuggle a second key into the front matter.
+    pub fn multiline_field(&self) -> Option<&'static str> {
+        self.front_matter_fields()
+            .into_iter()
+            .find(|(_, value)| value.contains(['\n', '\r']))
+            .map(|(key, _)| key)
+    }
 }
 
 /// A registered agent entry in the kernel's registry.
@@ -3043,9 +3113,6 @@ mod tests {
         assert!(id.emoji.is_none());
         assert!(id.avatar_url.is_none());
         assert!(id.color.is_none());
-        assert!(id.archetype.is_none());
-        assert!(id.vibe.is_none());
-        assert!(id.greeting_style.is_none());
     }
 
     #[test]
@@ -3054,14 +3121,46 @@ mod tests {
             emoji: Some("\u{1F916}".to_string()),
             avatar_url: Some("https://example.com/avatar.png".to_string()),
             color: Some("#FF5C00".to_string()),
-            archetype: Some("assistant".to_string()),
-            vibe: Some("friendly".to_string()),
-            greeting_style: Some("warm".to_string()),
         };
         let json = serde_json::to_string(&id).unwrap();
         let back: AgentIdentity = serde_json::from_str(&json).unwrap();
         assert_eq!(back.emoji, Some("\u{1F916}".to_string()));
         assert_eq!(back.color, Some("#FF5C00".to_string()));
+    }
+
+    /// A registry row persisted before #8447 still carries the three personality keys; it must load, keeping its appearance.
+    #[test]
+    fn test_agent_identity_ignores_legacy_personality_keys() {
+        let id: AgentIdentity = serde_json::from_str(
+            r##"{"emoji":"x","color":"#000000","archetype":"coder","vibe":"calm","greeting_style":"brief"}"##,
+        )
+        .unwrap();
+        assert_eq!(id.emoji.as_deref(), Some("x"));
+        assert_eq!(id.color.as_deref(), Some("#000000"));
+    }
+
+    #[test]
+    fn test_agent_personality_front_matter_fields_are_ordered_and_skip_omitted() {
+        let personality = AgentPersonality {
+            greeting_style: Some("brief".to_string()),
+            archetype: Some("coder".to_string()),
+            vibe: None,
+        };
+        assert_eq!(
+            personality.front_matter_fields(),
+            vec![("archetype", "coder"), ("greeting_style", "brief")]
+        );
+        assert!(AgentPersonality::default().front_matter_fields().is_empty());
+    }
+
+    #[test]
+    fn test_agent_personality_multiline_field() {
+        let personality = AgentPersonality {
+            vibe: Some("calm\r\nname: x".to_string()),
+            ..AgentPersonality::default()
+        };
+        assert_eq!(personality.multiline_field(), Some("vibe"));
+        assert_eq!(AgentPersonality::default().multiline_field(), None);
     }
 
     #[test]
@@ -3090,7 +3189,6 @@ mod tests {
                 emoji: Some("\u{1F525}".to_string()),
                 avatar_url: None,
                 color: Some("#00FF00".to_string()),
-                ..Default::default()
             },
             onboarding_completed: false,
             onboarding_completed_at: None,
@@ -3453,6 +3551,162 @@ model = "llama-3.3-70b-versatile"
         let tc = back.thinking.unwrap();
         assert_eq!(tc.budget_tokens, 5000);
         assert!(tc.stream_thinking);
+    }
+
+    /// #8290: `top_k` / `min_p` / `repeat_penalty` in an agent's `[model]` table used to fall into the flattened `extra_params` map, the only place they could live.
+    /// They now parse onto their typed fields, so an existing `agent.toml` migrates without an edit, and they survive both the TOML and the JSON (API) round trip.
+    #[test]
+    fn test_manifest_local_samplers_round_trip_on_typed_fields() {
+        let toml_str = r#"
+            name = "local"
+            [model]
+            provider = "ollama"
+            model = "qwen3:8b"
+            top_k = 40
+            min_p = 0.05
+            repeat_penalty = 1.1
+            enable_memory = true
+        "#;
+        let manifest: AgentManifest = toml::from_str(toml_str).expect("parse agent.toml");
+        let m = &manifest.model;
+        assert_eq!(m.top_k, Some(40));
+        assert_eq!(m.min_p, Some(0.05));
+        assert_eq!(m.repeat_penalty, Some(1.1));
+        for key in ["top_k", "min_p", "repeat_penalty"] {
+            assert!(
+                !m.extra_params.contains_key(key),
+                "{key} fell into extra_params"
+            );
+        }
+        // Unrelated provider keys still go to the escape hatch.
+        assert_eq!(
+            m.extra_params.get("enable_memory"),
+            Some(&serde_json::json!(true))
+        );
+
+        let toml_back: AgentManifest =
+            toml::from_str(&toml::to_string(&manifest).expect("serialize agent.toml"))
+                .expect("reparse agent.toml");
+        let json_back: AgentManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
+        for back in [&toml_back, &json_back] {
+            assert_eq!(back.model.top_k, Some(40));
+            assert_eq!(back.model.min_p, Some(0.05));
+            assert_eq!(back.model.repeat_penalty, Some(1.1));
+        }
+
+        // Unset stays absent on the way out rather than serializing as a value.
+        let plain = toml::to_string(&AgentManifest::default()).unwrap();
+        for key in ["top_k", "min_p", "repeat_penalty"] {
+            assert!(
+                !plain.contains(key),
+                "{key} serialized while unset: {plain}"
+            );
+        }
+    }
+
+    /// #8290: the untyped `extra_params` these keys used to live in accepted any value, so an `agent.toml` or a stored msgpack manifest can carry `top_k = -1` (vLLM / llama.cpp "disabled"), a float `top_k = 40.0`, or a non-number.
+    /// None of those may fail the manifest — on boot a failed msgpack decode skips the agent entirely.
+    #[test]
+    fn test_manifest_legacy_sampler_spellings_do_not_fail_the_load() {
+        // (top_k, min_p, repeat_penalty) as written by hand -> expected typed values.
+        type Written = (serde_json::Value, serde_json::Value, serde_json::Value);
+        type Expected = (Option<u32>, Option<f32>, Option<f32>);
+        let cases: [(Written, Expected); 5] = [
+            (
+                (
+                    serde_json::json!(-1),
+                    serde_json::json!(0.05),
+                    serde_json::json!(1.1),
+                ),
+                (None, Some(0.05), Some(1.1)),
+            ),
+            (
+                (
+                    serde_json::json!(40.0),
+                    serde_json::json!(0),
+                    serde_json::json!(1),
+                ),
+                (Some(40), Some(0.0), Some(1.0)),
+            ),
+            (
+                (
+                    serde_json::json!(0),
+                    serde_json::json!("0.05"),
+                    serde_json::json!(true),
+                ),
+                (None, None, None),
+            ),
+            (
+                (
+                    serde_json::json!(40.5),
+                    serde_json::json!(0.1),
+                    serde_json::json!(1.05),
+                ),
+                (None, Some(0.1), Some(1.05)),
+            ),
+            (
+                (
+                    serde_json::json!("40"),
+                    serde_json::json!(0.2),
+                    serde_json::json!(1.2),
+                ),
+                (None, Some(0.2), Some(1.2)),
+            ),
+        ];
+        for ((top_k, min_p, repeat_penalty), (want_k, want_min_p, want_rp)) in cases {
+            let check = |m: &ModelConfig, via: &str| {
+                assert_eq!(m.top_k, want_k, "top_k {top_k} via {via}");
+                assert_eq!(m.min_p, want_min_p, "min_p {min_p} via {via}");
+                assert_eq!(
+                    m.repeat_penalty, want_rp,
+                    "repeat_penalty {repeat_penalty} via {via}"
+                );
+            };
+
+            // agent.toml.
+            let toml_str = format!(
+                "name = \"local\"\n[model]\nprovider = \"vllm\"\nmodel = \"m\"\ntop_k = {}\nmin_p = {}\nrepeat_penalty = {}\n",
+                toml::Value::try_from(&top_k).unwrap(),
+                toml::Value::try_from(&min_p).unwrap(),
+                toml::Value::try_from(&repeat_penalty).unwrap(),
+            );
+            let manifest: AgentManifest = toml::from_str(&toml_str)
+                .unwrap_or_else(|e| panic!("agent.toml rejected:\n{toml_str}\n{e}"));
+            check(&manifest.model, "toml");
+
+            // A manifest persisted before the fields were typed: the values sit in `extra_params` and are written by the same `to_vec_named` the SQLite store uses.
+            let mut legacy = AgentManifest::default();
+            legacy
+                .model
+                .extra_params
+                .insert("top_k".into(), top_k.clone());
+            legacy
+                .model
+                .extra_params
+                .insert("min_p".into(), min_p.clone());
+            legacy
+                .model
+                .extra_params
+                .insert("repeat_penalty".into(), repeat_penalty.clone());
+            let blob = rmp_serde::to_vec_named(&legacy).unwrap();
+            let back: AgentManifest = rmp_serde::from_slice(&blob)
+                .unwrap_or_else(|e| panic!("stored manifest rejected for top_k {top_k}: {e}"));
+            check(&back.model, "msgpack");
+        }
+
+        // Valid values serialize exactly as before and survive the msgpack round trip unchanged.
+        let mut valid = AgentManifest::default();
+        valid.model.top_k = Some(40);
+        valid.model.min_p = Some(0.05);
+        valid.model.repeat_penalty = Some(1.1);
+        let toml_out = toml::to_string(&valid).unwrap();
+        assert!(toml_out.contains("top_k = 40\n"), "{toml_out}");
+        let back: AgentManifest =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&valid).unwrap()).unwrap();
+        assert_eq!(back.model.top_k, Some(40));
+        assert_eq!(back.model.min_p, Some(0.05));
+        assert_eq!(back.model.repeat_penalty, Some(1.1));
     }
 
     /// Per-agent knobs live in `agent.toml`, not `config.toml` (CLAUDE.md #5476),
