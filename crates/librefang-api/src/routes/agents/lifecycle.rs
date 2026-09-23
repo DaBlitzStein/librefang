@@ -1,4 +1,5 @@
 use super::*;
+use librefang_types::agent_type_store;
 
 // ---------------------------------------------------------------------------
 // Shared manifest resolution helper
