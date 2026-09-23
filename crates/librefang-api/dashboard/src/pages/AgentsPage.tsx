@@ -18,6 +18,7 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { Modal } from "../components/ui/Modal";
 import {
+  isGroupAssigned,
   isMcpGroupCardActionable,
   isMcpServerGranted,
   isToolAllowed,
@@ -2444,12 +2445,15 @@ export function AgentsPage() {
       .slice()
       .sort();
 
-    const assignedGroups = sortedGroups.filter(
-      ([name, tools]) => getGroupStatus(name, tools) !== "none",
-    );
-    const availableGroups = sortedGroups.filter(
-      ([name, tools]) => getGroupStatus(name, tools) === "none",
-    );
+    // Which list a group belongs to is not one question — see `isGroupAssigned`.
+    const groupIsAssigned = ([name, tools]: [string, ToolDefinition[]]) =>
+      isGroupAssigned({
+        isMcp: isMcpGroup(name),
+        granted: isMcpGroupGranted(name),
+        activeTools: activeCountIn(name, tools),
+      });
+    const assignedGroups = sortedGroups.filter(groupIsAssigned);
+    const availableGroups = sortedGroups.filter((g) => !groupIsAssigned(g));
 
     // Shared per-tool checklist rendered under an expanded group, for both
     // the assigned and available sections (#6565 follow-up — previously
