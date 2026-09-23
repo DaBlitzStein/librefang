@@ -350,8 +350,13 @@ impl LibreFangKernel {
             );
         }
 
-        // Check TOTP configuration consistency
-        if config.approval.second_factor == librefang_types::approval::SecondFactor::Totp {
+        // Check TOTP configuration consistency.
+        // `requires_any_totp`, not a comparison against one variant: `login`
+        // demands a code on the dashboard login (verified in `server.rs` under
+        // `requires_login_totp()`) and `both` demands one there and on tool
+        // approvals, and both used to boot silently while the surface they
+        // configure served requests with no code at all.
+        if config.approval.second_factor.requires_any_totp() {
             let vault_path = config.home_dir.join("vault.enc");
             let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
             let totp_ready = vault.unlock().is_ok()
@@ -360,10 +365,22 @@ impl LibreFangKernel {
                     .map(|v| v.as_str() == "true")
                     .unwrap_or(false);
             if !totp_ready {
+                // Name the surfaces this particular variant actually covers, so
+                // the line explains the consequence rather than restating the
+                // setting.
+                let mut surfaces = Vec::new();
+                if config.approval.second_factor.requires_login_totp() {
+                    surfaces.push("dashboard login");
+                }
+                if config.approval.second_factor.requires_approval_totp() {
+                    surfaces.push("tool approvals");
+                }
                 warn!(
-                    "Config: second_factor = \"totp\" but TOTP is not enrolled/confirmed in vault. \
-                     Approvals will require TOTP but no secret is configured. \
-                     Run POST /api/approvals/totp/setup to enroll."
+                    "Config: second_factor = \"{}\" but TOTP is not enrolled/confirmed in vault. \
+                     {} will require TOTP but no secret is configured, so no code is ever asked \
+                     for. Run POST /api/approvals/totp/setup to enroll.",
+                    config.approval.second_factor.as_str(),
+                    surfaces.join(" and ")
                 );
             }
         }
