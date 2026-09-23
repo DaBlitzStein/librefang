@@ -569,6 +569,12 @@ export function AgentManifestForm({
         </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.memory_read")}>
+            {/*
+              `?? []` renders the undeclared state as an empty box. Editing it
+              turns it into a declared list, which is what the operator means by
+              typing here; leaving it alone keeps `null` and the key stays off
+              disk.
+            */}
             <TagInput
               value={value.capabilities.memory_read ?? []}
               onChange={(next) => updateCapabilities({ memory_read: next })}
