@@ -1,10 +1,11 @@
-// The api.ts half of the agent avatar UI (#8339): the authenticated-image
-// allowlist, and the three request shapes the routes in
+// The api.ts half of the avatar UI (#8339, #8387): the authenticated-image
+// allowlist, which both surfaces share, and the shapes the routes in
 // `crates/librefang-api/src/routes/agents/avatar.rs` expect.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agentAvatarPath,
+  currentUserAvatarPath,
   deleteAgentAvatar,
   fetchAuthenticatedImage,
   isAuthenticatedImagePath,
@@ -24,6 +25,15 @@ describe("isAuthenticatedImagePath", () => {
     expect(isAuthenticatedImagePath("/api/media/artifacts/abc_123-x")).toBe(true);
   });
 
+  it("admits the signed-in user's avatar path, which is the only user path there is", () => {
+    expect(isAuthenticatedImagePath(currentUserAvatarPath())).toBe(true);
+    // Both halves, on purpose: `currentUserAvatarPath()` is what the query
+    // calls, but the arm that has to match it is a literal, so a refactor that
+    // routed the builder through something else would leave the two out of step
+    // while still returning a truthy string.
+    expect(currentUserAvatarPath()).toBe("/api/users/me/avatar");
+  });
+
   // The point of an allowlist is what it refuses. Each of these would send this
   // origin's bearer token somewhere it was never meant to go, and the first two
   // are the shapes an id built from user input could take.
@@ -36,6 +46,22 @@ describe("isAuthenticatedImagePath", () => {
     ["an absolute URL to another origin", "https://example.invalid/avatar.png"],
     ["a protocol-relative URL", `//example.invalid/api/agents/${AGENT_ID}/avatar`],
   ])("refuses %s", (_label, path) => {
+    expect(isAuthenticatedImagePath(path)).toBe(false);
+  });
+
+  // The refusal is as load-bearing as the admission: it is *why* the appearance
+  // editor is drawn for the caller's own row and no other, and why the dashboard
+  // never fetches another operator's picture.
+  it.each([
+    ["an ASCII name the class would have carried anyway", "/api/users/alice/avatar"],
+    ["a name that could not be a path segment", `/api/users/${encodeURIComponent("Juan Pérez")}/avatar`],
+    ["a uuid-shaped user id", `/api/users/${AGENT_ID}/avatar`],
+  ])("refuses the by-name user avatar path — %s", (_label, path) => {
+    // Not an oversight to be fixed by widening the class: `encodeURIComponent`
+    // carries `%`, and accepting `%XX` would readmit `%2F`, which decodes to
+    // the `/` this allowlist exists to stop. A by-name arm would also fail
+    // *selectively* — `alice` would work and `Juan Pérez` would not — which is
+    // the kind of bug nobody finds from a screenshot.
     expect(isAuthenticatedImagePath(path)).toBe(false);
   });
 
@@ -144,3 +170,10 @@ describe("agent avatar requests", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("/api/agents/agent%2Fone/avatar");
   });
 });
+// The api.ts half of the avatar UI (#8339): the authenticated-image allowlist,
+// and the three request shapes the routes in
+// `crates/librefang-api/src/routes/agents/avatar.rs` expect.
+//
+// The allowlist is shared between the agent's avatar and the signed-in user's,
+// so both arms are pinned here and read together: an arm that goes missing is a
+// silent failure in the browser, not a compile error.

@@ -118,6 +118,9 @@ describe("DashboardApp authed bootstrap", () => {
     // `/api/auth/dashboard-check` never echoes the username to a caller
     // either — the daemon's identity comes from the authenticated
     // `/api/authz/whoami` instead.
+    // The role is what the sidebar line and the menu header both render, and
+    // what #8092's assertions below expect. This file mounts no avatar editor,
+    // so the value only has to match them.
     vi.mocked(getWhoami).mockResolvedValue({ name: "daemon-user", role: "admin" });
   });
 

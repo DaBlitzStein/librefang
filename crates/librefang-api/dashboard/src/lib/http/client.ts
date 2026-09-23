@@ -44,6 +44,10 @@ export {
   // turned into an object URL by the caller rather than given to an `<img src>` (#8339)
   fetchAuthenticatedImage,
   agentAvatarPath,
+  // the agent avatar image — authenticated, so it is fetched as a Blob and
+  // turned into an object URL by the caller rather than given to an `<img src>` (#8339)
+  // the same for the signed-in user's own avatar, on a literal path (#8339)
+  currentUserAvatarPath,
   // channels & comms
   listChannels,
   getChannelQr,
@@ -187,6 +191,10 @@ export {
   getEffectivePermissions,
   // credential vault — names and a set/not-set boolean only (#8164)
   listVaultKeys,
+  // the calling credential's own name and emoji (#8339). `/api/auth/dashboard-check`
+  // cannot answer this: it is unauthenticated and never echoes the configured
+  // username.
+  getWhoami,
 } from "../../api";
 
 export type {
@@ -240,6 +248,11 @@ export {
   updateAgentIdentity,
   uploadAgentAvatar,
   deleteAgentAvatar,
+  // visual identity: emoji / colour, and the avatar image (#8339)
+  // the user side of the same (#8339)
+  updateUserIdentity,
+  uploadUserAvatar,
+  deleteUserAvatar,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
   // per-agent MCP server grant — write (#6565 follow-up)
