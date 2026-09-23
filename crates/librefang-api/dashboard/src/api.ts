@@ -1782,17 +1782,6 @@ export async function getAgentManifest(agentId: string): Promise<string> {
   return getText(`/api/agents/${encodeURIComponent(agentId)}/manifest`);
 }
 
-/** Response shape for `GET /api/agents/{id}/channels`. */
-export interface AgentChannelsResponse {
-  /** Channel-type allowlist currently pinned on the agent. Empty means "all". */
-  assigned: string[];
-  /** Every channel type configured on this instance (`[[sidecar_channels]]`),
-   *  regardless of whether it's assigned to this agent — the picker's option list. */
-  available: string[];
-  /** 'all' when `assigned` is empty, 'allowlist' otherwise. */
-  mode: "all" | "allowlist";
-}
-
 /** PUT /api/agents/{id}/channels — replace the agent's channel allowlist
  *  (`agent.toml: channels`). An empty array clears the allowlist, making
  *  the agent reachable from every configured channel again (#7742). */
@@ -2096,9 +2085,16 @@ export interface AgentChannelInstance {
 }
 
 export interface AgentChannelsResponse {
+  /** Channel-type allowlist currently pinned on the agent. Empty means "all". */
   assigned: string[];
+  /** Every channel type configured on this instance (`[[sidecar_channels]]`),
+   *  regardless of whether it's assigned to this agent — the picker's option list.
+   *  One entry per type, not per configured bot: this is matched against a bare
+   *  channel type. */
   available: string[];
+  /** Per-instance bindings — which specific bot delivers to which agent. */
   instances: AgentChannelInstance[];
+  /** 'all' when `assigned` is empty, 'allowlist' otherwise. */
   mode: "all" | "allowlist";
 }
 
