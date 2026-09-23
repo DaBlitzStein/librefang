@@ -13,7 +13,7 @@ use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::types::{
     AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
-    LifecycleReaction,
+    LifecycleReaction, SenderContext,
 };
 use librefang_types::agent::AgentId;
 use librefang_types::config::ChannelOverrides;
@@ -189,6 +189,14 @@ struct MockHandle {
     agents: Mutex<Vec<(AgentId, String)>>,
     /// Records all messages sent to agents: (agent_id, message).
     received: Arc<Mutex<Vec<(AgentId, String)>>>,
+    /// When true, `check_auto_reply` fires for every message. Off by default
+    /// so the dispatch tests that predate auto-reply keep their no-auto-reply
+    /// path.
+    auto_reply: bool,
+    /// Records the `SenderContext` the bridge handed to `check_auto_reply`,
+    /// so a test can assert what identity the auto-reply turn was launched
+    /// on behalf of.
+    auto_reply_sender: Arc<Mutex<Option<SenderContext>>>,
 }
 
 impl MockHandle {
@@ -196,6 +204,17 @@ impl MockHandle {
         Self {
             agents: Mutex::new(agents),
             received: Arc::new(Mutex::new(Vec::new())),
+            auto_reply: false,
+            auto_reply_sender: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Like `new`, but `check_auto_reply` fires and records the `SenderContext`
+    /// it is given.
+    fn with_auto_reply(agents: Vec<(AgentId, String)>) -> Self {
+        Self {
+            auto_reply: true,
+            ..Self::new(agents)
         }
     }
 }
@@ -208,6 +227,30 @@ impl ChannelBridgeHandle for MockHandle {
             .unwrap()
             .push((agent_id, message.to_string()));
         Ok(format!("Echo: {message}"))
+    }
+
+    /// Mirrors the production handle: the auto-reply decision and the turn it
+    /// launches both belong to the sender the message arrived from. The identity
+    /// is echoed into the reply text so a test can follow it end-to-end, and
+    /// recorded so it can be asserted directly.
+    async fn check_auto_reply(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> Option<String> {
+        if !self.auto_reply {
+            return None;
+        }
+        *self.auto_reply_sender.lock().unwrap() = Some(sender.clone());
+        self.received
+            .lock()
+            .unwrap()
+            .push((agent_id, format!("auto-reply: {message}")));
+        Some(format!(
+            "auto-reply to {}/{}",
+            sender.channel, sender.user_id
+        ))
     }
 
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
@@ -324,6 +367,73 @@ async fn test_bridge_dispatch_text_message() {
         assert_eq!(received[0].0, agent_id);
         assert_eq!(received[0].1, "Hello agent!");
     }
+
+    manager.stop().await;
+}
+
+/// Regression: an auto-reply turn must be launched with the sender's identity.
+///
+/// The auto-reply branch used to `return` before `build_sender_context`, so the
+/// turn ran with no `SenderContext` at all. The tool authorization gate derives
+/// its `(channel, sender_id)` pair from that context — with neither, every tool
+/// outside the guest read-only allowlist resolves to `NeedsApproval`, i.e. an
+/// agent that can execute nothing.
+///
+/// This asserts the two values the gate reads (`channel` + `user_id`) actually
+/// reach the handle that runs the turn.
+#[tokio::test]
+async fn auto_reply_turn_carries_sender_identity() {
+    let agent_id = AgentId::new();
+    let handle = Arc::new(MockHandle::with_auto_reply(vec![(
+        agent_id,
+        "coder".to_string(),
+    )]));
+    let router = Arc::new(AgentRouter::new());
+
+    // The platform id the production incident carried: a Telegram DM sender.
+    router.set_user_default("34387719".to_string(), agent_id);
+
+    let (adapter, tx) = MockAdapter::new("test-adapter", ChannelType::Telegram);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_text_msg(ChannelType::Telegram, "34387719", "status?"))
+        .await
+        .unwrap();
+
+    wait_until("auto-reply dispatch", || !adapter_ref.get_sent().is_empty()).await;
+
+    let sender = handle
+        .auto_reply_sender
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("auto-reply fired without ever receiving a SenderContext");
+
+    assert_eq!(
+        sender.user_id, "34387719",
+        "the auto-reply turn lost the sender id — the tool gate reads this as an \
+         unrecognised sender and forces every non-read-only tool into approval"
+    );
+    assert_eq!(
+        sender.channel, "telegram",
+        "the auto-reply turn lost the channel — the tool gate needs it to resolve \
+         the sender's RBAC binding"
+    );
+    assert_eq!(
+        sender.chat_id.as_deref(),
+        Some("34387719"),
+        "the DM chat id must ride along so the turn addresses the conversation it \
+         arrived on"
+    );
+
+    // The identity survived all the way to the reply delivered to the user.
+    let sent = adapter_ref.get_sent();
+    assert_eq!(sent.len(), 1, "expected 1 auto-reply, got {}", sent.len());
+    assert_eq!(sent[0].0, "34387719");
+    assert_eq!(sent[0].1, "auto-reply to telegram/34387719");
 
     manager.stop().await;
 }
