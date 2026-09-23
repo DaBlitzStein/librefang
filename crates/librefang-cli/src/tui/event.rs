@@ -2304,9 +2304,35 @@ fn rebuild_manifest_with_workspaces(
                 .collect()
         })
         .unwrap_or_default();
+    // A row the manifest already carries is exempt from both halves of the check.
+    //
+    // The name half is the one that bit: `resolve_workspace_decl` never inspects a name, and
+    // `expand_workspace_alias` resolves `@name/rest` by exact string equality on the segment
+    // before the first `/` — so the kernel accepts a name this editor's rule refuses, and
+    // `[workspaces."team.docs"]` is legal today. The folder *is* delivered; it is only the
+    // `@team.docs/...` shorthand that misses. Applying the rule to a row the operator did not
+    // introduce refuses the *whole* save, so adding an unrelated folder to such an agent was
+    // impossible, and the two escapes were worse than the trap: delete the row, or rename it and
+    // break every `@team.docs/...` path the agent already uses.
+    //
+    // The path half is exempt for the same reason and is the likelier of the two to be found on
+    // disk: this check exists because rows with an absolute or `..` path were *written* by an
+    // earlier version of this editor, `resolve_workspace_decl` warned and skipped them, and the
+    // operator had no way to remove them without losing the rest of the form.
+    // Exempting them cannot make an inert row worse — it is written back byte-identical and the
+    // kernel skips it exactly as it does today.
+    //
+    // What is typed here still has to be addressable; both halves are pinned by
+    // `rebuild_refuses_a_row_the_kernel_would_only_warn_about` above and
+    // `rebuild_keeps_a_pre_existing_row_the_alias_rule_would_refuse` below.
+    let already_declared: std::collections::HashSet<String> = table
+        .get("workspaces")
+        .and_then(toml::Value::as_table)
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default();
     let mut ws = toml::map::Map::new();
     for (name, path, mode) in workspaces {
-        if workspace_row_is_invalid(name, path) {
+        if !already_declared.contains(name) && workspace_row_is_invalid(name, path) {
             return Err(WorkspacesRebuildError::RejectedRow(name.clone()));
         }
         let mut entry = toml::map::Map::new();
@@ -6767,6 +6793,79 @@ mount = "/data/vault"
                 "{name:?} + {path:?} produced {err:?}"
             );
         }
+    }
+
+    /// A row the manifest already carries is not this editor's to police.
+    ///
+    /// Both shapes are here. `[workspaces."team.docs"]` is the name half: the kernel accepts it,
+    /// the agent gets the folder, and only the `@team.docs/…` shorthand misses — so refusing the
+    /// whole save over it blocked adding any unrelated folder, and the two escapes were worse
+    /// than the trap (delete the row, or rename it and break every `@team.docs/…` in use).
+    /// `path = "/srv/data"` is the path half: an earlier version of this editor wrote such rows,
+    /// the kernel warns and skips them, and the operator could not remove one without losing the
+    /// rest of the form.
+    ///
+    /// What the operator *types* is still checked in both halves — see
+    /// `rebuild_refuses_a_row_the_kernel_would_only_warn_about` above.
+    #[test]
+    fn rebuild_keeps_a_pre_existing_row_the_alias_rule_would_refuse() {
+        let manifest = r#"
+[workspaces."team.docs"]
+path = "shared/docs"
+
+[workspaces.legacy]
+path = "/srv/data"
+
+[workspaces.library]
+path = "shared/library"
+"#;
+        let out = rebuild_manifest_with_workspaces(
+            manifest,
+            &[
+                (
+                    "team.docs".to_string(),
+                    "shared/docs".to_string(),
+                    "rw".to_string(),
+                ),
+                (
+                    "legacy".to_string(),
+                    "/srv/data".to_string(),
+                    "rw".to_string(),
+                ),
+                (
+                    "library".to_string(),
+                    "shared/library".to_string(),
+                    "rw".to_string(),
+                ),
+                (
+                    "added".to_string(),
+                    "shared/added".to_string(),
+                    "rw".to_string(),
+                ),
+            ],
+        )
+        .expect("a pre-existing row must not refuse the save");
+
+        let parsed: toml::Value = toml::from_str(&out).unwrap();
+        let ws = parsed
+            .get("workspaces")
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert!(
+            ws.contains_key("team.docs"),
+            "the pre-existing name was dropped: {out}"
+        );
+        assert_eq!(
+            ws.get("legacy")
+                .and_then(|d| d.get("path"))
+                .and_then(toml::Value::as_str),
+            Some("/srv/data"),
+            "the inert row was not written back byte-identical: {out}"
+        );
+        assert!(
+            ws.contains_key("added"),
+            "the operator's new row is missing: {out}"
+        );
     }
 
     /// The two rules the dashboard applies to the same field
