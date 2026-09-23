@@ -119,6 +119,7 @@ const TYPE: AgentTemplate = {
   model: "claude-sonnet-5",
   source: "agent-type",
   editable: true,
+  from_registry: true,
 };
 
 const DETAIL: AgentTypeDetail = {
@@ -169,13 +170,22 @@ type MutationStub = { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean 
  * Promotion is the mutation every test varies; restore and the history payload
  * are opt-in so the tests that do not open the history modal keep reading as
  * one argument.
+ *
+ * A caller may also replace the template list, and that override landed on the
+ * same positional argument as `extras` — one from each side of this rebase —
+ * so the parameter accepts either spelling rather than rewriting one set of
+ * call sites.
  */
 function renderPage(
   promote: MutationStub,
-  extras: { restore?: MutationStub; versions?: TemplateVersionEntry[] } = {},
+  arg:
+    | { restore?: MutationStub; versions?: TemplateVersionEntry[] }
+    | AgentTemplate[] = {},
 ) {
+  const templates = Array.isArray(arg) ? arg : [TYPE];
+  const extras = Array.isArray(arg) ? {} : arg;
   vi.mocked(useAgentTypes).mockReturnValue(
-    mockQuery([TYPE]) as unknown as ReturnType<typeof useAgentTypes>,
+    mockQuery(templates) as unknown as ReturnType<typeof useAgentTypes>,
   );
   vi.mocked(useAgentType).mockReturnValue(
     mockQuery(DETAIL) as unknown as ReturnType<typeof useAgentType>,
@@ -361,5 +371,31 @@ describe("AgentTypesPage template history", () => {
     // The history modal itself stays open — cancelling the dialog is not
     // cancelling the browse.
     expect(screen.getByText(/History: researcher/)).toBeInTheDocument();
+  });
+});
+
+// An `editable` row still may have no registry original — created through
+// `POST /api/templates` or `agent_type_create` rather than promoted from one.
+// Before `from_registry` existed, the restore control rendered identically
+// either way, and its drawer could only answer "this agent type does not
+// exist in the registry" after the click (#8042 review).
+describe("AgentTypesPage restore control", () => {
+  // The two states change the control's own accessible name — that is the
+  // thing under test — so each test finds it by the name it expects, rather
+  // than through a helper that would have to already know which case it is.
+
+  it("is enabled when the type has a registry original", () => {
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, [{ ...TYPE, from_registry: true }]);
+
+    expect(screen.getByRole("button", { name: "Restore from registry" })).toBeEnabled();
+  });
+
+  it("is disabled and explains why when the type has no registry original", () => {
+    renderPage({ mutateAsync: vi.fn(), isPending: false }, [{ ...TYPE, from_registry: false }]);
+
+    expect(
+      screen.getByRole("button", { name: "This agent type does not exist in the registry." }),
+    ).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Restore from registry" })).toBeNull();
   });
 });

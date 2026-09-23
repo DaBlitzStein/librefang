@@ -25,6 +25,7 @@ export {
   listAgentSessions,
   listAgentTemplates,
   getAgentType,
+  getAgentTypeRegistryDiff,
   listPromptVersions,
   listPromptsOverview,
   listExperiments,
@@ -178,6 +179,8 @@ export {
   getUserPolicy,
   // effective permissions snapshot (RBAC follow-up — backs the simulator)
   getEffectivePermissions,
+  // credential vault — names and a set/not-set boolean only (#8164)
+  listVaultKeys,
 } from "../../api";
 
 export type {
@@ -209,6 +212,7 @@ export {
   putAgentTemplateToml,
   deleteAgentType,
   promoteAgentType,
+  restoreAgentTypeFromRegistry,
   restoreTemplateVersion,
   spawnEphemeral,
   spawnAgent,
@@ -388,6 +392,9 @@ export {
   // per-user budget (RBAC M5)
   updateUserBudget,
   deleteUserBudget,
+  // credential vault (#8164)
+  setVaultKey,
+  deleteVaultKey,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -453,6 +460,8 @@ export type {
   AuditQueryResponse,
   PermissionPolicy,
   PermissionPolicyUpdate,
+  VaultKeyStatus,
+  VaultKeySource,
   UserToolPolicy,
   UserToolCategories,
   UserMemoryAccess,

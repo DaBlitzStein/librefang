@@ -53,6 +53,8 @@ use crate::types;
         routes::update_agent_type,
         routes::delete_agent_type,
         routes::promote_agent_type,
+        routes::get_registry_diff,
+        routes::restore_from_registry,
         routes::list_template_history,
         routes::restore_template_version,
         routes::list_commands,
@@ -430,6 +432,15 @@ use crate::types;
 
         // ── Inbox ──
         routes::inbox_status,
+
+        // ── Knowledge bases ──
+        routes::knowledge::list_bases,
+        routes::knowledge::create_base,
+        routes::knowledge::delete_base,
+        routes::knowledge::list_documents,
+        routes::knowledge::put_document,
+        routes::knowledge::delete_document,
+        routes::knowledge::set_holders,
 
         // ── Webhooks ──
         routes::webhook_wake,

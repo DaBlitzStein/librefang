@@ -1900,6 +1900,13 @@ export interface AgentTemplate {
   model: string;
   source: AgentTypeSource;
   editable: boolean;
+  /**
+   * Whether a registry original exists to restore from. Only ever `true` for an
+   * `editable` row — an agent type created through `POST /api/templates` or
+   * `agent_type_create` has no registry counterpart, so its restore control has
+   * nothing to do (#8042).
+   */
+  from_registry: boolean;
 }
 
 /**
@@ -2009,6 +2016,40 @@ export interface PromoteAgentTypeResult {
  */
 export async function promoteAgentType(name: string): Promise<PromoteAgentTypeResult> {
   return post<PromoteAgentTypeResult>(`/api/templates/${encodeURIComponent(name)}/promote`, {});
+}
+
+/** A single field-level difference between local and registry manifests. */
+export interface FieldDiff {
+  field: string;
+  local: unknown;
+  registry: unknown;
+}
+
+/** Result of comparing a local agent type with its registry original. */
+export interface RegistryDiffResult {
+  name: string;
+  identical: boolean;
+  unlisted_diffs: number;
+  diffs: FieldDiff[];
+  local_toml: string;
+  registry_toml: string;
+}
+
+export async function getAgentTypeRegistryDiff(
+  name: string,
+): Promise<RegistryDiffResult> {
+  return get<RegistryDiffResult>(
+    `/api/templates/${encodeURIComponent(name)}/registry-diff`,
+  );
+}
+
+export async function restoreAgentTypeFromRegistry(
+  name: string,
+): Promise<AgentTypeDetail> {
+  return post<AgentTypeDetail>(
+    `/api/templates/${encodeURIComponent(name)}/restore`,
+    {},
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -4069,6 +4110,58 @@ export async function revokePasskey(
   );
   if (!response.ok) throw await parseError(response);
   return response.json();
+}
+
+// --- Credential vault write surface (#8164) ---
+
+/**
+ * Where the daemon actually resolves a vault key from.
+ *
+ * The daemon reads its own process environment before it touches the vault, so
+ * `set` alone describes storage rather than behaviour: on a host that exports
+ * `GITHUB_TOKEN` a vault-only flag reads `false` while promotion works, and
+ * reads `false` again after a delete that revoked nothing.
+ */
+export type VaultKeySource = "unset" | "vault" | "environment";
+
+/**
+ * One allowlisted vault key, whether the vault holds it, and where the daemon
+ * would actually take its value from. There is deliberately no `value` field:
+ * `/api/vault/keys` reports names, a boolean and a source, and the API has no
+ * read-back endpoint at all, so nothing on this side of the wire can ever
+ * display a stored secret.
+ *
+ * Both fields are needed and they answer different questions: `set` is vault
+ * presence, `source` is the effective credential. An operator whose environment
+ * overrides the key still has to know whether their write landed.
+ */
+export interface VaultKeyStatus {
+  key: string;
+  set: boolean;
+  source: VaultKeySource;
+}
+
+/**
+ * The set of keys a surface may manage, straight from the daemon's
+ * `WRITABLE_KEYS` allowlist. Never hard-code the list client-side — adding a
+ * key server-side must be enough to make it appear here.
+ */
+export async function listVaultKeys(): Promise<VaultKeyStatus[]> {
+  const data = await get<{ keys: VaultKeyStatus[] }>("/api/vault/keys");
+  return data.keys ?? [];
+}
+
+export async function setVaultKey(
+  key: string,
+  value: string,
+): Promise<VaultKeyStatus> {
+  return put<VaultKeyStatus>(`/api/vault/keys/${encodeURIComponent(key)}`, {
+    value,
+  });
+}
+
+export async function deleteVaultKey(key: string): Promise<VaultKeyStatus> {
+  return del<VaultKeyStatus>(`/api/vault/keys/${encodeURIComponent(key)}`);
 }
 
 export async function rejectApproval(id: string): Promise<ApiActionResponse> {
@@ -6214,4 +6307,112 @@ export async function listPairedDevices(): Promise<PairedDevice[]> {
 
 export async function removePairedDevice(deviceId: string): Promise<void> {
   return del<void>(`/api/pairing/devices/${encodeURIComponent(deviceId)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge bases (#8327)
+// ---------------------------------------------------------------------------
+// Documents uploaded once and readable by chosen agents. A base is a named
+// workspace under `{workspaces_dir}/knowledge/`, so the sharing decision is
+// stored in each agent's manifest rather than in a store of this feature's own.
+
+/** An agent that holds a base, as the base sees it. */
+export interface KnowledgeHolder {
+  agent_id: string;
+  agent_name: string;
+  /** Alias the agent reaches it by — the `@name` in its TOOLS.md. */
+  alias: string;
+  mode: "r" | "rw";
+}
+
+export interface KnowledgeBase {
+  name: string;
+  /** Path as written in `agent.toml`, relative to `workspaces_dir`. */
+  path: string;
+  document_count: number;
+  total_bytes: number;
+  agents: KnowledgeHolder[];
+}
+
+export interface KnowledgeDocument {
+  filename: string;
+  bytes: number;
+  modified?: string | null;
+}
+
+export async function listKnowledgeBases(): Promise<KnowledgeBase[]> {
+  const data = await get<{ bases: KnowledgeBase[] }>("/api/knowledge");
+  return data.bases ?? [];
+}
+
+export async function createKnowledgeBase(name: string): Promise<void> {
+  await post<unknown>("/api/knowledge", { name });
+}
+
+export async function deleteKnowledgeBase(name: string): Promise<void> {
+  return del<void>(`/api/knowledge/${encodeURIComponent(name)}`);
+}
+
+export async function listKnowledgeDocuments(name: string): Promise<KnowledgeDocument[]> {
+  const data = await get<{ documents: KnowledgeDocument[] }>(
+    `/api/knowledge/${encodeURIComponent(name)}/documents`,
+  );
+  return data.documents ?? [];
+}
+
+/**
+ * Upload one document. The body is the raw file, following the
+ * `POST /api/agents/{id}/upload` convention rather than introducing multipart
+ * for a single-file payload.
+ *
+ * Unlike `uploadAgentFile`, which forwards the browser's `file.type`, the
+ * content type is pinned to `application/octet-stream`: the handler takes the
+ * body as `Bytes` and stores it under the filename from the path, so a media
+ * type would be recorded nowhere and only risks tripping a content-type guard.
+ *
+ * The filename travels in the path, not a header, because it is also the
+ * document's identity for the delete route — one place for the server to
+ * validate it.
+ */
+export async function putKnowledgeDocument(
+  name: string,
+  filename: string,
+  file: Blob,
+): Promise<void> {
+  const response = await fetchWithTimeout(
+    `/api/knowledge/${encodeURIComponent(name)}/documents/${encodeURIComponent(filename)}`,
+    {
+      method: "PUT",
+      headers: buildHeaders({ "Content-Type": "application/octet-stream" }),
+      body: file,
+    },
+    LONG_RUNNING_TIMEOUT_MS,
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+}
+
+export async function deleteKnowledgeDocument(name: string, filename: string): Promise<void> {
+  return del<void>(
+    `/api/knowledge/${encodeURIComponent(name)}/documents/${encodeURIComponent(filename)}`,
+  );
+}
+
+/**
+ * Set exactly which agents hold a base.
+ *
+ * The complete set is sent every time: agents left out are revoked, which is
+ * what makes "share with nobody" an ordinary empty list rather than a separate
+ * route.
+ */
+export async function setKnowledgeHolders(
+  name: string,
+  agents: { agent_id: string; mode: "r" | "rw" }[],
+): Promise<KnowledgeHolder[]> {
+  const data = await put<{ agents: KnowledgeHolder[] }>(
+    `/api/knowledge/${encodeURIComponent(name)}/agents`,
+    { agents },
+  );
+  return data.agents ?? [];
 }

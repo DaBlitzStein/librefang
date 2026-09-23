@@ -102,6 +102,7 @@ def main():
         == {
             "post_agent_template_toml": "text/plain",
             "put_agent_template_toml": "text/plain",
+            "put_document": "application/octet-stream",
             "transcribe_audio": "audio/webm",
             "upload_file": "application/octet-stream",
         },
