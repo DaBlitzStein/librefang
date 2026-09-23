@@ -239,10 +239,9 @@ impl TemplateSource {
     }
 }
 
-use librefang_types::agent_type_store::agent_type_path_in;
 use librefang_types::agent_type_store::{
-    agent_type_path, agent_types_dir_in, workspace_agent_manifest_path,
-    workspace_agent_manifest_path_in, workspace_agents_dir_in,
+    agent_type_path_in, agent_types_dir_in, workspace_agent_manifest_path_in,
+    workspace_agents_dir_in,
 };
 
 /// Fold "the file does not exist" into `Ok(None)`, leaving every other I/O
@@ -693,8 +692,12 @@ pub async fn put_agent_template_toml(
             .into_json_tuple();
     }
 
-    if !agent_type_path(&name).exists() {
-        return if workspace_agent_manifest_path(&name).exists() {
+    // The same `home_dir` every other route in this file resolves against (#8112): writing the
+    // ambient `LIBREFANG_HOME` while `get_agent_template` reads the kernel's would answer 200 for
+    // a save the operator cannot then see.
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    if !agent_type_path_in(&home_dir, &name).exists() {
+        return if workspace_agent_manifest_path_in(&home_dir, &name).exists() {
             ApiErrorResponse::conflict(managed_elsewhere)
                 .with_code("template_not_editable")
                 .into_json_tuple()
@@ -725,7 +728,7 @@ pub async fn put_agent_template_toml(
         );
     }
 
-    match persist_agent_type(&name, &manifest) {
+    match persist_agent_type_in(&home_dir, &name, &manifest) {
         Ok(rendered) => {
             let _ = record_template_version(&state, &name, &rendered, "toml");
             let mut detail =
@@ -797,7 +800,14 @@ pub async fn post_agent_template_toml(
         );
     }
 
-    match store_create_from_manifest(&name, &manifest) {
+    // Same `home_dir` as the read routes (#8112) — see the note in `put_agent_template_toml`.
+    //
+    // No name is exempt from the live-agent shadow check here: `save-as-agent-type` is the only
+    // caller that snapshots an agent under its own name, and this route is a plain create.
+    // `""` is the "nobody" value — `validate_agent_type_name` rejects an empty name, so it can
+    // never equal the one being created.
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    match store_create_from_manifest(&home_dir, &name, &manifest, "") {
         Ok(rendered) => {
             let _ = record_template_version(&state, &name, &rendered, "create");
             let mut detail =
@@ -863,9 +873,8 @@ fn parse_manifest_toml_body(
 // the tool writes through the kernel's own `home_dir` too (`kernel::handles::agent_control`), so
 // all three writers of `agent-types/` agree on where the file lands.
 use librefang_types::agent_type_store::{
-    create_agent_type_from_manifest as store_create_from_manifest,
-    create_agent_type_in as store_create_in, persist_agent_type, persist_agent_type_in,
-    CreateAgentTypeError,
+    create_agent_type_from_manifest_in as store_create_from_manifest,
+    create_agent_type_in as store_create_in, persist_agent_type_in, CreateAgentTypeError,
 };
 
 /// POST /api/templates — Create an operator-authored agent type.
@@ -1379,24 +1388,31 @@ pub async fn restore_from_registry(
 
     // Only agent-type files can be restored — a live agent is managed elsewhere.
     // Read (not just stat) so the pre-restore content can be snapshotted below.
-    let pre_restore_content = match tokio::fs::read_to_string(agent_type_path(&name)).await {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return if workspace_agent_manifest_path(&name).exists() {
-                ApiErrorResponse::conflict(managed_elsewhere)
-                    .with_code("template_not_editable")
-                    .into_json_tuple()
-            } else {
-                ApiErrorResponse::not_found(not_found)
-                    .with_code("template_not_found")
-                    .into_json_tuple()
-            };
-        }
-        Err(e) => {
-            tracing::warn!("Failed to check agent type '{name}': {e}");
-            return ApiErrorResponse::internal(read_failed).into_json_tuple();
-        }
-    };
+    //
+    // Resolved against the same `home_dir` the write verbs, the spawn path and the registry
+    // diff use (#8112), not the process-wide `LIBREFANG_HOME`: the file this reads is the one a
+    // restore overwrites, and an embedder whose `KernelConfig.home_dir` differs would otherwise
+    // restore over a document none of the other routes can see.
+    let home_dir = state.kernel.config_ref().home_dir.clone();
+    let pre_restore_content =
+        match tokio::fs::read_to_string(agent_type_path_in(&home_dir, &name)).await {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return if workspace_agent_manifest_path_in(&home_dir, &name).exists() {
+                    ApiErrorResponse::conflict(managed_elsewhere)
+                        .with_code("template_not_editable")
+                        .into_json_tuple()
+                } else {
+                    ApiErrorResponse::not_found(not_found)
+                        .with_code("template_not_found")
+                        .into_json_tuple()
+                };
+            }
+            Err(e) => {
+                tracing::warn!("Failed to check agent type '{name}': {e}");
+                return ApiErrorResponse::internal(read_failed).into_json_tuple();
+            }
+        };
 
     // Read the registry version.
     let registry_content = match read_registry_agent_type(&name).await {
@@ -1443,7 +1459,12 @@ pub async fn restore_from_registry(
     }
 
     // Write via the shared persist path (atomic rename).
-    match persist_agent_type(&name, &manifest) {
+    //
+    // The `_in` spelling for the same reason the read above uses it: this overwrites the file
+    // `get_agent_template` reads back, and the ambient `LIBREFANG_HOME` is a different directory
+    // whenever the kernel was built with an explicit `home_dir`. Reading one tree and writing
+    // the other answers 200 while leaving the operator's copy untouched (#8112).
+    match persist_agent_type_in(&home_dir, &name, &manifest) {
         Ok(rendered) => {
             let _ = record_template_version(&state, &name, &rendered, "registry-restore");
             (

@@ -25,7 +25,9 @@ use librefang_api::server;
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use serde_json::{json, Value as Json};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use tempfile::TempDir;
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -61,6 +63,27 @@ async fn boot() -> Harness {
 /// This harness kernel's own home directory — where [`write_agent_type`] /
 /// [`write_workspace_agent`] seed fixtures, matching what the write verbs
 /// and the tool actually resolve against (#8112).
+/// The ambient `LIBREFANG_HOME`, pinned to a tempdir once.
+///
+/// The *registry* side is the one storage path the handlers do NOT resolve through
+/// `config.home_dir`: `registry_cache_dir()` reads this variable. So registry fixtures have to be
+/// seeded here, and they are shared by the whole test binary — which is what [`lock`] serialises.
+fn home() -> PathBuf {
+    static HOME: OnceLock<TempDir> = OnceLock::new();
+    let dir = HOME.get_or_init(|| {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("LIBREFANG_HOME", tmp.path());
+        tmp
+    });
+    dir.path().to_path_buf()
+}
+
+/// Serialises the tests whose fixtures live in the shared ambient [`home`].
+fn lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn home_dir(h: &Harness) -> PathBuf {
     h.state.kernel.config_ref().home_dir.clone()
 }
@@ -151,16 +174,16 @@ fn write_workspace_agent(h: &Harness, name: &str, body: &str) {
 
 /// The registry checkout root the diff/restore handlers resolve: `$LIBREFANG_HOME/registry`,
 /// with each agent type stored directory-per-type as `agent-types/{name}/agent.toml`.
-fn registry_agent_type_file(h: &Harness, name: &str) -> PathBuf {
-    home_dir(h)
+fn registry_agent_type_file(name: &str) -> PathBuf {
+    home()
         .join("registry")
         .join("agent-types")
         .join(name)
         .join("agent.toml")
 }
 
-fn write_registry_agent_type(h: &Harness, name: &str, body: &str) {
-    let file = registry_agent_type_file(h, name);
+fn write_registry_agent_type(name: &str, body: &str) {
+    let file = registry_agent_type_file(name);
     std::fs::create_dir_all(file.parent().unwrap()).expect("create registry agent-types dir");
     std::fs::write(file, body).expect("write registry agent type");
 }
@@ -186,7 +209,7 @@ system_prompt = "Seeded."
 fn cleanup(h: &Harness, name: &str) {
     let _ = std::fs::remove_file(agent_type_file(h, name));
     let _ = std::fs::remove_dir_all(home_dir(h).join("workspaces").join("agents").join(name));
-    let _ = std::fs::remove_dir_all(home_dir(h).join("registry").join("agent-types").join(name));
+    let _ = std::fs::remove_dir_all(home().join("registry").join("agent-types").join(name));
 }
 
 /// The exact body the dashboard's agent-type editor sends on save: seven flat keys, nothing else.
@@ -462,11 +485,12 @@ async fn a_workspace_agent_row_is_readable_but_refuses_the_write_verbs() {
 /// restore that can never succeed (#8042).
 #[tokio::test(flavor = "multi_thread")]
 async fn registry_diff_refuses_a_name_that_only_resolves_through_a_live_agent() {
+    let _g = lock().lock().await;
     let name = "at_registry_diff_liveagent";
     let h = boot().await;
     cleanup(&h, name);
     write_workspace_agent(&h, name, &manifest_with_non_form_fields(name));
-    write_registry_agent_type(&h, name, &registry_manifest_body(name, "from registry", 42));
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 42));
 
     let (status, body) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -487,11 +511,12 @@ async fn registry_diff_refuses_a_name_that_only_resolves_through_a_live_agent() 
 /// suite stays green (#8054).
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_refuses_a_name_that_only_resolves_through_a_live_agent() {
+    let _g = lock().lock().await;
     let name = "at_registry_restore_liveagent";
     let h = boot().await;
     cleanup(&h, name);
     write_workspace_agent(&h, name, &manifest_with_non_form_fields(name));
-    write_registry_agent_type(&h, name, &registry_manifest_body(name, "from registry", 42));
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 42));
 
     let (status, body) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -992,12 +1017,13 @@ async fn registry_diff_reports_registry_type_not_found_when_the_registry_copy_is
 /// no diffs — the response must not invent a difference the projection missed.
 #[tokio::test(flavor = "multi_thread")]
 async fn registry_diff_reports_identical_when_local_and_registry_match_exactly() {
+    let _g = lock().lock().await;
     let name = "at_registry_identical";
     let h = boot().await;
     cleanup(&h, name);
     let body = registry_manifest_body(name, "same everywhere", 42);
     write_agent_type(&h, name, &body);
-    write_registry_agent_type(&h, name, &body);
+    write_registry_agent_type(name, &body);
 
     let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::OK, "{diff}");
@@ -1013,11 +1039,12 @@ async fn registry_diff_reports_identical_when_local_and_registry_match_exactly()
 /// differences outside the projection is reported rather than hidden.
 #[tokio::test(flavor = "multi_thread")]
 async fn registry_diff_marks_a_field_outside_the_projection_as_non_identical() {
+    let _g = lock().lock().await;
     let name = "at_registry_hidden_diff";
     let h = boot().await;
     cleanup(&h, name);
     write_agent_type(&h, name, &registry_manifest_body(name, "local", 42));
-    write_registry_agent_type(&h, name, &registry_manifest_body(name, "local", 99));
+    write_registry_agent_type(name, &registry_manifest_body(name, "local", 99));
 
     let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::OK, "{diff}");
@@ -1044,6 +1071,7 @@ async fn registry_diff_marks_a_field_outside_the_projection_as_non_identical() {
 /// shows it.
 #[tokio::test(flavor = "multi_thread")]
 async fn unlisted_diffs_does_not_double_count_a_differing_listed_list_field() {
+    let _g = lock().lock().await;
     let name = "at_registry_list_field_diff";
     let h = boot().await;
     cleanup(&h, name);
@@ -1062,7 +1090,7 @@ system_prompt = "Seeded."
         )
     };
     write_agent_type(&h, name, &manifest_with_tags(r#"["a", "b"]"#));
-    write_registry_agent_type(&h, name, &manifest_with_tags(r#"["c", "d"]"#));
+    write_registry_agent_type(name, &manifest_with_tags(r#"["c", "d"]"#));
 
     let (status, diff) = get(&h, &format!("/api/templates/{name}/registry-diff")).await;
     assert_eq!(status, StatusCode::OK, "{diff}");
@@ -1085,11 +1113,12 @@ system_prompt = "Seeded."
 /// GET returns the registry content rather than the pre-restore local content.
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_overwrites_the_local_copy_and_reads_back_the_registry_version() {
+    let _g = lock().lock().await;
     let name = "at_registry_restore";
     let h = boot().await;
     cleanup(&h, name);
     write_agent_type(&h, name, &registry_manifest_body(name, "local", 42));
-    write_registry_agent_type(&h, name, &registry_manifest_body(name, "from registry", 99));
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
 
     let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{restored}");
@@ -1116,6 +1145,7 @@ async fn restore_overwrites_the_local_copy_and_reads_back_the_registry_version()
 /// A manifest whose current content came from a hand-edit of the file has no history row of its own, so recording only the post-restore content is not enough: the pre-restore content — the thing an operator actually wants back — must itself be recoverable from history, not merely implied by a row existing.
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_from_registry_records_a_recoverable_pre_restore_snapshot() {
+    let _g = lock().lock().await;
     let name = "at_registry_restore_history";
     let h = boot().await;
     cleanup(&h, name);
@@ -1124,7 +1154,7 @@ async fn restore_from_registry_records_a_recoverable_pre_restore_snapshot() {
         name,
         &registry_manifest_body(name, "hand edited on disk", 42),
     );
-    write_registry_agent_type(&h, name, &registry_manifest_body(name, "from registry", 99));
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
 
     let (status, restored) = post(&h, &format!("/api/templates/{name}/restore"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{restored}");
@@ -1177,12 +1207,13 @@ async fn restore_from_registry_records_a_recoverable_pre_restore_snapshot() {
 /// Dropping `template_versions` is the deterministic stand-in for the failure that actually happens — a `SQLITE_BUSY` from a concurrent writer — and reaches `record_version` as the same `LibreFangError::Memory`.
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_refuses_to_overwrite_when_the_pre_restore_snapshot_fails() {
+    let _g = lock().lock().await;
     let name = "at_registry_restore_snapshot_failure";
     let h = boot().await;
     cleanup(&h, name);
     let hand_edited = registry_manifest_body(name, "hand edited on disk", 42);
     write_agent_type(&h, name, &hand_edited);
-    write_registry_agent_type(&h, name, &registry_manifest_body(name, "from registry", 99));
+    write_registry_agent_type(name, &registry_manifest_body(name, "from registry", 99));
 
     // Break the snapshot store through the pool the substrate already exposes — the same
     // route `goals_routes_integration.rs` uses to make a substrate read fail from out here.
@@ -1223,12 +1254,12 @@ async fn restore_refuses_to_overwrite_when_the_pre_restore_snapshot_fails() {
 /// catalog.
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_from_registry_pins_the_manifest_name_to_the_url_segment() {
+    let _g = lock().lock().await;
     let name = "at_registry_restore_name_mismatch";
     let h = boot().await;
     cleanup(&h, name);
     write_agent_type(&h, name, &registry_manifest_body(name, "local", 42));
     write_registry_agent_type(
-        &h,
         name,
         r#"name = "Some Other Display Name"
 description = "from registry"
@@ -1842,6 +1873,7 @@ async fn toml_put_pins_the_name_to_the_url_rather_than_the_body() {
 /// "this agent type does not exist in the registry" (#8042 review).
 #[tokio::test(flavor = "multi_thread")]
 async fn templates_list_flags_from_registry_per_row() {
+    let _g = lock().lock().await;
     let synced = "at_list_from_registry_synced";
     let unsynced = "at_list_from_registry_unsynced";
     let live = "at_list_from_registry_live";
@@ -1853,7 +1885,7 @@ async fn templates_list_flags_from_registry_per_row() {
     // An agent type with a registry original.
     let manifest = registry_manifest_body(synced, "synced with the registry", 42);
     write_agent_type(&h, synced, &manifest);
-    write_registry_agent_type(&h, synced, &manifest);
+    write_registry_agent_type(synced, &manifest);
 
     // Created locally with no registry counterpart — e.g. through `POST
     // /api/templates` or the `agent_type_create` tool.
