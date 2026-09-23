@@ -1,0 +1,334 @@
+//! A template instantiation must not alias the template's own agent directory.
+//!
+//! Spawn resolves the workspace and writes the absolute result back into
+//! `agent.toml`, so the file at `workspaces/agents/<template>/agent.toml` ends up
+//! carrying `workspace = "<home>/workspaces/agents/<template>"`. Reading that
+//! file as a template and honouring the value handed the new agent the
+//! *template's* directory — its `.identity/IDENTITY.md`, its sessions and its
+//! memory — which is how an agent comes to believe it is the agent it was cloned
+//! from.
+//!
+//! `resolved_workspace_dir` cannot catch it downstream: an absolute path under
+//! the workspaces root is accepted there on purpose (#4991, so a recreate or a
+//! restart can reuse the same directory), and the template's directory is under
+//! that root. The guard therefore has to be at resolution time.
+//!
+//! The other half is which file is read at all. `agent-types/<name>.toml` is the
+//! type — the thing a deployment copies from — and carries no `workspace`;
+//! `workspaces/agents/<name>/agent.toml` is a live instance and always does.
+//! #6699 taught the ephemeral path to resolve against the type store; the
+//! regular spawn path kept reading only the instance.
+//!
+//! Run: cargo test -p librefang-api --test spawn_template_workspace_test
+
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode};
+use librefang_api::routes::AppState;
+use librefang_api::server;
+use librefang_kernel::LibreFangKernel;
+use librefang_types::config::{DefaultModelConfig, KernelConfig};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tower::ServiceExt;
+
+const TEST_TOKEN: &str = "test-secret";
+
+struct Harness {
+    app: axum::Router,
+    state: Arc<AppState>,
+    home_dir: PathBuf,
+    _tmp: tempfile::TempDir,
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        self.state.kernel.shutdown();
+    }
+}
+
+async fn boot() -> Harness {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: TEST_TOKEN.to_string(),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::BTreeMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+
+    let home_dir = tmp.path().to_path_buf();
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+    let (app, state) = server::build_router(kernel, "127.0.0.1:0".parse().expect("addr")).await;
+
+    Harness {
+        app,
+        state,
+        home_dir,
+        _tmp: tmp,
+    }
+}
+
+async fn post(
+    app: axum::Router,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    let resp = app.oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, json)
+}
+
+/// An agent *instance* on disk, in the shape spawn leaves one: the resolved
+/// absolute workspace round-tripped back into its own `agent.toml`. This is what
+/// a template lookup used to read.
+fn write_instance(home: &Path, name: &str) -> PathBuf {
+    let dir = home.join("workspaces").join("agents").join(name);
+    std::fs::create_dir_all(dir.join(".identity")).expect("mkdir instance");
+    std::fs::write(
+        dir.join("agent.toml"),
+        format!(
+            "name = \"{name}\"\n\
+             module = \"builtin:chat\"\n\
+             workspace = \"{}\"\n\
+             description = \"DE LA INSTANCIA\"\n",
+            dir.display()
+        ),
+    )
+    .expect("write instance manifest");
+    std::fs::write(
+        dir.join(".identity").join("IDENTITY.md"),
+        format!("---\nname: {name}\n---\n"),
+    )
+    .expect("write instance identity");
+    dir
+}
+
+/// An agent *type*, in the shape `POST /api/templates` writes one. No workspace.
+fn write_agent_type(home: &Path, name: &str, description: &str) {
+    let dir = home.join("agent-types");
+    std::fs::create_dir_all(&dir).expect("mkdir agent-types");
+    std::fs::write(
+        dir.join(format!("{name}.toml")),
+        format!("name = \"{name}\"\nmodule = \"builtin:chat\"\ndescription = \"{description}\"\n"),
+    )
+    .expect("write agent type");
+}
+
+/// The defect. A clone gets its own directory instead of the template's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clone_does_not_inherit_the_templates_workspace() {
+    let h = boot().await;
+    write_instance(&h.home_dir, "tmpl-inst");
+
+    let (status, body) = post(
+        h.app.clone(),
+        "/api/agents",
+        serde_json::json!({ "template": "tmpl-inst", "name": "clon" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "spawn failed: {body}");
+
+    // The clone's workspace is its own, so the kernel materialised its own
+    // directory. Before the fix the clone's workspace WAS the template's —
+    // `ensure_workspace` on a directory that already exists is a no-op — so
+    // `clon/` was never created at all.
+    let clon = h.home_dir.join("workspaces").join("agents").join("clon");
+    assert!(
+        clon.is_dir(),
+        "the clone must get its own workspace directory, not the template's: {}",
+        clon.display()
+    );
+
+    // And the identity it was given is its own. This is the symptom the whole
+    // guard exists to prevent: an agent presenting itself as the agent it was
+    // cloned from.
+    let identidad = std::fs::read_to_string(clon.join(".identity").join("IDENTITY.md"))
+        .expect("the clone's identity file");
+    assert!(
+        identidad.contains("name: clon"),
+        "the clone's identity must name the clone: {identidad}"
+    );
+}
+
+/// The door the template lookup does not cover: a caller that supplies the
+/// manifest itself.
+///
+/// This is the CLI's shape — `librefang agent spawn --template <name> --name
+/// <other>` expands the template and posts the result as `manifest_toml`, so
+/// the API never sees `template` and any guard placed at the lookup would be
+/// skipped. The kernel decides, because it is the one place every caller passes
+/// through.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_supplied_manifest_cannot_point_at_another_agents_directory() {
+    let h = boot().await;
+    let victima = write_instance(&h.home_dir, "vivo");
+
+    // Exactly what a template expansion of a live agent produces: its own
+    // manifest, with the absolute workspace spawn wrote into it.
+    let (status, body) = post(
+        h.app.clone(),
+        "/api/agents",
+        serde_json::json!({
+            "name": "nuevo",
+            "manifest_toml": format!(
+                "name = \"nuevo\"\nmodule = \"builtin:chat\"\nworkspace = \"{}\"\n",
+                victima.display()
+            ),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "spawn failed: {body}");
+
+    let propio = h.home_dir.join("workspaces").join("agents").join("nuevo");
+    assert!(
+        propio.join(".identity").join("IDENTITY.md").is_file(),
+        "the new agent must get its own workspace, not '{}'",
+        victima.display()
+    );
+    let identidad =
+        std::fs::read_to_string(propio.join(".identity").join("IDENTITY.md")).expect("identity");
+    assert!(
+        identidad.contains("name: nuevo"),
+        "the new agent's identity must name the new agent: {identidad}"
+    );
+}
+
+/// A shared workspace declared on purpose must survive.
+///
+/// The guard asks whether the path is *this* agent's directory, not what the
+/// agent is called, so a directory outside the agents tree is honoured however
+/// the spawn is named. Without that, a legitimate shared workspace would be
+/// silently dropped on every rename.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declared_shared_workspace_outside_the_agents_tree_is_kept() {
+    let h = boot().await;
+    let compartido = h.home_dir.join("workspaces").join("compartido");
+
+    let (status, body) = post(
+        h.app.clone(),
+        "/api/agents",
+        serde_json::json!({
+            "name": "con-compartido",
+            "manifest_toml": format!(
+                "name = \"con-compartido\"\nmodule = \"builtin:chat\"\nworkspace = \"{}\"\n",
+                compartido.display()
+            ),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "spawn failed: {body}");
+
+    assert!(
+        compartido.join(".identity").join("IDENTITY.md").is_file(),
+        "a declared shared workspace must be honoured, not replaced by the agent's own"
+    );
+}
+
+/// The type is what a deployment copies from, so an `agent-types/<name>.toml`
+/// must win over an instance of the same name.
+///
+/// The instance is deliberately invalid TOML: whichever file is read decides
+/// whether the spawn succeeds, so the assertion needs no second observable.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_type_wins_over_an_instance_of_the_same_name() {
+    let h = boot().await;
+    let instancia = write_instance(&h.home_dir, "tipo");
+    std::fs::write(
+        instancia.join("agent.toml"),
+        "name = \"tipo\"\nthis line is not valid TOML =\n",
+    )
+    .expect("write an unparseable instance");
+    write_agent_type(&h.home_dir, "tipo", "DEL TIPO");
+
+    let (status, body) = post(
+        h.app.clone(),
+        "/api/agents",
+        serde_json::json!({ "template": "tipo", "name": "desde-tipo" }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the agent type must be read in preference to the instance; reading the instance \
+         would fail to parse. Body: {body}"
+    );
+}
+
+/// The guard must not fire when the name is reused, which is the #4991 path: a
+/// recreate after delete, or a daemon restart, keeps the directory that name
+/// already owns instead of relocating.
+///
+/// The declared workspace here is a *shared* one, deliberately not
+/// `workspaces/agents/<name>`, so the two outcomes are distinguishable: keeping
+/// it lands the agent in `workspaces/compartido`, and dropping it — the bug this
+/// pins — would send it to `workspaces/agents/mismo` instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn reusing_the_same_name_keeps_its_declared_workspace() {
+    let h = boot().await;
+    let compartido = h.home_dir.join("workspaces").join("compartido");
+    std::fs::create_dir_all(compartido.join(".identity")).expect("mkdir compartido");
+    let instancia = write_instance(&h.home_dir, "mismo");
+    // Drop the fixture's own identity so its reappearance can only mean the
+    // kernel put the agent here — otherwise the negative assertion below would
+    // be reading this test's own handwriting.
+    std::fs::remove_dir_all(instancia.join(".identity")).expect("clear the fixture identity");
+    std::fs::write(
+        instancia.join("agent.toml"),
+        format!(
+            "name = \"mismo\"\nmodule = \"builtin:chat\"\nworkspace = \"{}\"\n",
+            compartido.display()
+        ),
+    )
+    .expect("write the shared-workspace manifest");
+
+    let (status, body) = post(
+        h.app.clone(),
+        "/api/agents",
+        serde_json::json!({ "template": "mismo", "name": "mismo" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "spawn failed: {body}");
+
+    assert!(
+        compartido.join(".identity").join("IDENTITY.md").is_file(),
+        "a same-name spawn must keep the declared workspace"
+    );
+    assert!(
+        !h.home_dir
+            .join("workspaces")
+            .join("agents")
+            .join("mismo")
+            .join(".identity")
+            .join("IDENTITY.md")
+            .is_file(),
+        "the declared workspace was dropped and the agent relocated"
+    );
+}
