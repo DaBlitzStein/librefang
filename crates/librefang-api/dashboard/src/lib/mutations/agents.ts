@@ -218,7 +218,9 @@ export function usePatchAgent() {
     }) => patchAgent(agentId, body),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
-      // Reaches `manifestHistory` too — it is nested under this key.
+      // `manifestHistory` is nested under this key, so the line below already
+      // reaches it; the explicit invalidation that follows is redundant with
+      // that nesting. It is kept because #8231's test asserts it is issued.
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       if (variables.body.manifest_toml !== undefined) {
         qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
@@ -227,6 +229,7 @@ export function usePatchAgent() {
         qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
         qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
       }
+      qc.invalidateQueries({ queryKey: agentKeys.manifestHistory(variables.agentId) });
     },
   });
 }
@@ -248,8 +251,11 @@ export function usePatchAgentRuntimeConfig() {
       : patchAgentConfig(agentId, config),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
-      // Reaches `manifestHistory` too — it is nested under this key.
+      // `manifestHistory` is nested under this key, so the line below already
+      // reaches it; the explicit invalidation that follows is redundant with
+      // that nesting. It is kept because #8231's test asserts it is issued.
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.manifestHistory(variables.agentId) });
       if (variables.isHand) {
         qc.invalidateQueries({ queryKey: handKeys.details() });
       }
