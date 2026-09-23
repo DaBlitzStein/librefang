@@ -17,7 +17,7 @@ use std::path::PathBuf;
 /// Resolve the LibreFang home directory: `LIBREFANG_HOME` if set, otherwise `~/.librefang`.
 ///
 /// Read live on every call rather than cached, because the integration suites set the variable per test binary and a cached value would leak one suite's fixtures into another's assertions.
-fn librefang_home() -> PathBuf {
+pub fn librefang_home() -> PathBuf {
     if let Ok(home) = std::env::var("LIBREFANG_HOME") {
         return PathBuf::from(home);
     }
@@ -56,7 +56,13 @@ pub fn workspace_agents_dir() -> PathBuf {
     workspace_agents_dir_in(&librefang_home())
 }
 
-/// Live agent workspaces under an explicitly supplied home directory.
+/// The live-agent-workspaces directory under an explicitly supplied home directory.
+///
+/// Same rationale as [`agent_types_dir_in`] / [`workspace_agent_manifest_path_in`]:
+/// the catalog *listing* (`GET /api/templates`) has to walk this directory against
+/// the same `home_dir` the spawn path and the detail routes resolve against, or an
+/// embedder whose `KernelConfig.home_dir` differs from `LIBREFANG_HOME` sees a
+/// listing that disagrees with what those other routes can actually read (#8112).
 pub fn workspace_agents_dir_in(home_dir: &std::path::Path) -> PathBuf {
     home_dir.join("workspaces").join("agents")
 }
@@ -156,8 +162,21 @@ pub fn create_agent_type(
     name: &str,
     spec: AgentTypeSpec,
 ) -> Result<CreatedAgentType, CreateAgentTypeError> {
+    create_agent_type_in(&librefang_home(), name, spec)
+}
+
+/// Same resolution as [`create_agent_type`] against an explicitly supplied home directory.
+///
+/// A caller with a `home_dir` in hand (the kernel, or a route handler with `AppState`) must use
+/// this rather than the process-environment version — see [`agent_type_path_in`] for why an
+/// embedder's `KernelConfig.home_dir` and `LIBREFANG_HOME` are not interchangeable (#8112).
+pub fn create_agent_type_in(
+    home_dir: &std::path::Path,
+    name: &str,
+    spec: AgentTypeSpec,
+) -> Result<CreatedAgentType, CreateAgentTypeError> {
     validate_agent_type_name(name).map_err(|_| CreateAgentTypeError::InvalidName)?;
-    if workspace_agent_manifest_path(name).exists() {
+    if workspace_agent_manifest_path_in(home_dir, name).exists() {
         return Err(CreateAgentTypeError::ShadowsLiveAgent);
     }
 
@@ -165,7 +184,7 @@ pub fn create_agent_type(
     let rendered = toml::to_string_pretty(&manifest).map_err(|e| {
         CreateAgentTypeError::Io(format!("failed to render agent type '{name}': {e}"))
     })?;
-    claim_and_write(name, &rendered)?;
+    claim_and_write_in(home_dir, name, &rendered)?;
 
     Ok(CreatedAgentType {
         name: name.to_string(),
@@ -211,6 +230,45 @@ fn claim_and_write(name: &str, rendered: &str) -> Result<(), CreateAgentTypeErro
     })?;
 
     let path = agent_type_path(name);
+    // `Path::exists()` followed by a write is check-then-act: two concurrent creates of the same name both observe "absent" and the second silently replaces the first, which is exactly the refusal this function promises.
+    // Claiming the path with `File::create_new` — an atomic create-if-absent at the OS level — lets exactly one of them through.
+    match std::fs::File::create_new(&path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(CreateAgentTypeError::NameTaken)
+        }
+        Err(e) => {
+            return Err(CreateAgentTypeError::Io(format!(
+                "failed to claim agent type '{name}': {e}"
+            )))
+        }
+    }
+
+    // The claim is filled by the same atomic rename every other write here uses, and removed again if that fails, so a failed create leaves no empty file behind for the catalog to trip over.
+    if let Err(e) = atomic_write(&path, rendered.as_bytes()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(CreateAgentTypeError::Io(format!(
+            "failed to write agent type '{name}': {e}"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Claim `name`'s path atomically under an explicitly supplied `home_dir` and write `rendered` into it.
+///
+/// The `_in` spelling matches [`agent_type_path_in`] and [`agent_types_dir_in`]: a caller that already holds a `KernelConfig.home_dir` must not resolve the path a second time through `LIBREFANG_HOME`, or the two can diverge for an embedder — or a test harness — that pins both independently (#8112).
+fn claim_and_write_in(
+    home_dir: &std::path::Path,
+    name: &str,
+    rendered: &str,
+) -> Result<(), CreateAgentTypeError> {
+    let dir = agent_types_dir_in(home_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        CreateAgentTypeError::Io(format!("failed to create {}: {e}", dir.display()))
+    })?;
+
+    let path = agent_type_path_in(home_dir, name);
     // `Path::exists()` followed by a write is check-then-act: two concurrent creates of the same name both observe "absent" and the second silently replaces the first, which is exactly the refusal this function promises.
     // Claiming the path with `File::create_new` — an atomic create-if-absent at the OS level — lets exactly one of them through.
     match std::fs::File::create_new(&path) {
@@ -293,12 +351,22 @@ pub fn create_agent_type_from_manifest_in(
 ///
 /// This is the edit path's landing, and it deliberately does not construct anything: the caller has already read the stored manifest and applied [`AgentTypeSpec::apply_to`] over it, so every field outside the flat shape is the one that was on disk a moment ago.
 pub fn persist_agent_type(name: &str, manifest: &AgentManifest) -> Result<String, String> {
+    persist_agent_type_in(&librefang_home(), name, manifest)
+}
+
+/// Same resolution as [`persist_agent_type`] against an explicitly supplied home directory.
+/// See [`create_agent_type_in`] for why this spelling exists (#8112).
+pub fn persist_agent_type_in(
+    home_dir: &std::path::Path,
+    name: &str,
+    manifest: &AgentManifest,
+) -> Result<String, String> {
     let rendered = toml::to_string_pretty(manifest)
         .map_err(|e| format!("failed to render agent type '{name}': {e}"))?;
-    let dir = agent_types_dir();
+    let dir = agent_types_dir_in(home_dir);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
-    atomic_write(&agent_type_path(name), rendered.as_bytes())
+    atomic_write(&agent_type_path_in(home_dir, name), rendered.as_bytes())
         .map_err(|e| format!("failed to write agent type '{name}': {e}"))?;
     Ok(rendered)
 }

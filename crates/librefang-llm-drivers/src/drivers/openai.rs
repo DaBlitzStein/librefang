@@ -995,6 +995,72 @@ fn sampling_is_fixed(model: &str) -> bool {
     rejects_temperature(model) || temperature_must_be_one(model)
 }
 
+/// The three sampling knobs that reach the wire through `extra_body` as well as
+/// through a typed request field.
+///
+/// The runtime's `build_extra_body` mirrors `ModelConfig::top_p`,
+/// `frequency_penalty` and `presence_penalty` into `extra_body` on top of the
+/// typed fields, and [`merge_extra_body`] lets an `extra_body` entry **override**
+/// the field of the same name. Gating the typed fields through
+/// [`sampling_is_fixed`] is therefore not enough on its own: the value comes
+/// back in through the merge and the model 400s on it anyway.
+///
+/// A model that [`rejects_temperature`] rejects these too, with the identical
+/// `unsupported_parameter` error — OpenAI fixes `temperature`, `top_p`, `n`
+/// at 1 and `presence_penalty` / `frequency_penalty` at 0 for reasoning
+/// models, since they don't vary sampling the way chat models do. Only
+/// `temperature` had a proactive-omit and strip-and-retry guard before this;
+/// these three went out unguarded and turned into an unrecoverable 400 on a
+/// reasoning model until an operator cleared the field by hand.
+const EXTRA_BODY_SAMPLING_PARAMS: &[&str] = &["top_p", "frequency_penalty", "presence_penalty"];
+
+/// Drop the [`EXTRA_BODY_SAMPLING_PARAMS`] keys from `extra_body` when the
+/// model is one whose sampling is fixed — same rationale as that predicate's
+/// own doc comment: proactively omit what the model will 400 on rather than
+/// spend a retry finding out.
+fn strip_rejected_sampling_params(
+    model: &str,
+    extra_body: &mut Option<BTreeMap<String, serde_json::Value>>,
+) {
+    if !sampling_is_fixed(model) {
+        return;
+    }
+    if let Some(map) = extra_body.as_mut() {
+        for key in EXTRA_BODY_SAMPLING_PARAMS {
+            map.remove(*key);
+        }
+        if map.is_empty() {
+            *extra_body = None;
+        }
+    }
+}
+
+/// Strip the first `extra_body` sampling parameter a reasoning model just
+/// rejected via a `400 unsupported_parameter`, so the retry does not repeat
+/// exactly the request that failed. Mirrors the `temperature` strip-and-retry
+/// arm below, for the three knobs that arrive through `extra_body` on top of
+/// the typed field.
+///
+/// Strips at most one key per call, like the `temperature` arm — a request
+/// that named two rejected knobs needs two retries, which the caller's
+/// `attempt < max_retries` loop already affords. Returns the key that was
+/// stripped, for the warning log.
+fn strip_rejected_extra_body_sampling_param(
+    body: &str,
+    extra_body: &mut Option<BTreeMap<String, serde_json::Value>>,
+) -> Option<&'static str> {
+    if !crate::llm_driver::llm_errors::is_unsupported_parameter_error(body) {
+        return None;
+    }
+    let lower = body.to_lowercase();
+    let map = extra_body.as_mut()?;
+    let rejected = *EXTRA_BODY_SAMPLING_PARAMS
+        .iter()
+        .find(|k| lower.contains(**k) && map.contains_key(**k))?;
+    map.remove(rejected);
+    Some(rejected)
+}
+
 #[derive(Debug, Serialize)]
 struct OaiMessage {
     role: String,
@@ -1512,7 +1578,12 @@ impl OpenAIDriver {
             (Some(request.max_tokens), None)
         };
 
-        let extra_body = request.extra_body.clone();
+        let mut extra_body = request.extra_body.clone();
+        // #8112: reasoning models reject `top_p` / `frequency_penalty` /
+        // `presence_penalty` exactly like they reject `temperature` — proactively
+        // drop them here instead of spending a retry to find out, same as
+        // `rejects_temperature` a few lines below already does for `temperature`.
+        strip_rejected_sampling_params(&request.model, &mut extra_body);
 
         let sampling_fixed = sampling_is_fixed(&request.model);
         if sampling_fixed {
@@ -1741,6 +1812,24 @@ impl LlmDriver for OpenAIDriver {
                     ))
                     .await;
                     continue;
+                }
+
+                // #8112: the same reasoning models reject `top_p` /
+                // `frequency_penalty` / `presence_penalty` with the identical
+                // `unsupported_parameter` error, but those reach the wire through
+                // `extra_body` rather than a typed field — same shape as the
+                // `temperature` strip above, just on the map instead of a struct field.
+                if status == 400 && attempt < max_retries {
+                    if let Some(param) =
+                        strip_rejected_extra_body_sampling_param(&body, &mut oai_request.extra_body)
+                    {
+                        warn!(model = %oai_request.model, param, "Stripping unsupported extra_body sampling param for this model");
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            100 * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
                 }
 
                 // A gateway that will not forward the reasoning control rejects the request before the model sees it (#7769).
@@ -2197,6 +2286,22 @@ impl LlmDriver for OpenAIDriver {
                     ))
                     .await;
                     continue;
+                }
+
+                // #8112: same reasoning models, same `unsupported_parameter` error,
+                // for the three sampling knobs that reach the wire through
+                // `extra_body` instead of a typed field. See the non-streaming arm above.
+                if status == 400 && attempt < max_retries {
+                    if let Some(param) =
+                        strip_rejected_extra_body_sampling_param(&body, &mut oai_request.extra_body)
+                    {
+                        warn!(model = %oai_request.model, param, "Stripping unsupported extra_body sampling param for this model (stream)");
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            100 * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
                 }
 
                 // A gateway that will not forward the reasoning control rejects the request before the model sees it (#7769).
@@ -3334,6 +3439,97 @@ mod tests {
         assert!(!rejects_temperature("plain-model-placeholder"));
         assert!(!rejects_temperature("llama-3.3-70b-versatile"));
         assert!(!rejects_temperature("deepseek-chat"));
+    }
+
+    // ----- #8112: extra_body sampling params on reasoning models -----
+
+    #[test]
+    fn test_strip_rejected_sampling_params_drops_all_three_for_a_reasoning_model() {
+        let mut extra_body = Some(BTreeMap::from([
+            ("top_p".to_string(), serde_json::json!(0.9)),
+            ("frequency_penalty".to_string(), serde_json::json!(0.5)),
+            ("presence_penalty".to_string(), serde_json::json!(-0.5)),
+            ("enable_memory".to_string(), serde_json::json!(true)),
+        ]));
+        strip_rejected_sampling_params("o3-mini", &mut extra_body);
+        let map = extra_body.expect("enable_memory must survive, so the map is not emptied");
+        assert!(!map.contains_key("top_p"));
+        assert!(!map.contains_key("frequency_penalty"));
+        assert!(!map.contains_key("presence_penalty"));
+        assert_eq!(map.get("enable_memory"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn test_strip_rejected_sampling_params_empties_to_none_when_nothing_else_remains() {
+        let mut extra_body = Some(BTreeMap::from([(
+            "top_p".to_string(),
+            serde_json::json!(0.9),
+        )]));
+        strip_rejected_sampling_params("o1", &mut extra_body);
+        assert!(
+            extra_body.is_none(),
+            "an extra_body left empty by the strip must become None, not Some({{}})"
+        );
+    }
+
+    #[test]
+    fn test_strip_rejected_sampling_params_leaves_normal_models_untouched() {
+        let mut extra_body = Some(BTreeMap::from([(
+            "top_p".to_string(),
+            serde_json::json!(0.9),
+        )]));
+        strip_rejected_sampling_params("gpt-4o", &mut extra_body);
+        assert_eq!(
+            extra_body,
+            Some(BTreeMap::from([(
+                "top_p".to_string(),
+                serde_json::json!(0.9)
+            )]))
+        );
+    }
+
+    #[test]
+    fn test_strip_rejected_extra_body_sampling_param_removes_the_named_key() {
+        let mut extra_body = Some(BTreeMap::from([
+            ("top_p".to_string(), serde_json::json!(0.9)),
+            ("frequency_penalty".to_string(), serde_json::json!(0.5)),
+        ]));
+        let body = r#"{"error":{"message":"Unsupported parameter: 'top_p' is not supported with this model.","type":"invalid_request_error","param":"top_p","code":"unsupported_parameter"}}"#;
+        let stripped = strip_rejected_extra_body_sampling_param(body, &mut extra_body);
+        assert_eq!(stripped, Some("top_p"));
+        let map = extra_body.expect("frequency_penalty must survive");
+        assert!(!map.contains_key("top_p"));
+        assert_eq!(map.get("frequency_penalty"), Some(&serde_json::json!(0.5)));
+    }
+
+    #[test]
+    fn test_strip_rejected_extra_body_sampling_param_ignores_unrelated_400() {
+        let mut extra_body = Some(BTreeMap::from([(
+            "top_p".to_string(),
+            serde_json::json!(0.9),
+        )]));
+        let body = r#"{"error":{"message":"invalid JSON","type":"invalid_request_error"}}"#;
+        assert_eq!(
+            strip_rejected_extra_body_sampling_param(body, &mut extra_body),
+            None
+        );
+        assert_eq!(
+            extra_body,
+            Some(BTreeMap::from([(
+                "top_p".to_string(),
+                serde_json::json!(0.9)
+            )]))
+        );
+    }
+
+    #[test]
+    fn test_strip_rejected_extra_body_sampling_param_none_when_map_absent() {
+        let mut extra_body = None;
+        let body = r#"{"error":{"message":"Unsupported parameter: 'top_p'","code":"unsupported_parameter"}}"#;
+        assert_eq!(
+            strip_rejected_extra_body_sampling_param(body, &mut extra_body),
+            None
+        );
     }
 
     // ----- uses_completion_tokens tests -----
