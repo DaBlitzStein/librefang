@@ -1835,6 +1835,9 @@ tui-templates-restore-invalid-name = 잘못된 템플릿 이름입니다
 tui-templates-restore-success = 레지스트리에서 복원했습니다
 tui-templates-restore-daemon-only = 레지스트리 복원은 데몬 모드가 필요합니다
 tui-templates-restore-custom-only = 레지스트리 복원은 사용자 정의 템플릿에만 사용할 수 있습니다
+
+tui-templates-confirm-restore = 이 에이전트 유형을 레지스트리 사본으로 덮어쓰시겠습니까? [y] 예  [any] 취소
+tui-templates-confirm-restore-version = 이 에이전트 유형을 선택한 버전으로 되돌리시겠습니까? [y] 예  [any] 취소
 tui-templates-restore-ok = ✓ { $name }: { $message }
 tui-templates-restore-fail = ✗ { $name }: { $message }
 tui-templates-restoring = { $name }을(를) 레지스트리에서 복원하는 중…
@@ -2210,12 +2213,11 @@ tui-agents-opt-create-new = 새 에이전트 생성
 
 tui-agents-hints-filter =   [입력] 필터  [Enter] 적용  [Esc] 검색 취소
 tui-agents-hints-list =   [↑↓] 탐색  [Enter] 상세  [/] 검색  [Esc] 뒤로
-tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [p] 모델 파라미터  [$] 토큰  [h] 설정 기록  [c] 채팅  [k] 종료  [Esc] 뒤로
+tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [w] 공유 폴더  [p] 모델 파라미터  [$] 토큰  [h] 설정 기록  [c] 채팅  [k] 종료  [Esc] 뒤로
 tui-agents-title-manifest-history = 설정 기록
 tui-agents-label-manifest-history-loading = 설정 기록을 불러오는 중...
 tui-agents-label-manifest-history-empty = 이 에이전트에 기록된 설정 변경이 아직 없습니다.
 tui-agents-hints-manifest-history =   [↑↓] 버전 탐색  [Esc] 뒤로
-tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [w] 공유 폴더  [p] 모델 파라미터  [$] 토큰  [c] 채팅  [k] 종료  [Esc] 뒤로
 tui-agents-title-model-params = 모델 파라미터
 tui-agents-prompt-model-params = 이 에이전트의 설정이 모델 설정보다 우선합니다. `inherit`는 모델 설정을 따릅니다.
 tui-agents-hints-model-params =   [←→] 변경  [i] 상속  [e] 직접 입력  [Enter] 저장  [Esc] 취소

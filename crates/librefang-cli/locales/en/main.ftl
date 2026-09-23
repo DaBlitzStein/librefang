@@ -1841,6 +1841,9 @@ tui-templates-restore-invalid-name = Invalid template name
 tui-templates-restore-success = Restored from registry
 tui-templates-restore-daemon-only = Registry restore requires daemon mode
 tui-templates-restore-custom-only = Restore from registry is only available for custom templates
+
+tui-templates-confirm-restore = Overwrite this agent type with the registry copy? [y] Yes  [any] Cancel
+tui-templates-confirm-restore-version = Roll this agent type back to the selected version? [y] Yes  [any] Cancel
 tui-templates-restore-ok = ✓ { $name }: { $message }
 tui-templates-restore-fail = ✗ { $name }: { $message }
 tui-templates-restoring = Restoring { $name } from registry…
@@ -2216,12 +2219,11 @@ tui-agents-opt-create-new = Create new agent
 
 tui-agents-hints-filter =   [Type] Filter  [Enter] Accept  [Esc] Cancel search
 tui-agents-hints-list =   [↑↓] Navigate  [Enter] Detail  [/] Search  [Esc] Back
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [p] Model params  [$] Tokens  [h] Config history  [c] Chat  [k] Kill  [Esc] Back
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [w] Shared folders  [p] Model params  [$] Tokens  [h] Config history  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-title-manifest-history = Configuration history
 tui-agents-label-manifest-history-loading = Loading configuration history...
 tui-agents-label-manifest-history-empty = No configuration changes recorded for this agent yet.
 tui-agents-hints-manifest-history =   [↑↓] Browse versions  [Esc] Back
-tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [w] Shared folders  [p] Model params  [$] Tokens  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-title-model-params = Model parameters
 tui-agents-prompt-model-params = This agent's own settings win over the model's. `inherit` means the model's setting applies.
 tui-agents-hints-model-params =   [←→] Change  [i] Inherit  [e] Custom value  [Enter] Save  [Esc] Cancel

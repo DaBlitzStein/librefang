@@ -890,6 +890,9 @@ tui-templates-restore-invalid-name = 无效的模板名称
 tui-templates-restore-success = 已从注册表还原
 tui-templates-restore-daemon-only = 从注册表还原需要守护进程模式
 tui-templates-restore-custom-only = 仅自定义模板支持从注册表还原
+
+tui-templates-confirm-restore = 用注册表中的副本覆盖此 agent 类型？[y] 是  [任意键] 取消
+tui-templates-confirm-restore-version = 将此 agent 类型回滚到所选版本？[y] 是  [任意键] 取消
 tui-templates-restore-ok = ✓ { $name }: { $message }
 tui-templates-restore-fail = ✗ { $name }: { $message }
 tui-templates-restoring = 正在从注册表还原 { $name }…
@@ -1265,12 +1268,11 @@ tui-agents-opt-create-new = 创建新 Agent
 
 tui-agents-hints-filter =   [输入] 过滤  [Enter] 应用  [Esc] 取消搜索
 tui-agents-hints-list =   [↑↓] 导航  [Enter] 详情  [/] 搜索  [Esc] 返回
-tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [p] 模型参数  [$] 令牌  [h] 配置历史  [c] 聊天  [k] 停止  [Esc] 返回
+tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [w] 共享文件夹  [p] 模型参数  [$] 令牌  [h] 配置历史  [c] 聊天  [k] 停止  [Esc] 返回
 tui-agents-title-manifest-history = 配置历史
 tui-agents-label-manifest-history-loading = 正在加载配置历史……
 tui-agents-label-manifest-history-empty = 该代理尚未记录任何配置变更。
 tui-agents-hints-manifest-history =   [↑↓] 浏览版本  [Esc] 返回
-tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [w] 共享文件夹  [p] 模型参数  [$] 令牌  [c] 聊天  [k] 停止  [Esc] 返回
 tui-agents-title-model-params = 模型参数
 tui-agents-prompt-model-params = 该代理自己的设置优先于模型设置。`inherit` 表示使用模型的设置。
 tui-agents-hints-model-params =   [←→] 修改  [i] 继承  [e] 自定义值  [Enter] 保存  [Esc] 取消
