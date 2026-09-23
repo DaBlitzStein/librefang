@@ -422,6 +422,14 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         mode: librefang_types::agent::ModelMode,
         router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
     ) -> KernelResult<()>;
+
+    /// Replace an agent's named-workspace declarations, rewriting its `TOOLS.md`
+    /// so the model is told about an alias the sandbox already accepts.
+    fn set_agent_workspaces(
+        &self,
+        agent_id: AgentId,
+        workspaces: std::collections::HashMap<String, librefang_types::agent::WorkspaceDecl>,
+    ) -> KernelResult<()>;
     /// Update an agent's schedule mode and restart its background loop so
     /// the change takes effect immediately, without a daemon restart.
     /// See [`LibreFangKernel::set_agent_schedule`] for the full contract.
@@ -1324,6 +1332,14 @@ impl KernelApi for LibreFangKernel {
 
     fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
         Self::set_agent_channels(self, agent_id, channels)
+    }
+
+    fn set_agent_workspaces(
+        &self,
+        agent_id: AgentId,
+        workspaces: std::collections::HashMap<String, librefang_types::agent::WorkspaceDecl>,
+    ) -> KernelResult<()> {
+        Self::set_agent_workspaces(self, agent_id, workspaces)
     }
     fn set_agent_schedule(
         self: Arc<Self>,
