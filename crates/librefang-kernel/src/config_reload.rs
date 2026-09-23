@@ -1375,13 +1375,16 @@ pub fn should_apply_hot(mode: ReloadMode, plan: &ReloadPlan) -> bool {
 /// swap on `hot_actions` alone made those edits silently no-op while the
 /// reload response reported success.
 ///
+/// A plan that carries only a **restart-required** change stores too, for the reason the `queue` and `registry` splits below already state: an edit that matches no class leaves the plan carrying no change at all, and the whole reloaded document is then discarded — `POST /api/config/reload` answers "no changes detected" against a file that plainly changed.
+/// Whether a restart-required edit reaches the live config must not depend on whether the same edit also touched something hot. `log_level` with no [`crate::log_reload::LogLevelReloader`] installed and `local_backend_timeout` are the remaining instances of that defect; they are absorbed here rather than added to a class one field at a time.
+///
 /// `Off` / `Restart` modes still return `false` — the operator expects no
 /// runtime change until a full restart.
 pub fn should_store_config(mode: ReloadMode, plan: &ReloadPlan) -> bool {
     match mode {
         ReloadMode::Off | ReloadMode::Restart => false,
         ReloadMode::Hot | ReloadMode::Hybrid => {
-            !plan.hot_actions.is_empty() || !plan.noop_changes.is_empty()
+            !plan.hot_actions.is_empty() || !plan.noop_changes.is_empty() || plan.restart_required
         }
     }
 }

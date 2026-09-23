@@ -407,6 +407,28 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
 /// - Unknown fields under `strict_config = false` (or unset) still warn
 ///   and proceed, matching `load_config`'s tolerant behaviour.
 pub fn try_load_config(path: &Path) -> Result<KernelConfig, String> {
+    try_load_config_over(path, None)
+}
+
+/// Load `path` with `base` supplying every field the resolved document does not state.
+///
+/// `base` is `None` at boot, where the compiled defaults are the right thing for an absent key —
+/// there is no live configuration to disagree with. The reload path passes the running config,
+/// because there the document is an *edit*: `POST /api/users/{name}/identity` and its siblings
+/// rewrite only the sections they own, and on a kernel whose config file did not exist yet the
+/// document they leave behind states nothing else. Reading that as a complete statement of intent is
+/// what hands the daemon the compiled defaults for its home, its data directory and its API key.
+///
+/// **The trade-off, stated rather than implied**: with a base, deleting a key from `config.toml` and
+/// reloading no longer resets that field to its default — it keeps the running value until the next
+/// restart, because an absent key now means "unchanged" rather than "unset". That is the same
+/// meaning the reload already gives every field it classifies as restart-required, and it is the
+/// only reading under which a document that states one section is not a declaration about the other
+/// hundred.
+pub fn try_load_config_over(
+    path: &Path,
+    base: Option<&KernelConfig>,
+) -> Result<KernelConfig, String> {
     if !path.exists() {
         return Err(format!("Config file not found: {}", path.display()));
     }
@@ -497,9 +519,51 @@ pub fn try_load_config(path: &Path) -> Result<KernelConfig, String> {
         );
     }
 
+    // A document that omits a field must not be read as declaring that field's compiled default.
+    //
+    // `KernelConfig` is `#[serde(default)]` at the container level, so deserializing a *partial*
+    // document over nothing resets every field it does not mention — the loose runtime that
+    // `load_config`'s own comment names as the thing a strict operator must not be handed.
+    // Strictness stops at parseability: a file that parses and is partial lands in the same place a
+    // file that failed to parse used to. `base` is the other half.
+    // The interchange is JSON rather than TOML, and deliberately: this value never reaches disk, and
+    // a live config is not always TOML-representable — an MCP transport entry serializes a unit that
+    // TOML has no syntax for — so routing it through `toml::Value` would make the reload fail for
+    // exactly the configurations that have an MCP server.
+    if let Some(base) = base {
+        let mut merged = serde_json::to_value(base)
+            .map_err(|e| format!("Failed to reuse the live config as a base: {e}"))?;
+        let document = serde_json::to_value(&root_value)
+            .map_err(|e| format!("Failed to read the document as a value: {e}"))?;
+        overlay_document(&mut merged, &document);
+        return serde_json::from_value(merged)
+            .map_err(|e| format!("Failed to deserialize config: {e}"));
+    }
+
     root_value
         .try_into::<KernelConfig>()
         .map_err(|e| format!("Failed to deserialize config: {e}"))
+}
+
+/// Deep-merge `document` onto `base`, with the document winning at every leaf.
+///
+/// Objects merge key by key; anything else replaces outright, so a stated `[]` still means empty
+/// rather than "keep what was there". The only property this needs is that a key the document does
+/// not mention keeps the base's value.
+fn overlay_document(base: &mut serde_json::Value, document: &serde_json::Value) {
+    match (base, document) {
+        (serde_json::Value::Object(base_map), serde_json::Value::Object(document_map)) => {
+            for (key, value) in document_map {
+                match base_map.get_mut(key) {
+                    Some(slot) => overlay_document(slot, value),
+                    None => {
+                        base_map.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (slot, value) => *slot = value.clone(),
+    }
 }
 
 /// Resolve config includes by deep-merging included files into the root value.
