@@ -4,7 +4,11 @@ use super::*;
 // Shared manifest resolution helper
 // ---------------------------------------------------------------------------
 /// Maximum manifest size (1MB) to prevent parser memory exhaustion.
-const MAX_MANIFEST_SIZE: usize = 1024 * 1024;
+///
+/// `pub(crate)` because every surface that accepts a whole agent manifest — the
+/// agent spawn path here and `PUT /api/templates/{name}/toml` in
+/// `agent_templates` — must enforce the same cap, not just this one.
+pub(crate) const MAX_MANIFEST_SIZE: usize = 1024 * 1024;
 
 /// Resolved manifest ready for spawning.
 struct ResolvedManifest {
@@ -1382,11 +1386,8 @@ pub async fn patch_agent(
 
     // Apply partial updates using dedicated registry methods
     if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
-        if let Err(e) = state
-            .kernel
-            .agent_registry()
-            .update_name(agent_id, name.to_string())
-        {
+        // `rename_agent`, not the bare registry rename, so IDENTITY.md's front matter follows the new name (#8469).
+        if let Err(e) = state.kernel.rename_agent(agent_id, name.to_string()) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(
