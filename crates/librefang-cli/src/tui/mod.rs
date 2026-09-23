@@ -844,6 +844,46 @@ impl App {
                     }
                 };
             }
+            AppEvent::AgentWorkspacesLoaded(id, generation, entries) => {
+                // Two conditions answering two different questions.
+                // `generation == ws_generation` is the late-response guard:
+                // `w` → `Esc` → `w` bumps the generation, so a reply to the
+                // first `w` carries a stale one and is dropped even when it
+                // arrives first — which `!ws_loaded` alone could not do,
+                // because the second `w` had already reset that to `false`.
+                // `!ws_loaded` then rejects a duplicate reply from the
+                // session that does match. Either one accepted would replace
+                // the table out from under an operator who has started
+                // editing, and reset `ws_cursor` to 0.
+                if generation == self.agents.ws_generation
+                    && !self.agents.ws_loaded
+                    && self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id)
+                {
+                    self.agents.workspaces = entries;
+                    self.agents.ws_loaded = true;
+                    if !self.agents.workspaces.is_empty() {
+                        self.agents.ws_cursor = 0;
+                    }
+                }
+            }
+            AppEvent::AgentWorkspacesUpdated(id) => {
+                // Guard on both the agent id and the sub-screen. This is
+                // stricter than `AgentWorkspacesLoaded` above, which only
+                // checks the id: that arm just refreshes `workspaces` in
+                // place, harmless to apply even if the operator has moved
+                // to a different sub-screen, while this arm also moves
+                // `sub` — which would eject them from wherever they went.
+                // The PATCH is a two-request round trip, so this can land
+                // after the operator has moved on to editing something
+                // else (or a different agent).
+                if self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id.clone())
+                    && matches!(self.agents.sub, agents::AgentSubScreen::EditWorkspaces)
+                {
+                    self.agents.status_msg =
+                        crate::i18n::t_args("tui-mod-agent-workspaces-updated", &[("id", &id)]);
+                    self.agents.sub = agents::AgentSubScreen::AgentDetail;
+                }
+            }
             AppEvent::MemoryAgentsLoaded(agents) => {
                 self.memory.agents = agents;
                 if !self.memory.agents.is_empty() {
@@ -1464,11 +1504,22 @@ impl App {
                 _ => {}
             }
             // Tab cycling: Tab / Shift+Tab
-            if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+            //
+            // Both are exempted while the shared-folders editor has a field
+            // open — there they are the field-to-field steps documented in
+            // `tui-agents-workspaces-help`, not a tab switch (#7835).
+            // Exempting `Tab` alone left `Shift+Tab` switching tabs and
+            // abandoning the buffer mid-edit, which is the same defect one
+            // key over, and it is the key an operator reaches for when they
+            // overshoot a field.
+            let editing_workspace_field = matches!(self.active_tab, Tab::Agents)
+                && matches!(self.agents.sub, agents::AgentSubScreen::EditWorkspaces)
+                && self.agents.ws_editing.is_some();
+            if key.code == KeyCode::Tab && key.modifiers.is_empty() && !editing_workspace_field {
                 self.next_tab();
                 return;
             }
-            if key.code == KeyCode::BackTab {
+            if key.code == KeyCode::BackTab && !editing_workspace_field {
                 self.prev_tab();
                 return;
             }
@@ -2205,6 +2256,26 @@ impl App {
 
     fn handle_agent_action(&mut self, action: agents::AgentAction) {
         match action {
+            agents::AgentAction::FetchAgentWorkspaces(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_workspaces(
+                        backend,
+                        id,
+                        self.agents.ws_generation,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
+            agents::AgentAction::UpdateWorkspaces { id, workspaces } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_update_agent_workspaces(
+                        backend,
+                        id,
+                        workspaces,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
             agents::AgentAction::Continue => {}
             agents::AgentAction::Back => {
                 // In Main phase, Esc from agents just stays on the tab
@@ -4069,5 +4140,282 @@ mod manifest_history_dispatch_tests {
             "an unrelated agent-tab failure is not the history fetch's reason"
         );
         assert_eq!(app.agents.status_msg, "Failed to save skills");
+    }
+}
+
+#[cfg(test)]
+mod agent_workspaces_event_tests {
+    use super::*;
+
+    /// The four `workspaces_tests` live in `screens/agents.rs` and exercise the key
+    /// handler, which deliberately leaves `sub` alone; only the event arm here can
+    /// take the operator out of the editor once the PATCH lands.
+    #[test]
+    fn workspaces_updated_event_returns_to_detail_with_status() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+
+        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-1".to_string()));
+
+        assert!(
+            matches!(app.agents.sub, agents::AgentSubScreen::AgentDetail),
+            "a successful save must return the operator to the detail view"
+        );
+        assert!(
+            app.agents.status_msg.contains("agent-1"),
+            "status message should name the saved agent, got {:?}",
+            app.agents.status_msg
+        );
+    }
+
+    /// A late-arriving save for an agent (or sub-screen) the operator has
+    /// since moved away from must not eject them from whatever they moved
+    /// on to — the same race `AgentWorkspacesLoaded` already guards against.
+    #[test]
+    fn workspaces_updated_event_ignored_for_stale_agent_or_subscreen() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+        app.agents.sub = agents::AgentSubScreen::EditModelParams;
+
+        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-1".to_string()));
+
+        assert!(
+            matches!(app.agents.sub, agents::AgentSubScreen::EditModelParams),
+            "a save for a sub-screen the operator already left must not move them"
+        );
+        assert!(
+            app.agents.status_msg.is_empty(),
+            "a stale save must not overwrite the status message either"
+        );
+
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-2".to_string()));
+
+        assert!(
+            matches!(app.agents.sub, agents::AgentSubScreen::EditWorkspaces),
+            "a save for a different agent than the one on screen must not move the operator"
+        );
+    }
+
+    /// `Tab::Agents` was missing from the `FetchError` routing match, so
+    /// every failure the shared-folders editor produces — failed GET,
+    /// unreadable manifest, duplicate-name rejection on save — fell into
+    /// `_ => {}` and vanished with no operator-visible trace (#7835).
+    #[test]
+    fn fetch_error_while_on_the_agents_tab_reaches_the_editor_status_msg() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.active_tab = Tab::Agents;
+
+        app.handle_event(AppEvent::FetchError("daemon unreachable".to_string()));
+
+        assert_eq!(app.agents.status_msg, "daemon unreachable");
+    }
+
+    /// A duplicate reply *within* one edit session — a retry, or a transport
+    /// that delivered the same response twice — must not replace a table the
+    /// operator has already started editing.
+    #[test]
+    fn second_workspaces_loaded_response_does_not_clobber_the_first() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+
+        app.handle_event(AppEvent::AgentWorkspacesLoaded(
+            "agent-1".to_string(),
+            app.agents.ws_generation,
+            vec![(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readwrite".to_string(),
+            )],
+        ));
+        assert!(app.agents.ws_loaded);
+
+        // The operator moves the cursor / starts editing on the first
+        // response before a stale second response for the same agent
+        // arrives (e.g. a duplicate `w` fetch).
+        app.agents.ws_cursor = 0;
+
+        app.handle_event(AppEvent::AgentWorkspacesLoaded(
+            "agent-1".to_string(),
+            app.agents.ws_generation,
+            vec![
+                ("a".to_string(), "p".to_string(), "readwrite".to_string()),
+                ("b".to_string(), "q".to_string(), "readwrite".to_string()),
+            ],
+        ));
+
+        assert_eq!(
+            app.agents.workspaces,
+            vec![(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readwrite".to_string()
+            )],
+            "a second response for the same edit session must not replace the loaded table"
+        );
+    }
+
+    /// The case `!ws_loaded` alone could not catch: `w` → `Esc` → `w` bumps
+    /// the generation, so the reply to the *first* `w` is stale even when it
+    /// is the first one to arrive. Under the old guard the second `w` had
+    /// already reset `ws_loaded` to `false`, which made that stale reply the
+    /// accepted one and the current session's own reply the discarded one.
+    /// The editor then seeds from a manifest the daemon has since moved on
+    /// from, and the next save writes it back — the lost update the PR
+    /// documents elsewhere.
+    #[test]
+    fn a_reply_from_a_superseded_edit_session_is_dropped() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+
+        // Two `w` presses: the first spawned its fetch under generation 1,
+        // the second bumped to 2 and is the session the operator is in now.
+        app.agents.ws_loaded = false;
+        app.agents.ws_generation = 2;
+
+        app.handle_event(AppEvent::AgentWorkspacesLoaded(
+            "agent-1".to_string(),
+            1,
+            vec![(
+                "stale".to_string(),
+                "shared/stale".to_string(),
+                "readwrite".to_string(),
+            )],
+        ));
+        assert!(
+            app.agents.workspaces.is_empty(),
+            "a reply to a superseded `w` must not populate the table"
+        );
+        assert!(!app.agents.ws_loaded);
+
+        app.handle_event(AppEvent::AgentWorkspacesLoaded(
+            "agent-1".to_string(),
+            2,
+            vec![(
+                "current".to_string(),
+                "shared/current".to_string(),
+                "readwrite".to_string(),
+            )],
+        ));
+        assert!(app.agents.ws_loaded);
+        assert_eq!(
+            app.agents.workspaces,
+            vec![(
+                "current".to_string(),
+                "shared/current".to_string(),
+                "readwrite".to_string()
+            )],
+            "the current session's reply is the one that must land"
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_workspaces_tab_exemption_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// `Tab` while a shared-folders field is open must advance the field,
+    /// not switch tabs — the global Tab-cycling handler used to consume
+    /// bare `Tab` before screen dispatch ever ran (#7835).
+    #[test]
+    fn tab_advances_workspace_field_instead_of_switching_tabs() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.phase = Phase::Main;
+        app.active_tab = Tab::Agents;
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+        app.agents.ws_loaded = true;
+        app.agents.handle_key(key(KeyCode::Char('a')));
+        assert!(matches!(app.agents.ws_editing, Some((0, 0))));
+
+        for c in "library".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Tab));
+
+        assert_eq!(app.agents.workspaces[0].0, "library");
+        assert!(
+            matches!(app.agents.ws_editing, Some((0, 1))),
+            "Tab must advance to the next field, not fall through to tab-cycling"
+        );
+        assert!(
+            matches!(app.active_tab, Tab::Agents),
+            "the global Tab-cycling handler must not fire while a field is open"
+        );
+    }
+
+    /// `Shift+Tab` while a shared-folders field is open must step back a
+    /// field, not switch tabs.
+    ///
+    /// Exempting `Tab` alone left the key beside it switching tabs and
+    /// abandoning the buffer mid-edit — the same defect one key over, on
+    /// the key an operator presses precisely because they overshot a field.
+    /// Both halves are asserted, because either one alone passes with the
+    /// bug still in place: the step-back would be invisible if the global
+    /// handler still consumed the key, and the exemption would be invisible
+    /// if `BackTab` did nothing once it arrived (#7835).
+    #[test]
+    fn back_tab_steps_back_a_field_instead_of_switching_tabs() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.phase = Phase::Main;
+        app.active_tab = Tab::Agents;
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+        app.agents.ws_loaded = true;
+        app.agents.handle_key(key(KeyCode::Char('a')));
+        assert!(matches!(app.agents.ws_editing, Some((0, 0))));
+
+        for c in "library".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Tab));
+        assert!(matches!(app.agents.ws_editing, Some((0, 1))));
+
+        for c in "/srv/docs".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+
+        assert_eq!(app.agents.workspaces[0].0, "library");
+        assert_eq!(app.agents.workspaces[0].1, "/srv/docs");
+        assert!(
+            matches!(app.agents.ws_editing, Some((0, 0))),
+            "Shift+Tab must step back to the previous field"
+        );
+        assert!(
+            matches!(app.active_tab, Tab::Agents),
+            "the global Tab-cycling handler must not fire while a field is open"
+        );
     }
 }

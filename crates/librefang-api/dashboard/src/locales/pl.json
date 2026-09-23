@@ -917,12 +917,14 @@
       "tools_mcp_inert": "nie przyznano — MCP jest twardo wyłączone",
       "tools_mcp_not_granted": "nie przyznano — kliknij, aby przyznać",
       "tools_mcp_readonly": "Narzędzia MCP są przyznawane dla każdego serwera osobno przez mcp_servers w agent.toml. Przełącz grupę powyżej, aby przyznać lub cofnąć ten serwer — poszczególne narzędzia są dodatkowo filtrowane przez tool_allowlist i tool_blocklist.",
+      "mcp_pending_title": "Serwery MCP niepodłączone",
+      "mcp_pending_desc": "Przyznane w agent.toml, ale brak aktywnego połączenia — nie dostarczają narzędzi. Sprawdź serwer na stronie MCP; uprawnienie aktywuje się po połączeniu.",
       "tools_blocked": "na liście zablokowanych",
       "tools_reset_to_all": "Resetuj, aby używać wszystkich narzędzi",
       "events_tail": "zdarzenia · tail",
       "no_logs": "Nie zarejestrowano jeszcze żadnych tur dla tego agenta.",
       "crashed_title": "{{name}} jest w stanie błędu",
-"edit_full_manifest": "Edytuj pełną konfigurację",
+      "edit_full_manifest": "Edytuj pełną konfigurację",
       "edit_full_manifest_hint": "Wszystkie pola manifestu — zasoby, uprawnienia, autonomia, format odpowiedzi i więcej.",
       "description": "Opis",
       "description_placeholder": "Nie ustawiono opisu.",
@@ -939,9 +941,7 @@
       "no_history": "Nie zarejestrowano jeszcze żadnych zmian konfiguracji.",
       "proactive_conditions": "Warunki (oddzielone przecinkami)",
       "proactive_conditions_hint": "To zastępuje pełną listę warunków — nie jest wstępnie wypełnione bieżącymi. Użyj pełnego edytora manifestu, aby zobaczyć, co jest aktywne.",
-      "proactive_conditions_placeholder": "np. agent.tags contains 'urgent'",
-      "mcp_pending_title": "Serwery MCP niepodłączone",
-      "mcp_pending_desc": "Przyznane w agent.toml, ale brak aktywnego połączenia — nie dostarczają narzędzi. Sprawdź serwer na stronie MCP; uprawnienie aktywuje się po połączeniu."
+      "proactive_conditions_placeholder": "np. agent.tags contains 'urgent'"
     },
     "tab": {
       "conversation": "Rozmowa",
