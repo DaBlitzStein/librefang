@@ -14,8 +14,10 @@ use axum::Router;
 use librefang_api::middleware::AuthenticatedApiUser;
 use librefang_api::routes::{self, AppState};
 use librefang_kernel::auth::UserRole;
+use librefang_kernel::provisioning::{AGENTS_SUBDIR, PROVISIONING_PATH_ENV};
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::{AgentId, AgentManifest, UserId};
+use std::path::Path;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -290,6 +292,43 @@ async fn restore_maps_missing_and_mismatched_versions() {
     assert_eq!(body["error"]["code"], "invalid_agent_id");
 }
 
+/// A snapshot the server cannot deserialize must fail as its own static 500
+/// rather than half-applying through the kernel or echoing parser internals.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_reports_a_corrupt_stored_version_as_a_static_500() {
+    let h = boot();
+    let id = spawn_owned_by(&h.state, "history-corrupt", "alice");
+
+    // A producer never writes unparseable TOML, but a hand-edited database or
+    // a row from an older schema can still hold one. Inserting it through the
+    // store is the only way to reach the parse guard.
+    let store =
+        librefang_memory::ManifestVersionStore::new(h.state.kernel.memory_substrate().pool());
+    store
+        .record_version(
+            &id.to_string(),
+            "history-corrupt",
+            "name = [not-a-manifest",
+            "test",
+        )
+        .expect("insert corrupt row");
+    let version_id = store.list_for_agent(&id.to_string(), 10).unwrap()[0].id;
+
+    let (status, body) = send(
+        &h,
+        Method::POST,
+        &format!("/api/agents/{id}/manifest-history/{version_id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {body}");
+    assert_eq!(body["error"]["code"], "version_corrupt", "body: {body}");
+    assert_eq!(
+        body["error"]["message"], "stored version is corrupt and cannot be restored",
+        "the message must stay static rather than echo the parser error: {body}"
+    );
+}
+
 /// A snapshot is the agent's whole `agent.toml`, so the read and the restore
 /// are owner-scoped. 404 rather than 403 stops id enumeration from telling
 /// "not yours" apart from "does not exist".
@@ -352,4 +391,92 @@ async fn an_unauthenticated_trusted_request_is_still_served() {
     let (status, body) = get_history(&h, &id, None).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert!(body["versions"].is_array(), "body: {body}");
+}
+
+/// `LIBREFANG_PROVISIONING_PATH` is process-global, so the provisioning case
+/// holds this lock while it is set and restores the previous value on drop,
+/// panic included.
+fn provisioning_env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Sets `LIBREFANG_PROVISIONING_PATH` for its lifetime.
+///
+/// Other cases in this binary boot their kernels concurrently and may observe
+/// the declaration — the reconcile is additive and runs in each kernel's own
+/// temp home, so an extra provisioned agent cannot change what they assert.
+struct ProvisioningEnv {
+    previous: Option<std::ffi::OsString>,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl ProvisioningEnv {
+    async fn set(root: &Path) -> Self {
+        let lock = provisioning_env_lock().lock().await;
+        let previous = std::env::var_os(PROVISIONING_PATH_ENV);
+        std::env::set_var(PROVISIONING_PATH_ENV, root.as_os_str());
+        Self {
+            previous,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for ProvisioningEnv {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var(PROVISIONING_PATH_ENV, value),
+            None => std::env::remove_var(PROVISIONING_PATH_ENV),
+        }
+    }
+}
+
+/// A deployment-provisioned agent is an input, not a file the API may roll
+/// back: the restore refuses through `guard_provisioned_agent` (#6695) before
+/// the version store is even consulted, because the next reconcile would
+/// overwrite whatever the restore applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_refuses_a_deployment_provisioned_agent() {
+    let root = tempfile::tempdir().expect("provisioning root");
+    let agents_dir = root.path().join(AGENTS_SUBDIR);
+    std::fs::create_dir_all(&agents_dir).expect("mkdir agents");
+    std::fs::write(
+        agents_dir.join("history-provisioned.toml"),
+        "name = \"history-provisioned\"\ndescription = \"deployment-owned\"\nmodule = \"builtin:chat\"\n",
+    )
+    .expect("write declaration");
+
+    let _env = ProvisioningEnv::set(root.path()).await;
+    let h = boot();
+
+    let id = h
+        .state
+        .kernel
+        .agent_registry()
+        .find_by_name("history-provisioned")
+        .expect("boot reconcile must provision the declared agent")
+        .id;
+
+    // Version 1 does not exist: the guard must fire before the store lookup.
+    // 423 Locked is the shared provisioned-write refusal; the 409 in the
+    // restore handler's OpenAPI annotation is stale.
+    let (status, body) = send(
+        &h,
+        Method::POST,
+        &format!("/api/agents/{id}/manifest-history/1/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::LOCKED, "body: {body}");
+    assert_eq!(body["ok"], false, "body: {body}");
+    assert_eq!(body["code"], "resource_provisioned", "body: {body}");
+    assert_eq!(body["kind"], "agent", "body: {body}");
+    assert_eq!(body["name"], "history-provisioned", "body: {body}");
+    assert!(
+        body["source"]
+            .as_str()
+            .is_some_and(|source| source.ends_with("history-provisioned.toml")),
+        "the refusal must name the declaring file: {body}"
+    );
 }

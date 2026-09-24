@@ -5125,6 +5125,56 @@ fn concurrent_full_and_mcp_manifest_persists_keep_both_registry_updates() {
     kernel.shutdown();
 }
 
+/// `set_agent_mcp_servers` patches the `mcp_servers` line in place instead of
+/// re-serializing the manifest through `persist_full_manifest_at`, so its
+/// history row is recorded on that path alone. Without it the MCP allowlist
+/// would be the one manifest change the History tab never shows.
+#[test]
+fn set_agent_mcp_servers_records_its_own_history_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let toml_path = tmp.path().join("agent.toml");
+    let kernel = boot_kernel_at(tmp.path());
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "mcp-history-agent".to_string(),
+                source_template: None,
+                ..Default::default()
+            },
+            None,
+            Some(toml_path.clone()),
+            None,
+        )
+        .expect("spawn");
+    // Materialise agent.toml first, so the MCP persist takes the in-place
+    // patch path rather than the missing-file full-serialize fallback.
+    kernel.persist_manifest_to_disk(agent_id, "test");
+    register_mcp_server(&kernel, "history-server");
+
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["history-server".to_string()])
+        .expect("allowlist update must persist");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    let versions = store.list_for_agent(&agent_id.to_string(), 10).unwrap();
+    let snapshot = versions
+        .iter()
+        .find(|version| version.change_source == "mcp-servers")
+        .unwrap_or_else(|| {
+            panic!("the in-place MCP persist must record its own history row: {versions:?}")
+        });
+    assert_eq!(
+        toml::from_str::<AgentManifest>(&snapshot.manifest_toml)
+            .expect("snapshot TOML parses as a manifest")
+            .mcp_servers,
+        vec!["history-server".to_string()],
+        "the snapshot must carry the new allowlist: {}",
+        snapshot.manifest_toml
+    );
+
+    kernel.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_mcp_connect_paths_register_one_connection_per_server() {
     use librefang_types::config::{HttpCompatToolConfig, McpServerConfigEntry, McpTransportEntry};
