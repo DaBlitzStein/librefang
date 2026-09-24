@@ -193,8 +193,18 @@ pub async fn upload_agent_avatar(
     // image or the new one, never a half-written file.
     let id = agent_id.to_string();
     let path = librefang_types::media::avatar_path(&avatars_dir, &id, ext);
-    let tmp = path.with_extension(format!("{ext}.tmp"));
+    // One temp file per upload, never a shared `{id}.{ext}.tmp`: two concurrent
+    // uploads for the same agent both wrote that one path, so whichever
+    // renamed second either found its file already renamed away (a spurious
+    // ENOENT 500) or renamed the other upload's bytes under its own
+    // `bytes`/`content_type` response. The nonce gives each request its own
+    // file to write, rename and clean up, and the rename stays atomic because
+    // the temp still sits beside the target in `avatars_dir`.
+    let tmp = path.with_extension(format!("{ext}.{}.tmp", uuid::Uuid::new_v4().simple()));
     if let Err(error) = std::fs::write(&tmp, &body) {
+        // A unique temp is this request's own filename, so a partial write
+        // would otherwise stay behind forever: nothing else ever reuses it.
+        let _ = std::fs::remove_file(&tmp);
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Could not write the avatar: {error}"),
