@@ -115,10 +115,15 @@ impl Drop for StagingDir {
     }
 }
 
-/// Move a complete staged skill into `skills_dir` with one `rename`.
+/// Move a complete staged skill into `skills_dir`, refusing to replace an install that
+/// raced it there.
 ///
 /// Both paths are children of `skills_dir`, so the rename is atomic on the same filesystem and a
 /// reader never observes a half-written `<slug>` directory: it is absent until it is complete.
+/// The move takes the client's process-wide promotion lock, so two installs that both passed the
+/// routes' `is_installed` probe resolve one after the other: the first lands, and the second is
+/// [`SkillError::AlreadyInstalled`] — the same conflict the probe reports — instead of an
+/// `ENOTEMPTY` that the handlers would answer with a scrubbed 500.
 fn promote_staged_install(
     staging_dir: &std::path::Path,
     skills_dir: &std::path::Path,
@@ -126,12 +131,33 @@ fn promote_staged_install(
 ) -> Result<(), SkillError> {
     let staged = staging_dir.join(slug);
     let installed = skills_dir.join(slug);
-    std::fs::rename(&staged, &installed).map_err(|error| {
-        SkillError::Io(std::io::Error::other(format!(
+    match librefang_skills::clawhub::promote_staged_skill_if_absent(&staged, &installed) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(SkillError::AlreadyInstalled(slug.to_string()))
+        }
+        Err(error) => Err(SkillError::Io(std::io::Error::other(format!(
             "failed to move staged skill into {}: {error}",
             installed.display()
-        )))
-    })
+        )))),
+    }
+}
+
+/// The answer for a slug that is already installed.
+///
+/// The routes' pre-install `is_installed` probe and a promotion that lost a concurrent
+/// race are the same condition, so both answer alike: `409` with the `already_installed`
+/// status the dashboard and CLI already key on. Without the matching arm in the install
+/// handlers, the raced `AlreadyInstalled` fell into their 500 catch-all — which blames
+/// the daemon for a race the caller can simply retry or ignore.
+fn already_installed_response(slug: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": format!("Skill '{slug}' is already installed"),
+            "status": "already_installed",
+        })),
+    )
 }
 
 /// The hub an install came from, resolved to a [`SkillSource`] once the version is known.
@@ -627,13 +653,7 @@ pub async fn clawhub_install(
 
     // Check if already installed
     if client.is_installed(&req.slug, &skills_dir) {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": format!("Skill '{}' is already installed", req.slug),
-                "status": "already_installed",
-            })),
-        );
+        return already_installed_response(&req.slug);
     }
 
     match install_under_budget(
@@ -681,6 +701,12 @@ pub async fn clawhub_install(
                     "tool_translations": translations,
                 })),
             )
+        }
+        // Two concurrent installs of the same slug can both pass the `is_installed`
+        // probe above; the one that loses the promotion lock gets the answer the probe
+        // would have given it, not an `ENOTEMPTY` 500.
+        Err(librefang_skills::SkillError::AlreadyInstalled(_)) => {
+            already_installed_response(&req.slug)
         }
         Err(e) => {
             let msg = format!("{e}");
@@ -969,13 +995,7 @@ pub async fn clawhub_cn_install(
         librefang_skills::clawhub::ClawHubClient::with_url(&clawhub_cn_base_url(), cache_dir);
 
     if client.is_installed(&req.slug, &skills_dir) {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": format!("Skill '{}' is already installed", req.slug),
-                "status": "already_installed",
-            })),
-        );
+        return already_installed_response(&req.slug);
     }
 
     match install_under_budget(
@@ -1020,6 +1040,11 @@ pub async fn clawhub_cn_install(
                 })),
             )
         }
+        // Same conflict as the standard hub: a lost promotion race is the
+        // `is_installed` probe's condition, answered as 409, never a 500.
+        Err(librefang_skills::SkillError::AlreadyInstalled(_)) => {
+            already_installed_response(&req.slug)
+        }
         Err(e) => {
             let msg = format!("{e}");
             let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
@@ -1052,9 +1077,10 @@ pub async fn clawhub_cn_install(
 #[cfg(test)]
 mod route_budget_tests {
     use super::{
-        install_under_budget, within_budget, within_route_budget, ClawHubHub,
-        CLAWHUB_INSTALL_BUDGET, CLAWHUB_ROUTE_BUDGET,
+        already_installed_response, install_under_budget, within_budget, within_route_budget,
+        ClawHubHub, CLAWHUB_INSTALL_BUDGET, CLAWHUB_ROUTE_BUDGET,
     };
+    use axum::http::StatusCode;
     use librefang_skills::clawhub::ClawHubClient;
     use librefang_skills::SkillError;
     use std::path::{Path, PathBuf};
@@ -1264,6 +1290,100 @@ mod route_budget_tests {
         );
     }
 
+    /// Two concurrent installs of one slug cannot both land in `skills/`.
+    ///
+    /// Both pass the routes' `is_installed` probe before either has promoted, which is the
+    /// race the promotion lock exists for. One install must win; the other must be answered as
+    /// [`SkillError::AlreadyInstalled`] — the condition the routes turn into the same 409 the
+    /// probe produces — and `skills/` must hold exactly one complete install, never an
+    /// `ENOTEMPTY` failure and never a `.backup-` or `.installing-` residue.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_installs_of_one_slug_leave_one_install_and_one_conflict() {
+        let hub = stub_hub(std::time::Duration::from_millis(150), true);
+        let skills_dir = tempfile::tempdir().unwrap();
+
+        let first = install_under_budget(
+            ClawHubClient::with_url(&hub.base_url, PathBuf::new()),
+            SLOW_SLUG.to_string(),
+            skills_dir.path().to_path_buf(),
+            ClawHubHub::ClawHub,
+            std::time::Duration::from_secs(5),
+        );
+        let second = install_under_budget(
+            ClawHubClient::with_url(&hub.base_url, PathBuf::new()),
+            SLOW_SLUG.to_string(),
+            skills_dir.path().to_path_buf(),
+            ClawHubHub::ClawHub,
+            std::time::Duration::from_secs(5),
+        );
+        let (first, second) = tokio::join!(first, second);
+        let outcomes = [first, second];
+
+        let mut installed = 0;
+        let mut conflicts = 0;
+        for outcome in &outcomes {
+            match outcome {
+                Ok(_) => installed += 1,
+                Err(SkillError::AlreadyInstalled(_)) => conflicts += 1,
+                Err(other) => panic!("a raced install answered something else: {other:?}"),
+            }
+        }
+        assert_eq!(
+            (installed, conflicts),
+            (1, 1),
+            "one install wins and the other gets the conflict: {outcomes:?}"
+        );
+
+        // The losing task removes its staging directory after it reports the conflict; wait
+        // for both cleanup guards to land so the assertions below see the settled state.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while entries(skills_dir.path())
+            .iter()
+            .any(|name| name.to_string_lossy().starts_with(".installing-"))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "install staging directories outlived the installs: {:?}",
+                entries(skills_dir.path())
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            entries(skills_dir.path()),
+            vec![std::ffi::OsString::from(SLOW_SLUG)],
+            "exactly one complete install, with no staging or backup residue"
+        );
+        assert!(
+            skills_dir
+                .path()
+                .join(SLOW_SLUG)
+                .join("skill.toml")
+                .is_file(),
+            "the winning install must be complete"
+        );
+    }
+
+    /// A lost promotion race answers exactly like the up-front `is_installed` probe.
+    ///
+    /// Both install routes return this tuple for a slug that is already installed, so a
+    /// caller cannot tell the race from the probe — and in particular never sees the
+    /// generic "Internal server error" the 500 catch-all produces.
+    #[test]
+    fn a_raced_install_answers_the_same_conflict_as_the_is_installed_probe() {
+        let (status, body) = already_installed_response(SLOW_SLUG);
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["status"], "already_installed");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("already installed"),
+            "the conflict must name the condition: {body:?}"
+        );
+    }
+
     /// A budget that expires mid-install leaves `skills/` exactly as it found it.
     ///
     /// The hub here is slow but healthy, so the install keeps running after the route stops
@@ -1294,8 +1414,9 @@ mod route_budget_tests {
         assert!(entries(skills_dir.path()).is_empty());
 
         // The install task is not cancelled; it keeps going and only then learns the route is
-        // gone. Wait for the download to have been served, then watch the directory while the
-        // task reaches its discard: the candidate must never appear, and staging must go away.
+        // gone. Wait for the download to have been served, then wait — under a deadline, not a
+        // fixed window a saturated CI can outlast — for the task's discard to clear the staging
+        // directory: the candidate must never appear while that happens.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while hub.served.load(Ordering::Relaxed) < 2 && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -1305,19 +1426,19 @@ mod route_budget_tests {
             "the stub hub never served the download"
         );
 
-        let settle = std::time::Instant::now() + std::time::Duration::from_millis(750);
-        while std::time::Instant::now() < settle {
+        let discard_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !entries(skills_dir.path()).is_empty() {
             assert!(
                 !skills_dir.path().join(SLOW_SLUG).exists(),
                 "a timed-out install was promoted into skills/"
             );
+            assert!(
+                std::time::Instant::now() < discard_deadline,
+                "a timed-out install left staging residue: {:?}",
+                entries(skills_dir.path())
+            );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert!(
-            entries(skills_dir.path()).is_empty(),
-            "a timed-out install left staging residue: {:?}",
-            entries(skills_dir.path())
-        );
     }
 
     /// The hub the budget exists for — accepts and then says nothing — leaves no residue either.

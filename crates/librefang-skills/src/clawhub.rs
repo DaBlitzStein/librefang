@@ -927,8 +927,16 @@ fn prepare_staging_dir(path: &Path) -> std::io::Result<StagingCleanup> {
     Ok(cleanup)
 }
 
+/// Serializes every skill promotion in this process.
+///
+/// Two installs of the same slug can both pass an `is_installed` probe before either
+/// has promoted anything, so the existence check and the `rename` that follows it must
+/// happen as one critical section. Without the lock, the second `rename` lands on a
+/// non-empty directory and fails with `ENOTEMPTY` — a filesystem detail for what is
+/// really the same conflict the probe reports.
+static PROMOTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
-    static PROMOTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = PROMOTION_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -969,6 +977,30 @@ fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
                 backup.display()
             ))),
         },
+    }
+}
+
+/// Move a complete staged directory into place, refusing to replace an existing target.
+///
+/// Public for callers outside this crate that pre-check `is_installed` and must not
+/// overwrite the result of that check: serialized on the same process-wide promotion
+/// lock as `promote_staged_skill`, so the existence probe and the `rename` are one
+/// critical section against every other promotion in this process. The loser of that
+/// race gets `AlreadyExists` — the condition its caller's own probe reports — instead
+/// of the `ENOTEMPTY` a bare `rename` raises when the destination appeared in between.
+pub fn promote_staged_skill_if_absent(staged: &Path, target: &Path) -> std::io::Result<()> {
+    let _guard = PROMOTION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match std::fs::symlink_metadata(target) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::rename(staged, target)
+        }
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} already exists", target.display()),
+        )),
+        Err(error) => Err(error),
     }
 }
 
@@ -1455,6 +1487,29 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
         assert_eq!(entries, vec![std::ffi::OsString::from("skill")]);
+    }
+
+    #[test]
+    fn promotion_if_absent_refuses_to_replace_an_existing_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged");
+        let target = dir.path().join("skill");
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("version"), "new").unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("version"), "old").unwrap();
+
+        let error = promote_staged_skill_if_absent(&staged, &target)
+            .expect_err("an existing install must not be replaced");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(target.join("version")).unwrap(),
+            "old"
+        );
+        assert!(
+            staged.join("version").is_file(),
+            "the losing candidate stays staged for its caller's cleanup guard"
+        );
     }
 
     #[test]
