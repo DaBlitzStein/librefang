@@ -691,11 +691,14 @@ const REGISTRY_MANAGED_MANIFEST: &str = ".registry-managed";
 
 /// What the sync recorded for one destination directory: managed filename → digest of the bytes the sync last wrote there.
 ///
-/// `Some(digest)` proves the file still holds content this sync wrote; `None` is an entry of unknown provenance — a bare name from a manifest written before digests existed, or a file whose write failed — which may be pruned but can never authorise an overwrite.
+/// `Some(digest)` proves the file still holds content this sync wrote.
+/// `None` is a bare name from a manifest written before digests existed — an install that upgraded into the digest scheme — so authorship is unprovable and the name is decided by the migration-window rules below, not by the ownership rule.
 ///
 /// **Ownership rule: the sync overwrites or deletes a file only while the bytes on disk are still the ones it wrote.** An operator edit withdraws that claim, and the file is then left alone (with a WARN naming it) on every later sync.
 /// Without it, a `discover_models = true` the operator set — the flag that puts a provider on the live-discovery path — was silently reverted by the next boot, so reconfiguring survived no restart (#7776 is the same symptom one layer up).
 /// To hand a file back to the registry, delete it: the next sync finds no local copy and re-installs the registry's own verbatim.
+///
+/// **Pre-digest entries are the migration window, and the two passes treat them asymmetrically on purpose.** A bare name upstream still ships is *adopted* on the update path: the registry copy is written and its digest recorded, because treating "unprovable" as "operator edit" froze every stale-but-untouched copy forever — the refreshed registry could never land, every boot warned, and the only way back was deleting the file by hand. A bare name upstream has *dropped* is pruned on the manifest's word alone: there is no registry copy left to adopt, and "keep forever" would mean a retired provider never leaves. Each pass accepts one overwrite/delete of a pre-digest file the operator may have edited; both windows are one sync wide, because the manifest written at the end of every sync carries digests for everything still shipped.
 type ManagedManifest = std::collections::BTreeMap<String, Option<String>>;
 
 /// SHA-256 of a file body, lowercase hex — the form stored in the manifest.
@@ -740,7 +743,7 @@ fn write_managed_manifest(dest_dir: &Path, manifest: &ManagedManifest) {
 
 /// Sync flat .toml files (e.g. integrations/, providers/).
 ///
-/// A file is (re)installed only while the sync can prove it owns what is on disk; see the ownership rule on [`ManagedManifest`].
+/// A file is (re)installed only while the sync can prove it owns what is on disk, with one deliberate exception: a bare pre-digest manifest entry is adopted on the first sync after an upgrade, so a normal upstream update is not frozen; see [`ManagedManifest`].
 fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
     let entries = match std::fs::read_dir(src_dir) {
         Ok(e) => e,
@@ -795,10 +798,22 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
             // But only when the bytes on disk are the ones this sync wrote:
             // otherwise this is the operator's file, and reverting it is how
             // `discover_models = true` was being lost on every restart.
-            let ours = previously_managed
-                .get(&name)
-                .and_then(|recorded| recorded.as_deref())
-                .is_some_and(|recorded| content_digest(&dst_content) == recorded);
+            //
+            // Three states, not two: the manifest holds a digest that matches
+            // (ours), a digest that does not (the operator's edit), or a bare
+            // pre-digest name (unprovable). The bare name is adopted here rather
+            // than kept — see the migration-window note on [`ManagedManifest`]:
+            // an install that upgraded into the digest scheme has a registry
+            // copy from an earlier release on disk, and calling that an operator
+            // edit froze every upstream update behind a WARN with no way back.
+            // The digest written below is the point of the adoption: a *later*
+            // operator edit is then protected like any other.
+            let pre_digest = matches!(previously_managed.get(&name), Some(None));
+            let ours = pre_digest
+                || previously_managed
+                    .get(&name)
+                    .and_then(|recorded| recorded.as_deref())
+                    .is_some_and(|recorded| content_digest(&dst_content) == recorded);
             if !ours {
                 // "kept local" on its own reads as "your edit is in force", and for
                 // `discover_models` that is not true: the preference store is applied
@@ -817,6 +832,15 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
                 );
                 operator_owned.insert(name);
                 continue;
+            }
+
+            if pre_digest {
+                tracing::debug!(
+                    "{label}: adopting the registry copy of {name} as the new baseline — its \
+                     manifest entry predates content digests and cannot prove authorship, so the \
+                     registry version wins once and the digest recorded below puts the name back \
+                     under management"
+                );
             }
 
             if std::fs::create_dir_all(dest_dir).is_ok()
@@ -851,7 +875,11 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
     // Deleting is an edit by another name, so it obeys the same ownership rule:
     // a file the operator has since changed is theirs whatever upstream did to
     // the name. Entries with no digest predate that proof and keep the original
-    // behaviour, pruning on the manifest's word alone.
+    // behaviour, pruning on the manifest's word alone — deliberately asymmetric
+    // with the update path above, which adopts such an entry while upstream
+    // still ships the name. Here there is no registry copy left to adopt, and
+    // "keep forever" would mean a provider the registry retires never leaves;
+    // see the migration-window note on [`ManagedManifest`].
     let mut removed = 0usize;
     for (name, recorded) in &previously_managed {
         if managed.contains_key(name) || operator_owned.contains(name) {
@@ -862,14 +890,15 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
             continue;
         }
         let ours = match recorded {
-            // A bare name from a pre-digest manifest: managed, authorship unprovable.
-            // Kept prunable so providers the registry retires stop loading into the
-            // catalog, matching the behaviour that predates digests; the window is a
+            // A bare name from a pre-digest manifest: managed, authorship
+            // unprovable. Pruned on the manifest's word alone, exactly as the
+            // update path adopts such a name while upstream still ships it (see
+            // the migration-window note on [`ManagedManifest`]). The window is a
             // single sync, because the manifest written below carries digests for
-            // everything that is still shipped. The one edit this can still lose is
-            // an operator's change to such a file in the same boot that upstream
-            // drops the name — a guess either way, and "keep forever" would mean
-            // retired providers never leave.
+            // everything that is still shipped. The one edit this can still lose
+            // is an operator's change to such a file in the same boot that
+            // upstream drops the name — a guess either way, and "keep forever"
+            // would mean retired providers never leave.
             None => true,
             Some(digest) => std::fs::read(&path)
                 .is_ok_and(|content| content_digest(&content) == digest.as_str()),
@@ -1427,33 +1456,57 @@ mod tests {
         );
     }
 
-    /// The same for an install that upgrades into the digest scheme: `~/.librefang/providers/*.toml` on disk today were installed under a manifest that recorded names without content digests, which is precisely the state in which the reporter's `discover_models` was being lost.
+    /// The migration window: `~/.librefang/providers/*.toml` installed by an earlier release are recorded by name only, so the first sync after the upgrade cannot prove their authorship.
     ///
-    /// A legacy entry cannot prove the bytes on disk are ours, so it must not authorise a rewrite.
+    /// Treating "unprovable" as "operator edit" froze every copy that differed from the refreshed registry — a normal upstream update never landed, every boot warned, and the only way back was deleting the file by hand.
+    /// Adopting the registry copy as the new baseline (bytes installed, digest recorded) is what ends the window: this test pins the update landing on that first sync, and that the recorded digest then protects a *later* operator edit like any other.
     #[test]
-    fn sync_flat_files_preserves_edits_under_a_pre_digest_manifest() {
+    fn sync_flat_files_adopts_a_pre_digest_entry_so_upstream_updates_still_land() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
         let dest = tmp.path().join("dest");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::create_dir_all(&dest).unwrap();
 
+        // The upgraded install: a copy from an earlier registry revision, and a
+        // manifest that records the name without a digest.
+        let registry_toml =
+            "id = \"deepseek\"\nmodels = [\"deepseek-chat\", \"deepseek-reasoner\"]\n";
+        std::fs::write(src.join("deepseek.toml"), registry_toml).unwrap();
+        std::fs::write(dest.join(REGISTRY_MANAGED_MANIFEST), "deepseek.toml").unwrap();
         std::fs::write(
-            src.join("deepseek.toml"),
-            "id = \"deepseek\"\ndiscover_models = false\n",
+            dest.join("deepseek.toml"),
+            "id = \"deepseek\"\nmodels = [\"deepseek-chat\"]\n",
         )
         .unwrap();
-        // The manifest an earlier release left behind: bare filenames, no digests.
-        std::fs::write(dest.join(REGISTRY_MANAGED_MANIFEST), "deepseek.toml").unwrap();
-        let operator_toml = "id = \"deepseek\"\ndiscover_models = true\n";
-        std::fs::write(dest.join("deepseek.toml"), operator_toml).unwrap();
 
         sync_flat_files(&src, &dest, "providers");
 
         assert_eq!(
             std::fs::read_to_string(dest.join("deepseek.toml")).unwrap(),
+            registry_toml,
+            "a pre-digest entry must not freeze the file against an upstream update"
+        );
+
+        // Adoption wrote a digest, so the name is managed again and a later
+        // operator edit is protected — the migration window is one sync wide.
+        let operator_toml = concat!(
+            "id = \"deepseek\"\n",
+            "models = [\"deepseek-chat\", \"deepseek-reasoner\"]\n",
+            "discover_models = true\n",
+        );
+        std::fs::write(dest.join("deepseek.toml"), operator_toml).unwrap();
+        std::fs::write(
+            src.join("deepseek.toml"),
+            "id = \"deepseek\"\nmodels = [\"deepseek-chat\", \"deepseek-reasoner\", \"deepseek-v4\"]\n",
+        )
+        .unwrap();
+        sync_flat_files(&src, &dest, "providers");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("deepseek.toml")).unwrap(),
             operator_toml,
-            "a pre-digest manifest entry must not authorise reverting the operator's file"
+            "after adoption the recorded digest must protect a later operator edit like any other"
         );
     }
 
