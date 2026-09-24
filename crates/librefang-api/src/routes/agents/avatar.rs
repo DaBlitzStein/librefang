@@ -402,7 +402,6 @@ pub async fn delete_agent_avatar(
         drop(t);
         return refusal.into_response();
     }
-    drop(t);
 
     let avatars_dir = state.kernel.config_snapshot().effective_avatars_dir();
     let removed = librefang_types::media::remove_avatars(&avatars_dir, &agent_id.to_string());
@@ -410,7 +409,29 @@ pub async fn delete_agent_avatar(
     // A stored `avatar_url` whose file is gone renders as a broken image, and
     // that state is reachable by restoring a backup of the database without
     // the avatars directory.
-    store_avatar_url(&state, agent_id, None);
+    if !store_avatar_url(&state, agent_id, None) {
+        // The files are already gone, so answering 200 would report a removal
+        // that left `avatar_url` pointing at a route with nothing behind it —
+        // exactly the manifest/disk disagreement the upload path's write
+        // ordering exists to prevent, only reached through the registry.
+        return match state.kernel.agent_registry().get(agent_id) {
+            // The agent vanished between `resolve_agent` and the identity
+            // write: the same failure the upload path answers as a 404.
+            None => json_error(StatusCode::NOT_FOUND, t.t("api-error-agent-not-found")),
+            // The agent is still there and the registry refused the write;
+            // the caller can retry, so this is the daemon's error, not theirs.
+            Some(_) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    "Avatar files removed but the stored avatar_url could not be cleared"
+                );
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "The avatar files were removed, but the stored avatar reference could not be cleared.".to_string(),
+                )
+            }
+        };
+    }
 
     (
         StatusCode::OK,
