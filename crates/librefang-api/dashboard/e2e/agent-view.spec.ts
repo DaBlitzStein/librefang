@@ -567,9 +567,12 @@ test("permissions hosts the grant lists and the exec policy, and only there", as
   await page.screenshot({ path: join(SHOTS, "14b-permissions-exec-policy.png") });
 
   // The tool filters sit below the fold too: without this shot the ported
-  // editor is asserted but never shown.
-  await allow.scrollIntoViewIfNeeded();
-  await expect(allow).toBeVisible();
+  // editor is asserted but never shown. `allow` cannot be re-resolved here:
+  // once a chip exists the placeholder flips to "Add more…", so the scroll
+  // anchors on the chip's own remove control instead.
+  const removeBash = capabilities.getByRole("button", { name: "Remove bash" }).first();
+  await removeBash.scrollIntoViewIfNeeded();
+  await expect(removeBash).toBeVisible();
   await page.screenshot({ path: join(SHOTS, "14c-permissions-tool-filters.png") });
 
   // And gone from where they used to render: Tools & skills keeps the per-tool

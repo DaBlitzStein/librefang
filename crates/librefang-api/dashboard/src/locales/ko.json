@@ -1041,10 +1041,6 @@
         "deleted": "트리거가 삭제되었습니다.",
         "pattern_custom": "사용자 정의 이벤트 패턴(JSON 또는 문자열)"
       },
-      "skill_meta": "설치됨",
-      "skill_pending": "대기 중",
-      "skill_pending_desc": "여기에 설치되지 않음 — 다음 스킬 리로드 시 활성화됩니다",
-      "skill_remove": "{{name}} 제거",
       "live_conversation": "실시간 대화",
       "no_conversation": "아직 대화가 없습니다. 채팅을 열어 첫 번째 메시지를 보내세요.",
       "open_chat": "채팅 열기",

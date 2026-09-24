@@ -1042,10 +1042,6 @@
         "deleted": "Trigger deleted",
         "pattern_custom": "Custom event pattern (JSON or string)"
       },
-      "skill_meta": "installed",
-      "skill_pending": "pending",
-      "skill_pending_desc": "not installed here — activates on the next skills reload",
-      "skill_remove": "Remove {{name}}",
       "live_conversation": "Live conversation",
       "no_conversation": "No conversation yet — open the chat to send the first message.",
       "open_chat": "Open chat",

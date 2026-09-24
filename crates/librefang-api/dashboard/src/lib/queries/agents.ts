@@ -246,10 +246,6 @@ export function useAgentTools(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.agentTools(agentId), options));
 }
 
-export function useAgentSkills(agentId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(agentQueries.agentSkills(agentId), options));
-}
-
 export function useAgentMcpServers(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.agentMcpServers(agentId), options));
 }

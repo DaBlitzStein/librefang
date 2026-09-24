@@ -1042,10 +1042,6 @@
         "deleted": "触发器已删除",
         "pattern_custom": "自定义事件模式（JSON 或字符串）"
       },
-      "skill_meta": "已安装",
-      "skill_pending": "待激活",
-      "skill_pending_desc": "此处未安装 — 将在下次技能重载时激活",
-      "skill_remove": "移除 {{name}}",
       "live_conversation": "实时对话",
       "no_conversation": "还没有对话 — 打开聊天发送第一条消息。",
       "open_chat": "打开聊天",

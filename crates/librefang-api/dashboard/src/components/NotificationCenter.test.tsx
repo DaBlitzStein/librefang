@@ -3,8 +3,8 @@ import { render, screen, act, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // Keep i18n predictable — return the default value when one is supplied,
-// otherwise the key. Matches the pattern used by AgentSkillItem.test.tsx
-// and PromptsExperimentsPanel.test.tsx.
+// otherwise the key. Matches the pattern used by
+// PromptsExperimentsPanel.test.tsx.
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string, defaultOrOpts?: unknown) => {

@@ -29,8 +29,6 @@ import {
   sendAgentMessage,
   resetAgentSession,
   updateAgentTools,
-  setAgentSkills,
-  setAgentMcpServers,
   setAgentChannels,
   getAgentTemplateToml,
 } from "../http/client";
@@ -700,65 +698,6 @@ export function useUpdateAgentTools() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
-    },
-  });
-}
-
-/**
- * PUT /agents/{id}/skills — replace the agent's skill allowlist (#4917).
- *
- * Powers the inline assignment UI on the Skills tab. An empty array clears
- * the allowlist back to "all" mode; a non-empty list is validated against
- * the registry server-side.
- *
- * Invalidates:
- * - `agentKeys.skills(id)` — the tab's own read (assigned / mode).
- * - `agentKeys.detail(id)` — `skills` and `skills_mode` are echoed on the
- *   agent detail payload and rendered in the summary drawer.
- * - `agentKeys.lists()` — the list row's skill summary chips.
- */
-export function useSetAgentSkills() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      agentId,
-      skills,
-    }: {
-      agentId: string;
-      skills: string[];
-    }) => setAgentSkills(agentId, skills),
-    onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
-      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
-      qc.invalidateQueries({ queryKey: agentKeys.lists() });
-    },
-  });
-}
-
-/**
- * PUT /agents/{id}/mcp_servers — replace the agent's MCP server grant list
- * (#6565 follow-up). Powers the group-level MCP grant/revoke on the agent
- * detail Tools tab, which previously could only read MCP grant state and
- * pointed the operator at a non-existent "MCP servers tab" to change it.
- * `agentKeys.detail(id)` carries the `mcp_servers` / `mcp_servers_mode`
- * fields this tab reads, so invalidating it is what actually refreshes the
- * grant state; `agentKeys.mcpServers(id)` is invalidated too for forward
- * compatibility with a future dedicated GET hook.
- */
-export function useSetAgentMcpServers() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      agentId,
-      mcpServers,
-    }: {
-      agentId: string;
-      mcpServers: string[];
-    }) => setAgentMcpServers(agentId, mcpServers),
-    onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
-      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
-      qc.invalidateQueries({ queryKey: agentKeys.lists() });
     },
   });
 }
