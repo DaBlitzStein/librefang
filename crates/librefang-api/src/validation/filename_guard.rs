@@ -315,14 +315,16 @@ pub fn is_safe_shape(name: &str, max_chars: usize) -> bool {
         return false;
     }
 
-    // Windows canonicalises a path by stripping trailing spaces, so `con .txt`
-    // reaches the same console as `con.txt`; the stem is trimmed for the same
-    // reason the name itself may not end in whitespace.
+    // Windows canonicalises a path by stripping trailing ASCII spaces, so
+    // `con .txt` reaches the same console as `con.txt`; the stem is trimmed for
+    // the same reason the name itself may not end in whitespace. Only U+0020 is
+    // stripped, because that is all `RtlIsDosDeviceName_Ustr` consults:
+    // `con\u{A0}.txt` is an ordinary file on Windows and stays one here.
     let stem = name
         .split('.')
         .next()
         .unwrap_or(name)
-        .trim_end()
+        .trim_end_matches(' ')
         .to_ascii_lowercase();
     !WINDOWS_RESERVED_STEMS.contains(&stem.as_str())
 }
@@ -573,6 +575,12 @@ mod tests {
         // Only the stem matters, so a name that merely starts with one is fine.
         assert!(guard().check("console.md").is_ok());
         assert!(guard().check("console .md").is_ok());
+        // Windows strips the ASCII space while canonicalising and nothing else,
+        // so the stem check does the same: the stem of these is `con`, not
+        // `con`, and Windows stores them as ordinary files.
+        assert!(guard().check("con\u{A0}.txt").is_ok());
+        assert!(guard().check("con\u{202F}.txt").is_ok());
+        assert!(guard().check("console\u{202F}.md").is_ok());
     }
 
     /// The character cap is the caller's; the 255-byte ceiling is the filesystem's, and both apply.
