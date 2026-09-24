@@ -664,6 +664,101 @@ async fn goal_run_start_returns_500_not_404_on_storage_failure() {
     );
 }
 
+/// #8427: a start that cannot read the goal's pause checkpoint must refuse with a 500 and leave the checkpoint in place.
+///
+/// The runner used to read the failure as "no checkpoint", start the goal again at iteration 0, and delete the checkpoint it could not read on the way — the paused run's progress was gone and the route answered 200.
+/// Refusing through the same `false` the route renders as a deleted goal would have been a 404 that sends the operator to re-create a goal that exists, so the refusal has its own outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_returns_500_and_keeps_an_unreadable_pause_checkpoint_8427() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "paused, unreadable", "agent_id": "11111111-1111-1111-1111-111111111111"}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+    let key = librefang_kernel::goal_runner::goal_pause_key(id.parse().unwrap());
+    let agent = librefang_types::goal::goals_storage_agent_id()
+        .0
+        .to_string();
+
+    // Not JSON, so `StructuredStore::get` fails on it — the same `Err` a pool or SQLite failure produces.
+    let pool = h._state.kernel.memory_substrate().pool();
+    pool.get()
+        .expect("pool connection")
+        .execute(
+            "INSERT INTO kv_store (agent_id, key, value, version, updated_at) VALUES (?1, ?2, ?3, 1, ?4)",
+            rusqlite::params![
+                agent,
+                key,
+                b"this is not json".as_slice(),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .expect("seeding the unreadable checkpoint must succeed");
+    let checkpoint_rows = || -> i64 {
+        pool.get()
+            .expect("pool connection")
+            .query_row(
+                "SELECT COUNT(*) FROM kv_store WHERE agent_id = ?1 AND key = ?2",
+                rusqlite::params![agent, key],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unreadable checkpoint is neither a deleted goal nor a fresh start: {body:?}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not start"),
+        "{body:?}"
+    );
+    assert_eq!(
+        checkpoint_rows(),
+        1,
+        "a refused start must not discard the checkpoint it could not read"
+    );
+
+    // `/resume` gates on the run readout, which reports the paused run as absent; that must not become a 409 "no paused run, use /start" for a checkpoint that is only unreadable.
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/resume"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unreadable checkpoint is not the absence of a paused run: {body:?}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not start"),
+        "{body:?}"
+    );
+    assert_eq!(
+        checkpoint_rows(),
+        1,
+        "a refused resume must not discard the checkpoint it could not read"
+    );
+
+    // The run readout has no other source for a paused run, so it still reports none; the runner logs why.
+    let (rs, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    assert_eq!(rs, StatusCode::OK);
+    assert_eq!(run["running"].as_bool(), Some(false), "{run:?}");
+    assert_eq!(
+        checkpoint_rows(),
+        1,
+        "reading the run must not discard the checkpoint either"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PUT /api/goals/{id}
 // ---------------------------------------------------------------------------
@@ -1627,6 +1722,48 @@ async fn goal_run_resume_without_a_paused_run_is_a_conflict() {
     assert!(body["error"].as_str().unwrap_or_default().contains("start"));
 }
 
+/// A goal that does not exist is a 404 on `/resume`, exactly as it is on
+/// `/start` — not the 409 the precondition answers for a goal that exists but
+/// has nothing paused.
+///
+/// The `require_paused` check used to run before the goal lookup, so a
+/// well-formed but unknown id got `409 Conflict` telling the operator to "use
+/// POST /api/goals/{id}/start to begin a new run" — advice that would itself
+/// 404. Someone who mistypes an id was told the wrong thing, and told to fix it
+/// in a way that could not work.
+///
+/// `/start` is the route this is pinned against because it is literally the
+/// same handler body with `require_paused: false`. `/stop`, `/pause` and `/run`
+/// are deliberately NOT: none of them looks the goal up, and all three answer
+/// `200` with a `false` flag for an id that does not exist.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_resume_on_an_unknown_goal_is_a_404_not_a_conflict() {
+    let h = boot().await;
+
+    for route in ["resume", "start"] {
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            &format!("/api/goals/{UNKNOWN_GOAL_ID}/{route}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "route {route}: {body:?}");
+        // The lookup failure, not the precondition. `ApiErrorResponse` nests the
+        // text under `error.message`, while the 409 this used to return puts a
+        // plain string in `error` — so this assertion distinguishes the two
+        // rather than merely restating the status code.
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not found"),
+            "route {route}: an unknown goal must report the lookup failure, \
+             not the resume precondition: {body:?}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn goal_run_pause_and_resume_reject_a_malformed_id() {
     let h = boot().await;
@@ -2114,14 +2251,54 @@ async fn updating_a_verified_goal_to_completed_stops_its_active_run() {
 /// wired unconditionally: a non-terminal update is an edit, not an operator
 /// ending the run. Without this the three tests above all pass against a
 /// `stop_goal_run` called on every `PUT`.
+///
+/// The run is given an agent that resolves, and that is what separates this
+/// assertion from a coin flip. A run that ends on its own is indistinguishable
+/// from one `stop_goal_run` ended: the loop's self-cleanup drops the same
+/// registry entry (`GoalRunner::start`'s `remove_if`) and deletes the same
+/// durable row (`run_loop`'s `delete_persisted_run`) that `stop_locked`
+/// deletes, so a run allowed to die takes the evidence with it — and every
+/// observable surface reports the same `running: false` either way. Pointed at
+/// the fabricated `11111111-…` id, the turn fails `Agent not found`,
+/// `MAX_ERROR_STREAK` consecutive failures end the run, and the entry is gone
+/// ~8s later (measured). Asserting anything about that run, registry entry
+/// included, races the scheduler rather than the edit.
+///
+/// A live agent's turn returns `Ok` — an explicitly driverless test kernel
+/// resolves `StubDriver`, whose `is_configured() == false` short-circuits the
+/// agent loop into a blank reply — so the loop keeps iterating at the goal's
+/// tick cadence until its `max_iterations` cap. Twenty-five ticks at the
+/// default 2s interval is a floor the machine's speed can only raise, against
+/// assertions that land milliseconds after the `PUT`: the run cannot end
+/// first. `running == true` is then the original assertion with its original
+/// meaning, and `GET /run` reports `false` on exactly the event a stop
+/// produces, so a `stop_goal_run` wired onto every `PUT` still fails here.
+///
+/// One residual way this can report a false red, and it is not this test's to
+/// fix: `GoalRunner::state` reads the registry and then `try_lock`s the handle,
+/// so a loop caught mid-update answers without a `run` key at all —
+/// indistinguishable from a stopped run. This is the only test in the file that
+/// reads the readout while the entry is still alive, which is why it is the one
+/// that can see it. Filed as #8397; the window is microseconds, so a red here
+/// is worth re-running before it is worth bisecting.
 #[tokio::test(flavor = "multi_thread")]
 async fn updating_a_goal_without_a_terminal_status_leaves_its_run_alone() {
     let h = boot().await;
+    let manifest = librefang_types::agent::AgentManifest {
+        name: format!("goal-edit-probe-{}", uuid::Uuid::new_v4()),
+        ..Default::default()
+    };
+    let agent = h
+        ._state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn_agent_typed must succeed in test kernel");
+
     let goal = create_goal(
         &h,
         serde_json::json!({
             "title": "Still going",
-            "agent_id": "11111111-1111-1111-1111-111111111111",
+            "agent_id": agent.to_string(),
         }),
     )
     .await;
@@ -2136,13 +2313,15 @@ async fn updating_a_goal_without_a_terminal_status_leaves_its_run_alone() {
         serde_json::json!({"title": "Renamed mid-run"}),
         serde_json::json!({"status": "in_progress"}),
     ] {
+        let edit = payload.to_string();
         let (put_status, body) =
             json_request(&h, Method::PUT, &format!("/api/goals/{id}"), Some(payload)).await;
         assert_eq!(put_status, StatusCode::OK, "got: {body:?}");
         let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
         assert_eq!(
             run["running"], true,
-            "an ordinary edit must not stop the run"
+            "an ordinary edit must not stop the run: {edit} left it reporting `running: false`, \
+             which is what stopping it does. Got: {run:?}"
         );
     }
 }

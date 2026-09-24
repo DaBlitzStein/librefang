@@ -2347,9 +2347,12 @@ pub async fn auth(
 }
 
 const LOGIN_PAGE_HTML: &str = include_str!("login_page.html");
-// If the inline script in login_page.html changes, recompute its script-src
-// SHA-256 below. dashboard_login_page_script_is_allowed_by_csp_hash enforces it.
-const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'sha256-TDA4xCzDRyoMM+fopfpKCyivlfu44tSPBzidGFvUgNM='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws://localhost:* ws://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*; font-src 'self' https://fonts.gstatic.com; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'";
+// One `script-src` hash per inline script the dashboard serves, across every page it serves.
+// The first is the submit handler in `login_page.html`; the second is the service-worker
+// registration in `../dashboard/index.html`, which the SPA shell carries on every authenticated route.
+// If either script changes, recompute its SHA-256 here — `dashboard_inline_scripts_are_allowed_by_csp_hash`
+// walks both pages and fails with the missing hash spelled out.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'sha256-TDA4xCzDRyoMM+fopfpKCyivlfu44tSPBzidGFvUgNM=' 'sha256-8jDM2e2sBqXcphSeNv2mxx6q5chJipVyCys5IbylByY='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws://localhost:* ws://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*; font-src 'self' https://fonts.gstatic.com; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'";
 
 /// Security headers middleware — applied to ALL API responses.
 pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Body> {
@@ -2359,7 +2362,8 @@ pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Bo
     headers.insert("x-frame-options", "DENY".parse().unwrap());
     headers.insert("x-xss-protection", "1; mode=block".parse().unwrap());
     // Dashboard JavaScript is served from self.
-    // The exact hash permits only the static inline submit handler in login_page.html.
+    // The exact hashes permit only the two static inline scripts the dashboard serves — the
+    // login submit handler and the SPA shell's service-worker registration — and nothing else.
     // SECURITY: 'unsafe-eval' and script-src 'unsafe-inline' remain forbidden (#3732).
     // 'unsafe-inline' remains in style-src because the React/Vite bundle injects CSS-in-JS style tags at runtime.
     headers.insert(
@@ -5171,13 +5175,64 @@ mod tests {
         }
     }
 
-    /// The `/dashboard` login page depends on its inline submit handler.
-    /// The CSP must allow its exact hash without permitting arbitrary inline JavaScript.
-    #[tokio::test]
-    async fn dashboard_login_page_script_is_allowed_by_csp_hash() {
+    /// The SPA shell as it is authored, which is what Vite emits and the daemon serves at every
+    /// authenticated dashboard route.
+    ///
+    /// The served copy is the build output under `static/react/`, which is a gitignored artifact and
+    /// therefore absent from a clean checkout — a test that read it would silently cover nothing in CI.
+    /// The source is the honest fixture instead: Vite copies this inline block into the bundle verbatim,
+    /// confirmed byte-for-byte against three independently produced `static/react/index.html` builds.
+    const DASHBOARD_SHELL_HTML: &str = include_str!("../dashboard/index.html");
+
+    /// Every inline `<script>` body in `html`, in document order, as `'sha256-…'` CSP source
+    /// expressions ready to be matched against a `script-src` directive.
+    ///
+    /// Scripts carrying a `src` attribute are external and need no hash, so they are skipped.
+    /// Returning every match rather than the first is the point: a page that grows a second inline
+    /// script is covered without touching this test.
+    fn inline_script_csp_hashes(html: &str) -> Vec<String> {
         use base64::Engine as _;
         use sha2::{Digest, Sha256};
 
+        let mut hashes = Vec::new();
+        let mut rest = html;
+        while let Some((_, after_open)) = rest.split_once("<script") {
+            let Some((attributes, body_and_rest)) = after_open.split_once('>') else {
+                break;
+            };
+            let Some((body, remainder)) = body_and_rest.split_once("</script>") else {
+                break;
+            };
+            rest = remainder;
+            if attributes.contains("src=") {
+                continue;
+            }
+            let digest = Sha256::digest(body.as_bytes());
+            let encoded = base64::engine::general_purpose::STANDARD.encode(digest);
+            hashes.push(format!("'sha256-{encoded}'"));
+        }
+        hashes
+    }
+
+    /// The sources listed by the `script-src` directive of `csp`.
+    fn script_src_sources(csp: &str) -> Vec<&str> {
+        csp.split(';')
+            .find(|directive| directive.trim_start().starts_with("script-src "))
+            .map(|directive| directive.split_ascii_whitespace().collect())
+            .unwrap_or_default()
+    }
+
+    /// Both pages the dashboard serves carry an inline script: the login form's submit handler and
+    /// the SPA shell's service-worker registration. The CSP must allow the exact hash of every one
+    /// of them, on every page, without permitting arbitrary inline JavaScript.
+    ///
+    /// Hashing whatever the pages actually contain — rather than asserting two known hashes — is what
+    /// makes this a guard: a third inline script, or an edit to either existing one, turns red here
+    /// instead of silently disabling a feature in the browser. #8337 was exactly that failure: only
+    /// the login page was ever presented to this test, so the shell's registration call was blocked
+    /// on all 47 static dashboard routes and the only symptom was a console line.
+    #[tokio::test]
+    async fn dashboard_inline_scripts_are_allowed_by_csp_hash() {
         let auth_state = AuthState {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             master_key: Default::default(),
@@ -5213,29 +5268,35 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let html = std::str::from_utf8(&body).unwrap();
-        let script = html
-            .split_once("<script>")
-            .and_then(|(_, rest)| rest.split_once("</script>"))
-            .map(|(script, _)| script)
-            .expect("login page must contain its submit handler");
-        let digest = Sha256::digest(script.as_bytes());
-        let encoded = base64::engine::general_purpose::STANDARD.encode(digest);
-        let hash_source = format!("'sha256-{encoded}'");
+        let login_html = std::str::from_utf8(&body).unwrap();
 
-        assert!(
-            csp.split(';')
-                .find(|directive| directive.trim_start().starts_with("script-src "))
-                .is_some_and(|directive| directive
-                    .split_ascii_whitespace()
-                    .any(|source| source == hash_source.as_str())),
-            "script-src must allow the exact inline login handler hash"
-        );
-        assert!(
-            !csp.split(';')
-                .find(|directive| directive.trim_start().starts_with("script-src "))
-                .is_some_and(|directive| directive.contains("'unsafe-inline'")),
-            "script-src must not allow arbitrary inline JavaScript"
-        );
+        let allowed = script_src_sources(&csp);
+        for (page, html) in [
+            ("login page", login_html),
+            ("dashboard SPA shell", DASHBOARD_SHELL_HTML),
+        ] {
+            let hashes = inline_script_csp_hashes(html);
+            assert!(
+                !hashes.is_empty(),
+                "{page} must contain at least one inline script; if it genuinely lost its last one, \
+                 drop it from this list rather than leaving a vacuous assertion"
+            );
+            for hash in hashes {
+                assert!(
+                    allowed.contains(&hash.as_str()),
+                    "script-src must allow the exact inline script hash {hash} served by the {page}; \
+                     add it to CONTENT_SECURITY_POLICY. Currently allowed: {allowed:?}"
+                );
+            }
+        }
+
+        // Allowing either of these would make every hash above decorative (#3732). `'unsafe-eval'`
+        // was already claimed as forbidden by the comment on the header, but nothing asserted it.
+        for forbidden in ["'unsafe-inline'", "'unsafe-eval'"] {
+            assert!(
+                !allowed.contains(&forbidden),
+                "script-src must not allow {forbidden}; it would defeat the per-script hashes"
+            );
+        }
     }
 }
