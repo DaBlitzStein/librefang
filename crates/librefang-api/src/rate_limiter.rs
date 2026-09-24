@@ -43,6 +43,7 @@ use axum::http::{header, HeaderMap, HeaderValue, Request, Response, StatusCode};
 use axum::middleware::Next;
 use dashmap::DashMap;
 use governor::{clock::DefaultClock, state::keyed::DashMapStateStore, Quota, RateLimiter};
+use std::borrow::Cow;
 use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -367,13 +368,30 @@ pub struct AuthRateLimitState {
 /// The approval id in an `/api/approvals/{id}/approve` (or `/api/v1/...`)
 /// path, if the path is one.
 ///
+/// The segment is percent-decoded the way axum's `Path<String>` extractor
+/// decodes it (`percent_decode_str` plus a strict UTF-8 check) before the
+/// caller parses it. The middleware reads `request.uri().path()` — the raw
+/// path, still percent-encoded — while the handler binds the already-decoded
+/// segment. Without this step an id sent with an escape inside it (say a
+/// `%2D` for one of a UUID's hyphens) fails `Uuid::parse_str` here but not in
+/// `approve_request`, the gate answers `false`, and the request that verifies
+/// a code rides the unmetered path. Decoding here keeps both ends parsing the
+/// same string.
+///
 /// This is the id [`AuthRateLimitState::approvals_require_totp`] is asked
 /// about: whether approving *that* request would verify a code.
-fn approve_path_request_id(path: &str) -> Option<&str> {
+fn approve_path_request_id(path: &str) -> Option<Cow<'_, str>> {
     let rest = path
         .strip_prefix("/api/approvals/")
         .or_else(|| path.strip_prefix("/api/v1/approvals/"))?;
     let id = rest.strip_suffix("/approve")?;
+    // Decode before the shape checks: a raw `%2F` only becomes a segment
+    // separator once decoded, and the handler's `{id}` carries the decoded
+    // slash — asking the gate about a multi-segment id would be a different
+    // request than the one `approve_request` resolves.
+    let id = percent_encoding::percent_decode_str(id)
+        .decode_utf8()
+        .ok()?;
     (!id.is_empty() && !id.contains('/')).then_some(id)
 }
 
@@ -433,7 +451,7 @@ pub async fn auth_rate_limit_layer(
     // below must reach its answer without paying for it. The question is
     // per-request (tool + grace window) — see the middleware docs above.
     let approve_is_metered = approve_path_request_id(path)
-        .is_some_and(|approval_id| (state.approvals_require_totp)(approval_id));
+        .is_some_and(|approval_id| (state.approvals_require_totp)(approval_id.as_ref()));
 
     // Endpoints that accept credentials, recovery codes, or TOTP codes —
     // any of these is a brute-force surface and must be rate-limited
@@ -1790,5 +1808,152 @@ mod tests {
                 "{uri} must not consult the approve gate"
             );
         }
+    }
+
+    /// Low-level coverage for [`approve_path_request_id`]: the versioned
+    /// prefix, the shapes that are not an approve path, and the empty /
+    /// multi-segment id that must not reach the gate.
+    #[test]
+    fn approve_path_request_id_matches_only_single_segment_approve_paths() {
+        assert_eq!(
+            approve_path_request_id("/api/approvals/abc/approve").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            approve_path_request_id("/api/v1/approvals/abc/approve").as_deref(),
+            Some("abc"),
+            "the versioned prefix must be recognised"
+        );
+        assert_eq!(
+            approve_path_request_id("/api/approvals//approve").as_deref(),
+            None,
+            "an empty id must not be passed to the gate"
+        );
+        assert_eq!(
+            approve_path_request_id("/api/approvals/a/b/approve").as_deref(),
+            None,
+            "an id that spans segments must not be passed to the gate"
+        );
+        assert_eq!(
+            approve_path_request_id("/api/approvals/abc/reject").as_deref(),
+            None,
+            "only the /approve suffix counts"
+        );
+        assert_eq!(
+            approve_path_request_id("/api/approvals/abc/approve/").as_deref(),
+            None,
+            "a trailing slash after the suffix is not an approve path"
+        );
+    }
+
+    /// The middleware reads `request.uri().path()` (raw, percent-encoded)
+    /// while `approve_request` binds `Path<String>` (decoded). A UUID whose
+    /// hyphens arrive escaped as `%2D` must resolve to the same id on both
+    /// ends, or the request that verifies a code is the one left unmetered.
+    #[test]
+    fn approve_path_request_id_decodes_percent_escapes_like_the_handler() {
+        let canonical = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+        let encoded = canonical.replacen('-', "%2D", 1);
+        assert_ne!(encoded, canonical);
+        assert!(
+            uuid::Uuid::parse_str(&encoded).is_err(),
+            "the raw segment must not parse as a UUID — the pre-fix failure mode"
+        );
+
+        let path = format!("/api/approvals/{encoded}/approve");
+        let parsed = approve_path_request_id(&path)
+            .expect("a percent-encoded approve path must be recognised");
+        assert_eq!(parsed.as_ref(), canonical);
+        assert_eq!(
+            uuid::Uuid::parse_str(parsed.as_ref()).unwrap(),
+            uuid::Uuid::parse_str(canonical).unwrap(),
+            "the decoded id must parse to the UUID the handler resolves"
+        );
+    }
+
+    /// End-to-end version of the parity above: with the route's `{id}` bound
+    /// by the real `Path<String>` extractor, a `%2D` id must be metered (the
+    /// gate is asked, and the bucket trips) and both the middleware and the
+    /// handler must see the same decoded UUID.
+    #[tokio::test]
+    async fn approve_gate_meters_percent_encoded_ids_the_handler_binds() {
+        use axum::extract::Path;
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let canonical = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+        let encoded = canonical.replacen('-', "%2D", 1);
+
+        let seen_by_middleware: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
+        let seen_by_handler: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
+        let gate_saw = Arc::clone(&seen_by_middleware);
+        let handler_saw = Arc::clone(&seen_by_handler);
+
+        let app = Router::new()
+            .route(
+                "/api/approvals/{id}/approve",
+                post(move |Path(id): Path<String>| {
+                    let seen = Arc::clone(&handler_saw);
+                    async move {
+                        *seen.lock().unwrap() = Some(id);
+                        "ok"
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                AuthRateLimitState {
+                    limiter: Arc::new(AuthLoginLimiter::new()),
+                    max_attempts: 1,
+                    trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+                    trust_forwarded_for: false,
+                    // Same shape as the production wiring: parse the id, then
+                    // ask whether approving it would verify a code. Here the
+                    // answer is "yes" for any UUID.
+                    approvals_require_totp: Arc::new(move |approval_id: &str| {
+                        *gate_saw.lock().unwrap() = Some(approval_id.to_string());
+                        uuid::Uuid::parse_str(approval_id).is_ok()
+                    }),
+                },
+                auth_rate_limit_layer,
+            ));
+
+        let public_ip: IpAddr = "203.0.113.63".parse().unwrap();
+        let make_req = || {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{encoded}/approve"))
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                    public_ip, 55000,
+                ))));
+            req
+        };
+
+        let resp = app.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // max_attempts = 1: the second request from the same IP must trip the
+        // limit. Before the decode fix the gate answered `false` for the
+        // encoded id and this stayed green forever.
+        let resp = app.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the encoded approve path must spend the login bucket like the plain form"
+        );
+
+        assert_eq!(
+            seen_by_middleware.lock().unwrap().as_deref(),
+            Some(canonical),
+            "the middleware must ask the gate about the decoded id"
+        );
+        assert_eq!(
+            seen_by_handler.lock().unwrap().as_deref(),
+            Some(canonical),
+            "the handler must bind the same decoded id"
+        );
     }
 }
