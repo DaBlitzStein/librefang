@@ -32,7 +32,7 @@
 //! `spawn_blocking` after `drop(t)` would work and is the alternative if these ever grow, at the cost of a `JoinError` arm on each call that adds nothing to the error the caller already gets.
 //! The bodies are bounded by [`MAX_AVATAR_BYTES`], so the window being blocked on is a few milliseconds.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -61,6 +61,23 @@ const BODY_LIMIT_HEADROOM_BYTES: usize = 64 * 1024;
 ///
 /// Without it the real ceiling is axum's own 2 MiB `Bytes` default, which sits *below* [`MAX_AVATAR_BYTES`] plus the headroom and would cut first.
 pub(crate) const AVATAR_BODY_LIMIT_BYTES: usize = MAX_AVATAR_BYTES + BODY_LIMIT_HEADROOM_BYTES;
+
+/// How many avatar uploads may hold a buffered body in memory at once.
+///
+/// [`AVATAR_BODY_LIMIT_BYTES`] bounds one buffered body, not how many can be resident: `upload_agent_avatar` takes `Bytes`, so the whole body is in RAM before the handler runs, and N parallel authenticated POSTs otherwise cost N × ~2.06 MiB.
+/// Eight is the default of `max_concurrent_uploads`, the operator setting that bounds the file-upload route; this route's cap is a compile-time constant, so its permit count is one too (see `PDF_EXTRACTION_PERMITS` in `agents/attachments.rs` for the same shape).
+pub(crate) const MAX_CONCURRENT_AVATAR_UPLOADS: usize = 8;
+
+/// The permits the avatar route's concurrency layer acquires before the `Bytes` extractor buffers anything.
+///
+/// Same 429-and-a-JSON-body policy as the file-upload route, via [`crate::middleware::limit_concurrent_uploads`]; a `LazyLock` because the route is built before any request exists and the count is fixed, not per-app state.
+static AVATAR_UPLOAD_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_AVATAR_UPLOADS)));
+
+/// A clone of the avatar route's permits, for the layer that owns them.
+pub(crate) fn avatar_upload_permits() -> Arc<tokio::sync::Semaphore> {
+    AVATAR_UPLOAD_PERMITS.clone()
+}
 
 fn json_error(status: StatusCode, message: String) -> axum::response::Response {
     (status, Json(serde_json::json!({ "error": message }))).into_response()

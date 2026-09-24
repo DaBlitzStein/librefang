@@ -211,6 +211,18 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route(
             "/agents/{id}/avatar",
             axum::routing::post(upload_agent_avatar)
+                // On the POST before GET and DELETE are added, so only uploads
+                // draw from the pool (`MethodRouter::layer` covers the methods
+                // present when it runs). The permit is held while the `Bytes`
+                // extractor buffers the body, and a saturated pool answers 429
+                // without spending the memory this bound exists to protect: a
+                // per-request cap cannot do that on its own — N parallel
+                // bodies are N × the cap. See
+                // `avatar::MAX_CONCURRENT_AVATAR_UPLOADS`.
+                .layer(axum::middleware::from_fn_with_state(
+                    avatar::avatar_upload_permits(),
+                    crate::middleware::limit_concurrent_uploads,
+                ))
                 .get(serve_agent_avatar)
                 .delete(delete_agent_avatar)
                 // Without this the `Bytes` extractor cuts at axum's own 2 MiB
@@ -221,16 +233,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
                 // `avatar::AVATAR_BODY_LIMIT_BYTES`.
                 .layer(axum::extract::DefaultBodyLimit::max(
                     avatar::AVATAR_BODY_LIMIT_BYTES,
-                ))
-                // Outermost, so the permit is taken before the extractor
-                // buffers a body: a saturated pool answers 429 without
-                // spending the memory this bound exists to protect. A
-                // per-request cap cannot do that on its own — N parallel
-                // bodies are N × the cap. See
-                // `avatar::MAX_CONCURRENT_AVATAR_UPLOADS`.
-                .layer(axum::middleware::from_fn_with_state(
-                    avatar::avatar_upload_permits(),
-                    crate::middleware::limit_concurrent_uploads,
                 )),
         )
         .route(
