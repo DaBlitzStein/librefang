@@ -2234,17 +2234,24 @@ pub async fn build_router(
                 max_attempts: auth_rl_max_attempts,
                 trusted_proxies: trusted_proxies.clone(),
                 trust_forwarded_for,
-                // Read live rather than snapshotted: this decides whether an
-                // approve request has a TOTP/recovery code to brute-force, and
-                // `POST /api/config/reload` swaps the whole approval policy
-                // (`ApprovalManager::update_policy`). A bool captured at boot
-                // would keep metering approvals after an operator set
-                // `second_factor` back to `none`, which is the lockout this
-                // gates — while a snapshot taken the other way would drop the
-                // #4020 brake on a path that had started verifying codes.
+                // Read live, per request: this decides whether approving the
+                // request behind the path's id has a TOTP/recovery code to
+                // brute-force. It follows the policy (`POST /api/config/reload`
+                // swaps the whole policy through `ApprovalManager::update_policy`),
+                // the tool (`totp_tools` narrows which tools verify a code) and
+                // the caller's grace window (a successful verification skips
+                // the next ones) — a bool captured at boot would keep metering
+                // approvals that verify nothing, which is the lockout this
+                // gates, or drop the #4020 brake on a path that had started
+                // verifying codes. `api_admin` is the identity `approve_request`
+                // resolves the API path under (routes/approvals.rs).
                 approvals_require_totp: {
                     let kernel = Arc::clone(&state.kernel);
-                    Arc::new(move || kernel.approvals().requires_approval_totp())
+                    Arc::new(move |approval_id: &str| {
+                        uuid::Uuid::parse_str(approval_id).is_ok_and(|id| {
+                            kernel.approvals().would_verify_totp(id, "api_admin")
+                        })
+                    })
                 },
             },
             rate_limiter::auth_rate_limit_layer,

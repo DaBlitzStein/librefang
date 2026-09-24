@@ -1558,21 +1558,45 @@ impl ApprovalManager {
     /// Check whether the current policy requires a TOTP code on tool
     /// approvals.
     ///
-    /// Deliberately not [`Self::requires_totp`], which compares
-    /// `second_factor` against `Totp` alone: `SecondFactor::Both` also requires
-    /// an approval code (`SecondFactor::requires_approval_totp`), so the two
-    /// disagree exactly when `Both` is configured.
-    ///
-    /// This is the tool-independent half of
+    /// The tool-independent half of
     /// [`ApprovalPolicy::tool_requires_totp`] — the predicate `resolve` and
-    /// `approve_request` consult before demanding a code — and the HTTP layer
-    /// reads it to decide whether an approve request has a 6-digit credential
-    /// to brute-force at all. Reading the policy here rather than snapshotting
-    /// it at boot is what makes that decision survive
-    /// `POST /api/config/reload`, which swaps the whole policy through
-    /// `update_policy`.
+    /// `approve_request` consult before demanding a code — and what
+    /// [`Self::requires_totp`] forwards to. Unlike a comparison against
+    /// `Totp` alone it answers `true` for `SecondFactor::Both` too
+    /// (`SecondFactor::requires_approval_totp`), matching the enforcement
+    /// path.
+    ///
+    /// It cannot answer whether *this* approval has a code to verify:
+    /// `totp_tools` narrows the policy per tool and the grace window skips the
+    /// check per caller, so the HTTP rate limiter asks the per-request
+    /// [`Self::would_verify_totp`] instead of this policy-wide answer.
     pub fn requires_approval_totp(&self) -> bool {
         self.read_policy().second_factor.requires_approval_totp()
+    }
+
+    /// Whether an approve request for `request_id` from `user_id` would verify
+    /// a TOTP or recovery code right now.
+    ///
+    /// This is the per-request form of the question the HTTP auth rate limiter
+    /// asks before spending a caller's login bucket on an approval. It mirrors
+    /// what `approve_request`/`resolve` enforce: a code is verified only when
+    /// the tool being approved is inside
+    /// [`ApprovalPolicy::tool_requires_totp`] — which `totp_tools` narrows —
+    /// and the caller is outside the grace window a previous successful
+    /// verification opened. A missing or already-resolved request has nothing
+    /// left to verify.
+    ///
+    /// Reading the policy live (not snapshotting it at boot) is what keeps the
+    /// answer in step with `POST /api/config/reload`, which swaps the whole
+    /// policy through `update_policy`.
+    pub fn would_verify_totp(&self, request_id: Uuid, user_id: &str) -> bool {
+        let policy = self.read_policy();
+        let Some(pending) = self.pending.get(&request_id) else {
+            return false;
+        };
+        let tool_needs_totp = policy.tool_requires_totp(&pending.request.tool_name);
+        drop(pending);
+        tool_needs_totp && !self.is_within_totp_grace(user_id, &policy)
     }
 
     /// Verify a TOTP code against a base32-encoded secret.
@@ -3672,6 +3696,104 @@ mod tests {
         // Even after recording grace, zero period means no grace
         mgr.record_totp_grace("admin");
         assert!(!mgr.is_within_totp_grace("admin", &policy));
+    }
+
+    /// The HTTP rate limiter's per-request gate: `would_verify_totp` must
+    /// mirror what `approve_request`/`resolve` enforce — a code only for a
+    /// tool inside `totp_tools`, and only outside the grace window — because
+    /// the limiter spends the caller's login bucket on its answer.
+    #[test]
+    fn would_verify_totp_is_narrowed_by_totp_tools() {
+        let policy = ApprovalPolicy {
+            second_factor: SecondFactor::Totp,
+            totp_tools: vec!["shell_exec".to_string()],
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        let listed = make_request("agent-1", "shell_exec", 60);
+        let listed_id = mgr.submit_manual_request(listed).unwrap();
+        let unlisted = make_request("agent-1", "file_write", 60);
+        let unlisted_id = mgr.submit_manual_request(unlisted).unwrap();
+
+        assert!(
+            mgr.would_verify_totp(listed_id, "api_admin"),
+            "a tool inside totp_tools verifies a code"
+        );
+        assert!(
+            !mgr.would_verify_totp(unlisted_id, "api_admin"),
+            "a tool outside totp_tools verifies nothing, so there is no code to meter"
+        );
+        assert!(
+            !mgr.would_verify_totp(Uuid::new_v4(), "api_admin"),
+            "an unknown approval id has nothing to verify"
+        );
+    }
+
+    /// An empty `totp_tools` means every tool verifies a code under
+    /// `second_factor = totp`; the tool-independent variants verify none.
+    #[test]
+    fn would_verify_totp_covers_every_tool_when_totp_tools_is_empty() {
+        let mgr = ApprovalManager::new(ApprovalPolicy {
+            second_factor: SecondFactor::Totp,
+            totp_tools: Vec::new(),
+            ..Default::default()
+        });
+        for tool in ["shell_exec", "file_write"] {
+            let id = mgr
+                .submit_manual_request(make_request("agent-1", tool, 60))
+                .unwrap();
+            assert!(
+                mgr.would_verify_totp(id, "api_admin"),
+                "{tool} must verify a code while totp_tools is empty"
+            );
+        }
+
+        for second_factor in [SecondFactor::None, SecondFactor::Login] {
+            let mgr = ApprovalManager::new(ApprovalPolicy {
+                second_factor,
+                ..Default::default()
+            });
+            let id = mgr
+                .submit_manual_request(make_request("agent-1", "shell_exec", 60))
+                .unwrap();
+            assert!(
+                !mgr.would_verify_totp(id, "api_admin"),
+                "{second_factor:?} verifies no approval code"
+            );
+        }
+    }
+
+    /// A successful code verification opens the grace window: approvals inside
+    /// it verify nothing, so the limiter must stop metering them even for a
+    /// listed tool — and another caller's grace must not answer for the API
+    /// caller.
+    #[test]
+    fn would_verify_totp_honours_the_grace_window() {
+        let policy = ApprovalPolicy {
+            second_factor: SecondFactor::Totp,
+            totp_grace_period_secs: 300,
+            ..Default::default()
+        };
+        let mgr = ApprovalManager::new(policy);
+
+        let listed = make_request("agent-1", "shell_exec", 60);
+        let listed_id = mgr.submit_manual_request(listed).unwrap();
+        assert!(mgr.would_verify_totp(listed_id, "api_admin"));
+
+        // Someone else's grace must not cover the API caller.
+        mgr.record_totp_grace("someone-else");
+        assert!(
+            mgr.would_verify_totp(listed_id, "api_admin"),
+            "grace is per caller; another caller's success must not skip the API caller's code"
+        );
+
+        // The API caller's own successful verification does.
+        mgr.record_totp_grace("api_admin");
+        assert!(
+            !mgr.would_verify_totp(listed_id, "api_admin"),
+            "inside the grace window no code is demanded, so there is nothing to meter"
+        );
     }
 
     /// Regression (#5144): `gc_expired_totp_entries` must drop grace

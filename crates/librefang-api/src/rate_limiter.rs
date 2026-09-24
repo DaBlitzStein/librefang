@@ -348,36 +348,58 @@ pub struct AuthRateLimitState {
     pub max_attempts: u32,
     pub trusted_proxies: Arc<crate::client_ip::TrustedProxies>,
     pub trust_forwarded_for: bool,
-    /// Whether an approve request verifies a TOTP or recovery code on this
-    /// daemon — i.e. whether
-    /// `ApprovalPolicy::second_factor.requires_approval_totp()` holds.
+    /// Whether approving the request with the given id would verify a TOTP or
+    /// recovery code right now — i.e. whether the approval's tool is inside
+    /// `ApprovalPolicy::tool_requires_totp` and the caller is outside the TOTP
+    /// grace window.
     ///
-    /// A predicate rather than a `bool` because the answer is not a boot
-    /// constant: `POST /api/config/reload` swaps the whole approval policy
-    /// through `ApprovalManager::update_policy`, so a value captured at
-    /// startup would still be metering approvals after the operator turned
-    /// the second factor off — the very lockout this gates.
-    pub approvals_require_totp: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// A predicate rather than a `bool` because the answer is neither a boot
+    /// constant nor a policy-wide one: `POST /api/config/reload` swaps the
+    /// whole approval policy through `ApprovalManager::update_policy`,
+    /// `totp_tools` narrows which tools verify a code, and a successful
+    /// verification opens a grace window that skips the next ones. A global
+    /// answer kept metering approvals that verified nothing — the lockout this
+    /// gates. It takes the approval id so each approve request is answered for
+    /// itself.
+    pub approvals_require_totp: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+}
+
+/// The approval id in an `/api/approvals/{id}/approve` (or `/api/v1/...`)
+/// path, if the path is one.
+///
+/// This is the id [`AuthRateLimitState::approvals_require_totp`] is asked
+/// about: whether approving *that* request would verify a code.
+fn approve_path_request_id(path: &str) -> Option<&str> {
+    let rest = path
+        .strip_prefix("/api/approvals/")
+        .or_else(|| path.strip_prefix("/api/v1/approvals/"))?;
+    let id = rest.strip_suffix("/approve")?;
+    (!id.is_empty() && !id.contains('/')).then_some(id)
 }
 
 /// Axum middleware that enforces per-IP rate limiting on authentication
 /// endpoints (`/api/auth/dashboard-login`, `/api/auth/login*`,
 /// `/api/auth/introspect`, `/api/auth/refresh`, the OAuth callback, the
 /// passkey ceremonies, `/api/approvals/totp/confirm`), and on
-/// `/api/approvals/{id}/approve` while that endpoint has a code to verify.
+/// `/api/approvals/{id}/approve` while approving that request would have a
+/// code to verify.
 ///
 /// The approval endpoints are the ones that need a condition attached.
-/// `approve_request` demands a TOTP or recovery code only when the approval
-/// policy says the tool needs one (`ApprovalPolicy::tool_requires_totp`), so
-/// with the default `second_factor = none` an approval is an authenticated
-/// click that verifies nothing and there is no credential on that path to
-/// brute-force. This middleware also runs *before* the handler, so it cannot
-/// see the outcome: it was counting successful approvals, and enough of them
-/// in one window exhausted the bucket shared with `dashboard-login` and
-/// answered a working operator with 429 "Too many login attempts" for the
-/// rest of the fifteen minutes. Metering is therefore gated on
-/// [`AuthRateLimitState::approvals_require_totp`], which is the same policy
-/// check the handler itself consults. `totp/confirm` is not gated: it always
+/// `approve_request` verifies a TOTP or recovery code only when the approval
+/// policy says the tool being approved needs one
+/// (`ApprovalPolicy::tool_requires_totp`, which `totp_tools` narrows) and the
+/// caller is outside the grace window a previous successful verification
+/// opened; with the shipped default `second_factor = none` no tool qualifies,
+/// so an approval is an authenticated click that verifies nothing and there is
+/// no credential on that path to brute-force. This middleware also runs
+/// *before* the handler, so it cannot see the outcome: it was counting
+/// successful approvals, and enough of them in one window exhausted the bucket
+/// shared with `dashboard-login` and answered a working operator with 429 "Too
+/// many login attempts" for the rest of the fifteen minutes. Metering is
+/// therefore gated per request on
+/// [`AuthRateLimitState::approvals_require_totp`], asked with the approval id
+/// from the path — the same per-tool, grace-aware question the handler and
+/// `resolve` answer. `totp/confirm` is not gated: it always
 /// verifies a code when it is reachable, and it runs once per enrollment, so
 /// the bucket costs a legitimate caller nothing.
 ///
@@ -406,10 +428,12 @@ pub async fn auth_rate_limit_layer(
     let limiter = state.limiter.clone();
     let max_attempts = state.max_attempts;
     let path = request.uri().path();
-    // Asked once, before any request is counted: an approve request only has
-    // a 6-digit code to brute-force while the policy requires one. See the
-    // middleware docs above.
-    let approvals_require_totp = (state.approvals_require_totp)();
+    // Asked lazily, and only for an approve path: the predicate takes the
+    // kernel's approval-policy lock, so every other route in the allowlist
+    // below must reach its answer without paying for it. The question is
+    // per-request (tool + grace window) — see the middleware docs above.
+    let approve_is_metered = approve_path_request_id(path)
+        .is_some_and(|approval_id| (state.approvals_require_totp)(approval_id));
 
     // Endpoints that accept credentials, recovery codes, or TOTP codes —
     // any of these is a brute-force surface and must be rate-limited
@@ -440,20 +464,16 @@ pub async fn auth_rate_limit_layer(
         || path == "/api/v1/auth/callback"
         // #4020 added the approve paths for the reason above — they accept
         // 6-digit and recovery codes. They only *do* while the policy
-        // requires one for the tool being approved: with
-        // `second_factor = none`/`login`, `tool_requires_totp` short-circuits
+        // requires one for the tool being approved and the caller is outside
+        // the grace window: with `second_factor = none`/`login`, or a tool
+        // outside a narrowed `totp_tools`, `tool_requires_totp` short-circuits
         // to false, nothing is verified, and metering the path bought no
         // brute-force protection while spending the caller's login budget on
-        // approvals that had already succeeded. Gate on the same policy check
-        // the handler makes; keep the confirm path unconditional, since it
-        // verifies a code whenever it is reachable and runs once per
+        // approvals that had already succeeded. Gate on the same per-request
+        // check the handler makes; keep the confirm path unconditional, since
+        // it verifies a code whenever it is reachable and runs once per
         // enrollment.
-        || (approvals_require_totp
-            && path.starts_with("/api/approvals/")
-            && path.ends_with("/approve"))
-        || (approvals_require_totp
-            && path.starts_with("/api/v1/approvals/")
-            && path.ends_with("/approve"))
+        || approve_is_metered
         || path == "/api/approvals/totp/confirm"
         || path == "/api/v1/approvals/totp/confirm"
         // #5981: passkey authentication mints a session, so its two ceremony
@@ -955,7 +975,7 @@ mod tests {
                     max_attempts,
                     trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
                     trust_forwarded_for: false,
-                    approvals_require_totp: Arc::new(|| false),
+                    approvals_require_totp: Arc::new(|_| false),
                 },
                 auth_rate_limit_layer,
             ));
@@ -1013,7 +1033,7 @@ mod tests {
                     max_attempts,
                     trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
                     trust_forwarded_for: false,
-                    approvals_require_totp: Arc::new(|| false),
+                    approvals_require_totp: Arc::new(|_| false),
                 },
                 auth_rate_limit_layer,
             ));
@@ -1064,7 +1084,7 @@ mod tests {
                     max_attempts,
                     trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
                     trust_forwarded_for: false,
-                    approvals_require_totp: Arc::new(|| false),
+                    approvals_require_totp: Arc::new(|_| false),
                 },
                 auth_rate_limit_layer,
             ));
@@ -1152,7 +1172,7 @@ mod tests {
                     max_attempts,
                     trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
                     trust_forwarded_for: false,
-                    approvals_require_totp: Arc::new(|| false),
+                    approvals_require_totp: Arc::new(|_| false),
                 },
                 auth_rate_limit_layer,
             ));
@@ -1198,7 +1218,7 @@ mod tests {
                     max_attempts,
                     trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
                     trust_forwarded_for: false,
-                    approvals_require_totp: Arc::new(|| false),
+                    approvals_require_totp: Arc::new(|_| false),
                 },
                 auth_rate_limit_layer,
             ));
@@ -1250,7 +1270,7 @@ mod tests {
                     max_attempts,
                     trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
                     trust_forwarded_for: false,
-                    approvals_require_totp: Arc::new(|| false),
+                    approvals_require_totp: Arc::new(|_| false),
                 },
                 auth_rate_limit_layer,
             ));
@@ -1358,7 +1378,7 @@ mod tests {
                     max_attempts,
                     trusted_proxies: trusted,
                     trust_forwarded_for: true,
-                    approvals_require_totp: Arc::new(|| false),
+                    approvals_require_totp: Arc::new(|_| false),
                 },
                 auth_rate_limit_layer,
             ));
@@ -1428,7 +1448,7 @@ mod tests {
                     max_attempts,
                     trusted_proxies: trusted,
                     trust_forwarded_for: true,
-                    approvals_require_totp: Arc::new(|| false),
+                    approvals_require_totp: Arc::new(|_| false),
                 },
                 auth_rate_limit_layer,
             ));
@@ -1487,7 +1507,7 @@ mod tests {
                     max_attempts,
                     trusted_proxies: trusted,
                     trust_forwarded_for: false, // master switch off
-                    approvals_require_totp: Arc::new(|| false),
+                    approvals_require_totp: Arc::new(|_| false),
                 },
                 auth_rate_limit_layer,
             ));
@@ -1524,10 +1544,12 @@ mod tests {
 
     /// Build the per-IP auth-limiter state for the middleware tests below.
     ///
-    /// `approvals_require_totp` mirrors the live approval policy: `true` when
-    /// `ApprovalPolicy::second_factor.requires_approval_totp()` is set, i.e.
-    /// when `approve_request` actually verifies a 6-digit code on some tools;
-    /// `false` when it verifies nothing.
+    /// `approvals_require_totp` stands in for the live per-request answer:
+    /// `true` when `approve_request` would verify a 6-digit code for the tool
+    /// behind the path's approval id and the caller is outside the grace
+    /// window, `false` when it would verify nothing. These tests fix one
+    /// answer for every id; `approve_gate_consults_the_predicate_with_the_requests_own_id`
+    /// covers the id-by-id case.
     fn auth_state(
         limiter: Arc<AuthLoginLimiter>,
         max_attempts: u32,
@@ -1538,7 +1560,7 @@ mod tests {
             max_attempts,
             trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
-            approvals_require_totp: Arc::new(move || approvals_require_totp),
+            approvals_require_totp: Arc::new(move |_approval_id: &str| approvals_require_totp),
         }
     }
 
@@ -1635,5 +1657,138 @@ mod tests {
             saw_429,
             "approve must stay rate-limited while the policy requires a TOTP code (limit={max_attempts})"
         );
+    }
+
+    /// The gate must be asked about the approval id carried by the path, not
+    /// answered from a policy-wide constant: with `totp_tools` narrowed, one
+    /// id verifies a code and another does not, and the bucket must follow.
+    #[tokio::test]
+    async fn approve_gate_consults_the_predicate_with_the_requests_own_id() {
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let max_attempts: u32 = 1;
+        let asked: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let asked_by_middleware = Arc::clone(&asked);
+        let app = Router::new()
+            .route("/api/approvals/{id}/approve", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                AuthRateLimitState {
+                    limiter: Arc::new(AuthLoginLimiter::new()),
+                    max_attempts,
+                    trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+                    trust_forwarded_for: false,
+                    // Only the listed id has a code to verify.
+                    approvals_require_totp: Arc::new(move |approval_id: &str| {
+                        asked_by_middleware
+                            .lock()
+                            .unwrap()
+                            .push(approval_id.to_string());
+                        approval_id == "verify-me"
+                    }),
+                },
+                auth_rate_limit_layer,
+            ));
+
+        let public_ip: IpAddr = "203.0.113.61".parse().unwrap();
+        let make_req = |id: &str| {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{id}/approve"))
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                    public_ip, 55000,
+                ))));
+            req
+        };
+
+        // The id with nothing to verify never spends the bucket, however many
+        // times it is sent.
+        for _ in 0..(max_attempts + 2) {
+            let resp = app.clone().oneshot(make_req("free-id")).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "an approval id that verifies no code must not be counted"
+            );
+        }
+
+        // The id that verifies a code does: the request past the cap trips.
+        let mut saw_429 = false;
+        for _ in 0..=(max_attempts + 1) {
+            let resp = app.clone().oneshot(make_req("verify-me")).await.unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_429,
+            "the approval id with a code to verify must still be metered"
+        );
+
+        let asked = asked.lock().unwrap();
+        assert!(
+            asked.iter().any(|id| id == "free-id") && asked.iter().any(|id| id == "verify-me"),
+            "the predicate must be asked about each request's own id, saw {asked:?}"
+        );
+        assert!(
+            asked.iter().all(|id| id != "approve"),
+            "the id segment must not include the `/approve` suffix, saw {asked:?}"
+        );
+    }
+
+    /// The predicate takes the kernel's approval-policy lock, so it must be
+    /// consulted only on the approve path. A predicate that panics when called
+    /// proves it: every non-approve route below would abort the request if the
+    /// middleware asked before deciding the path is not an approve one.
+    #[tokio::test]
+    async fn approve_gate_predicate_is_not_asked_off_the_approve_path() {
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route("/api/auth/dashboard-login", post(|| async { "ok" }))
+            .route("/api/approvals/totp/confirm", post(|| async { "ok" }))
+            .route("/api/approvals/some-id/reject", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                AuthRateLimitState {
+                    limiter: Arc::new(AuthLoginLimiter::new()),
+                    max_attempts: 5,
+                    trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+                    trust_forwarded_for: false,
+                    approvals_require_totp: Arc::new(|_approval_id: &str| {
+                        panic!("the approve gate must not be consulted for other routes")
+                    }),
+                },
+                auth_rate_limit_layer,
+            ));
+
+        let public_ip: IpAddr = "203.0.113.62".parse().unwrap();
+        for uri in [
+            "/api/auth/dashboard-login",
+            "/api/approvals/totp/confirm",
+            "/api/approvals/some-id/reject",
+        ] {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                    public_ip, 55000,
+                ))));
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "{uri} must not consult the approve gate"
+            );
+        }
     }
 }
