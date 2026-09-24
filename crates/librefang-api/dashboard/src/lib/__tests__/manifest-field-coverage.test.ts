@@ -78,7 +78,6 @@ const NO_SURFACE: Record<string, string> = {
   channels: "elsewhere: the drawer's own Channels section edits this allowlist (useSetAgentChannels). It is a set-membership list the channel bridge reads to decide which channels an agent may serve (channels/src/bridge.rs:3839), and a second control for one list is the redundancy requirement 2 exists to remove.",
   is_hand: "readonly: derived, not authored. memory/src/structured.rs:472 sets it while migrating a legacy hand agent, so it records what the agent is rather than what someone said about it. A form that could change it would let the label and the machinery disagree.",
   auto_dream_enabled: "elsewhere: the Memory page's Auto Dream toggle owns it, and registry.rs:988 documents that toggle as in-memory only, with this manifest field being the persistent half of the same flag. A second control here would mean Save writes agent.toml while the toggle writes memory, and the file wins on the next reload -- reverting the toggle with nothing on screen to explain it.",
-  auto_evolve: "elsewhere: the drawer's Skills tab toggles it through PATCH /api/agents/{id}, next to the skills it evolves.",
   triggers: "elsewhere: the Schedule tab edits the runtime trigger registry over /api/triggers, and the manifest's [[triggers]] array is reconciled into that registry one way (routes/workflows/triggers.rs:1217). A field here would write the array the runtime then overwrites, not the registry the operator was looking at.",
 };
 

@@ -116,6 +116,16 @@ async function mockBackend(page: Page) {
     if (path === `/api/agents/${AGENT_ID}/channels`) {
       return json(route, { assigned: ["telegram"], available: ["telegram", "discord"], mode: "allowlist" });
     }
+    // Granted but not connected (#7713): the one state the removed Tools tab
+    // was alone in showing, and now the mcp_servers section's warning.
+    if (path === `/api/agents/${AGENT_ID}/mcp_servers`) {
+      return json(route, {
+        assigned: ["github"],
+        available: [],
+        mode: "allowlist",
+        pending: ["github"],
+      });
+    }
     if (path === `/api/agents/${AGENT_ID}/avatar`) return json(route, {}, 404);
 
     // The list endpoints whose response is an object wrapper rather than a
@@ -297,23 +307,44 @@ test("the general group hosts the identity sections and the model group the mode
   await expect(page.getByRole("button", { name: "Use global default" })).toBeVisible();
 });
 
-// The grants panels are the other half of "Tools & skills": live writes over
-// their own endpoints, above the manifest sections for the same subject. They
-// are also the piece with the least cover — removing both from the group left
-// every other test in this file green, because a group that renders its
-// manifest sections still shows a `[data-section]`.
-test("the tools & skills group keeps its live grants panels", async ({ page }) => {
+// The grants panels that used to sit above the manifest sections retired with
+// the legacy Tools/Skills tabs: they were a second writer of the same
+// `capabilities_tools` / `skills` keys. What this pins is that the pieces they
+// uniquely owned are reachable in the form that inherited them, not just that
+// the group renders a generic `[data-section]`.
+test("the tools & skills group hosts the skills, MCP and per-tool sections", async ({ page }) => {
   await openAgent(page);
   await page.getByRole("tab", { name: "config" }).click();
   await page.getByRole("tab", { name: "Tools & skills", exact: true }).click();
 
-  // One string from each panel, and nothing else on the agent view renders
-  // either of them.
-  await expect(page.getByText("Using all available skills")).toBeVisible();
-  await expect(page.getByText("Using all available tools")).toBeVisible();
-  // The auto-evolve switch is the skills panel's own write, not a manifest
-  // field, so it goes with them.
-  await expect(page.getByText(/Auto-evolve/)).toBeVisible();
+  await expect(page.locator('[data-section="skills"]')).toBeVisible();
+  await expect(page.locator('[data-section="mcp_servers"]')).toBeVisible();
+  await expect(page.locator('[data-section="tools"]')).toBeVisible();
+
+  // The auto-evolve switch: a manifest field the drawer's Skills tab used to
+  // own alone, now where the skills it evolves are edited.
+  await expect(page.getByRole("checkbox", { name: "Auto-evolve" })).toBeVisible();
+  // The granted-but-unconnected crossing: the only state the removed Tools tab
+  // was alone in showing, and it lives in the mcp_servers section now.
+  await expect(page.getByTestId("agent-pending-mcp")).toBeVisible();
+  await expect(page.getByText("github", { exact: true })).toBeVisible();
+});
+
+// The badge that used to open the Tools Editor modal — a second writer of
+// `capabilities_tools` — is a pointer at the one editor that owns the list.
+// Asserted through the page because the placement (group + Advanced mode) is
+// the whole content of the affordance.
+test("the capabilities badge lands on the tools editor in the form", async ({ page }) => {
+  await openAgent(page);
+  await page.getByRole("button", { name: "Details" }).click();
+  await page.getByRole("button", { name: "Edit tools" }).click();
+
+  await expect(page.getByRole("tab", { name: "Permissions", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.getByRole("checkbox", { name: "Advanced mode" })).toBeChecked();
+  await expect(page.getByPlaceholder("Search allowlisted tools…")).toBeVisible();
 });
 
 test("the channels group hosts the live allowlist and the 29 overrides together", async ({ page }) => {
@@ -506,6 +537,22 @@ test("permissions hosts the grant lists and the exec policy, and only there", as
   await mode.selectOption("allowlist");
   await expect(mode).toHaveValue("allowlist");
 
+  // The declared/allow/block tool editor the Tools Editor modal owned, on the
+  // card the declared set lives on and behind the Advanced fold the journey
+  // already opened. The catalog is empty in this fixture, so the free-text
+  // commit is the path exercised — the one an operator uses for a tool the
+  // dashboard has not loaded yet.
+  const allow = capabilities.getByPlaceholder("Search allowlisted tools…");
+  await allow.fill("bash");
+  await allow.press("Enter");
+  await expect(capabilities.getByRole("button", { name: "Remove bash" })).toBeVisible();
+
+  const block = capabilities.getByPlaceholder("Search blocked tools…");
+  await block.fill("bash");
+  await block.press("Enter");
+  // Blocklist wins, and the form says so where the overlap is created.
+  await expect(capabilities.getByTestId("tool-list-conflict")).toBeVisible();
+
   await page.screenshot({
     path: join(SHOTS, "14-group-permissions.png"),
     fullPage: true,
@@ -519,8 +566,14 @@ test("permissions hosts the grant lists and the exec policy, and only there", as
   await expect(policyHeading).toBeVisible();
   await page.screenshot({ path: join(SHOTS, "14b-permissions-exec-policy.png") });
 
+  // The tool filters sit below the fold too: without this shot the ported
+  // editor is asserted but never shown.
+  await allow.scrollIntoViewIfNeeded();
+  await expect(allow).toBeVisible();
+  await page.screenshot({ path: join(SHOTS, "14c-permissions-tool-filters.png") });
+
   // And gone from where they used to render: Tools & skills keeps the per-tool
-  // editor and the grants panels, General keeps the lifecycle switches.
+  // editor, General keeps the lifecycle switches.
   await page.getByRole("tab", { name: "Tools & skills", exact: true }).click();
   await expect(page.locator('[data-section="capabilities"]')).toHaveCount(0);
   await expect(page.locator('[data-section="tools"]')).toBeVisible();

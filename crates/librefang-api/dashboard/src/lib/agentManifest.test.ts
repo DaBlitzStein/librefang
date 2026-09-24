@@ -1933,6 +1933,10 @@ describe("booleans whose default is true", () => {
     if (!parsed.ok) return;
     // The Rust side fills this with `default_true`.
     expect(parsed.form.show_progress).toBe(true);
+    // `auto_evolve` is `#[serde(default = "default_true")]` too: an agent that
+    // never chose runs its background skill-evolution review, and the form has
+    // to read that the same way or it would write an opt-out nobody asked for.
+    expect(parsed.form.auto_evolve).toBe(true);
     // And this one with `#[serde(default)]`, i.e. false.
     expect(parsed.form.cache_context).toBe(false);
     expect(parsed.form.mcp_disabled).toBe(false);
@@ -1944,10 +1948,22 @@ describe("booleans whose default is true", () => {
     expect(serializeManifestForm(form)).not.toContain("show_progress");
   });
 
+  it("omits auto_evolve while it holds the default", () => {
+    const form = emptyManifestForm();
+    expect(form.auto_evolve).toBe(true);
+    expect(serializeManifestForm(form)).not.toContain("auto_evolve");
+  });
+
   it("emits show_progress only when it is turned off", () => {
     const form = emptyManifestForm();
     form.show_progress = false;
     expect(serializeManifestForm(form)).toContain("show_progress = false");
+  });
+
+  it("emits auto_evolve only when it is turned off", () => {
+    const form = emptyManifestForm();
+    form.auto_evolve = false;
+    expect(serializeManifestForm(form)).toContain("auto_evolve = false");
   });
 
   it("omits the false-by-default flags while they are false", () => {
@@ -1957,21 +1973,25 @@ describe("booleans whose default is true", () => {
     expect(toml).not.toContain("mcp_disabled");
   });
 
-  it("round-trips every state of all three", () => {
+  it("round-trips every state of all four", () => {
     for (const show of [true, false]) {
       for (const cache of [true, false]) {
         for (const mcp of [true, false]) {
-          const form = emptyManifestForm();
-          form.show_progress = show;
-          form.cache_context = cache;
-          form.mcp_disabled = mcp;
+          for (const evolve of [true, false]) {
+            const form = emptyManifestForm();
+            form.show_progress = show;
+            form.cache_context = cache;
+            form.mcp_disabled = mcp;
+            form.auto_evolve = evolve;
 
-          const parsed = parseManifestToml(serializeManifestForm(form));
-          expect(parsed.ok).toBe(true);
-          if (!parsed.ok) return;
-          expect(parsed.form.show_progress).toBe(show);
-          expect(parsed.form.cache_context).toBe(cache);
-          expect(parsed.form.mcp_disabled).toBe(mcp);
+            const parsed = parseManifestToml(serializeManifestForm(form));
+            expect(parsed.ok).toBe(true);
+            if (!parsed.ok) return;
+            expect(parsed.form.show_progress).toBe(show);
+            expect(parsed.form.cache_context).toBe(cache);
+            expect(parsed.form.mcp_disabled).toBe(mcp);
+            expect(parsed.form.auto_evolve).toBe(evolve);
+          }
         }
       }
     }

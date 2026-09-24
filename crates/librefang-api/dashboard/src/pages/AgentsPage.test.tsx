@@ -17,6 +17,7 @@ import {
   CONFIG_GROUP_IDS,
   INFO_TABS,
   groupForFirstInvalidField,
+  resolveToolListConflicts,
 } from "./AgentsPage";
 import { MANIFEST_SECTION_IDS } from "../components/AgentManifestForm";
 import { emptyManifestForm, validateManifestForm } from "../lib/agentManifest";
@@ -459,5 +460,34 @@ describe("groupForFirstInvalidField", () => {
   // `if (owningGroup)` fallback is a no-op rather than a crash.
   it("returns nothing for a field path no section claims", () => {
     expect(groupForFirstInvalidField(["campo.inventado"])).toBeUndefined();
+  });
+});
+
+// The kernel applies `tool_blocklist` after `tool_allowlist`, and the form's
+// conflict notice promises the overlap is resolved at save. This is that
+// resolution, pulled out of `saveManifestEditor` so it is testable without the
+// page's twenty hooks.
+describe("resolveToolListConflicts", () => {
+  const formWith = (allowlist: string[], blocklist: string[]) => {
+    const form = emptyManifestForm();
+    form.tool_allowlist = allowlist;
+    form.tool_blocklist = blocklist;
+    return form;
+  };
+
+  it("drops only the allowlist entries the blocklist names", () => {
+    const resolved = resolveToolListConflicts(formWith(["bash", "rm"], ["rm"]));
+    expect(resolved.tool_allowlist).toEqual(["bash"]);
+    expect(resolved.tool_blocklist).toEqual(["rm"]);
+  });
+
+  it("returns the same form untouched when the lists do not overlap", () => {
+    const form = formWith(["bash"], ["rm"]);
+    expect(resolveToolListConflicts(form)).toBe(form);
+  });
+
+  it("leaves an empty allowlist (the all-mode statement) alone", () => {
+    const form = formWith([], ["rm"]);
+    expect(resolveToolListConflicts(form)).toBe(form);
   });
 });

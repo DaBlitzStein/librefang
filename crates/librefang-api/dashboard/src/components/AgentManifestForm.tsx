@@ -1,6 +1,6 @@
 import { createContext, useContext, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, ChevronDown, Plus, RotateCcw, Trash2, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, Clock, Plus, RotateCcw, Trash2, X } from "lucide-react";
 import {
   AUTO_ROUTE_STRATEGIES,
   CAPABILITY_ROUTING_KEYS,
@@ -202,6 +202,15 @@ interface AgentManifestFormProps {
    */
   mcpCatalog?: ManifestCatalogEntry[];
   /**
+   * MCP servers the agent has granted in `mcp_servers` but which currently
+   * have no live connection (#7713). Runtime state, not a manifest field, so
+   * it arrives as a prop from the caller that owns the query; it renders
+   * inside the `mcp_servers` section only. A declared-but-unreachable server
+   * contributes no tools and looks identical to a healthy grant everywhere
+   * else, which is the reason the warning exists.
+   */
+  mcpPending?: string[];
+  /**
    * The model router's profile catalog from the server (`GET
    * /api/model-router/profiles`). Present, the profile allowlist renders the
    * same finder the skills and tools lists use; absent, the plain tag box —
@@ -363,6 +372,7 @@ export function AgentManifestForm({
   skillCatalog,
   toolCatalog,
   mcpCatalog,
+  mcpPending,
   routerProfileCatalog,
   routerProfilesEnabled,
   nameField = "editable",
@@ -474,6 +484,36 @@ export function AgentManifestForm({
   const routerProfileFinder = useMemo(
     () => mergeCatalog(routerProfileCatalog, value.model.router_allowed_profiles),
     [routerProfileCatalog, value.model.router_allowed_profiles],
+  );
+
+  // The blocklist's own copy of the catalog-backed names. A tool listed in
+  // `tool_blocklist` is filtered out of the agent's usable set even when it is
+  // declared in `capabilities.tools` or pinned by `tool_allowlist` (the kernel's
+  // Step 4 filter, and the rule the legacy Tools tab marked per tool). The mark
+  // rides on the finder's option description so a search for it still works —
+  // `MultiSelectCmdk` matches descriptions as well as names.
+  const blocklistedToolNames = useMemo(
+    () => new Set(value.tool_blocklist),
+    [value.tool_blocklist],
+  );
+  const blockedMark = t("agents.detail.tools_blocked", { defaultValue: "blocklisted" });
+  const markedToolFinder = useMemo(() => {
+    if (!toolFinder || blocklistedToolNames.size === 0) return toolFinder;
+    const meta: Record<string, { description?: string }> = { ...toolFinder.meta };
+    for (const name of toolFinder.options) {
+      if (!blocklistedToolNames.has(name)) continue;
+      const description = meta[name]?.description;
+      meta[name] = { description: description ? `${description} · ${blockedMark}` : blockedMark };
+    }
+    return { options: toolFinder.options, meta };
+  }, [toolFinder, blocklistedToolNames, blockedMark]);
+
+  // Allowlist entries the blocklist also names. The kernel lets the blocklist
+  // win, so the pair is a conflict the operator is warned about and the save
+  // resolves (see `resolveToolListConflicts` in AgentsPage).
+  const toolListConflicts = useMemo(
+    () => value.tool_allowlist.filter((name) => blocklistedToolNames.has(name)),
+    [value.tool_allowlist, blocklistedToolNames],
   );
 
   // Limits for the selected model, and only when the catalog vouches for them.
@@ -1075,10 +1115,10 @@ export function AgentManifestForm({
             table are depth. */}
         <AdvancedFields>
         <Field label={t("agents.form.cap_tools")} hint={t("agents.form.cap_tools_hint")}>
-          {toolFinder ? (
+          {markedToolFinder ? (
             <MultiSelectCmdk
-              options={toolFinder.options}
-              optionMeta={toolFinder.meta}
+              options={markedToolFinder.options}
+              optionMeta={markedToolFinder.meta}
               value={value.capabilities.tools}
               onChange={(next) => {
                 const nextValue =
@@ -1098,6 +1138,81 @@ export function AgentManifestForm({
             />
           )}
         </Field>
+        {/* The other two halves of the same grant, on the same card: the
+            declared set above, the allowlist narrowing it, the blocklist
+            removing from it — MCP tools included, since the kernel's Step 4
+            filter stopped skipping them (#6495). These lived in the Tools
+            Editor modal, a second writer of `capabilities_tools` behind the
+            Overview badge; the manifest form owns all three now. */}
+        <Field
+          label={t("agents.tools_allowlist_title", { defaultValue: "Allowlist" })}
+          hint={t("agents.tools_allowlist_desc", {
+            defaultValue:
+              "Additional filter: only these tools remain available. Leave empty to skip this filter.",
+          })}
+        >
+          {markedToolFinder ? (
+            <MultiSelectCmdk
+              options={markedToolFinder.options}
+              optionMeta={markedToolFinder.meta}
+              value={value.tool_allowlist}
+              onChange={(next) => {
+                const nextValue =
+                  typeof next === "function" ? next(value.tool_allowlist) : next;
+                update({ tool_allowlist: nextValue });
+              }}
+              placeholder={t("agents.form.tool_allowlist_search_placeholder", {
+                defaultValue: "Search allowlisted tools…",
+              })}
+              allowFreeText
+            />
+          ) : (
+            <TagInput
+              value={value.tool_allowlist}
+              onChange={(next) => update({ tool_allowlist: next })}
+              placeholder={t("agents.form.cap_tools_placeholder")}
+            />
+          )}
+        </Field>
+        <Field
+          label={t("agents.tools_blocklist_title", { defaultValue: "Blocklist" })}
+          hint={t("agents.tools_blocklist_desc", {
+            defaultValue:
+              "These tools are blocked even if they are present in the allowlist.",
+          })}
+        >
+          {toolFinder ? (
+            <MultiSelectCmdk
+              options={toolFinder.options}
+              optionMeta={toolFinder.meta}
+              value={value.tool_blocklist}
+              onChange={(next) => {
+                const nextValue =
+                  typeof next === "function" ? next(value.tool_blocklist) : next;
+                update({ tool_blocklist: nextValue });
+              }}
+              placeholder={t("agents.form.tool_blocklist_search_placeholder", {
+                defaultValue: "Search blocked tools…",
+              })}
+              allowFreeText
+            />
+          ) : (
+            <TagInput
+              value={value.tool_blocklist}
+              onChange={(next) => update({ tool_blocklist: next })}
+              placeholder={t("agents.form.cap_tools_placeholder")}
+            />
+          )}
+        </Field>
+        {toolListConflicts.length > 0 && (
+          <p className="text-[11px] text-warning" data-testid="tool-list-conflict">
+            {t("agents.tools_conflict_warning", {
+              defaultValue:
+                "{{count}} tools are in both lists. Blocklist wins and those tools will be removed from the allowlist when you save.",
+              count: toolListConflicts.length,
+            })}
+          </p>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.memory_read")}>
             <TagInput
@@ -1346,6 +1461,22 @@ export function AgentManifestForm({
             />
           )}
         </Field>
+        {/* The switch the drawer's Skills tab used to own, next to the skills
+            it evolves: background skill-evolution review after each turn.
+            Rendered outside the Advanced fold because turning it off is how an
+            A2A worker keeps its turn latency off the background LLM budget. */}
+        <div className="border-t border-border-subtle/60 pt-2.5">
+          <Toggle
+            label={t("agents.detail.auto_evolve_label", { defaultValue: "Auto-evolve" })}
+            checked={value.auto_evolve}
+            onChange={(checked) => update({ auto_evolve: checked })}
+          />
+          <p className="text-[10px] text-text-dim/70 mt-0.5 ml-6">
+            {t("agents.detail.auto_evolve_desc", {
+              defaultValue: "Background skill evolution review after each turn",
+            })}
+          </p>
+        </div>
       </Section>
 
       <Section when={shows("mcp_servers")} id="mcp_servers" title={t("agents.form.mcp_servers")}>
@@ -1373,6 +1504,44 @@ export function AgentManifestForm({
             />
           )}
         </Field>
+        {/* Declared here, no live connection (#7713). The kernel derives this
+            from the connection pool, not the configured-server list, so an
+            unreachable grant is included — and it is exactly the case worth
+            surfacing, since a dead server contributes no tools and otherwise
+            looks identical to a healthy one. Ported from the drawer's Tools
+            tab, where it was the only per-agent crossing of the two. */}
+        {(mcpPending?.length ?? 0) > 0 && (
+          <div
+            className="rounded-md border border-amber-400/30 bg-amber-400/5 p-3 flex items-start gap-3"
+            data-testid="agent-pending-mcp"
+          >
+            <Clock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="font-mono text-[12.5px] font-medium text-text-main">
+                {t("agents.detail.mcp_pending_title", {
+                  defaultValue: "MCP servers not connected",
+                })}
+              </div>
+              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                {t("agents.detail.mcp_pending_desc", {
+                  defaultValue:
+                    "Granted in agent.toml but no live connection, so they contribute no tools. Check the server on the MCP page; the grant activates as soon as it connects.",
+                })}
+              </div>
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {mcpPending!.map((name) => (
+                  <span
+                    key={name}
+                    className="font-mono text-[10.5px] rounded px-1.5 py-0.5 bg-main/60 border border-border-subtle text-text-main"
+                    data-testid="agent-pending-mcp-item"
+                  >
+                    {name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
         <div className="mt-2">
           <Toggle
             label={t("agents.form.mcp_disabled")}

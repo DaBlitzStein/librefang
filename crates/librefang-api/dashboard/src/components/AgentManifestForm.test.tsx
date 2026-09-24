@@ -42,6 +42,7 @@ function Harness({
   skillCatalog,
   toolCatalog,
   mcpCatalog,
+  mcpPending,
   routerProfileCatalog,
   routerProfilesEnabled,
   initialState,
@@ -50,11 +51,14 @@ function Harness({
   providers = [{ name: "openai" }],
   nameField,
   sections,
+  advanced = false,
   onState,
 }: {
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
   mcpCatalog?: ManifestCatalogEntry[];
+  /** Runtime state, not manifest data: granted-but-unconnected servers. */
+  mcpPending?: string[];
   routerProfileCatalog?: ManifestCatalogEntry[];
   routerProfilesEnabled?: boolean;
   initialState?: ManifestFormState;
@@ -63,6 +67,7 @@ function Harness({
   providers?: { name: string }[];
   nameField?: "editable" | "readonly" | "hidden";
   sections?: ManifestSectionId[];
+  advanced?: boolean;
   /** Receives every state the form produces, so a test can read what would be saved. */
   onState?: (next: ManifestFormState) => void;
 }) {
@@ -81,10 +86,12 @@ function Harness({
       skillCatalog={skillCatalog}
       toolCatalog={toolCatalog}
       mcpCatalog={mcpCatalog}
+      mcpPending={mcpPending}
       routerProfileCatalog={routerProfileCatalog}
       routerProfilesEnabled={routerProfilesEnabled}
       nameField={nameField}
       sections={sections}
+      advanced={advanced}
     />
   );
 }
@@ -364,6 +371,151 @@ describe("AgentManifestForm — tools/skills/mcp selection (#5246)", () => {
     const list = await screen.findByRole("listbox");
     expect(within(list).getByText("read_file")).toBeInTheDocument();
     expect(within(list).getByText("write_file")).toBeInTheDocument();
+  });
+});
+
+// The three tool fields were one modal (the Tools Editor, opened from the
+// Overview badge) before this branch; the manifest form owns them now, in the
+// same Permissions card as the declared set they filter. What these pin is the
+// pair the modal was the only place to see: the allowlist/blocklist editor and
+// its conflict notice.
+describe("AgentManifestForm — the tool allow/block filters", () => {
+  const CATALOG: ManifestCatalogEntry[] = [
+    { name: "bash", description: "Run a shell command" },
+    { name: "rm", description: "Remove files" },
+  ];
+
+  it("edits tool_allowlist and tool_blocklist through their finders", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | null = null;
+    render(
+      <Harness toolCatalog={CATALOG} advanced onState={(next) => { latest = next; }} />,
+    );
+
+    const allow = screen.getByPlaceholderText("Search allowlisted tools…");
+    await user.click(allow);
+    await user.click(
+      within(await screen.findByRole("listbox")).getByText("bash"),
+    );
+    expect(latest!.tool_allowlist).toEqual(["bash"]);
+    // Close the first finder's listbox before opening the second: both render
+    // `aria-label="Select options"`, and an open one would make the next
+    // `findByRole("listbox")` ambiguous.
+    await user.keyboard("{Escape}");
+
+    const block = screen.getByPlaceholderText("Search blocked tools…");
+    await user.click(block);
+    // `bash` is already pinned by the allowlist, so blocking it is the overlap
+    // the notice exists for.
+    await user.click(
+      within(await screen.findByRole("listbox")).getByText("bash"),
+    );
+    expect(latest!.tool_blocklist).toEqual(["bash"]);
+  });
+
+  it("says what a conflict means instead of silently keeping both lists", async () => {
+    const initial = emptyManifestForm();
+    initial.tool_allowlist = ["bash"];
+    initial.tool_blocklist = ["bash", "rm"];
+    render(<Harness toolCatalog={CATALOG} advanced initialState={initial} />);
+
+    const notice = screen.getByTestId("tool-list-conflict");
+    // The stub i18n leaves `{{count}}` uninterpolated, so the assertion is
+    // about the notice being there and about the resolution it promises.
+    expect(notice).toHaveTextContent(/in both lists/);
+    expect(notice).toHaveTextContent(/removed from the allowlist when you save/);
+  });
+
+  // The mark the removed Tools tab put beside a blocked tool, ported to the
+  // finder: a name in `tool_blocklist` is filtered even when it is declared,
+  // and the option must say so where the operator picks it.
+  it("marks a blocklisted tool in the declared-tools finder", async () => {
+    const user = userEvent.setup();
+    const initial = emptyManifestForm();
+    initial.tool_blocklist = ["rm"];
+    render(<Harness toolCatalog={CATALOG} advanced initialState={initial} />);
+
+    await user.click(screen.getByPlaceholderText("Search tools…"));
+    const list = await screen.findByRole("listbox");
+    expect(within(list).getByText("Remove files · blocklisted")).toBeInTheDocument();
+  });
+
+  it("leaves an unblocklisted option unmarked", async () => {
+    const user = userEvent.setup();
+    const initial = emptyManifestForm();
+    initial.tool_blocklist = ["rm"];
+    render(<Harness toolCatalog={CATALOG} advanced initialState={initial} />);
+
+    await user.click(screen.getByPlaceholderText("Search tools…"));
+    const list = await screen.findByRole("listbox");
+    expect(within(list).getByText("Run a shell command")).toBeInTheDocument();
+  });
+});
+
+// The switch the drawer's Skills tab owned, now a manifest field with the
+// kernel's own default. Asserted through the serializer as well as the
+// control: the Rust side is `#[serde(default = "default_true")]`, so the only
+// value worth writing is the opt-out, and a control that flipped the state
+// without the serializer carrying it would look restored and not be.
+describe("AgentManifestForm — auto-evolve", () => {
+  it("starts checked, matching the kernel's default_true", () => {
+    render(<Harness />);
+    expect(screen.getByRole("checkbox", { name: "Auto-evolve" })).toBeChecked();
+  });
+
+  it("writes the opt-out only, and reads it back", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | null = null;
+    render(<Harness onState={(next) => { latest = next; }} />);
+
+    await user.click(screen.getByRole("checkbox", { name: "Auto-evolve" }));
+    expect(latest!.auto_evolve).toBe(false);
+    const toml = serializeManifestForm(latest!, emptyManifestExtras());
+    expect(toml).toContain("auto_evolve = false");
+
+    const reparsed = parseManifestToml(toml);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.auto_evolve).toBe(false);
+  });
+
+  it("writes nothing for the on state, because absent already means on", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | null = null;
+    render(<Harness onState={(next) => { latest = next; }} />);
+
+    await user.click(screen.getByRole("checkbox", { name: "Auto-evolve" }));
+    await user.click(screen.getByRole("checkbox", { name: "Auto-evolve" }));
+    expect(latest!.auto_evolve).toBe(true);
+    expect(serializeManifestForm(latest!, emptyManifestExtras())).not.toContain("auto_evolve");
+
+    const reparsed = parseManifestToml('name = "x"\n');
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.auto_evolve).toBe(true);
+  });
+});
+
+// The declared-but-unconnected crossing (#7713) used to render in the drawer's
+// Tools tab, the only place a server with no connection was visible at all.
+// The form's `mcp_servers` section inherits it; the runtime data arrives as a
+// prop because the form owns no queries.
+describe("AgentManifestForm — MCP granted without a connection", () => {
+  it("lists the servers that are granted but unreachable", () => {
+    render(<Harness mcpPending={["github", "linear"]} />);
+
+    const warning = screen.getByTestId("agent-pending-mcp");
+    expect(warning).toBeInTheDocument();
+    expect(
+      within(warning)
+        .getAllByTestId("agent-pending-mcp-item")
+        .map((el) => el.textContent),
+    ).toEqual(["github", "linear"]);
+  });
+
+  it("renders nothing when every granted server is connected", () => {
+    render(<Harness />);
+    expect(screen.queryByTestId("agent-pending-mcp")).not.toBeInTheDocument();
   });
 });
 

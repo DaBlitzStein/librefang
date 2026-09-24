@@ -141,6 +141,11 @@ export interface ManifestFormState {
   show_progress: boolean;
   cache_context: boolean;
   mcp_disabled: boolean;
+  // `#[serde(default = "default_true")]` on the Rust side, so absence means the
+  // background skill-evolution review runs; only the opt-out is ever written.
+  // The form carries the same default so opening and saving an agent that never
+  // touched the key cannot switch the review off (or on) behind the operator.
+  auto_evolve: boolean;
   // Tri-state counts: `""` inherits, a number is an override. Same shape as
   // the sampling knobs — an absent key and a zero are different statements.
   max_history_messages: string;
@@ -766,6 +771,7 @@ export const emptyManifestForm = (): ManifestFormState => ({
   show_progress: true,
   cache_context: false,
   mcp_disabled: false,
+  auto_evolve: true,
   max_history_messages: "",
   max_concurrent_invocations: "",
   tool_exec_backend: "",
@@ -1000,6 +1006,7 @@ export const FORM_TOP_LEVEL_KEYS = new Set([
   "show_progress",
   "cache_context",
   "mcp_disabled",
+  "auto_evolve",
   "max_history_messages",
   "max_concurrent_invocations",
   "tool_exec_backend",
@@ -1627,6 +1634,9 @@ export const serializeManifestForm = (
   if (!form.show_progress) writeBoolScalar(lines, "show_progress", false);
   if (form.cache_context) writeBoolScalar(lines, "cache_context", true);
   if (form.mcp_disabled) writeBoolScalar(lines, "mcp_disabled", true);
+  // The Rust default is `true`, so the key is written only as an explicit
+  // opt-out — same rule as `show_progress` above.
+  if (!form.auto_evolve) writeBoolScalar(lines, "auto_evolve", false);
   // Counts are `Option<usize>` / `Option<u32>`: `""` omits the key rather than
   // writing a zero, which would be a limit of nothing.
   // Parsed like the other numeric fields rather than interpolated raw: `-5`,
@@ -3149,6 +3159,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.show_progress = asBoolean(parsed.show_progress, true);
   form.cache_context = asBoolean(parsed.cache_context, false);
   form.mcp_disabled = asBoolean(parsed.mcp_disabled, false);
+  form.auto_evolve = asBoolean(parsed.auto_evolve, true);
   form.max_history_messages = asNumberString(parsed.max_history_messages);
   form.max_concurrent_invocations = asNumberString(parsed.max_concurrent_invocations);
   form.tool_exec_backend = asOptionalEnum(parsed.tool_exec_backend, TOOL_EXEC_BACKENDS);
