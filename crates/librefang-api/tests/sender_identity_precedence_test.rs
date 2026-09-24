@@ -96,16 +96,17 @@ enum ProviderScript {
     ToolThenAnswer,
 }
 
+/// One harness user: `(name, role, api_key, channel_bindings)`, where every binding is a
+/// `(channel_type, platform_id)` pair — the tuple `AuthManager::identify` keys on.
+type HarnessUser<'a> = (&'a str, &'a str, &'a str, Vec<(&'a str, &'a str)>);
+
 /// Boot the agents router behind the real auth middleware, with RBAC users wired into both
 /// `KernelConfig.users` (so `AuthManager` resolves them) and `AuthState.user_api_keys` (so the
 /// middleware admits their bearer tokens and populates `AuthenticatedApiUser`).
 ///
 /// Each tuple is `(name, role, api_key, channel_bindings)`, where every binding is a
 /// `(channel_type, platform_id)` pair — the tuple `AuthManager::identify` keys on.
-async fn start_harness_with(
-    users: Vec<(&str, &str, &str, Vec<(&str, &str)>)>,
-    script: ProviderScript,
-) -> Harness {
+async fn start_harness_with(users: Vec<HarnessUser<'_>>, script: ProviderScript) -> Harness {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
