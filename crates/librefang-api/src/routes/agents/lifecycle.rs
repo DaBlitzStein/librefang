@@ -45,47 +45,47 @@ async fn resolve_manifest(
                 });
             }
             let home = state.kernel.config_ref().home_dir.clone();
-            // The **agent type** is what a deployment copies from, and it lives
-            // in its own store (`<home>/agent-types/<name>.toml`). The agent
-            // instance of the same name is only a fallback, for deployments
-            // that keep their templates in the workspaces tree.
+            // The candidate order is owned by the kernel, so this door, the ephemeral spawn engine and the step-agent resolvers all answer "does this template exist?" the same way: the writable agent-type store, then the live instance, then the read-only registry checkout (see `agent_template_candidates`).
             //
-            // Reading the type first is not a preference: a type is a spec — the
-            // API never writes a `workspace` into one (`AgentTypeSpec` has no
-            // such field) — whereas an instance is a live agent's own manifest,
-            // and spawn has written its resolved absolute workspace into it.
-            // The type is what a template is supposed to be; the instance is a
-            // copy of an agent, sessions and memory included.
-            //
-            // A hand-written file in either store can still carry a `workspace`,
-            // which is why the decision about honouring one is made in the
-            // kernel, where every caller passes. See `kernel/spawn.rs`.
-            let type_path =
-                librefang_types::agent_type_store::agent_type_path_in(&home, &safe_name);
-            let instance_path = home
-                .join("workspaces")
-                .join("agents")
-                .join(&safe_name)
-                .join("agent.toml");
-            // Use tokio::fs to avoid blocking in an async context
-            match tokio::fs::read_to_string(&type_path).await {
-                Ok(content) => {
+            // The **agent type** comes first because it is what a deployment copies from — a spec, which the API never writes a `workspace` into (`AgentTypeSpec` has no such field) — whereas the instance is a live agent's own manifest, with spawn's resolved absolute workspace already written into it.
+            // A hand-written file in either store can still carry a `workspace`, which is why the decision about honouring one is made in the kernel, where every caller passes. See `kernel/spawn.rs`.
+            let candidates =
+                librefang_kernel::agent_template::agent_template_candidates(&home, &safe_name);
+            let mut found: Option<String> = None;
+            for candidate in &candidates {
+                // Use tokio::fs to avoid blocking in an async context
+                match tokio::fs::read_to_string(candidate).await {
+                    Ok(content) => {
+                        found = Some(content);
+                        break;
+                    }
+                    // Only an absent file continues the search, exactly as `load_agent_template` does: an existing file that cannot be read is a real failure, not a reason to serve a different manifest than the one on the operator's disk.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => {
+                        tracing::warn!(
+                            template = %safe_name,
+                            path = %candidate.display(),
+                            error = %e,
+                            "Failed to read agent template"
+                        );
+                        let t = ErrorTranslator::new(lang);
+                        return Err(ManifestError {
+                            message: t.t("api-error-template-read-failed"),
+                        });
+                    }
+                }
+            }
+            match found {
+                Some(content) => {
                     used_template = Some(safe_name.clone());
                     content
                 }
-                Err(_) => match tokio::fs::read_to_string(&instance_path).await {
-                    Ok(content) => {
-                        used_template = Some(safe_name.clone());
-                        content
-                    }
-                    Err(_) => {
-                        let t = ErrorTranslator::new(lang);
-                        return Err(ManifestError {
-                            message: t
-                                .t_args("api-error-template-not-found", &[("name", &safe_name)]),
-                        });
-                    }
-                },
+                None => {
+                    let t = ErrorTranslator::new(lang);
+                    return Err(ManifestError {
+                        message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
+                    });
+                }
             }
         } else {
             let t = ErrorTranslator::new(lang);
