@@ -293,6 +293,37 @@ async fn a_declared_shared_workspace_outside_the_agents_tree_is_kept() {
     );
 }
 
+/// The registry checkout is the last of the shared template candidates.
+///
+/// `POST /api/agents {"template": X}` used to hand-roll its own lookup list without the registry candidate, so a registry-only template resolved for the ephemeral and step-agent paths but not here.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registry_only_template_resolves_through_the_shared_candidates() {
+    let h = boot().await;
+    let templ = h
+        .home_dir
+        .join("registry")
+        .join("agents")
+        .join("solo-registro");
+    std::fs::create_dir_all(&templ).expect("mkdir registry template");
+    std::fs::write(
+        templ.join("agent.toml"),
+        "name = \"solo-registro\"\nmodule = \"builtin:chat\"\ndescription = \"DEL REGISTRO\"\n",
+    )
+    .expect("write registry template");
+
+    let (status, body) = post(
+        h.app.clone(),
+        "/api/agents",
+        serde_json::json!({ "template": "solo-registro", "name": "desde-registro" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a registry-only template must resolve; body: {body}"
+    );
+}
+
 /// The type is what a deployment copies from, so an `agent-types/<name>.toml`
 /// must win over an instance of the same name.
 ///
@@ -395,32 +426,19 @@ async fn two_agents_instantiated_from_the_same_type_do_not_share_paths() {
     }
 }
 
-/// The guard must not fire when the name is reused, which is the #4991 path: a
-/// recreate after delete, or a daemon restart, keeps the directory that name
-/// already owns instead of relocating.
+/// A recreate must re-accept the absolute workspace spawn itself wrote.
 ///
-/// The declared workspace here is a *shared* one, deliberately not
-/// `workspaces/agents/<name>`, so the two outcomes are distinguishable: keeping
-/// it lands the agent in `workspaces/compartido`, and dropping it — the bug this
-/// pins — would send it to `workspaces/agents/mismo` instead.
+/// This is the #4991 shape: spawn rewrites `manifest.workspace` to the resolved absolute directory and round-trips it into `agent.toml`, so a later spawn that reads that file back — here through the template door, with the same name — declares a workspace *inside* the agents tree.
+/// It must not be rejected (that was #4991's 500) and it must keep the directory the name already owns.
+///
+/// The declared directory is the one the name resolves to, so the guard evaluates its `resolved != own` branch and leaves it alone; keep-vs-drop is not distinguishable by directory placement here — dropping the path resolves to the same `agents/mismo` — so this pins the acceptance side and the reuse of the existing identity.
+/// The delete-then-recreate flow itself is covered in `agents_routes_integration.rs` (`test_recreate_agent_same_name_after_delete_succeeds`).
 #[tokio::test(flavor = "multi_thread")]
-async fn reusing_the_same_name_keeps_its_declared_workspace() {
+async fn reusing_the_same_name_accepts_its_own_absolute_workspace() {
     let h = boot().await;
-    let compartido = h.home_dir.join("workspaces").join("compartido");
-    std::fs::create_dir_all(compartido.join(".identity")).expect("mkdir compartido");
-    let instancia = write_instance(&h.home_dir, "mismo");
-    // Drop the fixture's own identity so its reappearance can only mean the
-    // kernel put the agent here — otherwise the negative assertion below would
-    // be reading this test's own handwriting.
-    std::fs::remove_dir_all(instancia.join(".identity")).expect("clear the fixture identity");
-    std::fs::write(
-        instancia.join("agent.toml"),
-        format!(
-            "name = \"mismo\"\nmodule = \"builtin:chat\"\nworkspace = \"{}\"\n",
-            compartido.display()
-        ),
-    )
-    .expect("write the shared-workspace manifest");
+    // Shaped exactly as spawn leaves a live agent: its own absolute directory
+    // inside the agents tree, round-tripped into `agent.toml`.
+    let propio = write_instance(&h.home_dir, "mismo");
 
     let (status, body) = post(
         h.app.clone(),
@@ -430,18 +448,29 @@ async fn reusing_the_same_name_keeps_its_declared_workspace() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "spawn failed: {body}");
 
-    assert!(
-        compartido.join(".identity").join("IDENTITY.md").is_file(),
-        "a same-name spawn must keep the declared workspace"
+    let agent_id: AgentId = body["agent_id"]
+        .as_str()
+        .expect("agent_id in the spawn response")
+        .parse()
+        .expect("agent_id is a UUID");
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .expect("the spawned agent is in the registry");
+    assert_eq!(
+        entry.manifest.workspace.as_deref(),
+        Some(propio.as_path()),
+        "the declared absolute workspace must be the one the name resolves to"
     );
+
+    // The identity already in the directory is the agent's own, not a freshly
+    // generated stranger's.
+    let identidad =
+        std::fs::read_to_string(propio.join(".identity").join("IDENTITY.md")).expect("identity");
     assert!(
-        !h.home_dir
-            .join("workspaces")
-            .join("agents")
-            .join("mismo")
-            .join(".identity")
-            .join("IDENTITY.md")
-            .is_file(),
-        "the declared workspace was dropped and the agent relocated"
+        identidad.contains("name: mismo"),
+        "the existing directory's identity must be reused: {identidad}"
     );
 }
