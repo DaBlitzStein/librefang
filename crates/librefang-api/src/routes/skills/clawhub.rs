@@ -1292,11 +1292,12 @@ mod route_budget_tests {
 
     /// Two concurrent installs of one slug cannot both land in `skills/`.
     ///
-    /// Both pass the routes' `is_installed` probe before either has promoted, which is the
-    /// race the promotion lock exists for. One install must win; the other must be answered as
-    /// [`SkillError::AlreadyInstalled`] — the condition the routes turn into the same 409 the
-    /// probe produces — and `skills/` must hold exactly one complete install, never an
-    /// `ENOTEMPTY` failure and never a `.backup-` or `.installing-` residue.
+    /// The test drives both installs straight into [`install_under_budget`], so no route's
+    /// `is_installed` probe filters either of them: both download and stage a candidate, and
+    /// both reach the promotion lock — the race the lock exists for. One install must win; the
+    /// other must be answered as [`SkillError::AlreadyInstalled`] — the condition the routes
+    /// turn into the same 409 the probe produces — and `skills/` must hold exactly one complete
+    /// install, never an `ENOTEMPTY` failure and never a `.backup-` or `.installing-` residue.
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_installs_of_one_slug_leave_one_install_and_one_conflict() {
         let hub = stub_hub(std::time::Duration::from_millis(150), true);
@@ -1397,6 +1398,14 @@ mod route_budget_tests {
         let hub = stub_hub(std::time::Duration::from_millis(500), true);
         let client = ClawHubClient::with_url(&hub.base_url, PathBuf::new());
         let skills_dir = tempfile::tempdir().unwrap();
+        // The staging directory lives for only a couple of milliseconds — measured at ~2 ms here
+        // — so polling for it can slide right past it and mistakenly read the empty directory as
+        // "already drained". The directory's mtime is the durable witness: creating the staging
+        // directory and removing it both touch it. Snapshot it before the install starts.
+        let baseline_mtime = std::fs::metadata(skills_dir.path())
+            .expect("stat skills dir")
+            .modified()
+            .expect("skills dir mtime");
 
         let error = install_under_budget(
             client,
@@ -1414,9 +1423,11 @@ mod route_budget_tests {
         assert!(entries(skills_dir.path()).is_empty());
 
         // The install task is not cancelled; it keeps going and only then learns the route is
-        // gone. Wait for the download to have been served, then wait — under a deadline, not a
-        // fixed window a saturated CI can outlast — for the task's discard to clear the staging
-        // directory: the candidate must never appear while that happens.
+        // gone. Wait for the download to have been served, then — under a deadline, not a fixed
+        // window a saturated CI can outlast — for the task to have reached its staging phase,
+        // witnessed by the mtime change. Only then may the drain below run: starting it while
+        // the staging has not even been created yet would let it pass on an empty `skills_dir`
+        // and mask a promotion or residue regression.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while hub.served.load(Ordering::Relaxed) < 2 && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -1425,6 +1436,20 @@ mod route_budget_tests {
             hub.served.load(Ordering::Relaxed) >= 2,
             "the stub hub never served the download"
         );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::fs::metadata(skills_dir.path())
+            .expect("stat skills dir")
+            .modified()
+            .expect("skills dir mtime")
+            == baseline_mtime
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the timed-out install never created its staging directory"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
 
         let discard_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !entries(skills_dir.path()).is_empty() {
@@ -1439,6 +1464,10 @@ mod route_budget_tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+        assert!(
+            entries(skills_dir.path()).is_empty(),
+            "a timed-out install must leave skills/ exactly as it found it"
+        );
     }
 
     /// The hub the budget exists for — accepts and then says nothing — leaves no residue either.

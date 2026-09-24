@@ -934,6 +934,10 @@ fn prepare_staging_dir(path: &Path) -> std::io::Result<StagingCleanup> {
 /// happen as one critical section. Without the lock, the second `rename` lands on a
 /// non-empty directory and fails with `ENOTEMPTY` — a filesystem detail for what is
 /// really the same conflict the probe reports.
+///
+/// The lock is process-wide only: a second daemon (or a CLI install) over the same
+/// home takes its own lock, so that cross-process race still surfaces as `ENOTEMPTY`
+/// and the callers' scrubbed 500. That is pre-existing and out of scope here.
 static PROMOTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
@@ -980,7 +984,7 @@ fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Move a complete staged directory into place, refusing to replace an existing target.
+/// Move a complete staged directory into place, refusing to replace an installed target.
 ///
 /// Public for callers outside this crate that pre-check `is_installed` and must not
 /// overwrite the result of that check: serialized on the same process-wide promotion
@@ -988,20 +992,34 @@ fn promote_staged_skill(staged: &Path, target: &Path) -> std::io::Result<()> {
 /// critical section against every other promotion in this process. The loser of that
 /// race gets `AlreadyExists` — the condition its caller's own probe reports — instead
 /// of the `ENOTEMPTY` a bare `rename` raises when the destination appeared in between.
+///
+/// "Installed" is the probe's condition, not bare existence: `ClawHubClient::is_installed`
+/// requires a `skill.toml`, so a manifestless `<slug>` directory — an empty one left by an
+/// interrupted uninstall — reads as absent to the caller and must not be refused here, or
+/// every reinstall would answer `AlreadyExists` for a skill the probe calls missing. A
+/// manifestless target is treated as absent: in the ordinary case (nothing at `target`) the
+/// check is a no-op and the `rename` lands as before, and when a bare directory is there
+/// POSIX `rename` substitutes it atomically. A manifestless *non-empty* directory still
+/// fails the `rename` (with `ENOTEMPTY`), which is the investigation-worthy state it always
+/// was rather than a completed install to refuse.
 pub fn promote_staged_skill_if_absent(staged: &Path, target: &Path) -> std::io::Result<()> {
     let _guard = PROMOTION_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match std::fs::symlink_metadata(target) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::rename(staged, target)
-        }
-        Ok(_) => Err(std::io::Error::new(
+    let installed = match std::fs::symlink_metadata(target) {
+        // Same criterion as the caller's pre-check (`is_installed`): only a target that
+        // carries `skill.toml` is an install to refuse.
+        Ok(_) => target.join("skill.toml").is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if installed {
+        return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!("{} already exists", target.display()),
-        )),
-        Err(error) => Err(error),
+        ));
     }
+    std::fs::rename(staged, target)
 }
 
 /// RFC 3986 percent-encoding for query parameters.
@@ -1496,8 +1514,12 @@ mod tests {
         let target = dir.path().join("skill");
         std::fs::create_dir(&staged).unwrap();
         std::fs::write(staged.join("version"), "new").unwrap();
+        std::fs::write(staged.join("skill.toml"), "name = \"new\"\n").unwrap();
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("version"), "old").unwrap();
+        // An install is a `<slug>` directory with a manifest; that is what the caller's
+        // `is_installed` probe checks before calling this.
+        std::fs::write(target.join("skill.toml"), "name = \"old\"\n").unwrap();
 
         let error = promote_staged_skill_if_absent(&staged, &target)
             .expect_err("an existing install must not be replaced");
@@ -1506,9 +1528,35 @@ mod tests {
             std::fs::read_to_string(target.join("version")).unwrap(),
             "old"
         );
+        assert_eq!(
+            std::fs::read_to_string(target.join("skill.toml")).unwrap(),
+            "name = \"old\"\n"
+        );
         assert!(
             staged.join("version").is_file(),
             "the losing candidate stays staged for its caller's cleanup guard"
+        );
+    }
+
+    #[test]
+    fn promotion_if_absent_replaces_a_manifestless_remnant() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = dir.path().join("staged");
+        let target = dir.path().join("skill");
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("skill.toml"), "name = \"new\"\n").unwrap();
+        // The residue an interrupted uninstall leaves: the `<slug>` directory is still there
+        // but carries no `skill.toml`, so the `is_installed` probe reports the skill as
+        // absent. Refusing the promotion here would wedge every reinstall.
+        std::fs::create_dir(&target).unwrap();
+
+        promote_staged_skill_if_absent(&staged, &target)
+            .expect("a manifestless remnant must not block the reinstall");
+
+        assert!(target.join("skill.toml").is_file());
+        assert!(
+            !staged.exists(),
+            "the staged candidate must have moved into place"
         );
     }
 
