@@ -300,26 +300,33 @@ impl LibreFangKernel {
         // reached through the sibling `[workspaces]` table and lives under the
         // named-workspaces root, so it is left alone, as is a hand's relative
         // `hands/<hand>/<role>`.
+        //
+        // The relative spelling of the same path is the same request: it is joined onto the workspaces root below, so judging where the path *points* means resolving it first.
+        // A check on the spelling alone would let `agents/vivo` alias `vivo` where the absolute path cannot.
         if let Some(requested) = manifest.workspace.as_ref() {
             let agents_root = cfg.effective_agent_workspaces_dir();
-            // A path carrying `..` is deliberately left for
-            // `resolve_workspace_dir` to *reject*: clearing it here would turn a
-            // traversal attempt into a quiet 201, which is a different contract
-            // from the one that check enforces and the one
-            // `agents_routes_integration.rs` pins.
-            if requested.starts_with(&agents_root) && !has_unsafe_relative_components(requested) {
+            // Resolve against the root spawn is about to join the path onto, so both spellings are judged on where they point.
+            // This is also where `..` traversal and absolute paths outside the root are *rejected*, and propagating that error keeps the fail-closed contract: clearing the path here would turn a traversal attempt into a quiet 201, which is a different contract from the one `resolve_workspace_dir` enforces and `agents_routes_integration.rs` pins.
+            let resolved = resolved_workspace_dir(
+                &cfg.effective_workspaces_dir(),
+                Some(requested.clone()),
+                &name,
+                agent_id,
+            )?;
+            if resolved.starts_with(&agents_root) {
                 let own = resolved_workspace_dir(&agents_root, None, &name, agent_id)?;
-                if *requested != own {
+                if resolved != own {
                     // Whether the directory being left behind holds anything is
                     // the difference between correcting a manifest and
                     // abandoning an agent's identity, sessions and memory, so
                     // say which one it is rather than emitting the same line
                     // for both.
-                    let abandoned = requested.is_dir() && directory_has_entries(requested);
+                    let abandoned = resolved.is_dir() && directory_has_entries(&resolved);
                     if abandoned {
                         tracing::warn!(
                             agent = %name,
                             requested_workspace = %requested.display(),
+                            resolved_workspace = %resolved.display(),
                             own_workspace = %own.display(),
                             "manifest names another agent's workspace directory, and that \
                              directory is not empty — this agent is moving to its own, and \
@@ -329,6 +336,7 @@ impl LibreFangKernel {
                         tracing::warn!(
                             agent = %name,
                             requested_workspace = %requested.display(),
+                            resolved_workspace = %resolved.display(),
                             own_workspace = %own.display(),
                             "manifest names another agent's workspace directory; using this \
                              agent's own"

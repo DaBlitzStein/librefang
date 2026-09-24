@@ -26,6 +26,7 @@ use axum::http::{Method, Request, StatusCode};
 use librefang_api::routes::AppState;
 use librefang_api::server;
 use librefang_kernel::LibreFangKernel;
+use librefang_types::agent::AgentId;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -220,6 +221,47 @@ async fn a_supplied_manifest_cannot_point_at_another_agents_directory() {
     );
 }
 
+/// The same door, spelled relatively.
+///
+/// `workspace = "agents/vivo"` does not begin with the agents root, so an `starts_with` test written against the absolute form skips it — and `resolve_workspace_dir` then joins it onto the workspaces root, landing the new agent in exactly the directory the absolute path was refused.
+/// The guard resolves the path against the root spawn joins it onto before judging it, so the two spellings answer the same question.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relative_workspace_cannot_point_at_another_agents_directory() {
+    let h = boot().await;
+    let victima = write_instance(&h.home_dir, "vivo");
+
+    let (status, body) = post(
+        h.app.clone(),
+        "/api/agents",
+        serde_json::json!({
+            "name": "nuevo",
+            "manifest_toml": "name = \"nuevo\"\nmodule = \"builtin:chat\"\nworkspace = \"agents/vivo\"\n",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "spawn failed: {body}");
+
+    let propio = h.home_dir.join("workspaces").join("agents").join("nuevo");
+    assert!(
+        propio.join(".identity").join("IDENTITY.md").is_file(),
+        "the new agent must get its own workspace, not the directory 'agents/vivo' resolves to"
+    );
+    let identidad =
+        std::fs::read_to_string(propio.join(".identity").join("IDENTITY.md")).expect("identity");
+    assert!(
+        identidad.contains("name: nuevo"),
+        "the new agent's identity must name the new agent: {identidad}"
+    );
+
+    // The directory the relative path named stays its own agent's.
+    let identidad_vivo =
+        std::fs::read_to_string(victima.join(".identity").join("IDENTITY.md")).expect("identity");
+    assert!(
+        identidad_vivo.contains("name: vivo"),
+        "the named directory must keep its own agent's identity: {identidad_vivo}"
+    );
+}
+
 /// A shared workspace declared on purpose must survive.
 ///
 /// The guard asks whether the path is *this* agent's directory, not what the
@@ -280,6 +322,77 @@ async fn an_agent_type_wins_over_an_instance_of_the_same_name() {
         "the agent type must be read in preference to the instance; reading the instance \
          would fail to parse. Body: {body}"
     );
+}
+
+/// Instantiation yields an independent agent.
+/// Two agents created from the same agent type resolve to distinct workspaces and get distinct identities — the type is a spec, not a directory, so nothing of its own is handed over.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_agents_instantiated_from_the_same_type_do_not_share_paths() {
+    let h = boot().await;
+    write_agent_type(&h.home_dir, "base", "DEL TIPO");
+
+    let mut workspaces = Vec::new();
+    for name in ["alfa", "beta"] {
+        let (status, body) = post(
+            h.app.clone(),
+            "/api/agents",
+            serde_json::json!({ "template": "base", "name": name }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "spawn of {name} failed: {body}"
+        );
+
+        let agent_id: AgentId = body["agent_id"]
+            .as_str()
+            .expect("agent_id in the spawn response")
+            .parse()
+            .expect("agent_id is a UUID");
+        let entry = h
+            .state
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .expect("the spawned agent is in the registry");
+        workspaces.push(
+            entry
+                .manifest
+                .workspace
+                .clone()
+                .expect("workspace resolved"),
+        );
+    }
+
+    let alfa = h.home_dir.join("workspaces").join("agents").join("alfa");
+    let beta = h.home_dir.join("workspaces").join("agents").join("beta");
+    assert!(alfa.is_dir(), "alfa must materialise its own workspace");
+    assert!(beta.is_dir(), "beta must materialise its own workspace");
+
+    // Each instance's resolved workspace is its own directory — not the type's
+    // store (which is a spec, not a directory) and not the other instance's.
+    assert_eq!(
+        workspaces[0], alfa,
+        "alfa's workspace must be its own directory"
+    );
+    assert_eq!(
+        workspaces[1], beta,
+        "beta's workspace must be its own directory"
+    );
+    assert_ne!(
+        workspaces[0], workspaces[1],
+        "the two instances must not share a workspace"
+    );
+
+    for (name, dir) in [("alfa", &alfa), ("beta", &beta)] {
+        let identidad =
+            std::fs::read_to_string(dir.join(".identity").join("IDENTITY.md")).expect("identity");
+        assert!(
+            identidad.contains(&format!("name: {name}")),
+            "{name}'s identity must name it: {identidad}"
+        );
+    }
 }
 
 /// The guard must not fire when the name is reused, which is the #4991 path: a
