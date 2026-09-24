@@ -19124,25 +19124,50 @@ fn boot_warns_that_a_non_local_tool_exec_backend_does_not_route_tool_calls_8221(
 /// `Login` belongs in this list for the same reason as the other two, and it is the variant whose absence costs the most: it is the dashboard login that verifies the code (`server.rs`, under `requires_login_totp()`), and when no secret is confirmed the check is skipped outright, so an operator who set `second_factor = "login"` is back to a password-only login with a clean boot and no line anywhere saying so.
 /// `Both` covers that surface and the approval surface, and had the same silence.
 /// Only `Totp` ever produced the warning, because the check compared against that variant alone.
+///
+/// The warning must also be exact about what happens after it is read, because the surfaces diverge: the login skips the check and asks for no code, while an approval that demands one is rejected with "TOTP code required for approval" and fails closed.
+/// A line claiming "no code is ever asked for" of both is false for the approval path, so each variant is asserted against what it must say and what it must not.
 #[test]
 fn boot_warns_for_every_second_factor_that_demands_a_code() {
-    // Each variant, and the surfaces the warning has to name for it.
+    // Each variant, the fragments the warning has to render for it, and the
+    // fragments it must not, because they describe the other surface and would
+    // misstate this variant's consequence.
     // Asserting on the rendered text rather than on a predicate, for the reason
     // the #8221 test above gives: the text is the deliverable, and a line that
-    // does not say which surface will run without a code leaves the operator to
-    // work out what they lost.
+    // does not say which surface will run without a code — or says the wrong
+    // thing about it — leaves the operator to work out what they lost.
     let cases = [
-        (SecondFactor::Totp, vec!["tool approvals"]),
-        (SecondFactor::Login, vec!["dashboard login"]),
+        (
+            SecondFactor::Totp,
+            vec![
+                "Tool approvals fail closed",
+                "TOTP code required for approval",
+            ],
+            vec!["no code is ever asked for"],
+        ),
+        (
+            SecondFactor::Login,
+            vec![
+                "Dashboard login skips the check",
+                "no code is ever asked for",
+            ],
+            vec!["fail closed", "TOTP code required for approval"],
+        ),
         (
             SecondFactor::Both,
-            vec!["dashboard login", "tool approvals"],
+            vec![
+                "Dashboard login skips the check",
+                "no code is ever asked for",
+                "Tool approvals fail closed",
+                "TOTP code required for approval",
+            ],
+            vec![],
         ),
     ];
 
     let mut failures = Vec::new();
 
-    for (second_factor, expected_surfaces) in cases {
+    for (second_factor, expected_fragments, forbidden_fragments) in cases {
         let tmp = tempfile::tempdir().unwrap();
         let home_dir = tmp.path().join("librefang-second-factor-warning-test");
         std::fs::create_dir_all(&home_dir).unwrap();
@@ -19171,10 +19196,18 @@ fn boot_warns_for_every_second_factor_that_demands_a_code() {
             kernel.shutdown();
             continue;
         }
-        for surface in expected_surfaces {
-            if !captured.contains(surface) {
+        for fragment in expected_fragments {
+            if !captured.contains(fragment) {
                 failures.push(format!(
-                    "{second_factor:?}: the warning never names {surface:?}"
+                    "{second_factor:?}: the warning never says {fragment:?}"
+                ));
+            }
+        }
+        for fragment in forbidden_fragments {
+            if captured.contains(fragment) {
+                failures.push(format!(
+                    "{second_factor:?}: the warning says {fragment:?}, which is false for this \
+                     variant"
                 ));
             }
         }

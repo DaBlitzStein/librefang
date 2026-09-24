@@ -365,22 +365,29 @@ impl LibreFangKernel {
                     .map(|v| v.as_str() == "true")
                     .unwrap_or(false);
             if !totp_ready {
-                // Name the surfaces this particular variant actually covers, so
-                // the line explains the consequence rather than restating the
-                // setting.
-                let mut surfaces = Vec::new();
+                // Spell out what each surface this variant covers actually does
+                // without a secret, because the two differ and the line must be
+                // exact about both: the dashboard login skips the check and
+                // never asks for a code (`server.rs`), while tool approvals fail
+                // closed — `resolve` rejects the approval with "TOTP code
+                // required for approval" and no valid code can be supplied.
+                let mut effects = Vec::new();
                 if config.approval.second_factor.requires_login_totp() {
-                    surfaces.push("dashboard login");
+                    effects.push("Dashboard login skips the check, so no code is ever asked for.");
                 }
                 if config.approval.second_factor.requires_approval_totp() {
-                    surfaces.push("tool approvals");
+                    effects.push(
+                        "Tool approvals fail closed: no valid code can be supplied, so an \
+                         approval that demands one is rejected with \"TOTP code required for \
+                         approval\".",
+                    );
                 }
                 warn!(
-                    "Config: second_factor = \"{}\" but TOTP is not enrolled/confirmed in vault. \
-                     {} will require TOTP but no secret is configured, so no code is ever asked \
-                     for. Run POST /api/approvals/totp/setup to enroll.",
+                    "Config: second_factor = \"{}\" but TOTP is not enrolled/confirmed in vault, \
+                     so the configured second factor is not in force. {} \
+                     Run POST /api/approvals/totp/setup to enroll.",
                     config.approval.second_factor.as_str(),
-                    surfaces.join(" and ")
+                    effects.join(" ")
                 );
             }
         }
