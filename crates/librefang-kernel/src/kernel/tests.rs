@@ -3210,7 +3210,7 @@ async fn resolved_exec_policy_survives_reload_and_update_manifest() {
         .clone();
     replacement.exec_policy = None;
     kernel
-        .update_manifest(agent_id, replacement)
+        .update_manifest(agent_id, replacement, "test")
         .expect("manifest update should succeed");
     assert_eq!(
         resolved_policy("after update_manifest"),
@@ -5063,7 +5063,7 @@ fn concurrent_full_and_mcp_manifest_persists_keep_both_registry_updates() {
             None,
         )
         .expect("spawn");
-    kernel.persist_manifest_to_disk(agent_id);
+    kernel.persist_manifest_to_disk(agent_id, "test");
     register_mcp_server(&kernel, "concurrent-server");
     kernel
         .tools_ref()
@@ -5112,7 +5112,7 @@ fn concurrent_full_and_mcp_manifest_persists_keep_both_registry_updates() {
         .expect("model registry update");
     let full_writer = {
         let kernel = Arc::clone(&kernel);
-        std::thread::spawn(move || kernel.persist_manifest_to_disk(agent_id))
+        std::thread::spawn(move || kernel.persist_manifest_to_disk(agent_id, "test"))
     };
     drop(write_guard);
     mcp_writer.join().unwrap();
