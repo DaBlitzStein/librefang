@@ -22,14 +22,15 @@ impl LibreFangKernel {
         let old_cfg = self.config.load();
         use crate::config_reload::{should_store_config, validate_config_for_reload};
 
-        // Read and parse the on-disk config via the strict loader (#4664).
-        // Unlike `crate::config::load_config`, `try_load_config` returns `Err`
-        // on every failure mode (TOML syntax error, broken `include = [...]`
-        // chain, migration failure, deserialize-shape mismatch) instead of
-        // silently falling back to `KernelConfig::default()`. Without this,
-        // the diff-and-apply path below would treat the defaults as the
-        // operator's intent and wipe out their `default_model`,
-        // `provider_api_keys`, channels, etc.
+        // Read and parse the on-disk config via the strict loader (#4664),
+        // loading the document over the live config rather than over the
+        // compiled defaults (#8459). Unlike `crate::config::load_config`,
+        // `try_load_config_over` returns `Err` on every failure mode (TOML
+        // syntax error, broken `include = [...]` chain, migration failure,
+        // deserialize-shape mismatch) instead of silently falling back to
+        // `KernelConfig::default()`. Without this, the diff-and-apply path
+        // below would treat the defaults as the operator's intent and wipe
+        // out their `default_model`, `provider_api_keys`, channels, etc.
         //
         // Surfacing `Err` here lets the watcher's
         // `Err(e) => tracing::warn!("Config hot-reload failed: {e}")` branch
