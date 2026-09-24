@@ -557,15 +557,10 @@ mod tests {
 
     /// Pins the figure itself, because the value is the fix: a reasoning model
     /// needs room for its thinking before it writes anything, and dropping this
-    /// back under 32K would reintroduce the empty reply this guards.
-    #[test]
-    fn system_default_leaves_room_for_a_reasoning_model() {
-        assert!(
-            DEFAULT_MODEL_MAX_TOKENS >= 32_768,
-            "system default must not fall below 32K; it is the budget a reasoning model \
-             has to fit its thinking and its reply inside, got {DEFAULT_MODEL_MAX_TOKENS}"
-        );
-    }
+    /// back under 32K would reintroduce the empty reply this guards. A
+    /// compile-time assertion, so it cannot be folded into a runtime `assert!`
+    /// that clippy rightly rejects as an assertion on a constant.
+    const _: () = assert!(DEFAULT_MODEL_MAX_TOKENS >= 32_768);
 
     /// The counterexample (#7770): a gateway that rejects `reasoning_effort`
     /// must be able to keep it off the wire, so an agent cannot force it on.
