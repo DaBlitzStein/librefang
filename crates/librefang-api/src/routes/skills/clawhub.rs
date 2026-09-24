@@ -1,6 +1,8 @@
 use super::*;
+use librefang_skills::clawhub::{ClawHubClient, ClawHubInstallResult};
+use librefang_skills::{SkillError, SkillSource};
 
-/// How long a ClawHub route waits for the hub before answering without it.
+/// How long a ClawHub **read** route waits for the hub before answering without it.
 ///
 /// The client is patient by design — 30 s per attempt and five attempts, with backoff between them —
 /// because a hub that answers slowly is worth more than a hub that is not asked twice. But patience
@@ -12,26 +14,45 @@ use super::*;
 /// (`REQUEST_TIMEOUT`, 10 s), so an unreachable hub is a 503 rather than a failed test.
 const CLAWHUB_ROUTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 
-/// Run one ClawHub round trip under [`CLAWHUB_ROUTE_BUDGET`].
+/// How long a ClawHub **install** route lets its own work run before answering without it.
+///
+/// Install is a POST with side effects, and `route_smoke` walks GETs only: the read budget above
+/// buys it nothing and costs it plenty. An install is a detail fetch, a download, an extraction and
+/// a security scan, and cutting it off eight seconds in cancels installs that are merely slow, not
+/// broken. The client already bounds a dead hub by itself — 30 s per attempt over five attempts,
+/// with backoff — so this is not the first line of defence; it exists so a caller cannot be held
+/// forever by work that outlives the client's retries (a hung extraction or scan). It is
+/// deliberately far above [`CLAWHUB_ROUTE_BUDGET`], and expiry is safe rather than cheap: see
+/// [`install_under_budget`].
+const CLAWHUB_INSTALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Run one ClawHub round trip under `budget`.
 ///
 /// A timeout maps to [`SkillError::MarketplaceUnavailable`] and not to `Network`, which is what the
 /// client raises for its own failures, because the condition is the one that variant documents: the
 /// daemon is healthy, the request was well-formed, and the upstream is not answering as a marketplace.
 /// That is the same `503` the rest of the family returns for a hub serving a webpage, so the dashboard
 /// renders one offline state for both rather than two.
+async fn within_budget<T>(
+    budget: std::time::Duration,
+    what: &str,
+    future: impl std::future::Future<Output = Result<T, SkillError>>,
+) -> Result<T, SkillError> {
+    match tokio::time::timeout(budget, future).await {
+        Ok(result) => result,
+        Err(_) => Err(SkillError::MarketplaceUnavailable(format!(
+            "{what} did not answer within {}s",
+            budget.as_secs()
+        ))),
+    }
+}
+
+/// Run one ClawHub read round trip under [`CLAWHUB_ROUTE_BUDGET`].
 async fn within_route_budget<T>(
     what: &str,
-    future: impl std::future::Future<Output = Result<T, librefang_skills::SkillError>>,
-) -> Result<T, librefang_skills::SkillError> {
-    match tokio::time::timeout(CLAWHUB_ROUTE_BUDGET, future).await {
-        Ok(result) => result,
-        Err(_) => Err(librefang_skills::SkillError::MarketplaceUnavailable(
-            format!(
-                "{what} did not answer within {}s",
-                CLAWHUB_ROUTE_BUDGET.as_secs()
-            ),
-        )),
-    }
+    future: impl std::future::Future<Output = Result<T, SkillError>>,
+) -> Result<T, SkillError> {
+    within_budget(CLAWHUB_ROUTE_BUDGET, what, future).await
 }
 
 fn patch_skill_provenance(
@@ -60,6 +81,152 @@ async fn patch_skill_provenance_off_thread(
     tokio::task::spawn_blocking(move || patch_skill_provenance(&manifest_path, source))
         .await
         .map_err(|e| format!("provenance patch task failed: {e}"))?
+}
+
+/// A per-call staging directory beside the final skill directory.
+///
+/// The `.installing-` prefix is the one `SkillRegistry::load_all` already sweeps on every load, so
+/// a daemon killed mid-install leaves behind only something the next load removes.
+fn install_staging_dir(skills_dir: &std::path::Path, slug: &str) -> std::path::PathBuf {
+    static INSTALL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = INSTALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    skills_dir.join(format!(".installing-{slug}-{}-{seq}", std::process::id()))
+}
+
+/// Removes a staging directory when the install task that owns it ends — on success, on error, or
+/// on unwind.
+///
+/// The final `<slug>` directory is only ever created by [`promote_staged_install`], so this guard
+/// cannot delete an installed skill: whatever it removes is either a discarded candidate or, after
+/// a successful promotion, an empty directory.
+struct StagingDir(std::path::PathBuf);
+
+impl Drop for StagingDir {
+    fn drop(&mut self) {
+        match std::fs::remove_dir_all(&self.0) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                path = %self.0.display(),
+                %error,
+                "Could not remove skill install staging directory"
+            ),
+        }
+    }
+}
+
+/// Move a complete staged skill into `skills_dir` with one `rename`.
+///
+/// Both paths are children of `skills_dir`, so the rename is atomic on the same filesystem and a
+/// reader never observes a half-written `<slug>` directory: it is absent until it is complete.
+fn promote_staged_install(
+    staging_dir: &std::path::Path,
+    skills_dir: &std::path::Path,
+    slug: &str,
+) -> Result<(), SkillError> {
+    let staged = staging_dir.join(slug);
+    let installed = skills_dir.join(slug);
+    std::fs::rename(&staged, &installed).map_err(|error| {
+        SkillError::Io(std::io::Error::other(format!(
+            "failed to move staged skill into {}: {error}",
+            installed.display()
+        )))
+    })
+}
+
+/// The hub an install came from, resolved to a [`SkillSource`] once the version is known.
+#[derive(Clone, Copy)]
+enum ClawHubHub {
+    ClawHub,
+    ClawHubCn,
+}
+
+impl ClawHubHub {
+    /// Stamp which hub a skill came from (#4689). Without this the installed manifest's `source`
+    /// stays `None`, `listSkills()` surfaces it as `source.type = "local"`, and the dashboard's
+    /// per-hub `isInstalledFromMarketplace(hub, slug)` check misses the freshly installed skill —
+    /// the hub's "Install" button keeps showing as clickable until the user reloads.
+    fn provenance(self, slug: &str, version: &str) -> SkillSource {
+        match self {
+            Self::ClawHub => SkillSource::ClawHub {
+                slug: slug.to_string(),
+                version: version.to_string(),
+            },
+            Self::ClawHubCn => SkillSource::ClawHubCn {
+                slug: slug.to_string(),
+                version: version.to_string(),
+            },
+        }
+    }
+}
+
+/// Install `slug` under `budget`, writing only to a staging directory until the skill is complete.
+///
+/// The install runs in its own task, and the staged skill is promoted only if the caller is still
+/// waiting when the task finishes. That is what makes a budget expiry safe: the work that gets cut
+/// off cannot leave a partial skill behind (the candidate reaches `skills_dir/<slug>` only via one
+/// `rename`), and it cannot leave staging junk either (the task's [`StagingDir`] guard removes the
+/// candidate once the task ends, after it has stopped writing). A timeout — or an HTTP caller that
+/// hangs up — therefore answers without side effects. The only race left is an install that
+/// completes in the same instant the budget expires, which lands complete or not at all, never
+/// truncated.
+async fn install_under_budget(
+    client: ClawHubClient,
+    slug: String,
+    skills_dir: std::path::PathBuf,
+    hub: ClawHubHub,
+    budget: std::time::Duration,
+) -> Result<ClawHubInstallResult, SkillError> {
+    let staging_dir = install_staging_dir(&skills_dir, &slug);
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn({
+        let staging_dir = staging_dir.clone();
+        async move {
+            let _staging = StagingDir(staging_dir.clone());
+            let result = client.install(&slug, &staging_dir).await;
+
+            match result {
+                // The route stopped waiting (budget expired, or the caller hung up): drop the
+                // finished candidate instead of promoting a skill whose caller was already told
+                // the install failed.
+                Ok(_) if result_tx.is_closed() => {}
+                Ok(result) => {
+                    // Stamp provenance while the skill is still staged, so the directory that
+                    // lands in `skills_dir` is complete at rename time. A patch failure stays
+                    // non-fatal, exactly as it was when this ran after installation.
+                    let manifest = staging_dir.join(&slug).join("skill.toml");
+                    let source = hub.provenance(&slug, &result.version);
+                    if let Err(error) = patch_skill_provenance_off_thread(manifest, source).await {
+                        tracing::warn!(
+                            slug = %slug,
+                            "Failed to patch provenance in skill.toml: {error}"
+                        );
+                    }
+
+                    if let Err(error) = promote_staged_install(&staging_dir, &skills_dir, &slug) {
+                        let _ = result_tx.send(Err(error));
+                    } else {
+                        let _ = result_tx.send(Ok(result));
+                    }
+                }
+                Err(error) => {
+                    let _ = result_tx.send(Err(error));
+                }
+            }
+        }
+    });
+
+    match tokio::time::timeout(budget, result_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_abandoned)) => Err(SkillError::Io(std::io::Error::other(
+            "install task ended without reporting a result",
+        ))),
+        Err(_) => Err(SkillError::MarketplaceUnavailable(format!(
+            "ClawHub install did not finish within {}s",
+            budget.as_secs()
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -469,28 +636,18 @@ pub async fn clawhub_install(
         );
     }
 
-    match within_route_budget("ClawHub install", client.install(&req.slug, &skills_dir)).await {
+    match install_under_budget(
+        client,
+        req.slug.clone(),
+        skills_dir.clone(),
+        ClawHubHub::ClawHub,
+        CLAWHUB_INSTALL_BUDGET,
+    )
+    .await
+    {
         Ok(result) => {
-            // #4689 — patch source provenance to ClawHub. Without this, the
-            // installed skill's manifest.source stays None and `listSkills()`
-            // surfaces it as `source.type = "local"`, which makes the
-            // dashboard's per-hub `isInstalledFromMarketplace("clawhub", slug)`
-            // check miss the freshly installed skill — the hub's "Install"
-            // button keeps showing as clickable until the user reloads. The
-            // ClawHubCn handler already does this; bringing ClawHub in line.
-            let manifest_path = skills_dir.join(&req.slug).join("skill.toml");
-            let source = librefang_skills::SkillSource::ClawHub {
-                slug: req.slug.clone(),
-                version: result.version.clone(),
-            };
-            if let Err(e) = patch_skill_provenance_off_thread(manifest_path.clone(), source).await {
-                tracing::warn!(
-                    slug = %req.slug,
-                    path = %manifest_path.display(),
-                    "Failed to patch provenance in skill.toml: {e}"
-                );
-            }
-
+            // #4689 — provenance was stamped while the skill was staged (see `ClawHubHub::
+            // provenance`), so the directory that landed in `skills/` is complete.
             // Reload so the kernel sees the patched provenance immediately —
             // mirrors what reload_skills() does for the FangHub install path.
             state.kernel.reload_skills();
@@ -821,23 +978,18 @@ pub async fn clawhub_cn_install(
         );
     }
 
-    match within_route_budget("ClawHub install", client.install(&req.slug, &skills_dir)).await {
+    match install_under_budget(
+        client,
+        req.slug.clone(),
+        skills_dir.clone(),
+        ClawHubHub::ClawHubCn,
+        CLAWHUB_INSTALL_BUDGET,
+    )
+    .await
+    {
         Ok(result) => {
-            // Patch source provenance to ClawHubCn so the skill registry knows
-            // this skill was installed from ClawHub and can surface update/version info.
-            let manifest_path = skills_dir.join(&req.slug).join("skill.toml");
-            let source = librefang_skills::SkillSource::ClawHubCn {
-                slug: req.slug.clone(),
-                version: result.version.clone(),
-            };
-            if let Err(e) = patch_skill_provenance_off_thread(manifest_path.clone(), source).await {
-                tracing::warn!(
-                    slug = %req.slug,
-                    path = %manifest_path.display(),
-                    "Failed to patch provenance in skill.toml: {e}"
-                );
-            }
-
+            // Provenance to ClawHubCn was stamped while the skill was staged, so the registry can
+            // surface update/version info and the directory in `skills/` is complete.
             let warnings: Vec<serde_json::Value> = result
                 .warnings
                 .iter()
@@ -899,7 +1051,98 @@ pub async fn clawhub_cn_install(
 
 #[cfg(test)]
 mod route_budget_tests {
-    use super::{within_route_budget, CLAWHUB_ROUTE_BUDGET};
+    use super::{
+        install_under_budget, within_budget, within_route_budget, ClawHubHub,
+        CLAWHUB_INSTALL_BUDGET, CLAWHUB_ROUTE_BUDGET,
+    };
+    use librefang_skills::clawhub::ClawHubClient;
+    use librefang_skills::SkillError;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A loopback hub that answers every request after `delay`, or never answers at all.
+    struct StubHub {
+        base_url: String,
+        served: Arc<AtomicUsize>,
+    }
+
+    fn stub_hub(delay: std::time::Duration, answer: bool) -> StubHub {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub hub");
+        let address = listener.local_addr().expect("stub hub address");
+        let served = Arc::new(AtomicUsize::new(0));
+
+        let counter = served.clone();
+        let _ = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let counter = counter.clone();
+                let _ = std::thread::spawn(move || {
+                    // Read the request head only: waiting for EOF would block on a client that
+                    // is itself waiting for the answer.
+                    let mut request = Vec::new();
+                    let mut byte = [0_u8; 1];
+                    while stream.read_exact(&mut byte).is_ok() {
+                        request.push(byte[0]);
+                        if request.ends_with(b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+
+                    if !answer {
+                        // Accept and stall. Long enough to outlast the test, short enough that
+                        // the detached thread does not linger long past it.
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
+
+                    std::thread::sleep(delay);
+
+                    let request = String::from_utf8_lossy(&request);
+                    let (content_type, body) = if request.contains("/download") {
+                        ("text/markdown", SKILL_MD)
+                    } else {
+                        ("application/json", DETAIL_JSON)
+                    };
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(body.as_bytes());
+                    let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    counter.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+        });
+
+        StubHub {
+            base_url: format!("http://{address}/api/v1"),
+            served,
+        }
+    }
+
+    const SLOW_SLUG: &str = "slow-skill";
+
+    /// A minimal valid detail response. `expectedSha256` is absent, which is the unverified path
+    /// the installer already warns about.
+    const DETAIL_JSON: &str =
+        r#"{"skill":{"slug":"slow-skill"},"latestVersion":{"version":"1.0.0"},"owner":null}"#;
+
+    /// A prompt-only skill body that satisfies conversion and the security pipeline.
+    const SKILL_MD: &str =
+        "---\nname: slow-skill\ndescription: slow test skill\nversion: 1.0.0\n---\n# Slow\nBody\n";
+
+    fn entries(dir: &Path) -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(dir)
+            .expect("read skills dir")
+            .map(|entry| entry.expect("dir entry").file_name())
+            .collect()
+    }
 
     /// A round trip that never settles must give up on the route's clock, not on the caller's.
     ///
@@ -952,5 +1195,154 @@ mod route_budget_tests {
             CLAWHUB_ROUTE_BUDGET < std::time::Duration::from_secs(10),
             "the route budget ({CLAWHUB_ROUTE_BUDGET:?}) must stay under route_smoke's REQUEST_TIMEOUT (10s)"
         );
+    }
+
+    /// Install and read budgets are separate, and install's is the larger one.
+    ///
+    /// Install is a POST that `route_smoke` does not walk, so the eight-second read bound is not
+    /// its bound. Collapsing the two constants back together silently restores the cancellation
+    /// these tests exist for.
+    #[test]
+    fn the_install_budget_is_its_own_and_not_the_read_budget() {
+        assert!(
+            CLAWHUB_INSTALL_BUDGET > CLAWHUB_ROUTE_BUDGET,
+            "install ({CLAWHUB_INSTALL_BUDGET:?}) must not share the read budget ({CLAWHUB_ROUTE_BUDGET:?})"
+        );
+    }
+
+    /// An install that takes longer than the read budget still completes.
+    ///
+    /// The read budget is a property of the GET routes `route_smoke` walks; applying it to install
+    /// cancels a merely slow hub mid-install. This drives one stub at a pace the read budget
+    /// refuses and the install budget accepts.
+    #[tokio::test]
+    async fn an_install_slower_than_the_read_budget_still_completes() {
+        let hub = stub_hub(std::time::Duration::from_millis(300), true);
+        let client = ClawHubClient::with_url(&hub.base_url, PathBuf::new());
+        let skills_dir = tempfile::tempdir().unwrap();
+
+        // The read budget, applied the way a read route applies it, gives up on this hub...
+        let read = within_budget(
+            std::time::Duration::from_millis(120),
+            "ClawHub test read",
+            client.get_skill(SLOW_SLUG),
+        )
+        .await;
+        assert!(
+            matches!(read, Err(SkillError::MarketplaceUnavailable(_))),
+            "the read budget must cut a 300 ms answer: {read:?}"
+        );
+
+        // ...while installing the same slug from the same hub completes.
+        let result = install_under_budget(
+            client,
+            SLOW_SLUG.to_string(),
+            skills_dir.path().to_path_buf(),
+            ClawHubHub::ClawHub,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .expect("an install that is only slow must not be cut by the read budget");
+
+        assert_eq!(result.skill_name, SLOW_SLUG);
+        let manifest_path = skills_dir.path().join(SLOW_SLUG).join("skill.toml");
+        assert!(manifest_path.is_file(), "the install did not land complete");
+        let manifest: librefang_skills::SkillManifest =
+            toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert!(
+            matches!(
+                manifest.source,
+                Some(librefang_skills::SkillSource::ClawHub { ref slug, .. }) if slug == SLOW_SLUG
+            ),
+            "provenance must be stamped before promotion: {:?}",
+            manifest.source
+        );
+        assert_eq!(
+            entries(skills_dir.path()),
+            vec![std::ffi::OsString::from(SLOW_SLUG)],
+            "a completed install must not leave staging behind"
+        );
+    }
+
+    /// A budget that expires mid-install leaves `skills/` exactly as it found it.
+    ///
+    /// The hub here is slow but healthy, so the install keeps running after the route stops
+    /// waiting, finishes the download, and would have succeeded — which is exactly the case where
+    /// a naive implementation promotes a skill whose caller was told the install failed. The
+    /// candidate must be discarded instead, and its staging directory removed.
+    #[tokio::test]
+    async fn a_cancelled_install_discards_its_candidate_without_residue() {
+        // Each leg takes ten times the budget, so a late timer under CI load still fires while
+        // the install is in flight rather than after it has already answered.
+        let hub = stub_hub(std::time::Duration::from_millis(500), true);
+        let client = ClawHubClient::with_url(&hub.base_url, PathBuf::new());
+        let skills_dir = tempfile::tempdir().unwrap();
+
+        let error = install_under_budget(
+            client,
+            SLOW_SLUG.to_string(),
+            skills_dir.path().to_path_buf(),
+            ClawHubHub::ClawHub,
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .expect_err("a budget that expires mid-download must answer");
+        assert!(
+            matches!(error, SkillError::MarketplaceUnavailable(_)),
+            "budget expiry is the marketplace being unavailable, not a network fault: {error:?}"
+        );
+        assert!(entries(skills_dir.path()).is_empty());
+
+        // The install task is not cancelled; it keeps going and only then learns the route is
+        // gone. Wait for the download to have been served, then watch the directory while the
+        // task reaches its discard: the candidate must never appear, and staging must go away.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while hub.served.load(Ordering::Relaxed) < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            hub.served.load(Ordering::Relaxed) >= 2,
+            "the stub hub never served the download"
+        );
+
+        let settle = std::time::Instant::now() + std::time::Duration::from_millis(750);
+        while std::time::Instant::now() < settle {
+            assert!(
+                !skills_dir.path().join(SLOW_SLUG).exists(),
+                "a timed-out install was promoted into skills/"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            entries(skills_dir.path()).is_empty(),
+            "a timed-out install left staging residue: {:?}",
+            entries(skills_dir.path())
+        );
+    }
+
+    /// The hub the budget exists for — accepts and then says nothing — leaves no residue either.
+    #[tokio::test]
+    async fn an_install_from_a_hub_that_never_answers_leaves_no_residue() {
+        let hub = stub_hub(std::time::Duration::ZERO, false);
+        let client = ClawHubClient::with_url(&hub.base_url, PathBuf::new());
+        let skills_dir = tempfile::tempdir().unwrap();
+
+        let error = install_under_budget(
+            client,
+            SLOW_SLUG.to_string(),
+            skills_dir.path().to_path_buf(),
+            ClawHubHub::ClawHub,
+            std::time::Duration::from_millis(200),
+        )
+        .await
+        .expect_err("a hub that never answers must hit the budget");
+        assert!(
+            matches!(error, SkillError::MarketplaceUnavailable(_)),
+            "{error:?}"
+        );
+
+        // Nothing can appear while the stalled download is still open.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(entries(skills_dir.path()).is_empty());
     }
 }
