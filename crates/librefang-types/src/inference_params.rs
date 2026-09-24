@@ -4,7 +4,7 @@
 //! Two categories live here and they follow opposite rules.
 //!
 //! **Preferences** — `temperature`, `top_p`, `max_tokens`, `frequency_penalty`, `presence_penalty`, `top_k`, `min_p`, `repeat_penalty` — are what the operator wants this agent to sound like.
-//! The specific setting beats the general one: agent manifest, then per-model override, then — for `max_tokens` alone — the model's own registry maximum, and only then the system default.
+//! The specific setting beats the general one: agent manifest, then per-model override, then — for `max_tokens` alone — the model's effective ceiling (its registry maximum, or the operator's per-model correction of it), and only then the system default.
 //! An unspecified output budget asks the endpoint for as much as it will give, and the registry is the only thing here that knows how much that is.
 //! That ordering is the whole point of the module: two instances of one agent type must be able to run the same model at different temperatures, and before this the per-model override overwrote both of them with one value.
 //!
@@ -18,7 +18,7 @@
 //! And a limit that was never measured is not a ceiling: see [`KnownLimit`].
 
 use crate::agent::{ModelConfig, DEFAULT_MODEL_MAX_TOKENS, DEFAULT_MODEL_TEMPERATURE};
-use crate::model_catalog::ModelOverrides;
+use crate::model_catalog::{EffectiveLimits, LimitSource as CatalogLimitSource, ModelOverrides};
 
 /// Preset context-window sizes offered by the editors, smallest first.
 ///
@@ -65,6 +65,31 @@ impl KnownLimit {
     /// Build a known limit, or `None` when the value is absent (`0`).
     pub fn new(tokens: u64, source: LimitSource) -> Option<Self> {
         (tokens > 0).then_some(Self { tokens, source })
+    }
+
+    /// The output ceiling resolved for a model by the catalog's
+    /// `ModelCatalog::effective_limits` / `effective_limits_for_manifest`, as a
+    /// [`KnownLimit`].
+    ///
+    /// The catalog has already ranked the operator's `model_overrides.json`
+    /// correction above the entry's own declared value (#7774); this maps the
+    /// paired [`crate::model_catalog::LimitSource`] onto the vocabulary warnings
+    /// speak, so a ceiling the operator set is not later reported back to that
+    /// operator as a registry fact.
+    ///
+    /// `None` when neither layer carried a value — the caller applies its own
+    /// fallback. `Unknown` is unreachable while `max_output_tokens` is `Some`
+    /// (the catalog pairs the two in one expression) and maps to
+    /// [`LimitSource::Registry`] to keep this total without an unreachable
+    /// panic.
+    pub fn from_effective_limits(limits: &EffectiveLimits) -> Option<Self> {
+        let source = match limits.max_output_tokens_source {
+            CatalogLimitSource::Override => LimitSource::Operator,
+            CatalogLimitSource::Catalog | CatalogLimitSource::Unknown => LimitSource::Registry,
+        };
+        limits
+            .max_output_tokens
+            .and_then(|tokens| Self::new(tokens, source))
     }
 }
 
@@ -194,9 +219,11 @@ pub struct ResolvedInferenceParams {
 /// Pure — call it with the override and the registry limit already looked up so
 /// it stays testable without a catalog.
 ///
-/// `known_max_output` is the matched registry entry's own `max_output_tokens`
-/// as a [`KnownLimit`], or `None` when the entry carries none that is vouched
-/// for. It decides `max_tokens` only when neither the agent nor the override
+/// `known_max_output` is the matched model's *effective* output ceiling as a
+/// [`KnownLimit`] — the operator's per-model `max_output_tokens` correction if
+/// one exists, otherwise the registry entry's own figure (see
+/// [`KnownLimit::from_effective_limits`]) — or `None` when neither vouched for
+/// one. It decides `max_tokens` only when neither the agent nor the override
 /// named one — an agent type that pins its own budget still wins, which is what
 /// keeps two instances of one type free to differ.
 pub fn resolve_inference_params(
@@ -238,7 +265,7 @@ pub fn resolve_inference_params(
 /// named one.
 ///
 /// An unspecified `max_tokens` asks the endpoint for as much as it will give,
-/// and the registry is the only thing here that knows how much that is: its
+/// and the catalog is the only thing here that knows how much that is: its
 /// `max_output_tokens` is what the provider documents as the model's ceiling,
 /// so requesting it cannot overshoot by construction.
 /// The fixed 4096 it replaces sat below the documented maximum of most entries,
@@ -248,10 +275,9 @@ pub fn resolve_inference_params(
 /// emitting any text produces no answer at all rather than a shorter one, and
 /// the loop then surfaces that absence as a placeholder reply.
 ///
-/// A [`KnownLimit`] is used as-is. An entry whose limits are placeholders yields
-/// `None` here by construction — that is what `limits_known` is for — and the
-/// fallback is [`DEFAULT_MODEL_MAX_TOKENS`] rather than a number nobody vouched
-/// for.
+/// A [`KnownLimit`] is used as-is: whoever looked the ceiling up is responsible
+/// for it having a source, and the fallback is [`DEFAULT_MODEL_MAX_TOKENS`] when
+/// there is none rather than a number nobody vouched for.
 fn default_max_tokens(known: Option<KnownLimit>) -> u32 {
     known
         .and_then(|limit| u32::try_from(limit.tokens).ok())
@@ -409,15 +435,17 @@ mod tests {
         assert_eq!(r.max_tokens, 65_536);
     }
 
-    /// The rung this module gained, walked from the catalog entry that asserts
-    /// the ceiling rather than from a hand-built `KnownLimit`: with no override
-    /// anywhere, a registry-declared `max_output_tokens` is the budget.
+    /// A registry entry's declared ceiling, walked through the entry-level
+    /// hand-off that the warning surfaces use rather than from a hand-built
+    /// `KnownLimit`: with no override anywhere, a registry-declared
+    /// `max_output_tokens` answers an unset budget.
     ///
-    /// Both halves are exercised together because they meet at
-    /// [`crate::model_catalog::ModelCatalogEntry::known_max_output_tokens`] —
-    /// the entry supplies the number, `limits_known` is what keeps a discovery
-    /// placeholder from supplying one — so this fails if either side of that
-    /// hand-off drifts.
+    /// The per-turn rung reads the *effective* limits instead, so an operator
+    /// override can correct the entry (see [`KnownLimit::from_effective_limits`]);
+    /// this pins the entry-side contract — the number comes from
+    /// [`crate::model_catalog::ModelCatalogEntry::known_max_output_tokens`], and
+    /// `limits_known` keeps a discovery placeholder from supplying one — that
+    /// the warning path still relies on.
     #[test]
     fn catalog_declared_ceiling_answers_an_unset_budget() {
         let entry = ModelCatalogEntry {
@@ -472,14 +500,59 @@ mod tests {
         assert_eq!(r.max_tokens, 1_024);
     }
 
-    /// A ceiling nobody vouched for is not a ceiling.
-    /// A discovered entry carries placeholder limits and reports `None` here, so
-    /// it must land on the system default rather than adopt the placeholder as
-    /// its own budget.
+    /// The source travels with the value. The catalog ranks the operator's
+    /// override above the entry's own figure before this rung sees it (#7774),
+    /// so the conversion has to map the winner's provenance onto the warning
+    /// vocabulary: an operator-corrected ceiling reported as a registry fact
+    /// would misattribute the number back to the layer it corrected.
     #[test]
-    fn unvouched_registry_limit_falls_back_to_the_system_default() {
-        let r = resolve_inference_params(&agent_with(None, None), None, None);
-        assert_eq!(r.max_tokens, DEFAULT_MODEL_MAX_TOKENS);
+    fn an_effective_ceiling_keeps_the_layer_that_asserted_it() {
+        let overridden = EffectiveLimits {
+            max_output_tokens: Some(8_192),
+            max_output_tokens_source: CatalogLimitSource::Override,
+            ..Default::default()
+        };
+        assert_eq!(
+            KnownLimit::from_effective_limits(&overridden),
+            KnownLimit::new(8_192, LimitSource::Operator)
+        );
+
+        let registry = EffectiveLimits {
+            max_output_tokens: Some(65_536),
+            max_output_tokens_source: CatalogLimitSource::Catalog,
+            ..Default::default()
+        };
+        assert_eq!(
+            KnownLimit::from_effective_limits(&registry),
+            KnownLimit::new(65_536, LimitSource::Registry)
+        );
+
+        // No layer asserted a ceiling: no limit, and nothing to attribute.
+        assert_eq!(
+            KnownLimit::from_effective_limits(&EffectiveLimits::default()),
+            None
+        );
+    }
+
+    /// The precedence this rung promises, in the only place it can be walked
+    /// without a catalog: the effective ceiling is what the operator said, so
+    /// an unset budget takes their correction rather than the entry's figure.
+    #[test]
+    fn unset_budget_takes_the_operator_corrected_ceiling() {
+        let limits = EffectiveLimits {
+            max_output_tokens: Some(8_192),
+            max_output_tokens_source: CatalogLimitSource::Override,
+            ..Default::default()
+        };
+        let r = resolve_inference_params(
+            &agent_with(None, None),
+            None,
+            KnownLimit::from_effective_limits(&limits),
+        );
+        assert_eq!(
+            r.max_tokens, 8_192,
+            "the correction, not the catalog figure"
+        );
     }
 
     /// Pins the figure itself, because the value is the fix: a reasoning model
