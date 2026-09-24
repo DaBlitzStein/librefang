@@ -6654,6 +6654,36 @@ async fn comms_task_rejects_unknown_assignee_with_400_not_500() {
     );
 }
 
+/// The 400/422 half of the `/api/comms/task` ↔ `/api/tasks` contract, pinned
+/// so it stays deliberate.
+///
+/// This route deserializes a typed `CommsTaskRequest`, so a value that is
+/// valid JSON but the wrong *type* — a fractional `priority` or
+/// `timeout_secs` — is rejected by the `Json` extractor as 422 before the
+/// handler runs. `/api/tasks` reads its body as `serde_json::Value` and
+/// rejects the same decimal with its own 400 (see
+/// `task_post_rejects_malformed_limits`). Both refuse; the status differs by
+/// design and both routes document which side they are on.
+#[tokio::test(flavor = "multi_thread")]
+async fn comms_task_rejects_fractional_limits_with_422() {
+    let harness = start_full_router("").await;
+
+    for (field, value) in [
+        ("priority", serde_json::json!(1.5)),
+        ("timeout_secs", serde_json::json!(1.5)),
+    ] {
+        let mut body = serde_json::json!({"title": "Fractional", "description": "d"});
+        body[field] = value.clone();
+        let (status, resp) = task_request(&harness, "POST", "/api/comms/task", Some(body)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{field} = {value} must be refused by the typed-body extractor, not coerced to a \
+             default (got {resp})"
+        );
+    }
+}
+
 /// The other half of the `/api/comms/task` ↔ `/api/tasks` agreement: this
 /// route hardcoded `TaskPostOptions::default()`, so a client sending
 /// `priority` / `timeout_secs` got a 201 for a task queued at priority 0 with
@@ -6924,7 +6954,9 @@ async fn task_post_rejects_malformed_limits() {
 
     for (field, value) in [
         ("priority", serde_json::json!("high")),
+        ("priority", serde_json::json!(1.5)),
         ("timeout_secs", serde_json::json!(-5)),
+        ("timeout_secs", serde_json::json!(1.5)),
         ("timeout_secs", serde_json::json!("soon")),
     ] {
         let mut body = serde_json::json!({"title": "Bad", "description": "d"});
