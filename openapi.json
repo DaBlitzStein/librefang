@@ -1892,8 +1892,15 @@
           "404": {
             "description": "Agent or version not found, or not accessible to the caller"
           },
-          "409": {
-            "description": "Agent is deployment-provisioned and not editable here"
+          "423": {
+            "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }

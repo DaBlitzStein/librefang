@@ -810,7 +810,7 @@ pub async fn list_agent_manifest_history(
         (status = 200, description = "Agent manifest restored", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent id or version does not belong to this agent"),
         (status = 404, description = "Agent or version not found, or not accessible to the caller"),
-        (status = 409, description = "Agent is deployment-provisioned and not editable here")
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
 pub async fn restore_agent_manifest_version(
