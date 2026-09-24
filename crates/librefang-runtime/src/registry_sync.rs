@@ -774,11 +774,28 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
             Some(n) if n.ends_with(".toml") => n.to_string(),
             _ => continue,
         };
-        // Skip rather than default to empty: blanking a destination because the
-        // source became unreadable destroys a provider file for nothing.
+        // A read failure is not evidence that upstream dropped the name. The
+        // prune pass below deletes a local copy whose digest matches the
+        // manifest's, and an intact copy of an unreadable source is exactly
+        // that shape — so a transient EACCES or ENOENT (a `git reset` racing
+        // the checkout, a restrictive mode) would destroy the operator's file
+        // on the strength of a missing answer. Carry the previous claim
+        // forward instead, exactly as the failed-write branch below does, so
+        // the name keeps both its file and its manifest entry until a run can
+        // read the source again.
         let src_content = match std::fs::read(&path) {
             Ok(content) => content,
-            Err(_) => continue,
+            Err(err) => {
+                tracing::warn!(
+                    "{label}: could not read {} ({err}); keeping the local copy and its \
+                     manifest entry untouched this run",
+                    path.display()
+                );
+                if let Some(previous) = previously_managed.get(&name) {
+                    managed.insert(name, previous.clone());
+                }
+                continue;
+            }
         };
 
         let dest_file = dest_dir.join(&name);
@@ -1572,8 +1589,8 @@ mod tests {
 
     /// A source the sync cannot read does not authorise deleting a destination it cannot vouch for (#8407).
     ///
-    /// An unreadable source is skipped before the destination is classified, so that name reaches the prune pass in neither the managed set nor the operator-owned one, and the prune decides on the manifest alone.
-    /// What it still requires is the digest: bytes it can prove it wrote are removed and reinstalled by the next sync, bytes it cannot are left alone — the same rule the digest exists for everywhere else.
+    /// An unreadable source is skipped before the destination is classified, and the name's previous manifest claim is carried forward, so the prune pass leaves it alone whether or not the recorded digest still matches.
+    /// A read failure is transient by nature (EACCES from a restrictive mode, ENOENT from a `git reset` racing the checkout); treating it as "upstream dropped the name" is what would delete the operator's copy.
     #[test]
     #[cfg(unix)]
     fn an_unreadable_source_does_not_authorise_deleting_an_unprovable_file() {
@@ -1608,6 +1625,65 @@ mod tests {
         );
 
         std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    /// The intact-copy half of the same rule: when the source cannot be read, the digest that matches the manifest is not licence to delete (#8411 review).
+    ///
+    /// The review's scenario: an EACCES or ENOENT on the checkout — a `git reset` racing the sync, a restrictive mode — leaves the name out of both the managed and operator-owned sets, and the prune pass then finds it in the manifest, sees the local bytes still match the recorded digest, classifies it as ours and removes it.
+    /// The operator's `~/.librefang/providers/foo.toml` is destroyed over a transient read error. The previous claim is carried forward instead, so the file and its manifest digest both survive the run — and the name is still prunable once a later run can read the source again, which the tail of this test pins.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_source_does_not_prune_the_intact_local_copy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let source = src.join("alpha.toml");
+        let installed = "id = \"alpha\"\nbase_url = \"https://alpha.example/v1\"\n";
+        std::fs::write(&source, installed).unwrap();
+        sync_flat_files(&src, &dest, "providers");
+
+        let manifest_before =
+            std::fs::read_to_string(dest.join(REGISTRY_MANAGED_MANIFEST)).unwrap();
+        assert!(
+            manifest_before.starts_with("alpha.toml\t"),
+            "precondition: the digest of the installed copy is recorded"
+        );
+
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(
+            std::fs::read(&source).is_err(),
+            "precondition: this test needs the source unreadable, which a root user bypasses"
+        );
+
+        sync_flat_files(&src, &dest, "providers");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("alpha.toml")).unwrap(),
+            installed,
+            "an unreadable source must not authorise pruning the intact local copy"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join(REGISTRY_MANAGED_MANIFEST)).unwrap(),
+            manifest_before,
+            "the manifest keeps the digest, so a later run can still prove ownership"
+        );
+
+        // The exclusion is per-run, not a freeze: once the source is readable
+        // again and upstream has really dropped the name, the digest does its
+        // job and the file is pruned.
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_file(&source).unwrap();
+        sync_flat_files(&src, &dest, "providers");
+
+        assert!(
+            !dest.join("alpha.toml").exists(),
+            "a later readable run must still be able to prune an upstream-dropped name"
+        );
     }
 
     /// The residual the manifest cannot rule out, pinned so that changing it has to be a decision (#8407).
