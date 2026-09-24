@@ -1247,6 +1247,7 @@ impl ModelCatalog {
     /// An install that enabled discovery before this change carries the flag only in `providers/*.toml`, which the sync rewrites — without this read it would lose the setting on the first boot after upgrading, which is the bug itself.
     /// A provider already present in the store is left alone, so an explicit `false` is never re-adopted as `true`.
     /// Each adoption is logged at `WARN`, because it transfers the decision from the file to the store: a hand edit to the flag stops mattering after this, and the message says so and names the supported way to change it.
+    /// The sync can overwrite such a file before this boot read runs — see [`Self::capture_legacy_discover_flag`], which adopts from the bytes at the moment of that overwrite so the read here is never the first to find the declaration gone (#8411).
     /// Returns how many were adopted, for the caller to log.
     pub fn adopt_legacy_discover_flags(&mut self, path: &std::path::Path) -> usize {
         let adopted: Vec<String> = self
@@ -1275,6 +1276,39 @@ impl ModelCatalog {
             tracing::warn!(path = %path.display(), %e, "adopted provider discovery preferences could not be persisted");
         }
         adopted.len()
+    }
+
+    /// Capture a legacy `discover_models = true` out of a provider file that is
+    /// about to be overwritten, so the boot adoption cannot lose it (#8411).
+    ///
+    /// [`Self::adopt_legacy_discover_flags`] reads the flag off the provider
+    /// files at boot, but the boot's registry sync runs first and its pre-digest
+    /// adoption replaces the very file that declares it: by the time the catalog
+    /// is loaded the declaration is gone, and the preference was lost with no
+    /// store entry and no warning — the exact failure the adoption exists to
+    /// prevent. `registry_sync` calls this with the bytes of the file it is
+    /// about to replace, before the write.
+    ///
+    /// The flag takes the route it would have taken at boot: the store records
+    /// it once (an existing entry is left alone, so an explicit `false` is never
+    /// re-adopted as `true`), the same `WARN` explains the transfer, and the
+    /// boot's [`Self::load_discover_prefs`] applies it on this same boot.
+    ///
+    /// Returns `true` when an entry was recorded.
+    pub fn capture_legacy_discover_flag(store_path: &std::path::Path, provider_file: &str) -> bool {
+        // Build the same single-file catalog the boot loads, so the adoption
+        // rules — declaration vs. default, WARN, idempotence — are one code
+        // path and cannot drift apart.
+        let mut catalog = Self::from_sources(
+            &[CatalogSource {
+                content: provider_file.to_string(),
+                is_custom: false,
+                origin: "<provider file being overwritten by the registry sync>".to_string(),
+            }],
+            None,
+        );
+        catalog.load_discover_prefs(store_path);
+        catalog.adopt_legacy_discover_flags(store_path) > 0
     }
 
     /// Add a provider to the catalog, applying the operator's discovery preference to it.

@@ -741,6 +741,17 @@ fn write_managed_manifest(dest_dir: &Path, manifest: &ManagedManifest) {
     let _ = std::fs::write(dest_dir.join(REGISTRY_MANAGED_MANIFEST), body);
 }
 
+/// Path of the operator-owned discovery-preference store for the home directory
+/// that owns `providers_dir` (`<home>/data/provider_discovery.json`).
+///
+/// Mirrors the layout `boot_with_config` and the providers API build. Only the
+/// `providers` destination is ever passed here, and its parent is the home.
+fn discover_prefs_path(providers_dir: &Path) -> Option<std::path::PathBuf> {
+    providers_dir
+        .parent()
+        .map(|home| home.join("data").join("provider_discovery.json"))
+}
+
 /// Sync flat .toml files (e.g. integrations/, providers/).
 ///
 /// A file is (re)installed only while the sync can prove it owns what is on disk, with one deliberate exception: a bare pre-digest manifest entry is adopted on the first sync after an upgrade, so a normal upstream update is not frozen; see [`ManagedManifest`].
@@ -825,6 +836,13 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
             // edit froze every upstream update behind a WARN with no way back.
             // The digest written below is the point of the adoption: a *later*
             // operator edit is then protected like any other.
+            //
+            // One thing the overwrite must not take with it: a pending
+            // `discover_models = true`, operator state with a designed home in
+            // the preference store. The boot's adoption reads the provider
+            // files *after* this sync, so the declaration is captured into the
+            // store below, before the write, and the boot read finds the flag
+            // already recorded (#8411).
             let pre_digest = matches!(previously_managed.get(&name), Some(None));
             let ours = pre_digest
                 || previously_managed
@@ -858,6 +876,18 @@ fn sync_flat_files(src_dir: &Path, dest_dir: &Path, label: &str) {
                      registry version wins once and the digest recorded below puts the name back \
                      under management"
                 );
+                // The declaration is about to be destroyed; read it into the
+                // operator's preference store first. A recorded preference is
+                // left alone, exactly as the boot adoption leaves it — same
+                // rules, one implementation (`capture_legacy_discover_flag`).
+                if label == "providers" {
+                    if let Some(store) = discover_prefs_path(dest_dir) {
+                        let _ = crate::model_catalog::ModelCatalog::capture_legacy_discover_flag(
+                            &store,
+                            &String::from_utf8_lossy(&dst_content),
+                        );
+                    }
+                }
             }
 
             if std::fs::create_dir_all(dest_dir).is_ok()
@@ -1524,6 +1554,61 @@ mod tests {
             std::fs::read_to_string(dest.join("deepseek.toml")).unwrap(),
             operator_toml,
             "after adoption the recorded digest must protect a later operator edit like any other"
+        );
+    }
+
+    /// #8411: the pre-digest adoption replaces a provider file whose authorship
+    /// it cannot prove — and with it goes a `discover_models = true` that was
+    /// pending there. The boot's adoption reads the provider files *after* this
+    /// sync, so the declaration has to be captured into the preference store
+    /// during the overwrite; otherwise the flag #8407 exists to carry over is
+    /// lost with no store entry and no WARN.
+    #[test]
+    fn sync_flat_files_captures_a_pending_discovery_flag_before_adopting_the_registry_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Mirror the real layout: the destination's parent is the home, which
+        // is where the `data/provider_discovery.json` store lives.
+        let home = tmp.path();
+        let src = home.join("registry").join("providers");
+        let dest = home.join("providers");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // The refreshed registry checkout: the copy the sync installs carries
+        // no flag.
+        let registry_toml =
+            "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n";
+        std::fs::write(src.join("deepseek.toml"), registry_toml).unwrap();
+
+        // The upgraded install: the operator's file declares discovery, and the
+        // manifest records the name without a digest.
+        std::fs::write(
+            dest.join("deepseek.toml"),
+            "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n",
+        )
+        .unwrap();
+        std::fs::write(dest.join(REGISTRY_MANAGED_MANIFEST), "deepseek.toml").unwrap();
+
+        sync_flat_files(&src, &dest, "providers");
+
+        // Precondition: the registry copy did replace the file, so the only
+        // place the declaration can survive is the store.
+        assert_eq!(
+            std::fs::read_to_string(dest.join("deepseek.toml")).unwrap(),
+            registry_toml,
+            "the pre-digest entry must still be adopted (upstream updates land)"
+        );
+        // The flag the overwrite destroyed is recorded for the boot that runs
+        // after this sync.
+        let store = home.join("data").join("provider_discovery.json");
+        let raw = std::fs::read_to_string(&store).expect(
+            "the pending flag must land in the preference store, or the boot adoption cannot see it",
+        );
+        let prefs: std::collections::BTreeMap<String, bool> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            prefs.get("deepseek"),
+            Some(&true),
+            "the declared discover_models = true has to survive the overwrite; store: {raw}"
         );
     }
 

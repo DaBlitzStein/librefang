@@ -3625,6 +3625,74 @@ fn a_legacy_discover_flag_is_adopted_once_and_never_re_adopted() {
     );
 }
 
+/// The boot adoption reads the flag off the provider files, but the boot's
+/// registry sync runs first and its pre-digest adoption overwrites the file —
+/// the declaration was gone before that read could see it (#8411).
+///
+/// The sync captures it from the bytes it is about to replace, and the capture
+/// has to obey the adoption's own rules: record a declared `true` once, and
+/// never re-adopt over a preference the operator has since recorded.
+#[test]
+fn a_flag_captured_before_an_overwrite_is_recorded_once_and_left_alone_after() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    let declaring = "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n";
+
+    assert!(
+        ModelCatalog::capture_legacy_discover_flag(&prefs, declaring),
+        "a declared true has to be captured — the file will not exist for the boot adoption"
+    );
+    let stored: std::collections::BTreeMap<String, bool> =
+        serde_json::from_str(&std::fs::read_to_string(&prefs).unwrap()).unwrap();
+    assert_eq!(stored.get("deepseek"), Some(&true));
+
+    // Same idempotence as the boot adoption: once recorded, the file's stale
+    // `true` never overrides what the store says.
+    assert!(!ModelCatalog::capture_legacy_discover_flag(
+        &prefs, declaring
+    ));
+    std::fs::write(&prefs, r#"{"deepseek": false}"#).unwrap();
+    assert!(
+        !ModelCatalog::capture_legacy_discover_flag(&prefs, declaring),
+        "a recorded false must keep the last word over the file"
+    );
+    let stored: std::collections::BTreeMap<String, bool> =
+        serde_json::from_str(&std::fs::read_to_string(&prefs).unwrap()).unwrap();
+    assert_eq!(stored.get("deepseek"), Some(&false));
+}
+
+/// The capture only fires for a genuine legacy opt-in: an absent key and an
+/// explicit `false` are both "no preference", and recording either would write
+/// an "off" for providers nobody has expressed an opinion about — the failure
+/// the adoption itself refuses to make.
+#[test]
+fn capture_ignores_files_without_a_true_declaration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+
+    for (case, body) in [
+        (
+            "absent key",
+            "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\n",
+        ),
+        (
+            "explicit false",
+            "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = false\n",
+        ),
+        // Not a provider file at all: nothing to key the preference by.
+        ("no [provider] table", "id = \"deepseek\"\n"),
+    ] {
+        assert!(
+            !ModelCatalog::capture_legacy_discover_flag(&prefs, body),
+            "{case} must not be captured"
+        );
+    }
+    assert!(
+        !prefs.exists(),
+        "nothing to record means no store file, exactly like the boot adoption"
+    );
+}
+
 /// Buffered `tracing` writer for the divergence-warning tests below.
 ///
 /// Local to this pair of tests rather than promoted to a shared helper:
