@@ -2216,29 +2216,28 @@ pub async fn set_provider_discovery(
         .home_dir()
         .join("data")
         .join("provider_discovery.json");
+    // Mutate the catalog inside the RCU closure and do the disk write outside
+    // it. The closure may run more than once under contention, so the write has
+    // to happen exactly once, after the mutation commits; keeping it inside also
+    // left a failed attempt's error sticky, turning a later successful toggle
+    // into a 500.
     let mut applied = false;
-    let mut write_error: Option<String> = None;
-    let sink = &mut applied;
-    let err_sink = &mut write_error;
-    let name_for_closure = name.clone();
-    state.kernel.model_catalog_update(&mut move |catalog| {
-        if catalog.set_provider_discover_preference(&name_for_closure, discover) {
-            // Surface a failed write instead of answering 200: the in-memory flip
-            // already happened, and a preference that never reached disk comes
-            // back as "off" on the next boot — the failure this endpoint exists to
-            // end (#7776, #8407).
-            match catalog.save_discover_prefs(&prefs_path) {
-                Ok(()) => *sink = true,
-                Err(e) => *err_sink = Some(e.to_string()),
-            }
-        }
+    let applied_sink = &mut applied;
+    state.kernel.model_catalog_update(&mut |catalog| {
+        *applied_sink = catalog.set_provider_discover_preference(&name, discover);
     });
-    if let Some(e) = write_error {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
-    }
     if !applied {
         return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
             .into_json_tuple();
+    }
+
+    // Persist from the snapshot the mutation above committed. Surface a failed
+    // write instead of answering 200: the in-memory flip already happened, and a
+    // preference that never reached disk comes back as "off" on the next boot —
+    // the failure this endpoint exists to end (#7776, #8407).
+    let snapshot = state.kernel.model_catalog_load();
+    if let Err(e) = snapshot.save_discover_prefs(&prefs_path) {
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     (
