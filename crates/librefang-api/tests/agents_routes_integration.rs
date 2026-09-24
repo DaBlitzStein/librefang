@@ -3838,3 +3838,77 @@ async fn test_avatars_are_stored_outside_workspaces_and_the_dashboard_tree() {
         "the avatar route must require a token"
     );
 }
+
+/// Two uploads for the same agent, in two formats, must not erase each other (#8349).
+///
+/// Every upload ends by sweeping the candidate extensions other than its own, so
+/// before the per-agent lock a PNG and a GIF in flight could each delete the
+/// other's file — the identity then named a route that served nothing. Each
+/// round here must end with exactly one file and a `GET` that serves it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_avatar_uploads_do_not_erase_each_other() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "avatar-concurrent");
+    let path = format!("/api/agents/{id}/avatar");
+
+    // Many rounds: the losing interleaving is a timing race — with the fix
+    // every round is serialised and deterministic, but a regression would slip
+    // past a single round whenever the scheduler happened to run them in order.
+    for round in 0..32 {
+        let png_upload = tokio::spawn(send_raw(
+            h.app.clone(),
+            post_bytes(&path, TINY_PNG.to_vec(), "application/octet-stream", None),
+        ));
+        let gif_upload = tokio::spawn(send_raw(
+            h.app.clone(),
+            post_bytes(&path, TINY_GIF.to_vec(), "application/octet-stream", None),
+        ));
+        let (png, gif) = tokio::join!(png_upload, gif_upload);
+        assert_eq!(
+            png.expect("png upload task").0,
+            StatusCode::OK,
+            "round {round}"
+        );
+        assert_eq!(
+            gif.expect("gif upload task").0,
+            StatusCode::OK,
+            "round {round}"
+        );
+
+        let (status, headers, bytes) = send_raw(h.app.clone(), get(&path)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "round {round}: an upload's sweep removed the other upload's file"
+        );
+        let content_type = headers["content-type"]
+            .to_str()
+            .expect("served content-type")
+            .to_string();
+        let expected = match bytes.as_slice() {
+            TINY_PNG => "image/png",
+            TINY_GIF => "image/gif",
+            other => panic!("round {round}: served bytes are neither upload: {other:?}"),
+        };
+        assert_eq!(
+            content_type, expected,
+            "round {round}: the served type must agree with the served bytes"
+        );
+    }
+
+    assert_eq!(
+        stored_identity(&h.state, id).avatar_url,
+        Some(librefang_types::media::agent_avatar_url(&id.to_string())),
+        "the stored reference must still name a route that answers"
+    );
+    let files: Vec<String> = std::fs::read_dir(avatars_dir(&h))
+        .expect("avatars dir")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        files.len(),
+        1,
+        "exactly one avatar may survive the race: {files:?}"
+    );
+}
