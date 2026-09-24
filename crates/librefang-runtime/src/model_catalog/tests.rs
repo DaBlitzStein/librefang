@@ -3624,3 +3624,134 @@ fn a_legacy_discover_flag_is_adopted_once_and_never_re_adopted() {
         "turning it off has to stick even while the file still says true"
     );
 }
+
+/// Buffered `tracing` writer for the divergence-warning tests below.
+///
+/// Local to this pair of tests rather than promoted to a shared helper:
+/// `kernel/tests.rs`, `config.rs` and `cron.rs` each carry their own copy, and
+/// factoring them together is a change to files this PR has no other reason to
+/// touch.
+#[derive(Clone)]
+struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogs;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl CapturedLogs {
+    fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+    }
+
+    /// Install this buffer as the calling thread's subscriber for the duration of the returned guard.
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        use tracing_subscriber::layer::SubscriberExt;
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(self.clone())
+            .with_ansi(false)
+            .with_target(false);
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(layer))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).expect("utf8")
+    }
+}
+
+/// The silent half the review caught (#8411): once the store has an entry, a hand
+/// edit of `discover_models` in the provider file stops mattering — including the
+/// edit that looks like it turns discovery *off*.
+///
+/// The store still wins, because that is the design; what changes is that the
+/// boot says so. The WARN names the provider, both values, and the supported way
+/// to change the setting, so the file no longer reads as if it were in force.
+#[test]
+fn a_provider_file_that_disagrees_with_the_stored_preference_warns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    std::fs::write(
+        providers.join("gateway.toml"),
+        "[provider]\nid = \"gateway\"\nbase_url = \"https://gateway.internal/v1\"\ndiscover_models = false\n",
+    )
+    .unwrap();
+    std::fs::write(&prefs, r#"{"gateway": true}"#).unwrap();
+
+    let logs = CapturedLogs::new();
+    let _guard = logs.install();
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    catalog.load_discover_prefs(&prefs);
+
+    assert!(
+        catalog.get_provider("gateway").unwrap().discover_models,
+        "the store wins, which is exactly why the disagreement has to be logged"
+    );
+    let text = logs.text();
+    assert!(
+        text.contains("declares discover_models = false") && text.contains("records true"),
+        "the WARN must show both values so the inert edit is visible; got: {text}"
+    );
+    assert!(
+        text.contains("stored preference wins"),
+        "the WARN must say which side wins; got: {text}"
+    );
+    assert!(
+        text.contains("/api/providers/gateway/discovery"),
+        "the WARN must say how to change it; got: {text}"
+    );
+}
+
+/// The other direction, and the one the review's scenario walks through: a
+/// `true` still declared in a hand-maintained file is adopted into the store, so
+/// from that boot on the file is inert — an operator turning it off there watches
+/// discovery stay on.
+///
+/// The adoption is a one-time legacy migration, but it is a transfer of control
+/// and now says so: WARN names the provider, the file as the source, the store as
+/// the new decider, and how to turn discovery off.
+#[test]
+fn adopting_a_legacy_discover_flag_warns_that_the_store_now_decides() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let providers = dir.path().join("providers");
+    let prefs = dir.path().join("data").join("provider_discovery.json");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::write(
+        providers.join("deepseek.toml"),
+        "[provider]\nid = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n",
+    )
+    .unwrap();
+
+    let logs = CapturedLogs::new();
+    let _guard = logs.install();
+    let mut catalog = ModelCatalog::new_from_dir(&providers);
+    assert_eq!(catalog.adopt_legacy_discover_flags(&prefs), 1);
+
+    let text = logs.text();
+    assert!(
+        text.contains("adopting the legacy discover_models = true"),
+        "the adoption must say what it read and from where; got: {text}"
+    );
+    assert!(
+        text.contains("stored preference decides"),
+        "the adoption must say who decides afterwards; got: {text}"
+    );
+    assert!(
+        text.contains("/api/providers/deepseek/discovery"),
+        "and how to turn discovery off once the store owns it; got: {text}"
+    );
+}

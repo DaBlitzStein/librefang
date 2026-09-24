@@ -47,6 +47,15 @@ pub struct ModelCatalog {
     /// Kept beside the other operator-owned files under `data/` and applied over
     /// the loaded catalog by [`ModelCatalog::load_discover_prefs`].
     discover_prefs: BTreeMap<String, bool>,
+    /// `discover_models` as *declared* in each provider file, keyed by provider id.
+    ///
+    /// [`ProviderInfo::discover_models`] defaults to `false`, so once a file has
+    /// been parsed an omitted key and an explicit `false` are the same value.
+    /// The divergence warning in [`Self::load_discover_prefs`] needs exactly
+    /// that difference: a file that says nothing must not be reported as
+    /// disagreeing with the store, while one whose author wrote `false` must
+    /// be. Only files that declare the key appear here.
+    declared_discover_flags: BTreeMap<String, bool>,
     /// Per-model inference parameter overrides, keyed by "provider:model_id".
     overrides: HashMap<String, ModelOverrides>,
 }
@@ -310,6 +319,7 @@ impl ModelCatalog {
             live_model_fetched_at: HashMap::new(),
             suppressed_providers: HashSet::new(),
             discover_prefs: BTreeMap::new(),
+            declared_discover_flags: BTreeMap::new(),
             overrides: HashMap::new(),
         }
     }
@@ -366,6 +376,20 @@ fn merge_provider_record(existing: &mut ProviderCatalogToml, incoming: ProviderC
     // provider keyless makes it keyless, any file opting in enables discovery.
     existing.key_required &= incoming.key_required;
     existing.discover_models |= incoming.discover_models;
+}
+
+/// Read `discover_models` exactly as a provider file declares it, if it declares it at all.
+///
+/// [`ProviderCatalogToml`] defaults the key to `false`, so the parsed value
+/// cannot tell "the author wrote `false`" from "this file never mentions it".
+/// The divergence warning needs that distinction; this reads it back off the
+/// same bytes the catalog is built from, once per file.
+fn declared_discover_models(content: &str) -> Option<bool> {
+    toml::from_str::<toml::Value>(content)
+        .ok()?
+        .get("provider")?
+        .get("discover_models")?
+        .as_bool()
 }
 
 impl ModelCatalog {
@@ -461,6 +485,9 @@ impl ModelCatalog {
         // Accumulated in TOML shape so the merge below can still tell an absent
         // field from a defaulted one; converted to `ProviderInfo` after the loop.
         let mut raw_providers: Vec<(ProviderCatalogToml, bool)> = Vec::new();
+        // What each file *declares* for `discover_models` — see the field's
+        // doc. Keyed by the id in that file's `[provider]` table.
+        let mut declared_discover_flags: BTreeMap<String, bool> = BTreeMap::new();
         for CatalogSource {
             content,
             is_custom,
@@ -479,6 +506,18 @@ impl ModelCatalog {
                 }
             };
             let provider_id = file.provider.as_ref().map(|p| p.id.clone());
+            // Record the declaration itself, not the parsed default: the
+            // divergence warning below has to tell "the author wrote `false`"
+            // from "this file never mentions the key". `true` wins across
+            // files, mirroring the flag's own merge rule.
+            if let Some(id) = provider_id.as_ref() {
+                if let Some(flag) = declared_discover_models(content) {
+                    declared_discover_flags
+                        .entry(id.clone())
+                        .and_modify(|existing| *existing |= flag)
+                        .or_insert(flag);
+                }
+            }
             if let Some(p) = file.provider {
                 match raw_providers
                     .iter_mut()
@@ -569,6 +608,7 @@ impl ModelCatalog {
             live_model_fetched_at: HashMap::new(),
             suppressed_providers: HashSet::new(),
             discover_prefs: BTreeMap::new(),
+            declared_discover_flags,
             overrides: HashMap::new(),
         }
     }
@@ -1143,6 +1183,7 @@ impl ModelCatalog {
     ///
     /// A missing file is not an error — it is the state of every install that never touched the setting.
     /// A malformed one is reported and ignored rather than falling back to the TOML values, because that silent fallback is the failure this file exists to prevent.
+    /// A stored preference that disagrees with a value the provider file declares is applied anyway — the store has the last word — but logged at `WARN`, naming both values and the way to change the winner; the disagreement is otherwise invisible, and the file reads as if it were in force.
     pub fn load_discover_prefs(&mut self, path: &std::path::Path) {
         let data = match std::fs::read_to_string(path) {
             Ok(d) => d,
@@ -1154,6 +1195,24 @@ impl ModelCatalog {
         };
         match serde_json::from_str::<BTreeMap<String, bool>>(&data) {
             Ok(prefs) => {
+                // The store outranks the files by design, but silently: an
+                // operator who edits `discover_models` in a provider file the
+                // store has an entry for watches the edit do nothing. Name the
+                // disagreement and who wins, so the file does not read as live.
+                for (id, stored) in &prefs {
+                    if let Some(declared) = self.declared_discover_flags.get(id) {
+                        if declared != stored {
+                            tracing::warn!(
+                                "provider {id}: the provider file declares discover_models = \
+                                 {declared}, but {} records {stored}; the stored preference \
+                                 wins, because it is applied after the catalog files. Change it \
+                                 through PUT /api/providers/{id}/discovery, or delete the {id} \
+                                 entry from that file to let the provider file decide again.",
+                                path.display()
+                            );
+                        }
+                    }
+                }
                 self.discover_prefs = prefs;
                 self.apply_discover_prefs();
             }
@@ -1187,6 +1246,7 @@ impl ModelCatalog {
     ///
     /// An install that enabled discovery before this change carries the flag only in `providers/*.toml`, which the sync rewrites — without this read it would lose the setting on the first boot after upgrading, which is the bug itself.
     /// A provider already present in the store is left alone, so an explicit `false` is never re-adopted as `true`.
+    /// Each adoption is logged at `WARN`, because it transfers the decision from the file to the store: a hand edit to the flag stops mattering after this, and the message says so and names the supported way to change it.
     /// Returns how many were adopted, for the caller to log.
     pub fn adopt_legacy_discover_flags(&mut self, path: &std::path::Path) -> usize {
         let adopted: Vec<String> = self
@@ -1199,6 +1259,14 @@ impl ModelCatalog {
             return 0;
         }
         for id in &adopted {
+            tracing::warn!(
+                "provider {id}: adopting the legacy discover_models = true from its provider \
+                 file into {} — no preference was recorded for it. From now on the stored \
+                 preference decides, and editing the provider file no longer changes discovery; \
+                 use PUT /api/providers/{id}/discovery with discover_models = false, or delete \
+                 the {id} entry from that file, to turn discovery off.",
+                path.display()
+            );
             self.discover_prefs.insert(id.clone(), true);
         }
         if let Err(e) = self.save_discover_prefs(path) {
