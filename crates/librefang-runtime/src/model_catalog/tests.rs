@@ -1484,6 +1484,7 @@ fn test_merge_ignores_half_a_declared_price() {
         }],
     );
     let entry = catalog.find_model("half-priced").unwrap();
+    assert!(!entry.pricing_known);
     assert_eq!(entry.input_cost_per_m, 0.0);
     assert_eq!(entry.output_cost_per_m, 0.0);
 }

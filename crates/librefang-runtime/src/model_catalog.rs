@@ -1758,6 +1758,10 @@ impl ModelCatalog {
                 limits_known,
                 input_cost_per_m: reported_price.map_or(0.0, |(input, _)| input),
                 output_cost_per_m: reported_price.map_or(0.0, |(_, output)| output),
+                // `Default` says `true` for registry entries that predate the field and carry real
+                // numbers; a probe result is not a declaration, so a freshly discovered model that
+                // declared no price must record the absence instead of defaulting to free.
+                pricing_known: reported_price.is_some(),
                 supports_tools,
                 supports_vision,
                 // The whole point of #7957: a freshly discovered gateway model records *whether*
