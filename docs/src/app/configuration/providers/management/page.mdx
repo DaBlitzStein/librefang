@@ -70,8 +70,8 @@ The flag never turns discovery *off* for the built-in ids — those are decided 
 The Dashboard exposes the same switch as **Auto-discover models** in the Add Provider wizard and in a provider's Configure drawer; the latter calls `PUT /api/providers/{name}/discovery` with `{"discover_models": true}`.
 
 That call records the preference in `data/provider_discovery.json`, which is applied over the catalog at boot, so the setting survives a daemon restart for every provider — registry-shipped ones included.
-The store is what decides discovery for any provider it has an entry for: once you have used the switch for a provider, editing `discover_models` in that provider's own file no longer changes anything.
-Change it through the Dashboard or the API instead, or edit the store file directly; deleting that file drops every recorded preference at once.
+The store is what decides discovery for any provider it has an entry for: once you have used the switch for a provider, editing `discover_models` in that provider's own file no longer changes anything — a boot that finds the two disagreeing logs a `WARN` naming the provider, both values, and the supported way to change the setting.
+Change it through the Dashboard or the API instead, or edit the store file directly. Deleting that file drops every recorded preference at once, but the reset only sticks for providers whose own file no longer declares `discover_models = true`: the next boot adopts such a flag back into the store, so discovery that should stay off means writing `false` in the provider file, or recording the preference again after the reset.
 Reading `discover_models` from a provider file still works for a provider the store has no entry for, which is how an install that enabled discovery before the store existed keeps it: the first boot reads the flag out of the file and records it.
 
 Everything else in a provider file stays yours, including a corrected `context_window`.
