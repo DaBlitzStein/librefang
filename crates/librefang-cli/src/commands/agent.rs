@@ -669,6 +669,8 @@ pub(crate) fn cmd_agent_routing_show(agent_id_str: &str, json: bool) {
 
     let mode = body["mode"].as_str().unwrap_or("fixed");
     ui::kv(&i18n::t("agent-routing-label-mode"), mode);
+    // #8446: printed before the fixed-mode early return because Stable mode also overrides a fixed agent's model with `pinned_model`.
+    print_routing_inert_reason(&body);
     if mode != "flexible" {
         println!("{}", i18n::t("agent-routing-fixed-explainer"));
         return;
@@ -700,6 +702,26 @@ pub(crate) fn cmd_agent_routing_show(agent_id_str: &str, json: bool) {
             &i18n::t("agent-routing-fixed-opt-out"),
         );
     }
+}
+
+/// Warn when the kernel mode makes the routing settings in `body` (a `GET` or `PUT /api/agents/{id}/model_routing` response) inert (#8446).
+///
+/// Stable mode runs neither router and applies only `pinned_model`, falling back to the manifest model, so the settings shown or just saved have no effect until the kernel leaves Stable mode.
+fn print_routing_inert_reason(body: &serde_json::Value) {
+    if let Some(value) = routing_inert_warning(body) {
+        ui::kv_warn(&i18n::t("agent-routing-label-stable"), &value);
+    }
+}
+
+/// The warning [`print_routing_inert_reason`] prints, or `None` when routing is live.
+fn routing_inert_warning(body: &serde_json::Value) -> Option<String> {
+    if body["routing_inert_reason"].as_str() != Some("stable_mode") {
+        return None;
+    }
+    Some(match body["pinned_model"].as_str() {
+        Some(model) => i18n::t_args("agent-routing-stable-inert", &[("model", model)]),
+        None => i18n::t("agent-routing-stable-inert-manifest"),
+    })
 }
 
 /// Build the PUT body for `routing-set` (#7781 review).
@@ -776,6 +798,8 @@ pub(crate) fn cmd_agent_routing_set(
                 &[("id", &agent_id), ("mode", mode)]
             )
         );
+        // The write succeeded and persisted, but in Stable mode it has no effect yet; say so instead of reporting plain success.
+        print_routing_inert_reason(&body);
     } else {
         let err_fallback = i18n::t("error-unknown");
         eprintln!(
@@ -887,7 +911,7 @@ pub(crate) fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
 
 /// The per-agent knobs `librefang agent set` accepts beyond `model`.
 ///
-/// Five sampling preferences plus the two endpoint limits — the same set the
+/// The sampling preferences plus the two endpoint limits — the same set the
 /// dashboard and the TUI expose, so no surface can set something the others
 /// cannot.
 pub(crate) const INFERENCE_PARAM_FIELDS: &[&str] = &[
@@ -896,6 +920,9 @@ pub(crate) const INFERENCE_PARAM_FIELDS: &[&str] = &[
     "top_p",
     "frequency_penalty",
     "presence_penalty",
+    "top_k",
+    "min_p",
+    "repeat_penalty",
     "context_window",
     "max_output_tokens",
 ];
@@ -915,7 +942,7 @@ pub(crate) fn parse_inference_param(field: &str, value: &str) -> Result<serde_js
         return Ok(serde_json::Value::Null);
     }
     match field {
-        "max_tokens" => trimmed
+        "max_tokens" | "top_k" => trimmed
             .parse::<u32>()
             .map(|v| serde_json::json!(v))
             .map_err(|_| invalid_param(field, trimmed, true)),
@@ -1333,7 +1360,7 @@ pub(crate) fn cmd_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_routing_set_payload, parse_inference_param};
+    use super::{build_routing_set_payload, parse_inference_param, routing_inert_warning};
 
     #[test]
     fn inherit_literals_become_json_null() {
@@ -1365,6 +1392,28 @@ mod tests {
             parse_inference_param("presence_penalty", "-0.5").unwrap(),
             serde_json::json!(-0.5_f32)
         );
+    }
+
+    /// #8290: `top_k` is a `u32` on the route, so it parses as an integer — `40.0` sent where the schema says `u32` is rejected by the daemon.
+    #[test]
+    fn local_model_samplers_parse_with_their_route_types() {
+        assert_eq!(
+            parse_inference_param("top_k", "40").unwrap(),
+            serde_json::json!(40)
+        );
+        assert!(parse_inference_param("top_k", "4.5").is_err());
+        assert_eq!(
+            parse_inference_param("min_p", "0.05").unwrap(),
+            serde_json::json!(0.05_f32)
+        );
+        assert_eq!(
+            parse_inference_param("repeat_penalty", "1.1").unwrap(),
+            serde_json::json!(1.1_f32)
+        );
+        for field in ["top_k", "min_p", "repeat_penalty"] {
+            assert!(super::INFERENCE_PARAM_FIELDS.contains(&field), "{field}");
+            assert!(parse_inference_param(field, "inherit").unwrap().is_null());
+        }
     }
 
     /// A typo fails here rather than as a `400` after a round trip to the
@@ -1413,6 +1462,41 @@ mod tests {
         assert_eq!(
             payload["allowed_profiles"],
             serde_json::json!(["coder", "quick"])
+        );
+    }
+
+    /// #8446: `routing` and `routing-set` must say when Stable mode makes the settings inert, and name the model that runs instead.
+    #[test]
+    fn stable_mode_routing_warning_names_the_model_that_runs() {
+        let pinned = routing_inert_warning(&serde_json::json!({
+            "routing_inert_reason": "stable_mode",
+            "pinned_model": "pinned-test-model",
+        }))
+        .expect("Stable mode must produce a warning");
+        assert!(pinned.contains("pinned-test-model"), "got: {pinned}");
+
+        let manifest = routing_inert_warning(&serde_json::json!({
+            "routing_inert_reason": "stable_mode",
+            "pinned_model": null,
+        }))
+        .expect("Stable mode without a pinned model must still warn");
+        assert!(
+            !manifest.contains("agent-routing-"),
+            "untranslated key: {manifest}"
+        );
+
+        assert_eq!(
+            routing_inert_warning(&serde_json::json!({
+                "routing_inert_reason": null,
+                "pinned_model": "pinned-test-model",
+            })),
+            None,
+            "live routing must not warn"
+        );
+        // A daemon predating the field sends no key at all, which must read as live routing.
+        assert_eq!(
+            routing_inert_warning(&serde_json::json!({"mode": "flexible"})),
+            None
         );
     }
 }

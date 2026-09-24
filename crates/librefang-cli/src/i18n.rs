@@ -12,6 +12,21 @@ const KO_FTL: &str = include_str!("../locales/ko/main.ftl");
 pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "zh-CN", "uk", "ko"];
 pub use librefang_types::i18n::DEFAULT_LANGUAGE;
 
+/// Maps a supported language to its embedded `.ftl` source.
+///
+/// This is the single place production code and tests both go through to
+/// resolve a language to its Fluent source, so a new entry in
+/// `SUPPORTED_LANGUAGES` cannot silently fall out of sync with the locale
+/// files the duplicate-key guard test below scans.
+fn locale_source(language: &str) -> &'static str {
+    match language {
+        "zh-CN" => ZH_CN_FTL,
+        "uk" => UK_FTL,
+        "ko" => KO_FTL,
+        _ => EN_FTL,
+    }
+}
+
 thread_local! {
     static I18N: RefCell<Option<I18n>> = const { RefCell::new(None) };
 }
@@ -42,12 +57,7 @@ impl I18n {
             .map_err(|e| format!("invalid language identifier: {e}"))?;
         let mut bundle = FluentBundle::new(vec![lang_id]);
         bundle.set_use_isolating(false);
-        let source = match language {
-            "zh-CN" => ZH_CN_FTL,
-            "uk" => UK_FTL,
-            "ko" => KO_FTL,
-            _ => EN_FTL,
-        };
+        let source = locale_source(language);
         let resource = FluentResource::try_new(source.to_string())
             .map_err(|(_, errors)| format!("failed to parse Fluent resource: {errors:?}"))?;
         bundle
@@ -186,6 +196,128 @@ pub fn t_args(key: &str, args: &[(&str, &str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Returns `(message_id, line_number)` for every top-level message/term
+    /// definition in a `.ftl` source, in encounter order (duplicates included).
+    ///
+    /// A definition is a line starting in column 0 with a valid Fluent
+    /// identifier (`[A-Za-z][A-Za-z0-9_-]*`, optionally prefixed with `-` for
+    /// terms) followed by `=`. Everything else at column 0 is a comment
+    /// (`#`); everything indented is either an attribute (`.attr = ...`) or a
+    /// continuation line of a multiline value, neither of which introduces a
+    /// new top-level key.
+    fn find_message_definitions(source: &str) -> Vec<(String, usize)> {
+        fn is_identifier(s: &str) -> bool {
+            let mut chars = s.chars();
+            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        }
+
+        let mut defs = Vec::new();
+        for (idx, line) in source.lines().enumerate() {
+            let Some(first_char) = line.chars().next() else {
+                continue; // blank line
+            };
+            if first_char.is_whitespace() || first_char == '#' {
+                continue; // continuation, attribute, or comment
+            }
+            let Some(eq_idx) = line.find('=') else {
+                continue; // not a definition line (e.g. a `[[ ... ]]` selector edge case)
+            };
+            let candidate = line[..eq_idx].trim();
+            let is_definition = candidate
+                .strip_prefix('-')
+                .map(is_identifier)
+                .unwrap_or_else(|| is_identifier(candidate));
+            if is_definition {
+                defs.push((candidate.to_string(), idx + 1));
+            }
+        }
+        defs
+    }
+
+    /// Guards against the failure mode from #8291-style merges: `union` is a
+    /// text-concatenating git merge driver, so two branches that each add a
+    /// key to the same `.ftl` file merge cleanly and leave both copies
+    /// behind, with no merge conflict to flag it.
+    ///
+    /// Fluent then rejects the *entire* resource for that language rather
+    /// than keeping one copy: `FluentBundle::add_resource` reports every
+    /// duplicate id as an `Overriding` error, which makes `bundle_for(..)`
+    /// return `Err`. When the duplicate lands in the default-language pack,
+    /// `I18n::new(DEFAULT_LANGUAGE).expect(..)` in `init()` panics — this is
+    /// exactly what happened when `tui-agents-hints-detail` ended up defined
+    /// three times in `en/main.ftl`: `i18n::init` panicked on the default
+    /// pack and took 138 unrelated `librefang-cli` tests down with it (doctor,
+    /// purge, desktop_install, every TUI screen, all eleven
+    /// `daemon_failure_exit_codes` cases), with a panic message that names
+    /// Fluent, not the merge that caused it.
+    ///
+    /// When the duplicate lands in a non-default pack instead, there is no
+    /// panic: `bundle_for` fails for that language only, silently falling
+    /// back to English for every key. That is what happened to 30
+    /// model-routing keys duplicated only in `zh-CN/main.ftl` (2512
+    /// definitions there against 2482 in `en`, `ko`, and `uk`) — the whole
+    /// Chinese pack silently stopped loading, and nothing failed except one
+    /// hand-written per-language assertion (`renders_chinese_translation`).
+    #[test]
+    fn locale_files_have_no_duplicate_message_keys() {
+        let mut failures = Vec::new();
+        for &language in SUPPORTED_LANGUAGES {
+            let path = format!("locales/{language}/main.ftl");
+            let mut lines_by_key: std::collections::BTreeMap<&str, Vec<usize>> =
+                std::collections::BTreeMap::new();
+            let defs = find_message_definitions(locale_source(language));
+            for (key, line_no) in &defs {
+                lines_by_key.entry(key.as_str()).or_default().push(*line_no);
+            }
+            for (key, lines) in lines_by_key {
+                if lines.len() > 1 {
+                    failures.push(format!(
+                        "{path}: `{key}` is defined {} times, at lines {lines:?}",
+                        lines.len()
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "duplicate Fluent message keys found (each one breaks Fluent's parsing \
+             for that entire locale pack — see the doc comment on this test):\n  {}",
+            failures.join("\n  ")
+        );
+    }
+
+    /// All four packs are hand-maintained translations of the same message
+    /// set. As of this writing they define exactly the same 2398 keys; this
+    /// pins that invariant so a key added to one locale and silently missed
+    /// in another (leaving `[key-name]` or an English fallback rendered)
+    /// gets caught here instead of by a user noticing untranslated text.
+    #[test]
+    fn locale_files_define_the_same_key_set() {
+        let en_keys: std::collections::BTreeSet<String> = find_message_definitions(EN_FTL)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        for &language in SUPPORTED_LANGUAGES {
+            if language == DEFAULT_LANGUAGE {
+                continue;
+            }
+            let path = format!("locales/{language}/main.ftl");
+            let keys: std::collections::BTreeSet<String> =
+                find_message_definitions(locale_source(language))
+                    .into_iter()
+                    .map(|(key, _)| key)
+                    .collect();
+            let missing: Vec<&String> = en_keys.difference(&keys).collect();
+            let extra: Vec<&String> = keys.difference(&en_keys).collect();
+            assert!(
+                missing.is_empty() && extra.is_empty(),
+                "{path} key set diverges from {}/main.ftl: missing {missing:?}, extra {extra:?}",
+                DEFAULT_LANGUAGE
+            );
+        }
+    }
 
     #[test]
     fn falls_back_to_default_language() {

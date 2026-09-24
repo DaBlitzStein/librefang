@@ -368,11 +368,28 @@ impl OllamaDriver {
             .as_ref()
             .and_then(ollama_response_format);
 
-        let options = if request.temperature == 0.0 && request.max_tokens == 0 {
+        // Samplers are read from `options`, not the top level of the body (#8290).
+        // `top_k` / `min_p` / `repeat_penalty` have the same names there as in llama.cpp.
+        // `top_p` and the penalties used to arrive through `extra_body`, which this driver merges at the top level, so Ollama never applied them.
+        let options = if request.temperature == 0.0
+            && request.max_tokens == 0
+            && request.top_p.is_none()
+            && request.frequency_penalty.is_none()
+            && request.presence_penalty.is_none()
+            && request.top_k.is_none()
+            && request.min_p.is_none()
+            && request.repeat_penalty.is_none()
+        {
             None
         } else {
             Some(OllamaOptions {
                 temperature: Some(request.temperature),
+                top_p: request.top_p,
+                frequency_penalty: request.frequency_penalty,
+                presence_penalty: request.presence_penalty,
+                top_k: request.top_k,
+                min_p: request.min_p,
+                repeat_penalty: request.repeat_penalty,
                 num_predict: if request.max_tokens > 0 {
                     Some(request.max_tokens)
                 } else {
@@ -513,6 +530,18 @@ struct OllamaRequest {
 struct OllamaOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frequency_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeat_penalty: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     num_predict: Option<u32>,
 }
@@ -1126,6 +1155,78 @@ mod tests {
         assert_eq!(wire.messages[0].content.as_deref(), Some("hello"));
         assert!(wire.messages[0].images.is_none());
         assert!(wire.tools.is_empty());
+    }
+
+    /// #8290: Ollama reads samplers from `options`.
+    /// `top_p` and the penalties used to arrive through `extra_body`, which this driver merges at the top level of the body, so they were posted where no sampler looks.
+    #[test]
+    fn build_request_places_sampling_params_in_options() {
+        let driver = OllamaDriver::new(String::new(), "http://x".to_string());
+        let mut r = req("llama3.1:8b");
+        r.top_p = Some(0.9);
+        r.frequency_penalty = Some(0.5);
+        r.presence_penalty = Some(-0.25);
+        r.top_k = Some(40);
+        r.min_p = Some(0.05);
+        r.repeat_penalty = Some(1.1);
+        let body = serde_json::to_value(driver.build_request(&r).expect("build")).unwrap();
+        let options = &body["options"];
+        // #8290 part 2: the llama.cpp samplers Ollama is usually tuned with, under the names its `options` block reads.
+        assert_eq!(options["top_k"], serde_json::json!(40));
+        assert_eq!(options["min_p"], serde_json::json!(0.05_f32));
+        assert_eq!(options["repeat_penalty"], serde_json::json!(1.1_f32));
+        assert_eq!(options["top_p"], serde_json::json!(0.9_f32));
+        assert_eq!(options["frequency_penalty"], serde_json::json!(0.5_f32));
+        assert_eq!(options["presence_penalty"], serde_json::json!(-0.25_f32));
+        assert_eq!(options["temperature"], serde_json::json!(0.7_f32));
+        assert_eq!(options["num_predict"], serde_json::json!(256));
+        for key in [
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "top_k",
+            "min_p",
+            "repeat_penalty",
+        ] {
+            assert!(
+                body.get(key).is_none(),
+                "{key} leaked to the top level: {body}"
+            );
+        }
+    }
+
+    /// Unset sampling parameters stay out of `options` rather than serializing as null, and a sampling-only request still gets an `options` block.
+    #[test]
+    fn build_request_omits_unset_sampling_params() {
+        let driver = OllamaDriver::new(String::new(), "http://x".to_string());
+        let body = serde_json::to_value(driver.build_request(&req("m")).expect("build")).unwrap();
+        for key in [
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "top_k",
+            "min_p",
+            "repeat_penalty",
+        ] {
+            assert!(body["options"].get(key).is_none(), "{body}");
+        }
+
+        let mut r = req("m");
+        r.temperature = 0.0;
+        r.max_tokens = 0;
+        r.top_p = Some(0.5);
+        let body = serde_json::to_value(driver.build_request(&r).expect("build")).unwrap();
+        assert_eq!(body["options"]["top_p"], serde_json::json!(0.5_f32));
+
+        let mut r = req("m");
+        r.temperature = 0.0;
+        r.max_tokens = 0;
+        r.repeat_penalty = Some(1.2);
+        let body = serde_json::to_value(driver.build_request(&r).expect("build")).unwrap();
+        assert_eq!(
+            body["options"]["repeat_penalty"],
+            serde_json::json!(1.2_f32)
+        );
     }
 
     #[test]
