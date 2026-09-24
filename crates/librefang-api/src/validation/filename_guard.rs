@@ -40,7 +40,8 @@ use librefang_kernel::injection_guard;
 
 /// Windows reserved device names, which cannot be used as a filename there even with an extension.
 ///
-/// Checked against the stem, case-insensitively.
+/// Checked against the stem — the text before the first dot — case-insensitively and after trimming trailing whitespace: Windows strips trailing spaces while canonicalising a path, so `con .txt` names the console just as `con.txt` does.
+/// The colon form `CON:` is not matched here but by [`WINDOWS_RESERVED_CHARS`], which refuses a colon wherever it appears.
 /// Refused on every platform rather than under `cfg(windows)`: a home directory is routinely copied or synced between machines, and a name that only breaks after the move is worse than one refused up front.
 ///
 /// Three groups in here are not DOS names and are easy to leave out:
@@ -56,14 +57,27 @@ pub const WINDOWS_RESERVED_STEMS: [&str; 30] = [
     "lpt6", "lpt7", "lpt8", "lpt9", "lpt¹", "lpt²", "lpt³",
 ];
 
+/// Characters Windows will not store in a filename, refused on every platform.
+///
+/// `CreateFile` answers `? * " < > |` with `ERROR_INVALID_NAME`, which a route would surface as a 500 — the same clean-refusal-versus-crash difference [`MAX_NAME_BYTES`] exists to make.
+/// The colon is the sharpest case: inside a path component it is the NTFS alternate-data-stream separator, and at the front of one it is the drive prefix, so `report 12:30.pdf` stores a file called `report 12` with the uploaded bytes hidden in a stream called `30.pdf`, and `C:evil.md` is a drive-relative path whose `Prefix::Disk` makes [`Path::join`] replace the base rather than extend it.
+/// Refused here for the reason the device names are: a home directory is routinely copied or synced onto Windows, where these either fail or mean something other than the name that was asked for, and the caller cannot see the machine that decides.
+///
+/// This is the class Windows refuses and nothing wider; every other punctuation mark stays legal, because the guard rejects by danger rather than by alphabet.
+///
+/// [`CreateFile`]: https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
+pub const WINDOWS_RESERVED_CHARS: [char; 7] = ['<', '>', ':', '"', '|', '?', '*'];
+
 /// Threat ids that warn but do not refuse a name.
 ///
 /// Each is a phrase whose false-positive rate *on a filename* outweighs what it catches there.
 /// `translate_execute` matches the two words "translate into", which in an internationalised product is an ordinary thing to call a document — `Translate into Spanish.md` is not an attack, and refusing it would repeat in another form the alphabet mistake that [`is_safe_shape`] exists to avoid.
-/// `system_colon` needs the colon, so it only fires on `system: overview.md`, and `you_are_now` needs the exact three-word run; both are plausible enough as prose in a filename to be worth a log line rather than a 400.
+/// `you_are_now` needs the exact three-word run; both are plausible enough as prose in a filename to be worth a log line rather than a 400.
+///
+/// `system_colon` is deliberately absent even though it is soft on the chat path: it needs a colon, [`is_safe_shape`] refuses a colon before the scanner runs, and an entry that can never fire would describe a policy this guard does not have.
 ///
 /// This is a *default*, not a policy: a route that stores names somewhere a model never sees can pass a wider list, and one that writes names into a prompt can pass `&[]`.
-pub const DEFAULT_SOFT_THREAT_IDS: &[&str] = &["translate_execute", "system_colon", "you_are_now"];
+pub const DEFAULT_SOFT_THREAT_IDS: &[&str] = &["translate_execute", "you_are_now"];
 
 /// A name accepted by [`FilenameGuard::check`].
 ///
@@ -128,7 +142,7 @@ impl std::fmt::Display for Rejected {
         match &self.reason {
             Reason::Shape => write!(
                 f,
-                "A {} may use any script, but not a path separator, a leading or trailing dot, surrounding whitespace, an invisible character, a Windows device name, or a drive-relative prefix such as `C:` — and at most {} characters, within the 255 bytes a filesystem will store.",
+                "A {} may use any script, but not a path separator, a character Windows cannot store (`< > : \" | ? *`), a leading or trailing dot, surrounding whitespace, an invisible character, or a Windows device name — and at most {} characters, within the 255 bytes a filesystem will store.",
                 self.kind, self.max_chars
             ),
             Reason::Injection { hard_signals, .. } => write!(
@@ -161,7 +175,8 @@ pub const MAX_NAME_BYTES: usize = 255;
 /// // This name is 128 three-byte characters — under one, over the other.
 /// assert!(guard.check(&"運".repeat(128)).is_err());
 /// // One ordinary component on Unix, a replacement for the base on Windows.
-/// // Refused on both, for the same reason the device names are.
+/// // Refused on both: a colon is not a character Windows stores, and the
+/// // same rule refuses the drive prefix wherever the request arrives.
 /// assert!(guard.check("C:evil.md").is_err());
 /// ```
 #[derive(Debug, Clone, Copy)]
@@ -239,27 +254,27 @@ impl FilenameGuard {
 /// What this refuses is a denylist of the classes that are actually dangerous — **not** an ASCII alphabet.
 /// This is an internationalised product; a base called `Manual de operaciones` or `運用マニュアル` is an ordinary thing to want, and an allowlist of `[A-Za-z0-9._-]` silently declares most of the world's writing systems invalid.
 /// The Unicode-property shorthand fails the same way from the other side: `[\p{Cc}\p{Cf}]` looks like the right generalisation of "invisible", and it rejects U+0600–U+0603, which are ordinary Arabic.
-/// That is why the invisible set below is an explicit table plus one explicit range, and not a category test.
+/// That is why the invisible set below is the repo's standalone-signal table plus two explicit ranges and two explicit separators, and not a category test.
 ///
 /// Each refusal earns its place:
 ///
 /// * a path separator of either family, or a leading `.` — the traversal and dotfile cases, and the leading-dot rule kills `.` and `..` at once;
 /// * control characters, NUL included;
 /// * leading or trailing whitespace and a trailing `.`, which Windows strips silently, so the name stored would not be the name asked for;
-/// * the invisible format characters, which make one name render as another — to the operator reviewing a list and to the model reading it;
+/// * the invisible format characters the repo treats as standalone signals, and the line and paragraph separators U+2028/U+2029 — one name renders as another, or as two, to the operator reviewing a list and to the model reading it;
 /// * the Unicode tag block, which mirrors printable ASCII one for one, renders as nothing anywhere, and is read by a model as the ASCII it mirrors;
+/// * the variation-selector supplement U+E0100–U+E01EF, which renders as nothing on its own and appears in no sequence this repo treats as ordinary text;
+/// * the characters Windows will not store in a name — `< > : " | ? *` — refused everywhere for the reason the device names are, with the colon also being NTFS's alternate-data-stream separator and the drive-prefix character;
 /// * the Windows reserved device names;
-/// * a leading `[A-Za-z]:`, the drive-relative form;
 /// * more than [`MAX_NAME_BYTES`] bytes, whatever the character cap says;
 /// * anything the platform's own parser does not read as exactly one ordinary component.
 ///
-/// The parser rule is the one a character denylist cannot replace, and the reason this module exists.
+/// The parser rule is the backstop a character denylist cannot replace, and the reason this module exists.
 /// Denying `/` and `\` still lets `C:evil.md` through, and on Windows that is a drive-relative path whose `Prefix::Disk` makes [`Path::join`] **replace** the base rather than extend it — so a write, or worse a `remove_dir_all`, lands outside the tree.
+/// The colon rule above refuses that name on every platform too, and the parser call remains because it asks the platform what it will read a name as, rather than trying to enumerate every prefix syntax a platform recognises.
 ///
-/// The drive-relative refusal above is a pattern rather than a parser call, and that is the point.
-/// [`Path::components`] reads `C:evil.md` as one ordinary component on Unix, where `:` is a legal filename character and `Path::join` extends rather than replaces — so the parser alone makes the protection depend on which OS the request happened to arrive at, and the main deployment target is the one that does not get it.
-/// A home directory is routinely copied or synced onto Windows, which is the argument that already refuses the device names everywhere, and it applies here with more force: a device name makes a write fail, while a drive-relative name makes it land somewhere else.
-/// The pattern is deliberately narrow — one ASCII letter, then `:` — so `notes:draft.md` stays an ordinary Unix name.
+/// Refusing those six characters and the colon everywhere is the same argument that already refuses the device names: a home directory is routinely copied or synced onto Windows, where a name is either unstorable or means something other than what was asked for, and the caller cannot see the machine that decides.
+/// The class is exactly what Windows refuses and nothing wider — `notes:draft.md` is refused, but `Q3 report (final).pdf` and `100% done.md` stay ordinary names, because a rule that reached past the class would be the alphabet mistake this function's first paragraph argues against.
 #[must_use]
 pub fn is_safe_shape(name: &str, max_chars: usize) -> bool {
     if name.is_empty() || name.chars().count() > max_chars || name.len() > MAX_NAME_BYTES {
@@ -268,28 +283,30 @@ pub fn is_safe_shape(name: &str, max_chars: usize) -> bool {
     if name.starts_with('.') || name.ends_with('.') || name.trim() != name {
         return false;
     }
-    // `is_control` does not cover the next two: a bidi override, a zero-width
-    // space or a tag character is category Cf, not Cc.
+    // `is_control` covers neither the invisible format characters nor the
+    // line/paragraph separators: a bidi override or a zero-width space is
+    // category Cf, and U+2028/U+2029 are Zl/Zp.
     //
-    // The tag block is checked as a range rather than through
-    // `INVISIBLE_FORMAT_CHARS`, which stops at U+FE0F. U+E0000–U+E007F are the
-    // standard smuggling channel and the one a name-based injection would
-    // actually use. Widening the shared table is the right long-term fix, but
-    // it lives in another crate and the chat path depends on its exact
-    // contents.
+    // The table is `INJECTION_SIGNAL_CHARS`, not the wider
+    // `INVISIBLE_FORMAT_CHARS` that prompt sanitizers strip. The wider set
+    // also carries U+200D and U+FE00–U+FE0F, which Unicode defines as
+    // components of ordinary emoji and presentation sequences, and refusing
+    // `team 👨👩👧.png` would be the alphabet mistake this module argues
+    // against, arriving through the wrong constant.
+    //
+    // The tag block and the variation-selector supplement are explicit ranges
+    // because neither table carries them: U+E0000–U+E007F mirror printable
+    // ASCII one for one, and U+E0100–U+E01EF renders as nothing on its own.
+    // Widening the shared table is the right long-term fix, but it lives in
+    // another crate and the chat path depends on its exact contents.
     if name.chars().any(|c| {
         c.is_control()
-            || matches!(c, '/' | '\\')
-            || librefang_types::text::INVISIBLE_FORMAT_CHARS.contains(&c)
+            || matches!(c, '/' | '\\' | '\u{2028}' | '\u{2029}')
+            || WINDOWS_RESERVED_CHARS.contains(&c)
+            || librefang_types::text::INJECTION_SIGNAL_CHARS.contains(&c)
             || ('\u{E0000}'..='\u{E007F}').contains(&c)
+            || ('\u{E0100}'..='\u{E01EF}').contains(&c)
     }) {
-        return false;
-    }
-
-    // Leading `[A-Za-z]:` — see this function's doc for why it is a pattern and
-    // not left to `components()` below.
-    let mut prefix = name.bytes();
-    if matches!(prefix.next(), Some(b) if b.is_ascii_alphabetic()) && prefix.next() == Some(b':') {
         return false;
     }
 
@@ -298,7 +315,15 @@ pub fn is_safe_shape(name: &str, max_chars: usize) -> bool {
         return false;
     }
 
-    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
+    // Windows canonicalises a path by stripping trailing spaces, so `con .txt`
+    // reaches the same console as `con.txt`; the stem is trimmed for the same
+    // reason the name itself may not end in whitespace.
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end()
+        .to_ascii_lowercase();
     !WINDOWS_RESERVED_STEMS.contains(&stem.as_str())
 }
 
@@ -363,49 +388,63 @@ mod tests {
             "/etc/passwd",
             "..\\..\\windows",
         ] {
-            let err = guard()
-                .check(name)
-                .expect_err("must refuse a name that is not one segment: {name}");
+            let Err(err) = guard().check(name) else {
+                panic!("must refuse a name that is not one segment: {name}");
+            };
             assert_eq!(err.reason(), &Reason::Shape, "{name}");
         }
     }
 
-    /// The case a character denylist misses.
+    /// The characters Windows will not store in a name, refused on every platform.
     ///
-    /// `C:evil.md` contains no separator, so a hand-written list of forbidden characters accepts it, and on Windows it is drive-relative: its `Prefix::Disk` makes `Path::join` replace the base rather than extend it, so the write lands wherever the process's current directory on `C:` happens to be.
-    /// Refused on every platform, for the reason the device names are: on Unix the parser reads this as one ordinary component and `Path::join` extends, so a parser call alone would protect only the machines that need it least while a synced directory carries the name onto one that needs it.
+    /// `CreateFile` answers `? * " < > |` with `ERROR_INVALID_NAME`, which a route would surface as a 500 — the same clean-refusal-versus-crash difference [`MAX_NAME_BYTES`] exists to make.
+    /// A colon is the sharpest case: inside a path component it is the NTFS alternate-data-stream separator, so `fs::write(root.join("report 12:30.pdf"), bytes)` stores a file called `report 12` and hides the uploaded bytes in a stream called `30.pdf`; at the front of a component it is the drive prefix, and `C:evil.md` is a drive-relative path whose `Prefix::Disk` makes `Path::join` replace the base rather than extend it, so the write lands wherever the process's current directory on `C:` happens to be.
+    /// Refused on every platform, for the reason the device names are: a home directory is routinely copied or synced onto Windows, where the name is either unstorable or means something other than what was asked for, and the caller cannot see that machine.
     #[test]
-    fn a_drive_relative_name_is_refused_on_every_platform() {
-        for name in ["C:evil.md", "c:evil.md", "Z:report.pdf", "C:"] {
-            assert_eq!(
-                guard().check(name).unwrap_err().reason(),
-                &Reason::Shape,
-                "{name}"
-            );
+    fn windows_unstorable_characters_are_refused_on_every_platform() {
+        for name in [
+            "what?.md",
+            "draft<v2>.md",
+            "a*b.md",
+            "a\"b.md",
+            "a|b.md",
+            "a>b.md",
+            // A colon anywhere, not only after a drive letter: the drive
+            // prefix and the stream separator are the same character.
+            "C:evil.md",
+            "c:evil.md",
+            "Z:report.pdf",
+            "C:",
+            "notes:draft.md",
+            "report 12:30.pdf",
+            "Chapter 1: Introduction.md",
+        ] {
+            let Err(err) = guard().check(name) else {
+                panic!("must refuse a name Windows cannot store: {name}");
+            };
+            assert_eq!(err.reason(), &Reason::Shape, "{name}");
         }
+
+        // The class is those characters and nothing wider, or the rule becomes
+        // the alphabet mistake this module argues against.
+        for name in [
+            "what!.md",
+            "100% done.md",
+            "Q3 report (final).pdf",
+            "notes-draft_v2.md",
+            "budget & forecast.csv",
+            "todo #4.md",
+            "price ~$10.txt",
+        ] {
+            assert!(guard().check(name).is_ok(), "{name}");
+        }
+
         // On Windows the refusal protects an invariant, and it is the same one
         // `an_accepted_name_always_extends_the_root` asserts from the other side.
         if cfg!(windows) {
             assert!(!Path::new("C:\\srv\\base")
                 .join("C:evil.md")
                 .starts_with("C:\\srv\\base"));
-        }
-    }
-
-    /// The refusal is the drive prefix and nothing wider.
-    ///
-    /// A colon anywhere else is an ordinary filename character on Unix, and refusing it would be the alphabet mistake this module exists to avoid.
-    #[test]
-    fn a_colon_that_is_not_a_drive_prefix_is_not_a_drive_relative_name() {
-        for name in [
-            "notes:draft.md",
-            "report 12:30.pdf",
-            "Chapter 1: Introduction.md",
-        ] {
-            assert!(
-                guard().check(name).is_ok(),
-                "a colon past the first two characters is not a drive prefix: {name}"
-            );
         }
     }
 
@@ -457,16 +496,43 @@ mod tests {
 
     #[test]
     fn invisible_and_tag_characters_are_refused() {
-        // One from the shared table, one bidi override, one from the tag block.
+        // One from the shared signal table, one bidi override, one from the
+        // tag block, one from the variation-selector supplement, and the two
+        // line/paragraph separators, which are Zl/Zp rather than Cf.
         for name in [
             "report\u{200B}.md",
             "report\u{202E}gnp.md",
             "report\u{E0041}.md",
             "\u{E0001}report.md",
+            "report\u{E0100}.md",
+            "report\u{2028}notes.md",
+            "report\u{2029}notes.md",
         ] {
             assert!(
                 guard().check(name).is_err(),
                 "an invisible code point must not survive into a stored name: {name:?}"
+            );
+        }
+    }
+
+    /// A name is refused by danger, not by alphabet — including the code points
+    /// Unicode defines as parts of an ordinary display sequence.
+    ///
+    /// `INVISIBLE_FORMAT_CHARS` carries U+200D and U+FE00–U+FE0F because a
+    /// prompt sanitizer strips them, but a filename check that inherits the
+    /// whole sanitizer set refuses `roadmap ❤️.md` and `team 👨‍👩‍👧.png`,
+    /// which are ordinary names on the machines that produce them.
+    #[test]
+    fn emoji_in_a_name_is_accepted() {
+        for name in [
+            "⚠️ incident report.md",
+            "roadmap ❤️.md",
+            "team 👨‍👩‍👧.png",
+            "☕.md",
+        ] {
+            assert!(
+                guard().check(name).is_ok(),
+                "an emoji sequence is an ordinary name: {name}"
             );
         }
     }
@@ -487,11 +553,26 @@ mod tests {
             // The superscript digits Windows reads as COM#/LPT# suffixes.
             "COM¹.md",
             "LPT².log",
+            // Windows strips trailing spaces while canonicalising a path, so
+            // the stem is compared after trimming them: `con .txt` names the
+            // console just as `con.txt` does.
+            "con .txt",
+            "CON .png",
+            "nul .md",
+            "aux  .log",
         ] {
+            assert!(guard().check(name).is_err(), "{name}");
+        }
+        // The historical DOS forms `CON:`, `NUL:` … need no stem match here:
+        // a colon is refused wherever it appears, which
+        // `windows_unstorable_characters_are_refused_on_every_platform`
+        // covers.
+        for name in ["con:", "nul:", "aux:", "com1:"] {
             assert!(guard().check(name).is_err(), "{name}");
         }
         // Only the stem matters, so a name that merely starts with one is fine.
         assert!(guard().check("console.md").is_ok());
+        assert!(guard().check("console .md").is_ok());
     }
 
     /// The character cap is the caller's; the 255-byte ceiling is the filesystem's, and both apply.
@@ -574,8 +655,20 @@ mod tests {
     /// Any id the runtime adds later refuses by default, rather than being silently admitted.
     #[test]
     fn an_id_absent_from_the_soft_list_refuses() {
-        assert!(!DEFAULT_SOFT_THREAT_IDS.contains(&"do_not_tell_the_user"));
-        assert!(guard().check("do not tell the user.md").is_err());
+        // `deception_hide` is the runtime's id for "do not tell the user". The
+        // assert names a real id on purpose: one the scanner never emits would
+        // be absent from every list and prove nothing.
+        assert!(!DEFAULT_SOFT_THREAT_IDS.contains(&"deception_hide"));
+        let err = guard()
+            .check("do not tell the user.md")
+            .expect_err("an id absent from the soft list must refuse");
+        let Reason::Injection { hard_signals, .. } = err.reason() else {
+            panic!("expected an injection refusal, got {:?}", err.reason());
+        };
+        assert!(
+            hard_signals.iter().any(|id| id == "deception_hide"),
+            "the refusal must name the runtime id that tripped it: {hard_signals:?}"
+        );
     }
 
     /// The shape check runs first, so an unsafe path never reaches the scanner.
