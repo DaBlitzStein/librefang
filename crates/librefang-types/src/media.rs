@@ -510,12 +510,31 @@ pub fn remove_avatars_except(avatars_dir: &std::path::Path, agent_id: &str, keep
 ///
 /// All four candidates are attempted, not just the first: an upload that changed format writes the new extension and removes the old one, and a crash between those two steps would otherwise leave a file that [`find_avatar`] could return for the rest of the agent's life.
 /// A missing file is not an error — this is called on deletion paths where "already gone" is the desired end state.
+///
+/// A caller that can do something with the failures — rather than only report a count — should call [`remove_avatars_reporting`], which is this function plus the errors it drops.
 pub fn remove_avatars(avatars_dir: &std::path::Path, agent_id: &str) -> usize {
-    AVATAR_EXTENSIONS
-        .iter()
-        .map(|ext| avatar_path(avatars_dir, agent_id, ext))
-        .filter(|path| std::fs::remove_file(path).is_ok())
-        .count()
+    remove_avatars_reporting(avatars_dir, agent_id).0
+}
+
+/// [`remove_avatars`], plus the files the filesystem refused to remove.
+///
+/// The count alone cannot tell "there was nothing stored" from "the directory would not give the file up": a permission error, a read-only mount or a directory where a candidate name belongs to a directory all land in `failures` here, while `NotFound` stays the non-error it is for [`remove_avatars`].
+/// `agent_purge` is the caller that needs the difference — it records every other failed step of a purge, and a deletion it cannot perform must not read as one that simply had nothing to do.
+pub fn remove_avatars_reporting(
+    avatars_dir: &std::path::Path,
+    agent_id: &str,
+) -> (usize, Vec<(std::path::PathBuf, std::io::Error)>) {
+    let mut removed = 0;
+    let mut failures = Vec::new();
+    for ext in AVATAR_EXTENSIONS {
+        let path = avatar_path(avatars_dir, agent_id, ext);
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failures.push((path, error)),
+        }
+    }
+    (removed, failures)
 }
 
 impl MediaAttachment {

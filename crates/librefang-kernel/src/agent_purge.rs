@@ -567,8 +567,19 @@ pub fn purge_agent(
     // `AgentId::from_name` means the next agent of that name would find it.
     let avatars_dir = cfg.effective_avatars_dir();
     for id in avatar_purge_ids(&plan) {
-        if librefang_types::media::remove_avatars(&avatars_dir, &id.to_string()) > 0 {
+        let (removed, errors) =
+            librefang_types::media::remove_avatars_reporting(&avatars_dir, &id.to_string());
+        if removed > 0 {
             report.avatar_removed = true;
+        }
+        // Recorded like every other step above: "nothing was stored" and "the
+        // directory would not give the file up" both leave `avatar_removed`
+        // false, and only these lines tell the operator which one happened.
+        // `plan_purge` predicts from `find_avatar` alone, so a refusal here is
+        // exactly where a `--dry-run` and the run would otherwise disagree
+        // with nothing said.
+        for (path, error) in errors {
+            failures.push(format!("remove avatar {}: {error}", path.display()));
         }
     }
 
