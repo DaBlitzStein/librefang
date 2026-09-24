@@ -2566,6 +2566,25 @@ mod tests {
     }
 
     #[test]
+    fn test_should_store_config_restart_only_swaps_in_hot_hybrid() {
+        // Plan with NO hot actions and NO noop changes: the only change is restart-required.
+        let plan = ReloadPlan {
+            restart_required: true,
+            restart_reasons: vec!["api_listen".to_string()],
+            hot_actions: vec![],
+            noop_changes: vec![],
+            config_stored: false,
+        };
+        // Discarding this plan is what let `POST /api/config/reload` answer
+        // "no changes detected" against a file that plainly changed.
+        assert!(should_store_config(ReloadMode::Hot, &plan));
+        assert!(should_store_config(ReloadMode::Hybrid, &plan));
+        // Off / Restart must still withhold the runtime change.
+        assert!(!should_store_config(ReloadMode::Off, &plan));
+        assert!(!should_store_config(ReloadMode::Restart, &plan));
+    }
+
+    #[test]
     fn test_should_store_config_off_restart_never_swap() {
         let plan = ReloadPlan {
             restart_required: false,

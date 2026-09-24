@@ -92,3 +92,72 @@ async fn a_reload_keeps_a_key_the_writer_never_stated() {
 
     kernel.shutdown();
 }
+
+/// A document that spells a documented alias must reload instead of failing on a duplicate field.
+///
+/// `serde_json::to_value(base)` emits the canonical name (`api_listen`) while the document keeps
+/// whatever the operator wrote (`listen_addr`), so merging the two as plain maps left both keys in
+/// one object and serde rejected the result with `duplicate field api_listen`. Every reload of such
+/// a config failed, while boot still worked because it passes no base and no overlay runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reload_accepts_a_documented_alias_for_a_stated_field() {
+    let (kernel, tmp) = MockKernelBuilder::new()
+        .with_config(|c| c.api_listen = "127.0.0.1:4545".to_string())
+        .build();
+
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        "listen_addr = \"0.0.0.0:9999\"\n",
+    )
+    .expect("write the document that uses the alias");
+
+    kernel.reload_config().await.expect(
+        "the alias names the same field serde accepts at boot; the reload must not reject it",
+    );
+
+    assert_eq!(
+        kernel.config_snapshot().api_listen,
+        "0.0.0.0:9999",
+        "the alias must land in the canonical field"
+    );
+
+    kernel.shutdown();
+}
+
+/// A stated map replaces the live one wholesale, so an entry the document omits is revoked.
+///
+/// `provider_api_keys` is a `BTreeMap`, and a recursive overlay keeps every entry the document does
+/// not restate — an operator rotating or revoking one provider key writes the stated table without
+/// that entry and the key stays in use, with the reload reporting no change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reload_drops_a_map_entry_the_stated_table_omits() {
+    let (kernel, tmp) = MockKernelBuilder::new()
+        .with_config(|c| {
+            c.provider_api_keys
+                .insert("openai".to_string(), "OPENAI_API_KEY".to_string());
+            c.provider_api_keys
+                .insert("anthropic".to_string(), "ANTHROPIC_API_KEY".to_string());
+        })
+        .build();
+
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        "[provider_api_keys]\nanthropic = \"ANTHROPIC_API_KEY\"\n",
+    )
+    .expect("write the document that revokes the openai entry");
+
+    kernel.reload_config().await.expect("reload");
+
+    let after = kernel.config_snapshot();
+    assert!(
+        !after.provider_api_keys.contains_key("openai"),
+        "the stated table must replace the live map, not merge into it: {:?}",
+        after.provider_api_keys
+    );
+    assert_eq!(
+        after.provider_api_keys.get("anthropic").map(String::as_str),
+        Some("ANTHROPIC_API_KEY"),
+    );
+
+    kernel.shutdown();
+}
