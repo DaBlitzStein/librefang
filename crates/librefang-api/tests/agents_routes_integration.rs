@@ -3912,3 +3912,77 @@ async fn test_concurrent_avatar_uploads_do_not_erase_each_other() {
         "exactly one avatar may survive the race: {files:?}"
     );
 }
+
+/// Cloning an agent that has an avatar duplicates the image under the clone's
+/// own id and repoints the clone at its own route (#8349).
+///
+/// The identity copy used to carry the source's `avatar_url` verbatim, so the
+/// clone rendered the source's picture and a deleted source removed the
+/// clone's face with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_clone_duplicates_the_source_avatar_under_the_clones_own_id() {
+    let h = boot(TEST_TOKEN).await;
+    let src = spawn_named(&h.state, "clone-avatar-source");
+    let source_path = format!("/api/agents/{src}/avatar");
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_bytes(
+            &source_path,
+            TINY_PNG.to_vec(),
+            "application/octet-stream",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "seeding the source avatar: {body:?}"
+    );
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{src}/clone"),
+            serde_json::json!({"new_name": "clone-avatar-dest"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "clone failed: {body:?}");
+    let new_id = body["agent_id"]
+        .as_str()
+        .expect("agent_id in response")
+        .to_string();
+    let new_agent: AgentId = new_id.parse().expect("clone id is a uuid");
+
+    // The clone serves its own copy, from its own route.
+    let (status, headers, bytes) =
+        send_raw(h.app.clone(), get(&format!("/api/agents/{new_id}/avatar"))).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the clone must serve its own image, not 404 on a reference it inherited"
+    );
+    assert_eq!(headers["content-type"], "image/png");
+    assert_eq!(bytes, TINY_PNG);
+    assert_eq!(
+        stored_identity(&h.state, new_agent).avatar_url,
+        Some(librefang_types::media::agent_avatar_url(&new_id)),
+        "the clone's reference must name its own route, not the source's"
+    );
+    assert!(
+        librefang_types::media::avatar_path(&avatars_dir(&h), &new_id, "png").is_file(),
+        "the avatar must be duplicated under the clone's own id"
+    );
+
+    // The source still serves its own image, untouched.
+    let (status, headers, bytes) = send_raw(h.app.clone(), get(&source_path)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "cloning must not move or alias the source's avatar"
+    );
+    assert_eq!(headers["content-type"], "image/png");
+    assert_eq!(bytes, TINY_PNG);
+}
