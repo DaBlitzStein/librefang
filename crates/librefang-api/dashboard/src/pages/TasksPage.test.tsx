@@ -406,6 +406,24 @@ describe("TasksPage", () => {
       });
     });
 
+    it("restricts priority and timeout_secs to whole numbers", () => {
+      // Both fields are integers server-side (`i64` / `u32`) and a fractional
+      // value is a 400 from `/api/tasks`. The browser can block that before
+      // submit only if the field declares an integer step — and `min={0}` on
+      // the timeout mirroring the server's `as_u64()` rejection of negatives.
+      renderPage();
+      fireEvent.click(screen.getByRole("button", { name: /tasks.new_task/i }));
+
+      const priority = screen.getByPlaceholderText("tasks.field_priority_placeholder");
+      const timeout = screen.getByPlaceholderText("tasks.field_timeout_placeholder");
+
+      expect(priority).toHaveAttribute("type", "number");
+      expect(priority).toHaveAttribute("step", "1");
+      expect(timeout).toHaveAttribute("type", "number");
+      expect(timeout).toHaveAttribute("step", "1");
+      expect(timeout).toHaveAttribute("min", "0");
+    });
+
     it("omits priority and timeout_secs from the payload when left blank", async () => {
       const mutate = vi.fn();
       useCreateTaskMock.mockReturnValue(makeMutation({ mutate }));

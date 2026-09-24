@@ -467,8 +467,15 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
             <label className="block text-xs font-semibold text-text-dim mb-1.5">
               {t("tasks.field_priority")}
             </label>
+            {/* `step={1}` is not decoration: the server stores an integer
+                (`priority` is `i64`, `timeout_secs` is `u32`) and rejects a
+                fractional value with a 400, so a number field that lets one
+                through hands the operator an error the browser could have
+                caught. Default step is 1, but only when unset — stating it
+                keeps the field whole-number after any future edit. */}
             <input
               type="number"
+              step={1}
               value={priority}
               onChange={(e) => setPriority(e.target.value)}
               placeholder={t("tasks.field_priority_placeholder")}
@@ -479,8 +486,13 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
             <label className="block text-xs font-semibold text-text-dim mb-1.5">
               {t("tasks.field_timeout")}
             </label>
+            {/* `step={1}` for the same reason as `priority`: seconds are an
+                integer (`u32`), and `min={0}` matches the server's
+                `as_u64()` rejection of negatives. `0` is valid and means
+                "never reclaim". */}
             <input
               type="number"
+              step={1}
               min={0}
               value={timeoutSecs}
               onChange={(e) => setTimeoutSecs(e.target.value)}
