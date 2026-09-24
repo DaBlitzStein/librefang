@@ -412,6 +412,10 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
                         models,
                         mut model_info,
                     } => {
+                        // Measured before the enrichment round trip: `/model/info` is an
+                        // optional side request, and counting it reported a latency the
+                        // inference path never pays.
+                        let latency_ms = start.elapsed().as_millis() as u64;
                         enrich_with_declared_model_info(
                             provider,
                             base_url,
@@ -422,7 +426,7 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
                         .await;
                         return ProbeResult {
                             reachable: true,
-                            latency_ms: start.elapsed().as_millis() as u64,
+                            latency_ms,
                             discovered_models: models,
                             discovered_model_info: model_info,
                             error: None,
@@ -473,6 +477,10 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
             models,
             mut model_info,
         } => {
+            // Measured before the enrichment round trip: `/model/info` is an
+            // optional side request, and counting it reported a latency the
+            // inference path never pays.
+            let latency_ms = start.elapsed().as_millis() as u64;
             enrich_with_declared_model_info(
                 provider,
                 base_url,
@@ -483,7 +491,7 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
             .await;
             ProbeResult {
                 reachable: true,
-                latency_ms: start.elapsed().as_millis() as u64,
+                latency_ms,
                 discovered_models: models,
                 discovered_model_info: model_info,
                 error: None,
@@ -725,7 +733,10 @@ struct DeclaredModelFigures {
 /// This is the only source of a gateway's own capacity and price figures that the `/v1/models` listing does not carry: LiteLLM's listing returns the bare OpenAI shape (`id` / `object` / `created` / `owned_by`), so a gateway fronting the operator's own deployments would otherwise have every model registered at the catalog's "unknown" sentinel with no price at all.
 ///
 /// Costs are USD per *token* in this payload and USD per **million** tokens in [`librefang_types::model_catalog::ModelCatalogEntry`], so the conversion happens here rather than at each consumer.
-/// `max_input_tokens` is preferred over `max_tokens` because the latter is ambiguous on a gateway that conflates the full window with the output ceiling, matching [`crate::model_metadata::parse_openai_model`]'s key priority.
+/// The context window is read through [`crate::model_metadata::parse_openai_model`], which owns the key priority (`max_model_len` → `context_length` → `context_window` → `max_input_tokens` → `max_tokens`) and rejects a `0` at each key; `max_input_tokens` is still preferred over `max_tokens`, the ambiguous key a gateway uses for whichever of the two it conflates.
+///
+/// A `model_name` may repeat: LiteLLM answers with one row per deployment, and several deployments can share an alias.
+/// Duplicate rows are merged field by field rather than overwritten — a later row fills in only what the entry does not have yet, so every figure any row declared survives, a duplicate that is silent about a field cannot erase what an earlier row said, and the first declaration wins when two rows disagree about the same field.
 fn parse_litellm_model_info(
     body: &serde_json::Value,
 ) -> std::collections::HashMap<String, DeclaredModelFigures> {
@@ -743,14 +754,7 @@ fn parse_litellm_model_info(
             continue;
         };
         let info = item.get("model_info");
-        let context_window = info
-            .and_then(|i| i.get("max_input_tokens"))
-            .and_then(serde_json::Value::as_u64)
-            .or_else(|| {
-                info.and_then(|i| i.get("max_tokens"))
-                    .and_then(serde_json::Value::as_u64)
-            })
-            .filter(|n| *n > 0);
+        let context_window = info.and_then(crate::model_metadata::parse_openai_model);
         let max_output_tokens = info
             .and_then(|i| i.get("max_output_tokens"))
             .and_then(serde_json::Value::as_u64)
@@ -761,15 +765,15 @@ fn parse_litellm_model_info(
                 .filter(|cost| cost.is_finite() && *cost >= 0.0)
                 .map(|cost| cost * 1_000_000.0)
         };
-        out.insert(
-            name.to_lowercase(),
-            DeclaredModelFigures {
-                context_window,
-                max_output_tokens,
-                input_cost_per_m: per_token_to_per_million("input_cost_per_token"),
-                output_cost_per_m: per_token_to_per_million("output_cost_per_token"),
-            },
-        );
+        let entry = out.entry(name.to_lowercase()).or_default();
+        entry.context_window = entry.context_window.or(context_window);
+        entry.max_output_tokens = entry.max_output_tokens.or(max_output_tokens);
+        entry.input_cost_per_m = entry
+            .input_cost_per_m
+            .or_else(|| per_token_to_per_million("input_cost_per_token"));
+        entry.output_cost_per_m = entry
+            .output_cost_per_m
+            .or_else(|| per_token_to_per_million("output_cost_per_token"));
     }
     out
 }
@@ -1554,6 +1558,92 @@ mod tests {
             {"model_name": "m", "model_info": {
                 "max_tokens": 4_096u64, "max_input_tokens": 128_000u64
             }},
+        ]});
+        let declared = parse_litellm_model_info(&body);
+        assert_eq!(declared.get("m").unwrap().context_window, Some(128_000));
+    }
+
+    /// A `0` under a higher-priority key means "not declared", not a verdict:
+    /// the zero-rejection must run per key so it cannot short-circuit the
+    /// fallback and discard a window a later key does state. Regression: the
+    /// filter used to sit after the `or_else`, so `max_input_tokens: 0`
+    /// swallowed the row's `max_tokens`.
+    #[test]
+    fn test_parse_litellm_model_info_a_zero_key_does_not_block_the_fallback() {
+        let body = serde_json::json!({"data": [
+            {"model_name": "m", "model_info": {
+                "max_input_tokens": 0u64, "max_tokens": 128_000u64
+            }},
+        ]});
+        let declared = parse_litellm_model_info(&body);
+        assert_eq!(declared.get("m").unwrap().context_window, Some(128_000));
+    }
+
+    /// The context window is read under the same key priority the shared
+    /// [`crate::model_metadata::parse_openai_model`] documents:
+    /// `max_model_len` → `context_length` → `context_window` →
+    /// `max_input_tokens` → `max_tokens`, and a `0` under the leading key
+    /// falls through to the next one.
+    #[test]
+    fn test_parse_litellm_model_info_uses_the_shared_key_priority() {
+        let body = serde_json::json!({"data": [
+            {"model_name": "vllm-shaped", "model_info": {
+                "max_model_len": 0u64, "context_length": 32_768u64,
+                "max_input_tokens": 128_000u64
+            }},
+            {"model_name": "proxied", "model_info": {
+                "context_window": 64_000u64, "max_input_tokens": 128_000u64
+            }},
+        ]});
+        let declared = parse_litellm_model_info(&body);
+        assert_eq!(
+            declared.get("vllm-shaped").unwrap().context_window,
+            Some(32_768)
+        );
+        assert_eq!(
+            declared.get("proxied").unwrap().context_window,
+            Some(64_000)
+        );
+    }
+
+    /// LiteLLM answers with one row per deployment, and several deployments
+    /// can share a `model_name`. The fold must keep every figure any row
+    /// declared — a duplicate row that is silent about a field cannot wipe it
+    /// (it used to overwrite the whole entry), and a row that declares a field
+    /// the others left out fills it in.
+    #[test]
+    fn test_parse_litellm_model_info_merges_duplicate_rows_for_one_alias() {
+        let body = serde_json::json!({"data": [
+            {"model_name": "team-default", "model_info": {
+                "max_input_tokens": 128_000u64, "max_output_tokens": 8_192u64,
+                "input_cost_per_token": 0.000003
+            }},
+            // Same alias, second deployment: declares nothing, and under
+            // last-write-wins would have replaced the row above with `None`s.
+            {"model_name": "team-default", "model_info": {
+                "max_tokens": null, "max_input_tokens": null,
+                "max_output_tokens": null, "input_cost_per_token": null
+            }},
+            // Third deployment, declares the half the first one was missing.
+            {"model_name": "team-default", "model_info": {
+                "output_cost_per_token": 0.000015
+            }},
+        ]});
+        let declared = parse_litellm_model_info(&body);
+        let figures = declared.get("team-default").expect("row present");
+        assert_eq!(figures.context_window, Some(128_000));
+        assert_eq!(figures.max_output_tokens, Some(8_192));
+        assert!((figures.input_cost_per_m.unwrap() - 3.0).abs() < 1e-9);
+        assert!((figures.output_cost_per_m.unwrap() - 15.0).abs() < 1e-9);
+    }
+
+    /// Two duplicate rows that disagree about the same field: the first
+    /// declaration wins, so a later deployment cannot silently lower a limit.
+    #[test]
+    fn test_parse_litellm_model_info_first_declaration_wins_on_conflict() {
+        let body = serde_json::json!({"data": [
+            {"model_name": "m", "model_info": {"max_input_tokens": 128_000u64}},
+            {"model_name": "m", "model_info": {"max_input_tokens": 64_000u64}},
         ]});
         let declared = parse_litellm_model_info(&body);
         assert_eq!(declared.get("m").unwrap().context_window, Some(128_000));
