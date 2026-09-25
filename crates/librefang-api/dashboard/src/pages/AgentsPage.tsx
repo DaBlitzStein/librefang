@@ -61,6 +61,7 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
+import { useModelRoutingInertReason } from "../lib/queries/config";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import { AgentModelParamFields } from "../components/AgentModelParamFields";
 import { selectModelLimits } from "../lib/modelLimits";
@@ -191,6 +192,28 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
       <span className="text-text-dim text-sm">{label}</span>
       <span className="text-sm text-right min-w-0">{children}</span>
     </div>
+  );
+}
+
+/**
+ * The existing-agent "Edit full configuration" form (#8446).
+ *
+ * An existing agent carries the kernel's answer on its detail payload as `routing_inert_reason`, so the Routing section warns from that rather than from a second config fetch.
+ * Split out of the drawer so a test can render it without AgentsPage's ~20 hooks.
+ */
+export function ManifestEditorForm({
+  agent,
+  ...formProps
+}: { agent: Pick<AgentDetail, "routing_inert_reason"> } & Omit<
+  React.ComponentProps<typeof AgentManifestForm>,
+  "nameField" | "routingInertReason"
+>) {
+  return (
+    <AgentManifestForm
+      {...formProps}
+      nameField="readonly"
+      routingInertReason={agent.routing_inert_reason ?? null}
+    />
   );
 }
 
@@ -1147,6 +1170,10 @@ export function AgentsPage() {
         : undefined,
     [mcpServersQuery.data],
   );
+  // #8446: a new agent has no detail payload to carry `routing_inert_reason`, so the form's Routing section reads the kernel mode off the shared config cache, fetched only while the form is open.
+  const routingInertReasonQuery = useModelRoutingInertReason({
+    enabled: showCreate && createMode === "form",
+  });
   const serializedFormToml = useMemo(
     () => serializeManifestForm(formState, formExtras),
     [formState, formExtras],
@@ -2516,6 +2543,67 @@ export function AgentsPage() {
       </div>
     );
 
+    // Shared per-tool checklist rendered under an expanded group, for both
+    // the assigned and available sections (#6565 follow-up — previously
+    // only the assigned section could expand). MCP rows stay non-clickable
+    // (`handleToggleTool` no-ops for them) — the server as a whole is
+    // granted/revoked from the group header, individual MCP tools are only
+    // ever filtered further by `tool_allowlist` / `tool_blocklist`.
+    const renderGroupToolList = (
+      groupName: string,
+      groupTools: ToolDefinition[],
+      mcpGroup: boolean,
+    ) => (
+      <div className="ml-4 mt-1.5 flex flex-col gap-1">
+        {mcpGroup && (
+          <p className="px-2.5 py-1.5 text-[10.5px] text-text-dim/70">
+            {t("agents.detail.tools_mcp_readonly", {
+              defaultValue:
+                "MCP tools are granted per server via mcp_servers in agent.toml. Toggle the group above to grant or revoke this server — individual tools are further filtered by tool_allowlist and tool_blocklist.",
+            })}
+          </p>
+        )}
+        {groupTools.map((tool) => {
+          const isActive = isToolActive(groupName, tool);
+          const blocked = mcpGroup && isToolBlocked(tool.name, blocklist);
+          return (
+            <div
+              key={tool.name}
+              onClick={() => handleToggleTool(groupName, tool.name)}
+              className={`flex items-center gap-2 px-2.5 py-1.5 rounded border transition-colors ${
+                mcpGroup ? "cursor-default" : "cursor-pointer"
+              } ${
+                isActive
+                  ? `border-brand/20 bg-main/40${mcpGroup ? "" : " hover:border-red-400/30"}`
+                  : `border-border-subtle bg-main/20 opacity-60${mcpGroup ? "" : " hover:border-brand/30 hover:opacity-100"}`
+              }`}
+            >
+              <div
+                className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${
+                  isActive ? "border-brand bg-brand/20" : "border-text-dim/30"
+                }`}
+              >
+                {isActive && <Check className="w-2 h-2 text-brand" />}
+              </div>
+              <span className="font-mono text-[11px] text-text-main truncate flex-1 min-w-0">
+                {tool.name}
+              </span>
+              {blocked && (
+                <span className="font-mono text-[9.5px] text-amber-500/80 shrink-0">
+                  {t("agents.detail.tools_blocked", { defaultValue: "blocklisted" })}
+                </span>
+              )}
+              {tool.description && (
+                <span className="font-mono text-[9.5px] text-text-dim/60 truncate max-w-[50%] hidden sm:inline">
+                  {tool.description}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
@@ -3378,6 +3466,9 @@ export function AgentsPage() {
                           ["model_param.top_p", detailAgent.model.top_p, false],
                           ["model_param.frequency_penalty", detailAgent.model.frequency_penalty, false],
                           ["model_param.presence_penalty", detailAgent.model.presence_penalty, false],
+                          ["model_param.top_k", detailAgent.model.top_k, false],
+                          ["model_param.min_p", detailAgent.model.min_p, false],
+                          ["model_param.repeat_penalty", detailAgent.model.repeat_penalty, false],
                           ["model_param.context_window", detailAgent.model.context_window, true],
                           ["model_param.max_output_tokens", detailAgent.model.max_output_tokens, true],
                         ] as const).map(([key, value, isTokenCount]) => (
@@ -3799,7 +3890,8 @@ export function AgentsPage() {
               </p>
             ) : (
               <div className="max-h-[65vh] overflow-y-auto pr-1">
-                <AgentManifestForm
+                <ManifestEditorForm
+                  agent={detailAgent}
                   value={manifestEditorFormState}
                   onChange={setManifestEditorFormState}
                   providers={formProviderOptions}
@@ -3809,7 +3901,6 @@ export function AgentsPage() {
                   skillCatalog={skillCatalogForForm}
                   toolCatalog={toolCatalogForForm}
                   mcpCatalog={mcpCatalogForForm}
-                  nameLocked
                 />
               </div>
             )}
@@ -3844,557 +3935,3 @@ export function AgentsPage() {
           </div>
         </DrawerPanel>
       )}
-
-      {/* Tools Editor Modal */}
-      {showToolsEditor && toolsEditorAgentId && (
-        <DrawerPanel isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg">
-          <div className="p-6 space-y-5">
-            <div>
-              <p className="text-[11px] text-text-dim/70">
-                {t("agents.tools_editor_desc", { defaultValue: "Review and manage the agent's tools. Declared tools are the primary set; allowlist/blocklist are additional filters." })}
-              </p>
-              {!toolsEditorLoading && (
-                <p className="mt-2 text-[10px] text-text-dim/50 font-mono">
-                  {capabilitiesToolsDraft.length} {t("agents.tools_declared_count", { defaultValue: "declared" })} · {availableToolNames.length} {t("agents.tools_available", { defaultValue: "tools available" })} · {toolAllowlistDraft.length} {t("agents.tools_allowed_count", { defaultValue: "allowed" })} · {toolBlocklistDraft.length} {t("agents.tools_blocked_count", { defaultValue: "blocked" })}
-                </p>
-              )}
-            </div>
-
-            {toolsEditorLoading ? (
-              <div className="flex items-center gap-2 text-xs text-text-dim py-8 justify-center">
-                <Loader2 className="w-4 h-4 animate-spin" /> {t("common.loading")}
-              </div>
-            ) : (
-              <>
-                <div className="rounded-xl border border-border-subtle bg-main/40 px-4 py-3">
-                  <div>
-                    <div className="text-sm font-bold text-text">{t("agents.tools_disabled_label", { defaultValue: "Disable all tools" })}</div>
-                    <p className="mt-1 text-[11px] text-text-dim/70">
-                      {toolsDisabledState
-                        ? t("agents.tools_disabled_hint_active", { defaultValue: "Tools are disabled for this agent; editing allow/block filters is blocked here. Re-enable tools in the agent config to manage filters." })
-                        : t("agents.tools_disabled_hint", { defaultValue: "Tools are currently enabled. Allowlist and blocklist below control which tools remain available." })}
-                    </p>
-                  </div>
-                </div>
-
-                {toolsDisabledState && (
-                  <div className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-[11px] text-warning">
-                    {t("agents.tools_disabled_save_blocked", { defaultValue: "All tools are disabled for this agent. To re-enable tools, edit the agent manifest or config directly — this editor only manages allow/block filters." })}
-                  </div>
-                )}
-
-                <div className="space-y-2">
-                  <div>
-                    <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-2">
-                      {t("agents.tools_declared_title", { defaultValue: "Declared Tools" })}
-                    </h4>
-                    <p className="text-[11px] text-text-dim/70 mb-3">
-                      {t("agents.tools_declared_desc", { defaultValue: "Tools this agent can use. Leave empty for unrestricted access to all tools." })}
-                    </p>
-                  </div>
-                  <MultiSelectCmdk
-                    options={availableToolNames}
-                    optionMeta={toolsEditorOptionMeta}
-                    value={capabilitiesToolsDraft}
-                    onChange={setCapabilitiesToolsDraft}
-                    placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
-                    disabled={toolsDisabledState}
-                    allowFreeText
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <div>
-                    <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-2">
-                      {t("agents.tools_allowlist_title", { defaultValue: "Allowlist" })}
-                    </h4>
-                    <p className="text-[11px] text-text-dim/70 mb-3">
-                      {t("agents.tools_allowlist_desc", { defaultValue: "Additional filter: only these tools remain available. Leave empty to skip this filter." })}
-                    </p>
-                  </div>
-                  <MultiSelectCmdk
-                    options={availableToolNames}
-                    optionMeta={toolsEditorOptionMeta}
-                    value={toolAllowlistDraft}
-                    onChange={setToolAllowlistDraft}
-                    placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
-                    disabled={toolsDisabledState}
-                    allowFreeText
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <div>
-                    <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-2">
-                      {t("agents.tools_blocklist_title", { defaultValue: "Blocklist" })}
-                    </h4>
-                    <p className="text-[11px] text-text-dim/70 mb-3">
-                      {t("agents.tools_blocklist_desc", { defaultValue: "These tools are blocked even if they are present in the allowlist." })}
-                    </p>
-                  </div>
-                  <MultiSelectCmdk
-                    options={availableToolNames}
-                    optionMeta={toolsEditorOptionMeta}
-                    value={toolBlocklistDraft}
-                    onChange={setToolBlocklistDraft}
-                    placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
-                    disabled={toolsDisabledState}
-                    allowFreeText
-                  />
-                </div>
-
-                {conflictingToolNames.length > 0 && (
-                  <div className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-[11px] text-warning">
-                    {t("agents.tools_conflict_warning", {
-                      defaultValue: "{{count}} tools are in both lists. Blocklist wins and those tools will be removed from the allowlist when you save.",
-                      count: conflictingToolNames.length,
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-
-            <div className="flex flex-col gap-2 pt-2">
-              {toolsDisabledState && (
-                <p className="text-center text-[10px] text-text-dim/50">
-                  {t("agents.tools_disabled_save_hint", { defaultValue: "Re-enable tools in the agent config to modify filters" })}
-                </p>
-              )}
-              <div className="flex gap-2">
-              <Button variant="primary" size="sm" className="flex-1" disabled={toolsEditorLoading || toolsEditorSaving || toolsDisabledState} onClick={async () => {
-                if (!toolsEditorAgentId) return;
-                setToolsEditorSaving(true);
-                try {
-                  const resolvedAllowlist = toolAllowlistDraft.filter((name) => !toolBlocklistDraft.includes(name));
-                  await updateToolsMutation.mutateAsync({
-                    agentId: toolsEditorAgentId,
-                    payload: {
-                      capabilities_tools: capabilitiesToolsDraft,
-                      tool_allowlist: resolvedAllowlist,
-                      tool_blocklist: toolBlocklistDraft,
-                    },
-                  });
-                  addToast(
-                    conflictingToolNames.length > 0
-                      ? t("agents.tools_saved_conflicts", { defaultValue: "Tools updated. Conflicts were resolved in favor of the blocklist." })
-                      : t("agents.tools_saved", { defaultValue: "Tools updated" }),
-                    "success",
-                  );
-                  qc.invalidateQueries({ queryKey: agentQueries.detail(toolsEditorAgentId).queryKey });
-                  if (detailAgent?.id === toolsEditorAgentId) {
-                    void refreshDetailAgent(toolsEditorAgentId);
-                  }
-                  closeToolsEditor();
-                } catch (err) {
-                  addToast(toastErr(err, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })), "error");
-                } finally {
-                  setToolsEditorSaving(false);
-                }
-              }}>
-                {toolsEditorSaving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}
-                {toolsEditorSaving ? t("common.saving") : t("common.save")}
-              </Button>
-              <Button variant="secondary" size="sm" onClick={closeToolsEditor}>
-                {t("common.cancel")}
-              </Button>
-              </div>
-            </div>
-          </div>
-        </DrawerPanel>
-      )}
-
-      {/* Create Agent Modal */}
-      <DrawerPanel
-        isOpen={showCreate}
-        onClose={closeCreateModal}
-        title={t("agents.create_agent")}
-        size="2xl"
-      >
-        <div className="p-5 space-y-4">
-          {/* Mode tabs — switching between Form and TOML round-trips the
-              manifest in both directions. We only re-parse when content
-              actually differs, so re-clicking the same tab is a no-op. */}
-          <div className="flex gap-2">
-            <button onClick={() => switchCreateMode("form")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "form" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
-              {t("agents.from_form")}
-            </button>
-            <button onClick={() => switchCreateMode("template")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "template" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
-              {t("agents.from_template")}
-            </button>
-            <button onClick={() => switchCreateMode("toml")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "toml" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
-              {t("agents.from_toml")}
-            </button>
-          </div>
-          {tomlParseError && (
-            // The error is set when leaving TOML→Form fails, so the user
-            // is bounced back to TOML; the message must show on the TOML
-            // tab too, otherwise the rejected switch is invisible.
-            <p className="text-xs text-error">
-              {t("agents.form.toml_parse_error", { msg: tomlParseError })}
-            </p>
-          )}
-
-          {createMode === "form" ? (
-            <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-4 max-h-[60vh] overflow-y-auto pr-1">
-              <AgentManifestForm
-                value={formState}
-                onChange={setFormState}
-                providers={formProviderOptions}
-                models={formModelOptions}
-                invalidFields={formErrors}
-                extras={formExtras}
-                skillCatalog={skillCatalogForForm}
-                toolCatalog={toolCatalogForForm}
-                mcpCatalog={mcpCatalogForForm}
-              />
-              <div className="space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex gap-1">
-                    <button
-                      type="button"
-                      onClick={() => setPreviewTab("toml")}
-                      className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
-                        previewTab === "toml"
-                          ? "bg-brand text-white"
-                          : "text-text-dim hover:text-text"
-                      }`}
-                    >
-                      {t("agents.form.preview_toml")}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPreviewTab("markdown")}
-                      className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
-                        previewTab === "markdown"
-                          ? "bg-brand text-white"
-                          : "text-text-dim hover:text-text"
-                      }`}
-                    >
-                      {t("agents.form.preview_markdown")}
-                    </button>
-                  </div>
-                  <div className="flex gap-2 items-center">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const text =
-                          previewTab === "toml" ? serializedFormToml : serializedFormMarkdown;
-                        void copyToClipboard(text).then((ok) =>
-                          ok
-                            ? addToast(t("agents.form.copied"), "success")
-                            : addToast(
-                                t("common.copy_failed", { defaultValue: "Copy failed" }),
-                                "error",
-                              ),
-                        );
-                      }}
-                      className="text-[10px] font-bold text-text-dim hover:text-brand"
-                      title={t("agents.form.copy")}
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                    </button>
-                    {previewTab === "toml" && (
-                      <button
-                        type="button"
-                        onClick={() => switchCreateMode("toml")}
-                        className="text-[10px] font-bold text-brand hover:underline"
-                      >
-                        {t("agents.form.switch_to_toml")}
-                      </button>
-                    )}
-                  </div>
-                </div>
-                <pre className="rounded-xl border border-border-subtle bg-main px-3 py-2 text-[11px] font-mono text-text-dim overflow-auto max-h-[55vh] whitespace-pre-wrap break-all">
-                  {previewTab === "toml" ? serializedFormToml : serializedFormMarkdown}
-                </pre>
-              </div>
-            </div>
-          ) : createMode === "template" ? (
-            <div className="space-y-3">
-              <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
-                <select value={templateName}
-                  onChange={e => setTemplateName(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
-                  <option value="">{t("agents.template_placeholder")}</option>
-                  {localizedTemplates.map(tmpl => (
-                    <option key={tmpl.name} value={tmpl.name}>{tmpl.displayName}</option>
-                  ))}
-                </select>
-                {selectedTemplate && (
-                  <div className="mt-2 rounded-xl border border-border-subtle/60 bg-surface/60 px-3 py-2">
-                    <p className="text-xs font-bold text-text">{selectedTemplate.displayName}</p>
-                    <p className="mt-1 text-[11px] leading-relaxed text-text-dim">{selectedTemplate.displayDescription}</p>
-                  </div>
-                )}
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">
-                  {t("agents.template_custom_name", { defaultValue: "Agent Name (optional)" })}
-                </label>
-                <input
-                  type="text"
-                  value={templateCustomName}
-                  onChange={e => setTemplateCustomName(e.target.value)}
-                  placeholder={
-                    selectedTemplate?.name ??
-                    t("agents.template_custom_name_placeholder", {
-                      defaultValue: "Leave blank to use template default",
-                    })
-                  }
-                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand"
-                />
-                <p className="text-[10px] text-text-dim mt-1">
-                  {t("agents.template_custom_name_hint", {
-                    defaultValue: "Override the template's default name so you can run multiple agents from the same template.",
-                  })}
-                </p>
-              </div>
-              <button
-                type="button"
-                disabled={!templateName || templateTomlLoading}
-                  onClick={async () => {
-                    if (!templateName) return;
-                    setTemplateTomlLoading(true);
-                    try {
-                      const toml = await templateTomlMutation.mutateAsync(templateName);
-                    // Carry the user's custom name across when dropping into
-                    // TOML mode — otherwise the input they just typed gets
-                    // silently discarded and the template's original name wins.
-                    const customName = templateCustomName.trim();
-                    const patched = customName
-                      ? toml.replace(
-                          /^name\s*=\s*(?:"[^"]*"|'[^']*')/m,
-                          `name = "${customName.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
-                        )
-                      : toml;
-                    setManifestToml(patched);
-                    setCreateMode("toml");
-                  } catch {
-                    addToast(
-                      t("agents.loading_template_toml_failed", {
-                        defaultValue: "Failed to load template TOML",
-                      }),
-                      "error",
-                    );
-                  } finally {
-                    setTemplateTomlLoading(false);
-                  }
-                }}
-                className="text-[10px] font-bold text-brand hover:underline disabled:text-text-dim disabled:no-underline disabled:cursor-not-allowed"
-              >
-                {templateTomlLoading ? (
-                  <span className="inline-flex items-center gap-1">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    {t("agents.loading_template_toml", { defaultValue: "Loading template…" })}
-                  </span>
-                ) : (
-                  t("agents.edit_template_toml", {
-                    defaultValue: "Edit TOML for advanced customization →",
-                  })
-                )}
-              </button>
-            </div>
-          ) : (
-            <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.manifest_toml")}</label>
-              <textarea value={manifestToml} onChange={e => {
-                  setManifestToml(e.target.value);
-                  // Clear stale parse error so the user gets fresh feedback
-                  // on their next switch attempt instead of seeing a message
-                  // that may already be addressed.
-                  if (tomlParseError) setTomlParseError(null);
-                }}
-                placeholder={'[agent]\nname = "my-agent"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n\n[thinking]\nbudget_tokens = 10000\nstream_thinking = false'}
-                rows={12}
-                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-brand resize-none" />
-              <p className="text-[9px] text-text-dim/50 mt-1 flex items-center gap-1">
-                <Brain className="w-3 h-3" />
-                {t("agents.thinking_toml_hint")}
-              </p>
-            </div>
-          )}
-
-          {spawnMutation.error && (
-            <p className="text-xs text-error">{toastErr(spawnMutation.error, String(spawnMutation.error))}</p>
-          )}
-
-          <div className="flex gap-2 pt-2">
-            <Button variant="primary" className="flex-1"
-              onClick={() => {
-                const onSuccess = () => {
-                  addToast(
-                    t("agents.agent_created", { defaultValue: "Agent created" }),
-                    "success",
-                  );
-                  closeCreateModal();
-                };
-                const onError = (e: Error) => {
-                  addToast(
-                    e?.message ||
-                      t("agents.create_failed", { defaultValue: "Failed to create agent" }),
-                    "error",
-                  );
-                };
-                if (createMode === "form") {
-                  // Names already preserved from `[workspaces]` entries the
-                  // form can't render (mount-based declarations) — without
-                  // this a form row can collide with one of them and the
-                  // duplicate key only surfaces as an opaque server-side
-                  // TOML parse error instead of the inline message below.
-                  const errors = validateManifestForm(
-                    formState,
-                    preservedWorkspaceNamesFromExtras(formExtras),
-                  );
-                  setFormErrors(new Set(errors));
-                  if (errors.length > 0) return;
-                  spawnMutation.mutate(
-                    { manifest_toml: serializedFormToml },
-                    { onSuccess, onError },
-                  );
-                  return;
-                }
-                const customName = templateCustomName.trim();
-                spawnMutation.mutate(
-                  createMode === "template"
-                    ? { template: templateName, ...(customName ? { name: customName } : {}) }
-                    : { manifest_toml: manifestToml },
-                  { onSuccess, onError },
-                );
-              }}
-              disabled={
-                spawnMutation.isPending ||
-                templateTomlLoading ||
-                (createMode === "form"
-                  ? !formState.name.trim() ||
-                    !formState.model.provider.trim() ||
-                    !formState.model.model.trim()
-                  : createMode === "template"
-                    ? !templateName.trim()
-                    : !manifestToml.trim())
-              }>
-              {spawnMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
-              {t("agents.create_agent")}
-            </Button>
-            <Button variant="secondary" onClick={closeCreateModal}>{t("common.cancel")}</Button>
-          </div>
-        </div>
-      </DrawerPanel>
-
-      {/* Prompts & Experiments Modal */}
-      {showPrompts && detailAgent && (
-        <PromptsExperimentsModal
-          agentId={detailAgent.id}
-          agentName={t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}
-          onClose={() => setShowPrompts(false)}
-        />
-      )}
-      <ConfirmDialog
-        isOpen={confirmDialog !== null}
-        title={confirmDialog?.title ?? ""}
-        message={confirmDialog?.message ?? ""}
-        tone={confirmDialog?.tone}
-        onConfirm={() => confirmDialog?.onConfirm()}
-        onClose={() => setConfirmDialog(null)}
-      />
-
-      {/* Clone Agent Modal (#6566) — collects the required `new_name`. */}
-      <Modal
-        isOpen={cloneDialog !== null}
-        onClose={() => setCloneDialog(null)}
-        title={t("agents.clone_title", { defaultValue: "Clone agent" })}
-        size="sm"
-      >
-        <form
-          className="p-6 space-y-4"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (!cloneDialog) return;
-            const newName = cloneNameDraft.trim();
-            if (!newName) return;
-            try {
-              const result = await cloneMutation.mutateAsync({
-                agentId: cloneDialog.agentId,
-                payload: {
-                  new_name: newName,
-                  include_skills: cloneIncludeSkills,
-                  include_tools: cloneIncludeTools,
-                },
-              });
-              const notice = cloneResultNotice(result);
-              if (notice.partial) {
-                addToast(t("agents.clone_partial", {
-                  defaultValue: "Agent cloned with incomplete initialization: {{warnings}}",
-                  warnings: notice.warnings,
-                }), "info");
-              } else {
-                addToast(t("agents.clone_succeeded", { defaultValue: "Agent cloned" }), "success");
-              }
-              setCloneDialog(null);
-            } catch (err) {
-              addToast(toastErr(err, t("agents.clone_failed", { defaultValue: "Failed to clone agent" })), "error");
-            }
-          }}
-        >
-          <p className="text-[11px] text-text-dim/70">
-            {t("agents.clone_desc", {
-              defaultValue: "Copies {{name}}'s manifest into a new agent. The name must be unique.",
-              name: cloneDialog?.sourceName ?? "",
-            })}
-          </p>
-          <div className="space-y-1.5">
-            <label
-              htmlFor="clone-agent-name"
-              className="block text-[10px] font-black text-text-dim uppercase tracking-widest"
-            >
-              {t("agents.clone_name_label", { defaultValue: "New agent name" })}
-            </label>
-            <Input
-              id="clone-agent-name"
-              value={cloneNameDraft}
-              onChange={(e) => setCloneNameDraft(e.target.value)}
-              placeholder={t("agents.clone_name_placeholder", { defaultValue: "my-agent-copy" })}
-              maxLength={256}
-              autoFocus
-            />
-          </div>
-          <div className="space-y-2">
-            <label className="flex items-center gap-2 text-[11px] text-text-dim">
-              <input
-                type="checkbox"
-                checked={cloneIncludeSkills}
-                onChange={(e) => setCloneIncludeSkills(e.target.checked)}
-              />
-              {t("agents.clone_include_skills", { defaultValue: "Copy skill assignments" })}
-            </label>
-            <label className="flex items-center gap-2 text-[11px] text-text-dim">
-              <input
-                type="checkbox"
-                checked={cloneIncludeTools}
-                onChange={(e) => setCloneIncludeTools(e.target.checked)}
-              />
-              {t("agents.clone_include_tools", { defaultValue: "Copy tool assignments" })}
-            </label>
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="secondary" onClick={() => setCloneDialog(null)}>
-              {t("common.cancel")}
-            </Button>
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={!cloneNameDraft.trim() || cloneMutation.isPending}
-            >
-              {cloneMutation.isPending
-                ? t("common.saving", { defaultValue: "Saving..." })
-                : t("agents.clone")}
-            </Button>
-          </div>
-        </form>
-      </Modal>
-    </div>
-  );
-}

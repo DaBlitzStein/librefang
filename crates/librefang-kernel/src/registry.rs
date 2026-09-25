@@ -675,6 +675,36 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's top-k sampling. `None` = inherit.
+    pub fn update_top_k(&self, id: AgentId, value: Option<u32>) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.top_k = value;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Update an agent's minimum-probability (min-p) sampling. `None` = inherit.
+    pub fn update_min_p(&self, id: AgentId, value: Option<f32>) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.min_p = value;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Update an agent's repetition penalty. `None` = inherit.
+    pub fn update_repeat_penalty(&self, id: AgentId, value: Option<f32>) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.repeat_penalty = value;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's context-window override (`agent.toml: [model] context_window`).
     ///
     /// A limit, not a preference: it tells the runtime what the endpoint can
@@ -782,6 +812,24 @@ impl AgentRegistry {
     pub fn update_channels(&self, id: AgentId, channels: Vec<String>) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
             entry.manifest.channels = channels;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Replace an agent's named-workspace declarations.
+    ///
+    /// The whole map is replaced rather than merged, matching every other
+    /// allowlist setter here: a caller that wants to add one entry sends the
+    /// map it wants to end up with, and "remove the last one" stays expressible.
+    pub fn update_workspaces(
+        &self,
+        id: AgentId,
+        workspaces: std::collections::HashMap<String, librefang_types::agent::WorkspaceDecl>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.workspaces = workspaces;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
@@ -919,7 +967,9 @@ impl AgentRegistry {
     }
 
     /// Update an agent's name (also updates the name index).
-    pub fn update_name(&self, id: AgentId, new_name: String) -> LibreFangResult<()> {
+    ///
+    /// Returns the previous name, read under the same entry lock as the write, so a caller reconciling on-disk state (IDENTITY.md, #8469) compares against the name this call actually replaced rather than one read earlier.
+    pub fn update_name(&self, id: AgentId, new_name: String) -> LibreFangResult<String> {
         // #4980 nit: reject renames into the reserved `_operator:`
         // namespace — synthetic operator-node step-result names would
         // collide with the real agent and make run history ambiguous.
@@ -952,7 +1002,7 @@ impl AgentRegistry {
         };
         self.name_index.remove(&old_name);
         self.notify_changed();
-        Ok(())
+        Ok(old_name)
     }
 
     /// Update an agent's description.

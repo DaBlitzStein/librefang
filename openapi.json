@@ -1032,6 +1032,36 @@
               }
             }
           },
+          "400": {
+            "description": "A field is malformed: an invalid agent ID, colour or avatar URL, a personality value containing a line break, or personality values that would grow IDENTITY.md past the 32 KiB identity-file cap. A rejected personality value changes nothing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The new name is taken, or a personality field was sent and the agent's IDENTITY.md cannot be edited in place (missing, not a regular file, or its front matter is never closed). When a personality field was sent, nothing was changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
           "423": {
             "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
             "content": {
@@ -1530,7 +1560,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "PATCH /api/agents/{id}/identity — Update an agent's visual identity.",
+        "summary": "PATCH /api/agents/{id}/identity — Update an agent's appearance and personality.",
         "operationId": "update_agent_identity",
         "parameters": [
           {
@@ -1544,7 +1574,7 @@
           }
         ],
         "requestBody": {
-          "description": "Identity fields to update. PATCH semantics: an omitted or `null` field preserves the stored value, and a partial body never nulls the fields it does not mention. A field cannot be set back to `null`, because `null` already means \"not provided\"; sending an empty string stores an empty string, which is the closest thing to clearing one. Identical in behaviour to the six identity fields of `PATCH /api/agents/{id}/config`.",
+          "description": "Identity fields to update. Appearance (`emoji`, `avatar_url`, `color`) is stored in the agent registry; personality (`archetype`, `vibe`, `greeting_style`) is written into the front matter of the agent's `.identity/IDENTITY.md`, which is what reaches the prompt, leaving the rest of that file untouched. PATCH semantics: an omitted or `null` field preserves the current value, and a partial body never nulls the fields it does not mention. A field cannot be set back to `null`, because `null` already means \"not provided\"; sending an empty string stores an empty string, which is the closest thing to clearing one. Identical in behaviour to the six identity fields of `PATCH /api/agents/{id}/config`.",
           "content": {
             "application/json": {
               "schema": {
@@ -1556,7 +1586,37 @@
         },
         "responses": {
           "200": {
-            "description": "Update an agent's visual identity",
+            "description": "Update an agent's appearance and personality",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A colour, avatar URL or personality value is malformed; nothing was changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The agent's IDENTITY.md cannot be edited in place (missing, not a regular file, or its front matter is never closed); nothing was changed",
             "content": {
               "application/json": {
                 "schema": {
@@ -2146,7 +2206,7 @@
         ],
         "responses": {
           "200": {
-            "description": "An agent's model routing mode and router override",
+            "description": "An agent's model routing mode and router override, plus `routing_inert_reason` (`\"stable_mode\"` when the kernel mode makes routing inert, else null) and `pinned_model`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2208,7 +2268,7 @@
         },
         "responses": {
           "200": {
-            "description": "Updated model routing settings",
+            "description": "Updated model routing settings, with the same fields as the GET; `routing_inert_reason` is `\"stable_mode\"` when the saved settings have no effect under the current kernel mode, else null",
             "content": {
               "application/json": {
                 "schema": {
@@ -7883,13 +7943,340 @@
         }
       }
     },
+    "/api/knowledge": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "GET /api/knowledge — every base with its documents' totals and its holders.",
+        "operationId": "list_bases",
+        "responses": {
+          "200": {
+            "description": "Shared knowledge bases",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "POST /api/knowledge — create an empty base.",
+        "operationId": "create_base",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A base of that name already exists, or one that differs from it only by case",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}": {
+      "delete": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "DELETE /api/knowledge/{name} — remove the base and revoke it everywhere.",
+        "operationId": "delete_base",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}/agents": {
+      "put": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "PUT /api/knowledge/{name}/agents — set exactly which agents hold this base.",
+        "operationId": "set_holders",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetHoldersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Holders updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}/documents": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "GET /api/knowledge/{name}/documents — list the documents in a base.",
+        "operationId": "list_documents",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Documents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/{name}/documents/{filename}": {
+      "put": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "PUT /api/knowledge/{name}/documents/{filename} — write a document.",
+        "description": "The body is the file, raw. That is the convention `POST /api/agents/{id}/upload`\nalready set in this codebase, and it keeps `multipart` off the dependency list\nfor a payload that is one file.",
+        "operationId": "put_document",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "description": "Document filename",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Document too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "DELETE /api/knowledge/{name}/documents/{filename} — remove a document.",
+        "operationId": "delete_document",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Knowledge base name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "description": "Document filename",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such base or document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/logs/stream": {
       "get": {
         "tags": [
           "system"
         ],
         "summary": "GET /api/logs/stream — SSE endpoint for real-time audit log streaming.",
-        "description": "Streams new audit entries as Server-Sent Events. Accepts optional query\nparameters for filtering:\n  - `level`  — filter by classified level (info, warn, error)\n  - `filter` — text substring filter across action/detail/agent_id\n\nA heartbeat ping is sent every 15 seconds to keep the connection alive.\nThe endpoint polls the audit log every second. The first poll sends up\nto the most recent 200 entries as a bounded backfill (prevents a flood\nwhen subscribing against a long-running daemon); every subsequent poll\nuses a cursor (`since_seq`) so bursts faster than the previous\n`recent(200)` sliding window are no longer silently truncated.",
+        "description": "Streams new audit entries as Server-Sent Events. Accepts optional query\nparameters for filtering:\n  - `level`  — filter by classified level (info, warn, error, debug), classified from the entry's `outcome` (leading `error` / `fail` / `denied` or a status code ending `_failed` / `_error` / `_denied` such as `db_remove_failed`, `warn`, `debug`), falling back to the action so `PermissionDenied` and `BudgetExceeded` are errors; each event carries the classification as `level`\n  - `filter` — text substring filter across action/detail/agent_id\n\nA heartbeat ping is sent every 15 seconds to keep the connection alive.\nThe endpoint polls the audit log every second. The first poll sends up\nto the most recent 200 entries as a bounded backfill (prevents a flood\nwhen subscribing against a long-running daemon); every subsequent poll\nuses a cursor (`since_seq`) so bursts faster than the previous\n`recent(200)` sliding window are no longer silently truncated.",
         "operationId": "logs_stream",
         "responses": {
           "200": {
@@ -12232,6 +12619,7 @@
           "sessions"
         ],
         "summary": "DELETE /api/sessions/:id — Delete a session.",
+        "description": "Cascades to every descendant session (#7752) — deleting a session that\nspawned sub-agent runs takes the whole delegated subtree with it. The\nresponse body reports what actually came down rather than a bare 204, so\na caller who only asked to delete one id can tell a subtree was removed\n(#7991 review).",
         "operationId": "delete_session",
         "parameters": [
           {
@@ -12246,7 +12634,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Session deleted"
+            "description": "Session deleted, cascading to descendants",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -12369,7 +12764,7 @@
           "skills"
         ],
         "summary": "GET /api/skills — List installed skills.",
-        "description": "`categories` always reflects all skills regardless of the `?category=` filter.",
+        "description": "`categories` always reflects all skills regardless of the `?category=` filter.\n\nEach item carries both directions of a skill's tool relationship, named so they cannot be confused (#8445): `tools_count` counts the tools the skill *provides*, while `required_tools` / `required_tools_count` / `required_capabilities` echo the manifest's `[requirements]` table, i.e. what the agent must be granted for the skill to run.\nThe `required_*` lists are always present; a skill that declares nothing reports empty lists, which is a different fact from \"unknown\".",
         "operationId": "list_skills",
         "responses": {
           "200": {
@@ -12754,6 +13149,7 @@
           "skills"
         ],
         "summary": "Get detailed information about a specific skill, including linked files,\ntags, evolution history, and readiness status.",
+        "description": "`tools` lists the tools the skill *provides*; `required_tools` and `required_capabilities` list what it *needs* from the host, from the manifest's `[requirements]` table (#8445).\nBoth `required_*` lists are always present and empty when the skill declares nothing.",
         "operationId": "get_skill_detail",
         "parameters": [
           {
@@ -13485,6 +13881,87 @@
         }
       }
     },
+    "/api/templates/{name}/registry-diff": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/templates/:name/registry-diff — Compare local agent type with its registry original.",
+        "description": "Scoped to `TemplateSource::AgentType` like `restore_from_registry` — a name that only resolves\nthrough a live agent's own workspace manifest has nothing `restore` can ever act on, so a diff\noffered for it is a comparison for a control that cannot succeed (#8042).",
+        "operationId": "get_agent_type_registry_diff",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Diff between local and registry versions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent type or registry version not found"
+          },
+          "409": {
+            "description": "The name belongs to a live agent"
+          }
+        }
+      }
+    },
+    "/api/templates/{name}/restore": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/:name/restore — Overwrite local agent type with the registry version.",
+        "description": "Records two snapshots, because this write destroys the local copy by design.\nA manifest whose current content came from a hand-edit of the file has no snapshot anywhere, so the pre-restore content is recorded first (`pre-registry-restore`) — otherwise, after the overwrite, that content is gone from disk and was never in history either, leaving nothing to go back to.\nThat first snapshot is a precondition, not a courtesy: if it fails the route answers 500 and writes nothing, because proceeding would destroy the only copy of the content it just failed to save.\nThe post-restore content is then recorded too (`registry-restore`), so `GET /api/templates/{name}/history` reports the registry copy as current rather than the previous dashboard save.\nThat second one is best-effort — losing it costs a history row, not the manifest.",
+        "operationId": "restore_agent_type_from_registry",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent type restored from registry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent type or registry version not found"
+          },
+          "409": {
+            "description": "The name belongs to a live agent"
+          },
+          "500": {
+            "description": "The pre-restore snapshot could not be recorded; nothing was overwritten"
+          }
+        }
+      }
+    },
     "/api/templates/{name}/toml": {
       "get": {
         "tags": [
@@ -13513,6 +13990,103 @@
                 }
               }
             }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "PUT /api/templates/:name/toml — Replace the template manifest with raw TOML.",
+        "description": "Accepts the full manifest as `text/plain` TOML. Parses, validates, and persists it.\nThis is the full-manifest counterpart of the flat-shape `PUT /templates/{name}`.\n\nThree contracts worth stating before touching this handler:\n\n- **Identity is pinned to the URL.** The document's `name` key is overwritten with the path segment, so an operator who edits `name = \"…\"` in the raw-TOML tab gets a 200 whose response carries the URL's name — the same deliberate pin the flat `PUT /templates/{name}` makes.\n  It is asserted by `toml_put_pins_the_name_to_the_url_rather_than_the_body`.\n- **Keys the manifest does not recognize are reported, not dropped in silence.**\n  `AgentManifest` is `#[serde(default)]` without `deny_unknown_fields` (forward compatibility with manifests written by a newer daemon), so a typo like `sesion_mode` would otherwise parse cleanly, persist, and vanish from the file.\n  The handler round-trips the submitted document through `AgentManifest` and reports any top-level key that did not survive as `unknown_keys` in the 200 response, with a `WARN` log naming the template.\n- **Every save is snapshotted into the version history**, with the change source `\"toml\"`, the same way create and the flat `PUT` snapshot theirs.\n  A write path that skips the snapshot makes `GET /api/templates/{name}/history` report the previous save as current while the file on disk is something else, and a history that is silently incomplete is worse than none because nothing distinguishes the two.",
+        "operationId": "put_agent_template_toml",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Template updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid TOML"
+          },
+          "404": {
+            "description": "No such agent type"
+          },
+          "409": {
+            "description": "Name belongs to a live agent"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/{name}/toml — Create a new agent type from raw TOML, in one write (#8028).",
+        "description": "The dashboard's original create flow was `POST /api/templates` (name + description over a\ndefault manifest) followed immediately by `PUT /api/templates/{name}/toml` (the manifest the\noperator actually authored). That leaves a half-built stub on disk if the second call fails —\nwith no way to retry it, since a repeated `POST /api/templates` now answers 409 — and records\ntwo version-history snapshots for the one document the operator meant to create.\n\nThis endpoint takes the full manifest up front and claims the name atomically, the same claim\n[`create_agent_type`] uses for the flat-shape create, so the type exists in exactly one form\nfrom the first successful write and history carries exactly one snapshot for it.",
+        "operationId": "post_agent_template_toml",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Agent type created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid TOML or name"
+          },
+          "409": {
+            "description": "Name already taken by an agent type or a live agent"
           }
         }
       }
@@ -15894,6 +16468,25 @@
           }
         }
       },
+      "BaseHolderRequest": {
+        "type": "object",
+        "required": [
+          "agent_id"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`\"rw\"` or `\"r\"`. Defaults to read-only: a knowledge base is a thing to\nread, and an agent that can rewrite the documents every other agent\nreads is a decision the operator should have to make explicitly."
+          }
+        },
+        "additionalProperties": false
+      },
       "BulkActionResult": {
         "type": "object",
         "description": "Outcome of a single bulk action (delete/start/stop).",
@@ -16189,6 +16782,18 @@
             }
           }
         }
+      },
+      "CreateBaseRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "EphemeralRunRollupView": {
         "type": "object",
@@ -16755,13 +17360,15 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Personality, written into the front matter of the agent's `.identity/IDENTITY.md`, which is what reaches the prompt (#8447)."
           },
           "avatar_url": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Appearance, stored in the agent registry."
           },
           "base_url": {
             "type": [
@@ -16773,7 +17380,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Appearance, stored in the agent registry."
           },
           "context_window": {
             "type": [
@@ -16794,7 +17402,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Appearance, stored in the agent registry."
           },
           "fallback_models": {
             "type": [
@@ -16815,7 +17424,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Personality, written into the front matter of the agent's `.identity/IDENTITY.md`, which is what reaches the prompt (#8447)."
           },
           "max_output_tokens": {
             "type": [
@@ -16834,6 +17444,14 @@
             "format": "int32",
             "description": "Maximum tokens to request for the LLM response.\n\nTri-state: omit the key to leave it unchanged, send `null` to hand the\nfield back to \"inherit\" (the per-model override, then the system\ndefault, supplies it), or send a number to pin it for this agent.",
             "minimum": 0
+          },
+          "min_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Minimum-probability (min-p) sampling (0.0–1.0). Same tri-state as [`Self::max_tokens`]."
           },
           "model": {
             "type": [
@@ -16861,6 +17479,14 @@
               "null"
             ]
           },
+          "repeat_penalty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Repetition penalty (0.01–2.0, `1.0` = off). Same tri-state as [`Self::max_tokens`]."
+          },
           "system_prompt": {
             "type": [
               "string",
@@ -16875,6 +17501,15 @@
             "format": "float",
             "description": "Sampling temperature (0.0–2.0). Lower values are more deterministic.\nSame tri-state as [`Self::max_tokens`]."
           },
+          "top_k": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Top-k sampling (≥ 1). Same tri-state as [`Self::max_tokens`].",
+            "minimum": 0
+          },
           "top_p": {
             "type": [
               "number",
@@ -16887,7 +17522,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Personality, written into the front matter of the agent's `.identity/IDENTITY.md`, which is what reaches the prompt (#8447)."
           },
           "web_search_augmentation": {
             "type": [
@@ -17161,6 +17797,22 @@
         "properties": {
           "enabled": {
             "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SetHoldersRequest": {
+        "type": "object",
+        "required": [
+          "agents"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BaseHolderRequest"
+            },
+            "description": "The complete set of agents that should hold this base. Agents absent\nfrom the list have it revoked, which is what makes \"share with nobody\"\nexpressible as `[]` rather than needing a separate route."
           }
         },
         "additionalProperties": false
@@ -17456,43 +18108,49 @@
       },
       "UpdateIdentityRequest": {
         "type": "object",
-        "description": "Request body for updating agent visual identity.\n\nEvery field is optional and carries PATCH semantics: an omitted or `null` field preserves the stored value, and an empty string stores an empty string (`GET /api/agents/{id}` then reports `\"\"`, not `null`).\nSee `merge_agent_identity` in the parent module for why `null` cannot mean \"clear\".",
+        "description": "Request body for updating an agent's identity.\n\nThe fields have two owners (#8447).\nAppearance (`emoji`, `avatar_url`, `color`) is stored in the agent registry and drawn by the dashboard.\nPersonality (`archetype`, `vibe`, `greeting_style`) is written into the front matter of `{workspace}/.identity/IDENTITY.md`, the file the system prompt injects, and is read back from that file (`GET /api/agents/{id}/files/IDENTITY.md`).\n\nEvery field is optional and carries PATCH semantics: an omitted or `null` field preserves the current value, and an empty string stores an empty string (`GET /api/agents/{id}` then reports `\"\"`, not `null`; a personality key is written as a bare `key:`).\nSee `merge_agent_identity` in the parent module for why `null` cannot mean \"clear\".",
         "properties": {
           "archetype": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Personality, written into IDENTITY.md's front matter."
           },
           "avatar_url": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Appearance, stored in the registry."
           },
           "color": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Appearance, stored in the registry."
           },
           "emoji": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Appearance, stored in the registry."
           },
           "greeting_style": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Personality, written into IDENTITY.md's front matter."
           },
           "vibe": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Personality, written into IDENTITY.md's front matter."
           }
         },
         "additionalProperties": false

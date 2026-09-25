@@ -152,7 +152,7 @@ export const agentQueries = {
     }),
   // Per-agent channel allowlist (#7742) — backs the Configure drawer's
   // Channels section.
-  agentChannels: (agentId: string) =>
+  channels: (agentId: string) =>
     queryOptions({
       queryKey: agentKeys.channels(agentId),
       queryFn: () => getAgentChannels(agentId),
@@ -230,5 +230,5 @@ export function useAgentManifest(agentId: string, options: QueryOverrides = {}) 
 }
 
 export function useAgentChannels(agentId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(agentQueries.agentChannels(agentId), options));
+  return useQuery(withOverrides(agentQueries.channels(agentId), options));
 }

@@ -43,6 +43,9 @@ export interface ManifestFormState {
     top_p: string;
     frequency_penalty: string;
     presence_penalty: string;
+    top_k: string;
+    min_p: string;
+    repeat_penalty: string;
     // Endpoint limits rather than sampling preferences: what the model can
     // read and emit, not how it should sound.
     context_window: string;
@@ -217,6 +220,9 @@ export const emptyManifestForm = (): ManifestFormState => ({
     top_p: "",
     frequency_penalty: "",
     presence_penalty: "",
+    top_k: "",
+    min_p: "",
+    repeat_penalty: "",
     context_window: "",
     max_output_tokens: "",
     api_key_env: "",
@@ -380,6 +386,9 @@ const FORM_MODEL_KEYS = new Set([
   "top_p",
   "frequency_penalty",
   "presence_penalty",
+  "top_k",
+  "min_p",
+  "repeat_penalty",
   "context_window",
   "max_output_tokens",
   "api_key_env",
@@ -534,6 +543,17 @@ const writeStringScalar = (lines: string[], key: string, value: string): void =>
   if (!value) return;
   lines.push(`${key} = ${escapeTomlString(value)}`);
 };
+// `system_prompt` is not tri-state like the sampling knobs above it: a blank
+// value here means "this agent has no system prompt", not "no opinion, fall
+// back to the canned default" — that was the removed flat editor's documented
+// contract (`system_prompt_hint`: "Left blank, the agent type stores a blank
+// prompt — nothing is substituted for you"). Routing it through the
+// skip-if-empty `writeStringScalar` drops the key on an intentionally blank
+// prompt, and `ModelConfig`'s container-level `#[serde(default)]` then fills
+// the missing key with "You are a helpful AI agent." on the very next save.
+const writeSystemPrompt = (lines: string[], value: string): void => {
+  lines.push(`system_prompt = ${escapeTomlString(value)}`);
+};
 const writeNumberScalar = (lines: string[], key: string, value: number | null): void => {
   if (value === null) return;
   lines.push(`${key} = ${value}`);
@@ -686,12 +706,15 @@ export const serializeManifestForm = (
   const modelBody: string[] = [];
   writeStringScalar(modelBody, "provider", form.model.provider.trim());
   writeStringScalar(modelBody, "model", form.model.model.trim());
-  writeStringScalar(modelBody, "system_prompt", form.model.system_prompt);
+  writeSystemPrompt(modelBody, form.model.system_prompt);
   writeNumberScalar(modelBody, "temperature", parseFloatish(form.model.temperature));
   writeNumberScalar(modelBody, "max_tokens", parseInteger(form.model.max_tokens));
   writeNumberScalar(modelBody, "top_p", parseFloatish(form.model.top_p));
   writeNumberScalar(modelBody, "frequency_penalty", parseSignedFloat(form.model.frequency_penalty));
   writeNumberScalar(modelBody, "presence_penalty", parseSignedFloat(form.model.presence_penalty));
+  writeNumberScalar(modelBody, "top_k", parseInteger(form.model.top_k));
+  writeNumberScalar(modelBody, "min_p", parseFloatish(form.model.min_p));
+  writeNumberScalar(modelBody, "repeat_penalty", parseFloatish(form.model.repeat_penalty));
   writeNumberScalar(modelBody, "context_window", parseInteger(form.model.context_window));
   writeNumberScalar(modelBody, "max_output_tokens", parseInteger(form.model.max_output_tokens));
   writeStringScalar(modelBody, "api_key_env", form.model.api_key_env.trim());
@@ -1250,6 +1273,9 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   form.model.top_p = asNumberString(modelTable.top_p);
   form.model.frequency_penalty = asNumberString(modelTable.frequency_penalty);
   form.model.presence_penalty = asNumberString(modelTable.presence_penalty);
+  form.model.top_k = asNumberString(modelTable.top_k);
+  form.model.min_p = asNumberString(modelTable.min_p);
+  form.model.repeat_penalty = asNumberString(modelTable.repeat_penalty);
   form.model.context_window = asNumberString(modelTable.context_window);
   form.model.max_output_tokens = asNumberString(modelTable.max_output_tokens);
   form.model.api_key_env = asString(modelTable.api_key_env);
