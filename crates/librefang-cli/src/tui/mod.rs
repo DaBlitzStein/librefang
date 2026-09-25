@@ -620,22 +620,23 @@ impl App {
                     Tab::Dashboard => {
                         self.dashboard.loading = false;
                         self.dashboard.status_msg = err;
-                        // Covers every failure the shared-folders editor can hit
-                        // Covers every failure the shared-folders editor can hit
-                        // (fetch, unreadable manifest, duplicate name on save) —
-                        // without this arm they fell into `_ => {}` and vanished
-                        // (#7835). #8231's agents tab needs it for the same reason:
-                        // a fetch failure from another sub-screen of this tab has
-                        // to reach `status_msg` instead of vanishing.
-                        //
-                        // It deliberately writes nothing but `status_msg`. The
-                        // manifest-history pane keeps its own `loading` flag and
-                        // its own error (its failures arrive as
-                        // `AgentManifestHistoryFailed`, not here), and clearing the
-                        // flag here would end an outstanding history fetch on an
-                        // error that belongs to some other pane of the same tab —
-                        // see `an_unrelated_agent_tab_fetch_error_leaves_the_history_fetch_alone`.
                     }
+                    // Covers every failure the shared-folders editor can hit
+                    // (fetch, unreadable manifest, duplicate name on save) —
+                    // without this arm they fell into `_ => {}` and vanished
+                    // (#7835). #8231's agents tab needs it for the same reason:
+                    // a fetch failure from another sub-screen of this tab has
+                    // to reach `status_msg` instead of vanishing.
+                    //
+                    // It deliberately writes nothing but `status_msg`, unlike
+                    // every other arm here. The manifest-history pane keeps its
+                    // own `loading` flag and its own error (its failures arrive
+                    // as `AgentManifestHistoryFailed`, not here), so clearing
+                    // the flag here would end an outstanding history fetch on
+                    // an error that belongs to some other pane of the same tab
+                    // — see
+                    // `an_unrelated_agent_tab_fetch_error_leaves_the_history_fetch_alone`.
+                    Tab::Agents => self.agents.status_msg = err,
                     Tab::Chat => self.chat.status_msg = Some(err),
                     Tab::Workflows => {
                         self.workflows.loading = false;
