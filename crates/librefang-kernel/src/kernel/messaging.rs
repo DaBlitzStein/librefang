@@ -698,6 +698,7 @@ impl LibreFangKernel {
         let mut ephemeral_session = librefang_memory::session::Session {
             id: ephemeral_session_id,
             agent_id,
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: Some("ephemeral /btw".to_string()),
@@ -1349,7 +1350,7 @@ impl LibreFangKernel {
                             agent_id.to_string(),
                             librefang_runtime::audit::AuditAction::AgentMessage,
                             "agent loop skipped",
-                            "No LLM provider configured — configure via dashboard settings",
+                            "failed: no LLM provider configured — configure via dashboard settings",
                         );
                     }
                     return Ok(result);
@@ -2455,6 +2456,7 @@ impl LibreFangKernel {
         let mut session = existing_session.unwrap_or_else(|| librefang_memory::session::Session {
             id: effective_session_id,
             agent_id,
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
