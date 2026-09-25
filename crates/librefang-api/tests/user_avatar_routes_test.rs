@@ -258,13 +258,9 @@ async fn upload_png(h: &Harness, name: &str, bytes: &[u8]) -> (StatusCode, serde
 
 /// Upload an avatar and require it to have worked.
 ///
-/// Most of this file uses an upload as a setup step and then asserts on a
-/// later read. When the upload is what failed, that shape reports it as a
-/// puzzling failure of the *reader* — which is exactly what happened while
-/// #8459 was being chased: a mid-test reload handed the kernel a different
-/// `home_dir`, the bytes went somewhere the assertions were not looking, and
-/// the failure surfaced two calls later as `has_avatar` being false. A setup
-/// step should fail as itself.
+/// Most of this file uses an upload as a setup step and then asserts on a later read.
+/// When the upload is what failed, that shape reports it as a puzzling failure of the *reader* — which is exactly what happened while #8459 was being chased: a mid-test reload handed the kernel a different `home_dir`, the bytes went somewhere the assertions were not looking, and the failure surfaced two calls later as `has_avatar` being false.
+/// A setup step should fail as itself.
 async fn upload_png_ok(h: &Harness, name: &str, bytes: &[u8]) {
     let (status, body) = upload_png(h, name, bytes).await;
     assert_eq!(status, StatusCode::OK, "upload failed: {body:?}");
