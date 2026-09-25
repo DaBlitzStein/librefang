@@ -1222,8 +1222,21 @@ async fn spawn_once(
                                     // and a `channel_send` / `channel_dm`
                                     // auto-filled from that metadata must
                                     // still resolve to this instance.
-                                    let _ = reported_account_id_cell
-                                        .set(params.account_id.clone());
+                                    //
+                                    // Only a `ready` that reports an id may
+                                    // claim the cell: `OnceLock::set` is
+                                    // one-shot, so an id-less first `ready`
+                                    // would freeze the alias at `None` and
+                                    // discard the id a later `ready` reports
+                                    // (the adapter re-announcing after its
+                                    // auth handshake). The first reported id
+                                    // wins, idempotently — it is the value
+                                    // already stamped into in-flight message
+                                    // metadata.
+                                    if params.account_id.is_some() {
+                                        let _ = reported_account_id_cell
+                                            .set(params.account_id.clone());
+                                    }
                                     match classify_protocol_version(params.protocol_version) {
                                         ProtocolSkew::Match => info!(
                                             adapter = %adapter_name,
@@ -4267,6 +4280,62 @@ mod tests {
             Some("ready-acct"),
             "the ready-event account_id must remain resolvable as the \
              `reported_account_id` alias while `account_id()` answers the config name"
+        );
+
+        adapter.stop().await.unwrap();
+    }
+
+    /// #8418 review — an id-less `ready` must not freeze the reported-account
+    /// alias at `None`.
+    ///
+    /// `reported_account_id_cell` is a `OnceLock<Option<String>>`, so
+    /// `set(None)` from a first `ready` that declared no `account_id` pinned
+    /// the alias for the process's lifetime: a later `ready` that did report
+    /// one (the adapter re-announcing after its auth handshake) was discarded,
+    /// and a `channel_send` / `channel_dm` auto-filled from the reported id
+    /// stopped resolving. Only a `ready` that carries an id may claim the cell.
+    #[tokio::test]
+    async fn test_sidecar_reported_account_id_survives_an_id_less_ready() {
+        let python = match which_python() {
+            Some(p) => p,
+            None => return,
+        };
+        // The first `ready` is the legacy bare shape (no `account_id`); the
+        // second reports one. The trailing message is the stream's only yield,
+        // so receiving it proves both `ready` frames were processed.
+        let script = concat!(
+            "import sys,json;",
+            "print(json.dumps({'method':'ready','params':{'capabilities':[]}}),flush=True);",
+            "print(json.dumps({'method':'ready','params':",
+            "{'capabilities':[],'account_id':'late-acct'}}),flush=True);",
+            "print(json.dumps({'method':'message','params':",
+            "{'user_id':'u','user_name':'n','text':'one'}}),flush=True);",
+            "sys.exit(0)"
+        );
+        let config = cfg(
+            "bot-a",
+            &python,
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        );
+        let adapter = SidecarAdapter::new(&config, std::env::temp_dir());
+        let mut stream = adapter.start().await.unwrap();
+        use futures::StreamExt;
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
+            .await
+            .expect("timed out waiting for first message")
+            .expect("stream ended before first message");
+        assert_eq!(
+            first.metadata.get("account_id").and_then(|v| v.as_str()),
+            Some("bot-a"),
+            "the routing stamp must still come from the config name"
+        );
+
+        assert_eq!(
+            adapter.reported_account_id(),
+            Some("late-acct"),
+            "the id-less first `ready` froze the reported-account alias at `None`, \
+             discarding the id the later `ready` reported"
         );
 
         adapter.stop().await.unwrap();
