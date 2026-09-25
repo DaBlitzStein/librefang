@@ -12,7 +12,7 @@
 //! Run: cargo test -p librefang-api --test auto_reply_sender_identity_test
 
 use librefang_api::channel_bridge::KernelBridgeAdapter;
-use librefang_channels::bridge::ChannelBridgeHandle;
+use librefang_channels::bridge::{AutoReplyOutcome, ChannelBridgeHandle};
 use librefang_channels::types::{ConversationScope, SenderContext};
 use librefang_kernel::KernelApi;
 use librefang_kernel::LibreFangKernel;
@@ -256,11 +256,16 @@ async fn auto_reply_turn_honours_the_conversation_think_setting() {
     );
 }
 
-/// A turn with nothing to say must produce no reply.
+/// A turn with nothing to say must produce no reply — and must still count as
+/// a claimed message.
 ///
 /// The auto-reply arm prefixes and sends whatever it is handed, and
 /// `maybe_prefix_response` prefixes the empty string, so an empty reply reaches
 /// the user as a prefix-only bubble whenever `prefix_agent_name` is configured.
+///
+/// The outcome must be `Fired(None)`, not `NotFired`: the turn *ran* and
+/// consumed the message, so the bridge must not fall through and dispatch the
+/// identical turn a second time in the same channel session.
 #[tokio::test(flavor = "multi_thread")]
 async fn auto_reply_silent_turn_returns_no_reply() {
     let (kernel, _tmp) = boot_driverless();
@@ -268,13 +273,41 @@ async fn auto_reply_silent_turn_returns_no_reply() {
 
     let adapter = KernelBridgeAdapter::new(kernel.clone() as Arc<dyn KernelApi>);
 
-    let reply = adapter
+    let outcome = adapter
         .check_auto_reply(agent_id, "hello", &telegram_dm())
         .await;
 
-    assert!(
-        reply.is_none(),
-        "a silent turn was handed back as a reply, so the arm would prefix an empty string and \
-         send a bubble with nothing in it; got {reply:?}"
+    assert_eq!(
+        outcome,
+        AutoReplyOutcome::Fired(None),
+        "a silent turn must be reported as a claimed message with no reply, not as \
+         `NotFired`; `NotFired` makes the bridge re-dispatch the same turn in the same \
+         channel session"
+    );
+}
+
+/// A turn that fails is still a claimed message.
+///
+/// `Err` used to collapse into `None` alongside the silent case, so the bridge
+/// read it as "auto-reply did not fire" and re-ran the identical turn — the
+/// user message landed in the same channel session twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_auto_reply_turn_reports_failed() {
+    let (kernel, _tmp) = boot_driverless();
+
+    // No agent is registered under this id, so the turn cannot start.
+    let missing_agent = AgentId::new();
+    let adapter = KernelBridgeAdapter::new(kernel.clone() as Arc<dyn KernelApi>);
+
+    let outcome = adapter
+        .check_auto_reply(missing_agent, "hello", &telegram_dm())
+        .await;
+
+    assert_eq!(
+        outcome,
+        AutoReplyOutcome::Failed,
+        "a failed auto-reply turn must be reported as claimed, not as `NotFired`; \
+         the bridge would otherwise re-run the identical turn and duplicate the \
+         user message in the same channel session"
     );
 }

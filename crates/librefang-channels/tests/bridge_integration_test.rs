@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use futures::Stream;
-use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
+use librefang_channels::bridge::{AutoReplyOutcome, BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::types::{
     AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
@@ -193,6 +193,12 @@ struct MockHandle {
     /// so the dispatch tests that predate auto-reply keep their no-auto-reply
     /// path.
     auto_reply: bool,
+    /// When set, `check_auto_reply` reports exactly this outcome after
+    /// recording the claimed turn. Used to drive the arms where the engine
+    /// claims the message but has no reply to deliver (`Fired(None)`) or the
+    /// turn failed (`Failed`) — the states the bridge must not mistake for
+    /// "auto-reply did not fire".
+    auto_reply_outcome: Option<AutoReplyOutcome>,
     /// Records the `SenderContext` the bridge handed to `check_auto_reply`,
     /// so a test can assert what identity the auto-reply turn was launched
     /// on behalf of.
@@ -205,6 +211,7 @@ impl MockHandle {
             agents: Mutex::new(agents),
             received: Arc::new(Mutex::new(Vec::new())),
             auto_reply: false,
+            auto_reply_outcome: None,
             auto_reply_sender: Arc::new(Mutex::new(None)),
         }
     }
@@ -214,6 +221,16 @@ impl MockHandle {
     fn with_auto_reply(agents: Vec<(AgentId, String)>) -> Self {
         Self {
             auto_reply: true,
+            ..Self::new(agents)
+        }
+    }
+
+    /// Like `with_auto_reply`, but the claimed turn reports `outcome` instead
+    /// of the sender-echoing reply — the silent / failed shapes.
+    fn with_auto_reply_outcome(agents: Vec<(AgentId, String)>, outcome: AutoReplyOutcome) -> Self {
+        Self {
+            auto_reply: true,
+            auto_reply_outcome: Some(outcome),
             ..Self::new(agents)
         }
     }
@@ -238,19 +255,22 @@ impl ChannelBridgeHandle for MockHandle {
         agent_id: AgentId,
         message: &str,
         sender: &SenderContext,
-    ) -> Option<String> {
+    ) -> AutoReplyOutcome {
         if !self.auto_reply {
-            return None;
+            return AutoReplyOutcome::NotFired;
         }
         *self.auto_reply_sender.lock().unwrap() = Some(sender.clone());
         self.received
             .lock()
             .unwrap()
             .push((agent_id, format!("auto-reply: {message}")));
-        Some(format!(
+        if let Some(outcome) = &self.auto_reply_outcome {
+            return outcome.clone();
+        }
+        AutoReplyOutcome::Fired(Some(format!(
             "auto-reply to {}/{}",
             sender.channel, sender.user_id
-        ))
+        )))
     }
 
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
@@ -436,6 +456,75 @@ async fn auto_reply_turn_carries_sender_identity() {
     assert_eq!(sent[0].1, "auto-reply to telegram/34387719");
 
     manager.stop().await;
+}
+
+/// Regression: a claimed auto-reply turn with nothing to deliver must not be
+/// re-dispatched through the ordinary turn.
+///
+/// `check_auto_reply` answered `Option<String>`, so a turn that ran but was
+/// silent (`Ok("")`) and a turn that failed (`Err`) came back as the same
+/// `None` the bridge reads as "the engine never claimed the message". It then
+/// ran the ordinary turn on top of the auto-reply one — the same user message
+/// landed in the same channel session twice and cost a second LLM turn.
+///
+/// The claim itself is observable at the handle: the mock records the auto-reply
+/// turn when `check_auto_reply` runs, and the ordinary turn when `send_message`
+/// runs. Exactly one of those records may exist.
+#[tokio::test]
+async fn claimed_auto_reply_without_a_reply_is_not_re_dispatched() {
+    for outcome in [AutoReplyOutcome::Fired(None), AutoReplyOutcome::Failed] {
+        let label = format!("{outcome:?}");
+        let agent_id = AgentId::new();
+        let handle = Arc::new(MockHandle::with_auto_reply_outcome(
+            vec![(agent_id, "coder".to_string())],
+            outcome,
+        ));
+        let router = Arc::new(AgentRouter::new());
+        router.set_user_default("34387719".to_string(), agent_id);
+
+        let (adapter, tx) = MockAdapter::new("test-adapter", ChannelType::Telegram);
+        let adapter_ref = adapter.clone();
+
+        let mut manager = BridgeManager::new(handle.clone(), router);
+        manager.start_adapter(adapter.clone()).await.unwrap();
+
+        tx.send(make_text_msg(ChannelType::Telegram, "34387719", "status?"))
+            .await
+            .unwrap();
+
+        // The engine must have claimed the message...
+        wait_until("auto-reply claimed the message", || {
+            !handle.received.lock().unwrap().is_empty()
+        })
+        .await;
+
+        // ...and the ordinary turn must never run on top of it. A re-dispatched
+        // turn is a synchronous mock call, so give it a bounded window to show
+        // up and fail fast if it does; the fixed path stays quiet.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+        while tokio::time::Instant::now() < deadline {
+            let received = handle.received.lock().unwrap().clone();
+            assert_eq!(
+                received.len(),
+                1,
+                "{label}: the claimed auto-reply turn was re-dispatched as the ordinary \
+                 turn, so the user message lands in the same channel session twice and \
+                 costs a second LLM turn; handle calls: {received:?}"
+            );
+            assert!(
+                !received[0].1.starts_with("Echo:"),
+                "{label}: the record is the ordinary turn, not the auto-reply claim: {received:?}"
+            );
+            let sent = adapter_ref.get_sent();
+            assert!(
+                sent.is_empty(),
+                "{label}: a silent/failed auto-reply must deliver nothing; got {sent:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        manager.stop().await;
+    }
 }
 
 /// Test that /agents command returns the list of running agents.

@@ -4,7 +4,7 @@
 //! `start_channel_bridge()` entry point called by the daemon.
 
 use crate::workflow::WorkflowId;
-use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
+use librefang_channels::bridge::{AutoReplyOutcome, BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
 use librefang_channels::types::{ChannelAdapter, ConversationScope, SenderContext};
@@ -2327,12 +2327,19 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         agent_id: AgentId,
         message: &str,
         sender: &SenderContext,
-    ) -> Option<String> {
+    ) -> AutoReplyOutcome {
         // Check if auto-reply should fire for this message
         let channel_type = "bridge"; // Generic; the bridge layer handles specifics
-        self.kernel
+        if self
+            .kernel
             .auto_reply()
-            .should_reply(message, channel_type, agent_id)?;
+            .should_reply(message, channel_type, agent_id)
+            .is_none()
+        {
+            // The engine never claimed the message: the ordinary dispatch may
+            // run the turn.
+            return AutoReplyOutcome::NotFired;
+        }
         // Fire auto-reply synchronously (bridge already runs in background task).
         //
         // Sent through this adapter's own channel-turn method rather than by
@@ -2351,11 +2358,17 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             // response both mean "nothing to say". Without it, an empty reply
             // would reach `maybe_prefix_response` and come out as a prefix-only
             // bubble whenever `prefix_agent_name` is configured.
-            Ok(reply) if !reply.is_empty() => Some(reply),
-            Ok(_) => None,
+            //
+            // Either way the turn *ran*: the outcome is `Fired`, never
+            // `NotFired`, so the bridge does not dispatch the same message a
+            // second time in the same channel session.
+            Ok(reply) if !reply.is_empty() => AutoReplyOutcome::Fired(Some(reply)),
+            Ok(_) => AutoReplyOutcome::Fired(None),
             Err(e) => {
                 tracing::warn!(error = %e, "Auto-reply failed");
-                None
+                // A failed turn is still a claimed message: re-dispatching it
+                // would run the identical turn again in the same session.
+                AutoReplyOutcome::Failed
             }
         }
     }
