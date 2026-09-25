@@ -43,6 +43,27 @@ describe("AgentAvatar", () => {
     ).toHaveAttribute("src", "blob:test/1");
   });
 
+  it("uses a caller-resolved URL and asks the hook for nothing", () => {
+    mockAvatarUrl.mockReturnValue("blob:own/9");
+
+    render(
+      <AgentAvatar
+        agentId="a1"
+        avatarUrl={AVATAR}
+        resolvedSrc="blob:chat/1"
+        fallback="Jane Doe"
+      />,
+    );
+
+    // The chat transcript resolves the image once and hands the URL to every
+    // bubble. Each bubble must render that shared URL rather than minting a
+    // handle of its own, and must not leave the hook fetching behind it.
+    expect(mockAvatarUrl).toHaveBeenCalledWith("a1", false);
+    expect(
+      screen.getByRole("img", { name: "Jane Doe" }).querySelector("img"),
+    ).toHaveAttribute("src", "blob:chat/1");
+  });
+
   it("shows the emoji while the image is still in flight", () => {
     // The hook resolves to `undefined` until the blob arrives. The identity
     // must not be blank for however long that takes.

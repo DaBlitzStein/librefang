@@ -21,7 +21,7 @@ import {
   getAgentSkills,
   getAgentMcpServers,
 } from "../http/client";
-import { agentKeys, toolKeys } from "./keys";
+import { agentAvatarKeys, agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_MS = 30_000;
@@ -180,7 +180,7 @@ export const agentQueries = {
   // this key rather than by polling for it.
   avatar: (agentId: string, enabled: boolean) =>
     queryOptions({
-      queryKey: agentKeys.avatar(agentId),
+      queryKey: agentAvatarKeys.avatar(agentId),
       queryFn: () => fetchAuthenticatedImage(agentAvatarPath(agentId)),
       enabled: !!agentId && enabled,
       staleTime: AVATAR_STALE_MS,
@@ -278,7 +278,11 @@ export function useAgentAvatarUrl(agentId: string, hasAvatar: boolean): string |
   const [objectUrl, setObjectUrl] = useState<string | undefined>(undefined);
 
   useEffect(() => {
-    if (!blob) {
+    // `!hasAvatar` is part of the condition, not just the query's `enabled`: a
+    // disabled query still returns cached data, so a caller that only wants to
+    // know "is there an image" would otherwise mint an object URL for a cached
+    // Blob it is not rendering (#8339 review).
+    if (!blob || !hasAvatar) {
       setObjectUrl(undefined);
       return;
     }
@@ -291,7 +295,7 @@ export function useAgentAvatarUrl(agentId: string, hasAvatar: boolean): string |
       // initials the fallback is there to give.
       setObjectUrl(undefined);
     };
-  }, [blob]);
+  }, [blob, hasAvatar]);
 
   return objectUrl;
 }

@@ -90,13 +90,26 @@ export const agentKeys = {
   // configured on this instance".
   channels: (agentId: string) =>
     [...agentKeys.all, "channels", agentId] as const,
-  // The avatar image itself (#8339), cached as a Blob because
-  // `GET /api/agents/{id}/avatar` is authenticated and an `<img src>` carries
-  // no bearer token. Its own subtree rather than a leaf under `detail(id)`:
-  // the agent detail is refetched on a timer and re-downloading an image on
-  // every poll is the one thing this key exists to avoid.
-  avatar: (agentId: string) =>
-    [...agentKeys.all, "avatar", agentId] as const,
+};
+
+/**
+ * The avatar image itself (#8339), cached as a Blob because
+ * `GET /api/agents/{id}/avatar` is authenticated and an `<img src>` carries no
+ * bearer token.
+ *
+ * Its own root rather than a child of `agentKeys.all`, for the same reason it
+ * is not a leaf under `detail(id)`: broad invalidations. `detail(id)` is
+ * refetched on a timer, and several unrelated mutations — a hand toggle
+ * (`mutations/hands.ts:42`, `:180`) and the knowledge-sharing writes
+ * (`mutations/knowledge.ts`) — sweep `agentKeys.all` precisely because they
+ * touch every agent. A child key there re-downloaded every cached image on
+ * each of those: 22 avatars, 22 image GETs for a change that touched none of
+ * them. Nothing invalidates this root wholesale; the upload and delete hooks
+ * name the one agent whose image changed.
+ */
+export const agentAvatarKeys = {
+  all: ["agentAvatars"] as const,
+  avatar: (agentId: string) => [...agentAvatarKeys.all, agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
