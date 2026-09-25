@@ -219,6 +219,18 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route(
             "/agents/{id}/avatar",
             axum::routing::post(upload_agent_avatar)
+                // On the POST before GET and DELETE are added, so only uploads
+                // draw from the pool (`MethodRouter::layer` covers the methods
+                // present when it runs). The permit is held while the `Bytes`
+                // extractor buffers the body, and a saturated pool answers 429
+                // without spending the memory this bound exists to protect: a
+                // per-request cap cannot do that on its own — N parallel
+                // bodies are N × the cap. See
+                // `avatar::MAX_CONCURRENT_AVATAR_UPLOADS`.
+                .layer(axum::middleware::from_fn_with_state(
+                    avatar::avatar_upload_permits(),
+                    crate::middleware::limit_concurrent_uploads,
+                ))
                 .get(serve_agent_avatar)
                 .delete(delete_agent_avatar)
                 // Without this the `Bytes` extractor cuts at axum's own 2 MiB
@@ -473,7 +485,7 @@ pub(crate) fn is_own_avatar_reference(agent_id: AgentId, value: &str) -> bool {
     value.is_empty() || value == librefang_types::media::agent_avatar_url(&agent_id.to_string())
 }
 
-/// Merge a partial identity update onto an agent's stored identity (#6608).
+/// Merge a partial appearance update onto an agent's stored identity (#6608).
 ///
 /// PATCH semantics for the three `AgentIdentity` fields (`emoji`, `avatar_url`, `color`): an `incoming` field of `None` means "not provided by the caller" and preserves the stored value; `Some(v)` overwrites it.
 /// The three personality fields both routes also accept are not merged here: they are written into IDENTITY.md's front matter by `LibreFangKernel::set_agent_personality` (#8447), and a file edit keeps every key it is not given by construction.

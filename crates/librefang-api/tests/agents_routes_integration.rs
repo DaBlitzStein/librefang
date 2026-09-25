@@ -3948,125 +3948,152 @@ async fn test_avatars_are_stored_outside_workspaces_and_the_dashboard_tree() {
     );
 }
 
-/// An unreadable template is a server-side fault, not a malformed request, and it
-/// must report that in every locale.
+/// Two uploads for the same agent, in two formats, must not erase each other (#8349).
 ///
-/// The status used to be decided by `contains()` on `ManifestError::message`, which
-/// is already translated — so the arm only ever matched English and every other
-/// locale fell through to `400 invalid_manifest`, telling the operator their request
-/// was wrong. This test sends `Accept-Language: es` precisely because that is the
-/// case the substring match could not see.
-/// Every manifest-resolution failure must report the same status regardless of the
-/// caller's language.
-///
-/// These statuses used to be recovered by matching English substrings of an
-/// already-translated message, so a Spanish client got `400 invalid_manifest` for all
-/// of them. The signature case is the one that mattered most: "malformed request" is
-/// not what the server meant by a rejected signature.
+/// Every upload ends by sweeping the candidate extensions other than its own, so
+/// before the per-agent lock a PNG and a GIF in flight could each delete the
+/// other's file — the identity then named a route that served nothing. Each
+/// round here must end with exactly one file and a `GET` that serves it.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_manifest_errors_keep_their_status_in_a_non_english_locale() {
+async fn test_concurrent_avatar_uploads_do_not_erase_each_other() {
     let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "avatar-concurrent");
+    let path = format!("/api/agents/{id}/avatar");
 
-    let spanish = |body: serde_json::Value| {
-        Request::builder()
-            .method(Method::POST)
-            .uri("/api/agents")
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {}", TEST_TOKEN))
-            .header("accept-language", "es")
-            .body(Body::from(body.to_string()))
-            .unwrap()
-    };
+    // Many rounds: the losing interleaving is a timing race — with the fix
+    // every round is serialised and deterministic, but a regression would slip
+    // past a single round whenever the scheduler happened to run them in order.
+    for round in 0..32 {
+        let png_upload = tokio::spawn(send_raw(
+            h.app.clone(),
+            post_bytes(&path, TINY_PNG.to_vec(), "application/octet-stream", None),
+        ));
+        let gif_upload = tokio::spawn(send_raw(
+            h.app.clone(),
+            post_bytes(&path, TINY_GIF.to_vec(), "application/octet-stream", None),
+        ));
+        let (png, gif) = tokio::join!(png_upload, gif_upload);
+        assert_eq!(
+            png.expect("png upload task").0,
+            StatusCode::OK,
+            "round {round}"
+        );
+        assert_eq!(
+            gif.expect("gif upload task").0,
+            StatusCode::OK,
+            "round {round}"
+        );
 
-    // Missing template → 404, not 400.
-    let (status, body) = send(
-        h.app.clone(),
-        spanish(serde_json::json!({ "template": "no-such-template-here" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    assert_eq!(body["code"].as_str(), Some("template_not_found"), "{body}");
-
-    // Oversized manifest → 413, not 400.
-    let huge = format!(
-        "name = \"huge\"\nversion = \"0.1.0\"\nmodule = \"builtin:chat\"\ndescription = \"{}\"\n",
-        "x".repeat(1024 * 1024 + 1)
-    );
-    let (status, body) = send(
-        h.app.clone(),
-        spanish(serde_json::json!({ "manifest_toml": huge })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
-    assert_eq!(body["code"].as_str(), Some("manifest_too_large"), "{body}");
-
-    // Rejected signature → 403, not 400. A client that only reads the status must not
-    // be told its request was malformed when the server refused to trust it.
-    let (status, body) = send(
-        h.app.clone(),
-        spanish(serde_json::json!({
-            "manifest_toml": "name = \"signed\"\nversion = \"0.1.0\"\nmodule = \"builtin:chat\"\ndescription = \"d\"\n\n[model]\nprovider = \"default\"\nmodel = \"default\"\n",
-            "signed_manifest": "{\"not\":\"a valid signed envelope\"}",
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["code"].as_str(), Some("signature_invalid"), "{body}");
-}
-
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread")]
-async fn test_spawn_with_unreadable_template_reports_a_server_fault_in_any_locale() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let h = boot(TEST_TOKEN).await;
-
-    let store_dir = h.state.kernel.config_ref().home_dir.join("agent-types");
-    std::fs::create_dir_all(&store_dir).expect("create agent-types dir");
-    let path = store_dir.join("unreadable-tmpl.toml");
-    std::fs::write(&path, "name = \"unreadable-tmpl\"\n").expect("write agent type");
-    // Chmod 000: the file exists, so this is not a not-found.
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
-        .expect("drop read permission");
-
-    // Running as root defeats the permission bits entirely — the read would succeed
-    // and the test would assert nothing. Skip rather than pass vacuously.
-    if std::fs::read_to_string(&path).is_ok() {
-        eprintln!("skipping: this process can read a 0o000 file (running as root?)");
-        return;
+        let (status, headers, bytes) = send_raw(h.app.clone(), get(&path)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "round {round}: an upload's sweep removed the other upload's file"
+        );
+        let content_type = headers["content-type"]
+            .to_str()
+            .expect("served content-type")
+            .to_string();
+        let expected = match bytes.as_slice() {
+            TINY_PNG => "image/png",
+            TINY_GIF => "image/gif",
+            other => panic!("round {round}: served bytes are neither upload: {other:?}"),
+        };
+        assert_eq!(
+            content_type, expected,
+            "round {round}: the served type must agree with the served bytes"
+        );
     }
 
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri("/api/agents")
-        .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {}", TEST_TOKEN))
-        .header("accept-language", "es")
-        .body(Body::from(
-            serde_json::json!({ "template": "unreadable-tmpl" }).to_string(),
-        ))
-        .unwrap();
-    let (status, body) = send(h.app.clone(), request).await;
+    assert_eq!(
+        stored_identity(&h.state, id).avatar_url,
+        Some(librefang_types::media::agent_avatar_url(&id.to_string())),
+        "the stored reference must still name a route that answers"
+    );
+    let files: Vec<String> = std::fs::read_dir(avatars_dir(&h))
+        .expect("avatars dir")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        files.len(),
+        1,
+        "exactly one avatar may survive the race: {files:?}"
+    );
+}
 
+/// Cloning an agent that has an avatar duplicates the image under the clone's
+/// own id and repoints the clone at its own route (#8349).
+///
+/// The identity copy used to carry the source's `avatar_url` verbatim, so the
+/// clone rendered the source's picture and a deleted source removed the
+/// clone's face with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_clone_duplicates_the_source_avatar_under_the_clones_own_id() {
+    let h = boot(TEST_TOKEN).await;
+    let src = spawn_named(&h.state, "clone-avatar-source");
+    let source_path = format!("/api/agents/{src}/avatar");
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_bytes(
+            &source_path,
+            TINY_PNG.to_vec(),
+            "application/octet-stream",
+            None,
+        ),
+    )
+    .await;
     assert_eq!(
         status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "an unreadable template must not be reported as a client error: {body}"
-    );
-    assert_eq!(
-        body["code"].as_str(),
-        Some("template_read_failed"),
-        "the code must name the real fault, not template_not_found or invalid_manifest: {body}"
-    );
-    // The message is Spanish here, which is the whole point: the status and code
-    // must not depend on the response text the operator happens to receive.
-    assert!(
-        !body["error"].as_str().unwrap_or_default().is_empty(),
-        "the error message should still be rendered in the requested locale: {body}"
+        StatusCode::OK,
+        "seeding the source avatar: {body:?}"
     );
 
-    // Restore so the temp dir can be cleaned up.
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{src}/clone"),
+            serde_json::json!({"new_name": "clone-avatar-dest"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "clone failed: {body:?}");
+    let new_id = body["agent_id"]
+        .as_str()
+        .expect("agent_id in response")
+        .to_string();
+    let new_agent: AgentId = new_id.parse().expect("clone id is a uuid");
+
+    // The clone serves its own copy, from its own route.
+    let (status, headers, bytes) =
+        send_raw(h.app.clone(), get(&format!("/api/agents/{new_id}/avatar"))).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the clone must serve its own image, not 404 on a reference it inherited"
+    );
+    assert_eq!(headers["content-type"], "image/png");
+    assert_eq!(bytes, TINY_PNG);
+    assert_eq!(
+        stored_identity(&h.state, new_agent).avatar_url,
+        Some(librefang_types::media::agent_avatar_url(&new_id)),
+        "the clone's reference must name its own route, not the source's"
+    );
+    assert!(
+        librefang_types::media::avatar_path(&avatars_dir(&h), &new_id, "png").is_file(),
+        "the avatar must be duplicated under the clone's own id"
+    );
+
+    // The source still serves its own image, untouched.
+    let (status, headers, bytes) = send_raw(h.app.clone(), get(&source_path)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "cloning must not move or alias the source's avatar"
+    );
+    assert_eq!(headers["content-type"], "image/png");
+    assert_eq!(bytes, TINY_PNG);
 }
 
 /// An unreadable template is a server-side fault, not a malformed request, and it

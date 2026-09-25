@@ -32,7 +32,8 @@
 //! `spawn_blocking` after `drop(t)` would work and is the alternative if these ever grow, at the cost of a `JoinError` arm on each call that adds nothing to the error the caller already gets.
 //! The bodies are bounded by [`MAX_AVATAR_BYTES`], so the window being blocked on is a few milliseconds.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -61,6 +62,50 @@ const BODY_LIMIT_HEADROOM_BYTES: usize = 64 * 1024;
 ///
 /// Without it the real ceiling is axum's own 2 MiB `Bytes` default, which sits *below* [`MAX_AVATAR_BYTES`] plus the headroom and would cut first.
 pub(crate) const AVATAR_BODY_LIMIT_BYTES: usize = MAX_AVATAR_BYTES + BODY_LIMIT_HEADROOM_BYTES;
+
+/// How many avatar uploads may hold a buffered body in memory at once.
+///
+/// [`AVATAR_BODY_LIMIT_BYTES`] bounds one buffered body, not how many can be resident: `upload_agent_avatar` takes `Bytes`, so the whole body is in RAM before the handler runs, and N parallel authenticated POSTs otherwise cost N × ~2.06 MiB.
+/// Eight is the default of `max_concurrent_uploads`, the operator setting that bounds the file-upload route; this route's cap is a compile-time constant, so its permit count is one too (see `PDF_EXTRACTION_PERMITS` in `agents/attachments.rs` for the same shape).
+pub(crate) const MAX_CONCURRENT_AVATAR_UPLOADS: usize = 8;
+
+/// The permits the avatar route's concurrency layer acquires before the `Bytes` extractor buffers anything.
+///
+/// Same 429-and-a-JSON-body policy as the file-upload route, via [`crate::middleware::limit_concurrent_uploads`]; a `LazyLock` because the route is built before any request exists and the count is fixed, not per-app state.
+static AVATAR_UPLOAD_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_AVATAR_UPLOADS)));
+
+/// A clone of the avatar route's permits, for the layer that owns them.
+pub(crate) fn avatar_upload_permits() -> Arc<tokio::sync::Semaphore> {
+    AVATAR_UPLOAD_PERMITS.clone()
+}
+
+/// Per-agent upload locks, so two uploads for one agent cannot delete each other's file (#8349).
+///
+/// Each upload places its own `{id}.{ext}` and then sweeps every other candidate extension (`remove_avatars_except`).
+/// That pair of steps is only safe against one upload at a time: a PNG and a GIF in flight both rename, then both sweep, and each removes the other's file — leaving `avatar_url` pointing at a route that 404s, or at an image the losing caller's own response never named.
+/// The lock is keyed by `AgentId`, not by extension, because the collision is between two uploads of one agent and two different agents must never contend.
+/// Entries are `Arc`s so the table's own [`Mutex`] is never held across an upload: it is consulted only to find or create the entry, and the upload then awaits the entry's own `tokio::sync::Mutex`.
+static AVATAR_UPLOAD_LOCKS: LazyLock<Mutex<HashMap<AgentId, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Acquire the per-agent avatar-upload lock, creating it on first use.
+///
+/// The returned guard serialises the caller's place-then-sweep section against every other upload for the same agent.
+/// Idle entries are dropped on each acquisition — an entry no other `Arc` holds is one no upload can be queued on — so the table tracks uploads in flight rather than every agent that ever had one.
+async fn lock_avatar_upload(agent_id: AgentId) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = AVATAR_UPLOAD_LOCKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        locks
+            .entry(agent_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    lock.lock_owned().await
+}
 
 fn json_error(status: StatusCode, message: String) -> axum::response::Response {
     (status, Json(serde_json::json!({ "error": message }))).into_response()
@@ -142,16 +187,21 @@ pub async fn upload_agent_avatar(
     lang: Option<axum::Extension<RequestLanguage>>,
     body: Bytes,
 ) -> axum::response::Response {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let agent_id = match resolve_agent(&state, &id, &t) {
-        Ok(agent_id) => agent_id,
-        Err(response) => return *response,
+    // `ErrorTranslator` is `!Send`, and the per-agent lock below is acquired
+    // across an `.await`, so the translator stays inside this block rather than
+    // spanning the handler. Its one later use builds its own.
+    let agent_id = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        let agent_id = match resolve_agent(&state, &id, &t) {
+            Ok(agent_id) => agent_id,
+            Err(response) => return *response,
+        };
+        // Setting an avatar writes `avatar_url` into the manifest identity, which the next reconcile of a provisioned agent would overwrite (#6695).
+        if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+            return refusal.into_response();
+        }
+        agent_id
     };
-    // Setting an avatar writes `avatar_url` into the manifest identity, which the next reconcile of a provisioned agent would overwrite (#6695).
-    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
-        drop(t);
-        return refusal.into_response();
-    }
 
     if body.len() > MAX_AVATAR_BYTES {
         return json_error(
@@ -171,6 +221,11 @@ pub async fn upload_agent_avatar(
             "An avatar must be a PNG, JPEG, GIF or WebP image. SVG is not accepted: it is a document that can carry script, and this daemon serves avatars back to a browser.".to_string(),
         );
     };
+
+    // Serialise the place-then-sweep section per agent (#8349): each upload's
+    // sweep removes every candidate extension but its own, so two uploads for
+    // one agent — a PNG and a GIF, say — otherwise delete each other's file.
+    let _upload_guard = lock_avatar_upload(agent_id).await;
 
     let avatars_dir = state.kernel.config_snapshot().effective_avatars_dir();
     if let Err(error) = std::fs::create_dir_all(&avatars_dir) {
@@ -193,8 +248,18 @@ pub async fn upload_agent_avatar(
     // image or the new one, never a half-written file.
     let id = agent_id.to_string();
     let path = librefang_types::media::avatar_path(&avatars_dir, &id, ext);
-    let tmp = path.with_extension(format!("{ext}.tmp"));
+    // One temp file per upload, never a shared `{id}.{ext}.tmp`: two concurrent
+    // uploads for the same agent both wrote that one path, so whichever
+    // renamed second either found its file already renamed away (a spurious
+    // ENOENT 500) or renamed the other upload's bytes under its own
+    // `bytes`/`content_type` response. The nonce gives each request its own
+    // file to write, rename and clean up, and the rename stays atomic because
+    // the temp still sits beside the target in `avatars_dir`.
+    let tmp = path.with_extension(format!("{ext}.{}.tmp", uuid::Uuid::new_v4().simple()));
     if let Err(error) = std::fs::write(&tmp, &body) {
+        // A unique temp is this request's own filename, so a partial write
+        // would otherwise stay behind forever: nothing else ever reuses it.
+        let _ = std::fs::remove_file(&tmp);
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Could not write the avatar: {error}"),
@@ -233,6 +298,7 @@ pub async fn upload_agent_avatar(
         // its `avatar_url` still marks the standard route and that route now
         // serves the new image — the upload effectively landed. When it did not,
         // the file sits unmarked until the next upload sets the marker.
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         return json_error(StatusCode::NOT_FOUND, t.t("api-error-agent-not-found"));
     }
 
@@ -375,7 +441,6 @@ pub async fn delete_agent_avatar(
         drop(t);
         return refusal.into_response();
     }
-    drop(t);
 
     let avatars_dir = state.kernel.config_snapshot().effective_avatars_dir();
     let removed = librefang_types::media::remove_avatars(&avatars_dir, &agent_id.to_string());
@@ -383,7 +448,29 @@ pub async fn delete_agent_avatar(
     // A stored `avatar_url` whose file is gone renders as a broken image, and
     // that state is reachable by restoring a backup of the database without
     // the avatars directory.
-    store_avatar_url(&state, agent_id, None);
+    if !store_avatar_url(&state, agent_id, None) {
+        // The files are already gone, so answering 200 would report a removal
+        // that left `avatar_url` pointing at a route with nothing behind it —
+        // exactly the manifest/disk disagreement the upload path's write
+        // ordering exists to prevent, only reached through the registry.
+        return match state.kernel.agent_registry().get(agent_id) {
+            // The agent vanished between `resolve_agent` and the identity
+            // write: the same failure the upload path answers as a 404.
+            None => json_error(StatusCode::NOT_FOUND, t.t("api-error-agent-not-found")),
+            // The agent is still there and the registry refused the write;
+            // the caller can retry, so this is the daemon's error, not theirs.
+            Some(_) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    "Avatar files removed but the stored avatar_url could not be cleared"
+                );
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "The avatar files were removed, but the stored avatar reference could not be cleared.".to_string(),
+                )
+            }
+        };
+    }
 
     (
         StatusCode::OK,
