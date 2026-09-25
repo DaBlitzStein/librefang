@@ -109,9 +109,50 @@ fn resolve_user(state: &AppState, name: &str) -> Result<UserConfig, Box<axum::re
 /// The server-derived file stem for a user's avatar.
 ///
 /// Takes the **configured** user rather than the requested name so that the value passed to the filesystem is visibly not the string from the URL — see the module docs.
-/// The mapping is stable (UUIDv5 under a fixed namespace), so a rename of the `[[users]]` entry moves the avatar to a new stem rather than making the old one reachable.
+/// The mapping is stable (UUIDv5 under a fixed namespace), so a rename gives the user a new stem — and the file has to be moved to it explicitly, or the old stem keeps the only copy.
+/// [`super::update_user`] does that with [`move_user_avatar`] after the row is persisted, which is what stops a later holder of the freed name from inheriting the picture.
 fn avatar_id(user: &UserConfig) -> String {
     UserId::from_name(&user.name).to_string()
+}
+
+/// Move a renamed user's stored image from the old stem to the new one.
+///
+/// The stem is derived from the name ([`avatar_id`]), so without this a rename
+/// leaves the file under the uuid of a name that no longer exists: the renamed
+/// user's route serves nothing, and the next holder of the freed name inherits
+/// the picture.
+/// It is the same residue [`super::delete_user`] sweeps when a row goes away,
+/// except that here the row survives and the image moves with it.
+/// [`super::update_user`] calls this strictly after the `[[users]]` write, so a
+/// rename the config refused cannot have carried the picture away first.
+///
+/// Each candidate is moved with one `fs::rename` inside one directory, so the
+/// move is atomic and the file is never absent from both stems.
+/// The normal directory holds a single one, because an upload clears the other
+/// extensions; moving all four anyway takes a shadow file left by a crash
+/// between an upload's write and its clear out of the freed stem, where it
+/// would otherwise become the next holder's image.
+/// A missing source is not an error — a user who never uploaded one has
+/// nothing to move.
+/// A real failure is returned rather than swallowed: the picture has a live
+/// owner whose route now serves nothing, and `update_user` reports it.
+pub(crate) fn move_user_avatar(
+    dir: &std::path::Path,
+    old_name: &str,
+    new_name: &str,
+) -> std::io::Result<()> {
+    let old_id = UserId::from_name(old_name).to_string();
+    let new_id = UserId::from_name(new_name).to_string();
+    for ext in librefang_types::media::AVATAR_EXTENSIONS {
+        let old_path = librefang_types::media::avatar_path(dir, &old_id, ext);
+        let new_path = librefang_types::media::avatar_path(dir, &new_id, ext);
+        match std::fs::rename(&old_path, &new_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// `PATCH /api/users/{name}/identity` — the emoji that stands for this user.
@@ -181,29 +222,23 @@ pub async fn upload_user_avatar(
             format!("Could not create the avatar directory: {error}"),
         );
     }
-    // Write the bytes to a temp file beside the target and rename it into
-    // place, and only then clear the candidates that would shadow it. Every
-    // failure the filesystem can report therefore arrives before anything is
-    // taken away: clearing the slot first would mean disk full, `EPERM` or a
-    // read-only mount deletes the picture the operator had and then answers
-    // 500 with nothing written.
-    // The temp file sits in the same directory, so the rename stays within one
-    // filesystem and is atomic on POSIX: a reader sees the old image or the new
-    // one, never a half-written file.
+    // Write the bytes through `crate::atomic_write` — a staging file beside
+    // the target, `fsync`, then a rename — and only then clear the candidates
+    // that would shadow it. Every failure the filesystem can report therefore
+    // arrives before anything is taken away: clearing the slot first would
+    // mean disk full, `EPERM` or a read-only mount deletes the picture the
+    // operator had and then answers 500 with nothing written.
+    //
+    // The staging name carries the process id and a per-process counter, which
+    // is the #8349 hardening and the reason this is not a hand-rolled
+    // `{uuid}.{ext}.tmp`: that name was derived from the subject alone, so two
+    // concurrent uploads for the same user truncated each other's bytes and
+    // whichever renamed last published a splice of the two.
     let id = avatar_id(&user);
     let path = librefang_types::media::avatar_path(&dir, &id, ext);
-    let tmp = path.with_extension(format!("{ext}.tmp"));
-    if let Err(error) = std::fs::write(&tmp, &body) {
-        return err_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Could not write the avatar: {error}"),
-        );
-    }
-
-    if let Err(error) = std::fs::rename(&tmp, &path) {
+    if let Err(error) = crate::atomic_write(&path, &body) {
         // Nothing has been cleared either, so the refusal costs the caller
         // nothing beyond the request itself.
-        let _ = std::fs::remove_file(&tmp);
         return err_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Could not store the avatar: {error}"),
@@ -557,6 +592,76 @@ mod tests {
             5,
             "v5 is what makes the mapping reproducible rather than random"
         );
+    }
+
+    /// A rename moves every candidate to the new stem and frees the old one.
+    ///
+    /// Both files exist here because a crash between an upload's write and its
+    /// clear can leave a shadow candidate; if it stayed under the old stem, the
+    /// next user to take the freed name would inherit a stale format.
+    #[test]
+    fn moving_an_avatar_carries_every_candidate_to_the_new_stem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = UserId::from_name("Alice").to_string();
+        let new = UserId::from_name("Alicia").to_string();
+        std::fs::write(
+            librefang_types::media::avatar_path(dir.path(), &old, "png"),
+            b"png",
+        )
+        .expect("write png");
+        std::fs::write(
+            librefang_types::media::avatar_path(dir.path(), &old, "gif"),
+            b"gif",
+        )
+        .expect("write gif");
+
+        move_user_avatar(dir.path(), "Alice", "Alicia").expect("move");
+
+        assert_eq!(
+            std::fs::read(librefang_types::media::avatar_path(dir.path(), &new, "png"))
+                .expect("png at the new stem"),
+            b"png"
+        );
+        assert_eq!(
+            std::fs::read(librefang_types::media::avatar_path(dir.path(), &new, "gif"))
+                .expect("gif at the new stem"),
+            b"gif"
+        );
+        assert!(
+            librefang_types::media::find_avatar(dir.path(), &old).is_none(),
+            "nothing may be left under the old stem"
+        );
+    }
+
+    /// A user who never uploaded one has nothing to move, and that is not an
+    /// error: every candidate being absent is the ordinary case for a rename.
+    #[test]
+    fn moving_an_absent_avatar_is_not_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        move_user_avatar(dir.path(), "Alice", "Alicia").expect("nothing to move is not a failure");
+    }
+
+    /// A real disk failure is propagated rather than swallowed, because the
+    /// caller reports it: the picture has an owner whose route would otherwise
+    /// serve nothing.
+    #[test]
+    fn a_failed_move_is_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = UserId::from_name("Alice").to_string();
+        let new = UserId::from_name("Alicia").to_string();
+        std::fs::write(
+            librefang_types::media::avatar_path(dir.path(), &old, "png"),
+            b"png",
+        )
+        .expect("write png");
+        // A directory squatting on the target makes `fs::rename` fail with a
+        // kind that is not `NotFound` — the shape of every real failure this
+        // helper must not mistake for absence.
+        std::fs::create_dir(librefang_types::media::avatar_path(dir.path(), &new, "png"))
+            .expect("squat the target");
+
+        let error = move_user_avatar(dir.path(), "Alice", "Alicia").expect_err("must fail");
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]

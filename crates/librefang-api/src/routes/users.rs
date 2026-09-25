@@ -576,6 +576,31 @@ pub async fn update_user(
     {
         Ok(final_cfg) => {
             let dir = state.kernel.config_snapshot().effective_user_avatars_dir();
+            // A rename changes the avatar's file stem, which is derived from the
+            // name rather than stored on the row (`avatar::avatar_id`), so the
+            // picture has to be moved with it. Strictly after the config write,
+            // for the same reason `delete_user` removes the file only then: a
+            // rename the write refused (BadRequest / Conflict / Managed) must
+            // not have carried the picture away first, and the file cannot join
+            // the config write's transaction.
+            //
+            // The opposite failure — row renamed, file stranded — is reported
+            // rather than warned about: the renamed user's own route would 404
+            // while the stale file sits under a freed name for its next holder
+            // to inherit, and unlike the delete sweep this picture still has a
+            // live owner waiting for it. `internal_err_response` logs the
+            // detail while the client gets the generic 500, matching how a
+            // post-write reload failure is surfaced by
+            // `persist_identity_sections`.
+            if final_cfg.name != name {
+                if let Err(error) = avatar::move_user_avatar(&dir, &name, &final_cfg.name) {
+                    return internal_err_response(format!(
+                        "user '{name}' was renamed to '{}', but its avatar could not be moved \
+                         to the new stem: {error}; the image must be re-uploaded under the new name",
+                        final_cfg.name
+                    ));
+                }
+            }
             (
                 StatusCode::OK,
                 Json(UserView::from_config(&final_cfg, &dir)),

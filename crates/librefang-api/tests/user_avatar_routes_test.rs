@@ -12,6 +12,7 @@
 //!                                       precedence)
 //!   GET    /api/users/{name}/avatar     (bytes, headers, ETag/304, absent, 404)
 //!   DELETE /api/users/{name}/avatar     (remove → GET 404)
+//!   PUT    /api/users/{name}            (a rename moves the stored image)
 //!   PATCH  /api/users/{name}/identity   (emoji set/clear, survives a PUT of the
 //!                                       user row, surfaces on whoami)
 //!
@@ -126,6 +127,21 @@ async fn boot_with_users(users: Vec<UserConfig>, extra: Vec<UserConfig>) -> Harn
         users: all,
         ..KernelConfig::default()
     };
+
+    // Seed the config file before boot with the two paths the reload cannot
+    // recover from defaults: without them the first `[[users]]` write creates a
+    // `config.toml` that names no home, the reload falls back to
+    // `~/.librefang`, and every directory assertion in this file would probe
+    // the developer's real avatar tree instead of the fixture's (#8459).
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        format!(
+            "home_dir = {:?}\ndata_dir = {:?}\n",
+            tmp.path(),
+            tmp.path().join("data")
+        ),
+    )
+    .expect("seed config.toml");
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
     let kernel = Arc::new(kernel);
@@ -256,6 +272,16 @@ async fn upload_png(h: &Harness, name: &str, bytes: &[u8]) -> (StatusCode, serde
     .await
 }
 
+/// Upload an avatar and require it to have worked.
+///
+/// Most of this file uses an upload as a setup step and then asserts on a later read.
+/// When the upload is what failed, that shape reports it as a puzzling failure of the *reader* — which is exactly what happened while #8459 was being chased: a mid-test reload handed the kernel a different `home_dir`, the bytes went somewhere the assertions were not looking, and the failure surfaced two calls later as `has_avatar` being false.
+/// `boot_with_users` now seeds `home_dir` into the fixture's `config.toml`, so a reload keeps the tree; the setup step still fails as itself for any other reason.
+async fn upload_png_ok(h: &Harness, name: &str, bytes: &[u8]) {
+    let (status, body) = upload_png(h, name, bytes).await;
+    assert_eq!(status, StatusCode::OK, "upload failed: {body:?}");
+}
+
 // ---------------------------------------------------------------------------
 // Round trip
 // ---------------------------------------------------------------------------
@@ -314,7 +340,7 @@ async fn avatar_upload_round_trips_and_shows_on_the_user_view() {
 #[tokio::test(flavor = "multi_thread")]
 async fn avatar_serves_a_304_for_a_matching_if_none_match() {
     let h = boot(vec![]).await;
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
 
     let (_, headers, _) = send_raw(h.app.clone(), get("/api/users/Alice/avatar", TEST_TOKEN)).await;
     let etag = headers["etag"].to_str().expect("etag").to_string();
@@ -328,7 +354,7 @@ async fn avatar_serves_a_304_for_a_matching_if_none_match() {
 
     // A validator that survives a content change would pin the old image in
     // every browser that had seen it.
-    upload_png(&h, "Alice", TINY_GIF).await;
+    upload_png_ok(&h, "Alice", TINY_GIF).await;
     let mut req = get("/api/users/Alice/avatar", TEST_TOKEN);
     req.headers_mut()
         .insert("if-none-match", etag.parse().expect("header value"));
@@ -344,7 +370,7 @@ async fn avatar_serves_a_304_for_a_matching_if_none_match() {
 #[tokio::test(flavor = "multi_thread")]
 async fn avatar_replacement_removes_the_previous_format() {
     let h = boot(vec![]).await;
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
     let (status, _) = upload_png(&h, "Alice", TINY_GIF).await;
     assert_eq!(status, StatusCode::OK);
 
@@ -398,7 +424,7 @@ async fn avatar_ignores_the_content_type_the_client_claims() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_me_segment_is_literal_and_does_not_fall_through_to_a_user_named_me() {
     let h = boot(vec![]).await;
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
     // The row named `me` is given an image by writing it straight to disk,
     // because the route that would upload one is shadowed — see
     // `the_row_named_me_cannot_be_written_to` for that half.
@@ -654,7 +680,7 @@ async fn a_device_name_is_not_a_file_name() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_user_avatar_is_not_an_agent_avatar() {
     let h = boot(vec![]).await;
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
 
     let dir = users_avatar_dir(&h);
     let agents = agent_avatar_dir(&h);
@@ -851,7 +877,7 @@ async fn non_owner_write_roles_are_refused_and_reads_are_not() {
 
     // Reads are on the generic authenticated-GET rule, so the lowest role sees
     // the avatar of a user it is not.
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
     for (label, token) in [
         ("viewer", VIEWER_KEY),
         ("user", USER_KEY),
@@ -988,6 +1014,49 @@ async fn the_emoji_can_be_cleared_and_is_validated() {
     );
 }
 
+/// A hand-edited oversize emoji must not wedge every later write (#8339 review
+/// follow-up).
+///
+/// `load_config` boots on the value rather than refusing to start, so the write
+/// gate has to tolerate it too: before this, any `/api/users/*` or
+/// `/api/groups/*` edit re-serialised the row, tripped the emoji bound on a
+/// user the operator was not touching, and answered 400 until the file was
+/// fixed by hand.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hand_edited_oversize_emoji_does_not_block_unrelated_writes() {
+    let oversize = "x".repeat(librefang_types::config::MAX_EMOJI_CHARS + 1);
+    let h = boot(vec![UserConfig {
+        name: "Oversize".to_string(),
+        emoji: Some(oversize.clone()),
+        ..Default::default()
+    }])
+    .await;
+
+    // An edit of a different row is the reported symptom.
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(
+            Method::PATCH,
+            "/api/users/Alice/identity",
+            TEST_TOKEN,
+            serde_json::json!({ "emoji": "🦀" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a pre-existing hand-edit must not fail an unrelated write: {body:?}"
+    );
+
+    // And the offending row is reported, not silently repaired.
+    let (_, view) = send(h.app.clone(), get("/api/users/Oversize", TEST_TOKEN)).await;
+    assert_eq!(
+        view["emoji"], oversize,
+        "the hand-edit is left in place: {view}"
+    );
+}
+
 /// Whoami answers the identity question in one call: the WebUI has to fetch it
 /// before it can render anything, so a second round trip for the glyph would be
 /// paid on every page load.
@@ -1005,7 +1074,7 @@ async fn whoami_reports_the_callers_emoji_and_avatar() {
         ),
     )
     .await;
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
 
     // Asked as Alice, with Alice's own key — the credential that most needs
     // this and the one least able to reach a user-management endpoint.
@@ -1032,13 +1101,109 @@ async fn whoami_reports_the_callers_emoji_and_avatar() {
 }
 
 // ---------------------------------------------------------------------------
+// Renaming
+// ---------------------------------------------------------------------------
+
+/// A rename carries the stored image to the new stem, because the file is keyed
+/// on `UserId::from_name(name)` and the new name derives a different uuid.
+///
+/// Without the move the picture stays under the uuid of a name that no longer
+/// exists: the renamed user's own route serves nothing, and the next person
+/// given the freed name inherits the image. Both halves are asserted, because
+/// the second is the one an operator would meet as a brand-new teammate wearing
+/// the previous holder's face.
+#[tokio::test(flavor = "multi_thread")]
+async fn renaming_a_user_moves_the_avatar_to_the_new_stem() {
+    let h = boot(vec![]).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
+
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(
+            Method::PUT,
+            "/api/users/Alice",
+            TEST_TOKEN,
+            serde_json::json!({ "name": "Alicia", "role": "user" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rename failed: {body:?}");
+    assert_eq!(body["name"], "Alicia", "{body:?}");
+
+    // (a) The file is under the new stem, and only there.
+    let dir = users_avatar_dir(&h);
+    assert_eq!(
+        file_names(&dir),
+        vec![format!("{}.png", expected_stem("Alicia"))],
+        "the picture must live under the renamed user's stem"
+    );
+
+    // (b) The renamed user still serves it: the response's `has_avatar` and the
+    // bytes the route hands back both have to agree with the directory.
+    assert_eq!(body["has_avatar"], true, "{body:?}");
+    let (status, _, bytes) =
+        send_raw(h.app.clone(), get("/api/users/Alicia/avatar", TEST_TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, TINY_PNG, "the moved file must be the same image");
+
+    // (c) The old name serves nothing.
+    let (status, _) = send(h.app.clone(), get("/api/users/Alice/avatar", TEST_TOKEN)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // (d) And the freed name starts clean for its next holder instead of
+    // handing them the previous holder's picture.
+    let (status, _) = send(
+        h.app.clone(),
+        json_req(
+            Method::POST,
+            "/api/users",
+            TEST_TOKEN,
+            serde_json::json!({ "name": "Alice", "role": "user" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, view) = send(h.app.clone(), get("/api/users/Alice", TEST_TOKEN)).await;
+    assert_eq!(
+        view["has_avatar"], false,
+        "the reused name inherited a picture: {view}"
+    );
+}
+
+/// A rename of a user who never uploaded a picture is an ordinary rename: the
+/// move tolerates a missing source rather than inventing a 500 for the common
+/// case.
+#[tokio::test(flavor = "multi_thread")]
+async fn renaming_a_user_without_an_avatar_is_not_an_error() {
+    let h = boot(vec![]).await;
+
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(
+            Method::PUT,
+            "/api/users/Watcher",
+            TEST_TOKEN,
+            serde_json::json!({ "name": "Watcher2", "role": "viewer" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rename failed: {body:?}");
+    assert_eq!(body["name"], "Watcher2", "{body:?}");
+    assert_eq!(body["has_avatar"], false, "{body:?}");
+    assert!(
+        file_names(&users_avatar_dir(&h)).is_empty(),
+        "a rename must not conjure a file out of nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Deletion
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_an_avatar_makes_it_404_and_clears_has_avatar() {
     let h = boot(vec![]).await;
-    upload_png(&h, "Alice", TINY_PNG).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
 
     let (status, body) = send(
         h.app.clone(),
