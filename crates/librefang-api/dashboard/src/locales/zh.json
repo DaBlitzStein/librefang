@@ -4628,6 +4628,7 @@
     "presence_penalty": "存在惩罚",
     "repeat_penalty": "重复惩罚",
     "repeat_penalty_placeholder": "0.01 到 2，1 = 关闭",
+    "sampling_provider_hint": "仅适用于兼容 OpenAI 的提供商和 Ollama",
     "temperature": "温度",
     "temperature_placeholder": "0 到 2",
     "top_k": "Top-K",

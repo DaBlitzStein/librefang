@@ -688,6 +688,69 @@ mod tests {
         assert_eq!((r.top_k, r.min_p, r.repeat_penalty), (None, None, None));
     }
 
+    /// A resolution that stops at the map leaves two spellings of one knob.
+    ///
+    /// When the value comes from the per-model override the agent manifest
+    /// leaves the typed field unset, so `apply_to` wrote the override's number
+    /// into `extra_params` while `model.top_p` still said "inherit".
+    /// `build_extra_body` builds the wire body from the typed field, which
+    /// makes the two a second resolution of the same knob rather than a
+    /// projection of this one (#8112 review).
+    #[test]
+    fn apply_to_mirrors_the_resolved_value_onto_the_typed_field() {
+        // Value supplied by the model override: the agent sets nothing.
+        let agent = ModelConfig::default();
+        let model = ModelOverrides {
+            top_p: Some(0.5),
+            frequency_penalty: Some(0.25),
+            presence_penalty: Some(-0.5),
+            ..Default::default()
+        };
+        let mut applied = agent.clone();
+        resolve_inference_params(&agent, Some(&model)).apply_to(&mut applied);
+
+        assert_eq!(applied.top_p, Some(0.5));
+        assert_eq!(applied.frequency_penalty, Some(0.25));
+        assert_eq!(applied.presence_penalty, Some(-0.5));
+        // The map and the typed field hold the same number, which is what
+        // makes reading either one the same answer. The `0.5` / `0.25` / `-0.5`
+        // literals are exact in binary, so a tolerance would hide a mismatch.
+        assert_eq!(
+            applied.extra_params.get("top_p"),
+            Some(&serde_json::json!(0.5_f32))
+        );
+        assert_eq!(
+            applied.extra_params.get("frequency_penalty"),
+            Some(&serde_json::json!(0.25_f32))
+        );
+        assert_eq!(
+            applied.extra_params.get("presence_penalty"),
+            Some(&serde_json::json!(-0.5_f32))
+        );
+
+        // The mirror copies the *resolved* value, not the override: an agent
+        // that set its own preference keeps it even when they differ.
+        let agent = ModelConfig {
+            top_p: Some(0.8),
+            ..Default::default()
+        };
+        let mut applied = agent.clone();
+        resolve_inference_params(&agent, Some(&model)).apply_to(&mut applied);
+        assert_eq!(applied.top_p, Some(0.8));
+        assert_eq!(
+            applied.extra_params.get("top_p"),
+            Some(&serde_json::json!(0.8_f32))
+        );
+
+        // Nothing set anywhere stays absent on both sides, rather than becoming
+        // a `null` the driver would flatten onto the wire.
+        let agent = ModelConfig::default();
+        let mut applied = agent.clone();
+        resolve_inference_params(&agent, None).apply_to(&mut applied);
+        assert_eq!(applied.top_p, None);
+        assert!(!applied.extra_params.contains_key("top_p"));
+    }
+
     #[test]
     fn known_limit_warns_but_never_clamps() {
         let limit = KnownLimit::new(16_384, LimitSource::Registry);

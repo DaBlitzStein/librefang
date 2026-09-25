@@ -4643,6 +4643,7 @@
     "presence_penalty": "Kara za obecność",
     "repeat_penalty": "Kara za powtórzenia",
     "repeat_penalty_placeholder": "od 0,01 do 2, 1 = wył.",
+    "sampling_provider_hint": "Tylko dostawcy zgodni z OpenAI oraz Ollama",
     "temperature": "Temperatura",
     "temperature_placeholder": "od 0 do 2",
     "top_k": "Top-K",

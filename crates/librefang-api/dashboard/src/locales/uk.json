@@ -4639,6 +4639,7 @@
     "presence_penalty": "Штраф за присутність",
     "repeat_penalty": "Штраф за повторення",
     "repeat_penalty_placeholder": "від 0,01 до 2, 1 = вимк.",
+    "sampling_provider_hint": "Лише провайдери, сумісні з OpenAI, та Ollama",
     "temperature": "Температура",
     "temperature_placeholder": "від 0 до 2",
     "top_k": "Top-K",

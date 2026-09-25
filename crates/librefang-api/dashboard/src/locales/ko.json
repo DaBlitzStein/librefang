@@ -4627,6 +4627,7 @@
     "presence_penalty": "존재 페널티",
     "repeat_penalty": "반복 페널티",
     "repeat_penalty_placeholder": "0.01 ~ 2, 1 = 끔",
+    "sampling_provider_hint": "OpenAI 호환 제공자와 Ollama에서만 적용됩니다",
     "temperature": "온도",
     "temperature_placeholder": "0 ~ 2",
     "top_k": "Top-K",
