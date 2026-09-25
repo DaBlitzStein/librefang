@@ -998,6 +998,49 @@ async fn the_emoji_can_be_cleared_and_is_validated() {
     );
 }
 
+/// A hand-edited oversize emoji must not wedge every later write (#8339 review
+/// follow-up).
+///
+/// `load_config` boots on the value rather than refusing to start, so the write
+/// gate has to tolerate it too: before this, any `/api/users/*` or
+/// `/api/groups/*` edit re-serialised the row, tripped the emoji bound on a
+/// user the operator was not touching, and answered 400 until the file was
+/// fixed by hand.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hand_edited_oversize_emoji_does_not_block_unrelated_writes() {
+    let oversize = "x".repeat(librefang_types::config::MAX_EMOJI_CHARS + 1);
+    let h = boot(vec![UserConfig {
+        name: "Oversize".to_string(),
+        emoji: Some(oversize.clone()),
+        ..Default::default()
+    }])
+    .await;
+
+    // An edit of a different row is the reported symptom.
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(
+            Method::PATCH,
+            "/api/users/Alice/identity",
+            TEST_TOKEN,
+            serde_json::json!({ "emoji": "🦀" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a pre-existing hand-edit must not fail an unrelated write: {body:?}"
+    );
+
+    // And the offending row is reported, not silently repaired.
+    let (_, view) = send(h.app.clone(), get("/api/users/Oversize", TEST_TOKEN)).await;
+    assert_eq!(
+        view["emoji"], oversize,
+        "the hand-edit is left in place: {view}"
+    );
+}
+
 /// Whoami answers the identity question in one call: the WebUI has to fetch it
 /// before it can render anything, so a second round trip for the glyph would be
 /// paid on every page load.
