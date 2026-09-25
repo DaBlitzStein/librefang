@@ -179,32 +179,25 @@ pub async fn upload_agent_avatar(
             format!("Could not create the avatar directory: {error}"),
         );
     }
-    // Write the bytes to a temp file beside the target, update the identity,
-    // rename the temp file into place, and only then clear the candidates that
-    // would shadow it. Every failure the filesystem can report therefore
-    // arrives before anything is taken away.
+    // Write the bytes through `crate::atomic_write` — a staging file beside
+    // the target, `fsync`, then a rename — and only then update the identity
+    // and clear the candidates that would shadow it. Every failure the
+    // filesystem can report therefore arrives before anything is taken away.
     //
     // That ordering is the fix, not the tidiness. Clearing the slot first —
     // which is what this did — means disk full, `EPERM` or a read-only mount
     // deletes the picture the operator had and then answers 500 with nothing
     // written, so `avatar_url` points at a route that 404s and the picture is
-    // simply gone. The temp file sits in the same directory, so the rename
-    // stays within one filesystem and is atomic on POSIX: a reader sees the old
-    // image or the new one, never a half-written file.
+    // simply gone. The staging name carries the process id and a per-process
+    // counter, which is the #8349 hardening and the reason this is not a
+    // hand-rolled `{uuid}.{ext}.tmp`: that name was derived from the subject
+    // alone, so two concurrent uploads for the same agent truncated each
+    // other's bytes and whichever renamed last published a splice of the two.
     let id = agent_id.to_string();
     let path = librefang_types::media::avatar_path(&avatars_dir, &id, ext);
-    let tmp = path.with_extension(format!("{ext}.tmp"));
-    if let Err(error) = std::fs::write(&tmp, &body) {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Could not write the avatar: {error}"),
-        );
-    }
-
-    if let Err(error) = std::fs::rename(&tmp, &path) {
+    if let Err(error) = crate::atomic_write(&path, &body) {
         // Nothing has been cleared either, so the refusal costs the caller
         // nothing beyond the request itself.
-        let _ = std::fs::remove_file(&tmp);
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Could not store the avatar: {error}"),
