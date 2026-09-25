@@ -13,6 +13,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import * as http from "../http/client";
 import { useAgentAvatarUrl } from "./agents";
 import { createQueryClientWrapper } from "../test/query-client";
+import { agentAvatarKeys, agentKeys } from "./keys";
 
 vi.mock("../http/client", () => ({
   fetchAuthenticatedImage: vi.fn(),
@@ -164,6 +165,38 @@ describe("useAgentAvatarUrl", () => {
     expect(revoked).toEqual(["blob:test/1"]);
   });
 
+  it("returns no URL when `hasAvatar` is false, even for a cached blob", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    queryClient.setQueryData(agentAvatarKeys.avatar("agent-1"), pngBlob());
+
+    // A disabled `useQuery` still returns its cached `data`, so the flag has to
+    // gate the effect too: callers like the chat transcript use it to say "the
+    // caller already resolved the URL", and a second object URL over the same
+    // Blob is exactly what that call shape exists to avoid.
+    const { result } = renderHook(() => useAgentAvatarUrl("agent-1", false), { wrapper });
+
+    expect(result.current).toBeUndefined();
+    expect(created).toEqual([]);
+    expect(http.fetchAuthenticatedImage).not.toHaveBeenCalled();
+  });
+
+  it("does not re-mint when a broad `agentKeys.all` invalidation sweeps", async () => {
+    vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(pngBlob());
+    const { queryClient, wrapper } = createQueryClientWrapper();
+
+    const { result } = renderHook(() => useAgentAvatarUrl("agent-1", true), { wrapper });
+    await waitFor(() => expect(result.current).toBe("blob:test/1"));
+
+    // What toggling a hand does (`mutations/hands.ts`): `agentKeys.all` is
+    // invalidated to refresh every agent row. The image blob lives under its
+    // own `agentAvatars` root, so that sweep must not re-download it — with the
+    // old child key it re-fetched on every hand toggle, and each 200 re-minted
+    // the object URL, changing every `<img src>` rendering this agent.
+    await queryClient.invalidateQueries({ queryKey: agentKeys.all });
+
+    expect(http.fetchAuthenticatedImage).toHaveBeenCalledTimes(1);
+    expect(created).toEqual(["blob:test/1"]);
+  });
   it("stays undefined when the image cannot be fetched, so the initials show", async () => {
     vi.mocked(http.fetchAuthenticatedImage).mockRejectedValue(new Error("404"));
     const { wrapper } = createQueryClientWrapper();

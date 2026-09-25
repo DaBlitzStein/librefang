@@ -22,7 +22,7 @@ import {
   getAgentMcpServers,
   getAgentManifestHistory,
 } from "../http/client";
-import { agentKeys, toolKeys } from "./keys";
+import { agentAvatarKeys, agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 import { AVATAR_STALE_MS } from "./avatar";
 
@@ -192,7 +192,7 @@ export const agentQueries = {
   // invalidating this key rather than by polling for it.
   avatar: (agentId: string, enabled: boolean) =>
     queryOptions({
-      queryKey: agentKeys.avatar(agentId),
+      queryKey: agentAvatarKeys.avatar(agentId),
       // React Query's signal is forwarded: switching agents quickly otherwise
       // leaves the superseded image GET holding a connection slot until it
       // finishes on its own.
@@ -280,7 +280,10 @@ export function useAgentChannels(agentId: string, options: QueryOverrides = {}) 
  *
  * `hasAvatar` is the caller's answer to "is `identity.avatar_url` set", and it
  * gates the request: an agent without one would otherwise cost a 404 on every
- * render of the row that shows its initials.
+ * render of the row that shows its initials. It also gates the object URL: a
+ * disabled query still returns cached data, so without the second check a
+ * caller that only wants to know "is there an image" would mint a URL for a
+ * cached Blob it is not rendering (#8339 review).
  *
  * `enabled` is the caller's answer to "is the component that renders the image
  * actually mounted". It exists because the consumer may be conditionally
@@ -302,7 +305,7 @@ export function useAgentAvatarUrl(
   // `useObjectUrl` owns the document-scoped handle and revokes it on unmount or
   // when the blob changes; passing it nothing while the consumer is unmounted
   // is what drops the URL a closed drawer would otherwise keep alive.
-  return useObjectUrl(enabled ? blob : undefined);
+  return useObjectUrl(enabled && hasAvatar ? blob : undefined);
 }
 
 export function useAgentManifestHistory(agentId: string, options: QueryOverrides = {}) {

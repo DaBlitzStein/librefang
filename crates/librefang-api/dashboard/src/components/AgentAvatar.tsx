@@ -15,6 +15,14 @@ interface AgentAvatarProps extends HTMLAttributes<HTMLDivElement> {
    * would hand that bubble a new reference every 30 s and defeat the memo.
    */
   avatarUrl?: string;
+  /**
+   * An object URL the caller already resolved for this agent's image, when it
+   * has one. Given this, the component mints nothing of its own: the chat
+   * transcript resolves the selected agent's image once and hands the string to
+   * every bubble, instead of each bubble holding its own object URL over the
+   * same cached Blob (#8339 review).
+   */
+  resolvedSrc?: string;
   /** The agent's `identity.emoji`, shown when there is no image. */
   emoji?: string;
   /** The agent's name — what `Avatar` turns into initials when there is no image. */
@@ -42,11 +50,17 @@ interface AgentAvatarProps extends HTMLAttributes<HTMLDivElement> {
 export const AgentAvatar = memo(function AgentAvatar({
   agentId,
   avatarUrl,
+  resolvedSrc,
   emoji,
   fallback,
   size = "md",
   ...props
 }: AgentAvatarProps) {
-  const src = useAgentAvatarUrl(agentId, !!avatarUrl);
-  return <Avatar fallback={fallback} size={size} src={src} emoji={emoji} {...props} />;
+  // The hook still runs on every render — only its fetch is gated. `hasAvatar`
+  // is false when the caller already resolved the URL, and the hook returns
+  // `undefined` rather than reaching for a cached Blob it must not render.
+  const ownSrc = useAgentAvatarUrl(agentId, resolvedSrc === undefined && !!avatarUrl);
+  return (
+    <Avatar fallback={fallback} size={size} src={resolvedSrc ?? ownSrc} emoji={emoji} {...props} />
+  );
 });

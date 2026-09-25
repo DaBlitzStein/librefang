@@ -38,6 +38,7 @@ import {
 import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVersion, SendAgentMessageOptions, SpawnEphemeralRequest } from "../../api";
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
 import {
+  agentAvatarKeys,
   agentKeys,
   approvalKeys,
   budgetKeys,
@@ -335,7 +336,7 @@ export function useUploadAgentAvatar() {
     mutationFn: ({ agentId, file }: { agentId: string; file: Blob }) =>
       uploadAgentAvatar(agentId, file),
     onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: agentKeys.avatar(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentAvatarKeys.avatar(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
@@ -351,7 +352,7 @@ export function useUploadAgentAvatar() {
  * avatars directory — gets back to rendering its initials.
  *
  * The avatar key is **removed** rather than invalidated, and that is the one
- * place this mutation diverges from the upload above it. `agentKeys.avatar` is
+ * place this mutation diverges from the upload above it. `agentAvatarKeys.avatar` is
  * gated on `enabled: hasAvatar`, which is "is `identity.avatar_url` set", so the
  * `detail` refetch this same `onSuccess` triggers is what switches the query
  * off. A disabled `useQuery` keeps returning its cached `data`, and an
@@ -364,7 +365,7 @@ export function useDeleteAgentAvatar() {
   return useMutation({
     mutationFn: deleteAgentAvatar,
     onSuccess: (_data, agentId) => {
-      qc.removeQueries({ queryKey: agentKeys.avatar(agentId) });
+      qc.removeQueries({ queryKey: agentAvatarKeys.avatar(agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
