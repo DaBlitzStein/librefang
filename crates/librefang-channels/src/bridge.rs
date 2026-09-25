@@ -148,7 +148,11 @@ pub enum AutoReplyOutcome {
     /// already logged where it happened. The message is spent for the same
     /// reason as [`AutoReplyOutcome::Fired`]: re-dispatching would re-run the
     /// identical turn, and the failure is not evidence that no turn ran.
-    Failed,
+    /// The string is the error the turn failed with, so the bridge can tell
+    /// the user (unless the adapter suppresses error responses) and record a
+    /// failed delivery — the two things the ordinary path does on a kernel
+    /// failure.
+    Failed(String),
 }
 
 /// Kernel operations needed by channel adapters.
@@ -5244,13 +5248,41 @@ async fn dispatch_message(
                 .await;
             return;
         }
-        // The engine claimed the message and the turn already ran (silent or
-        // empty reply), or claimed it and failed. In both cases the message is
-        // spent: falling through would dispatch the identical turn a second
-        // time in the same channel session — the user message would land in
-        // that session's history twice and cost a second LLM turn. A failed
-        // turn was already logged where it failed.
-        AutoReplyOutcome::Fired(None) | AutoReplyOutcome::Failed => return,
+        // The engine claimed the message and the turn already ran with nothing
+        // to say (silent or empty reply): the message is spent, and silence is
+        // not a failure to report.
+        AutoReplyOutcome::Fired(None) => return,
+        // The engine claimed the message and the turn failed. The message is
+        // still spent — falling through would dispatch the identical turn a
+        // second time in the same channel session, duplicating the user message
+        // in history and paying a second LLM turn — but the failure must reach
+        // the user and the delivery metrics the same way the ordinary path's
+        // kernel-failure arm does: an error bubble unless the adapter
+        // suppresses error responses, and a failed delivery record either way.
+        AutoReplyOutcome::Failed(error) => {
+            let err_msg = format!("Agent error: {error}");
+            if !adapter.suppress_error_responses() {
+                send_response(
+                    adapter,
+                    &message.sender,
+                    err_msg.clone(),
+                    thread_id,
+                    output_format,
+                )
+                .await;
+            }
+            handle
+                .record_delivery(
+                    agent_id,
+                    ct_str,
+                    &message.sender.platform_id,
+                    false,
+                    Some(&err_msg),
+                    thread_id,
+                )
+                .await;
+            return;
+        }
         // The engine did not claim the message — the ordinary dispatch below
         // handles it.
         AutoReplyOutcome::NotFired => {}

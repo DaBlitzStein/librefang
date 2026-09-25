@@ -291,6 +291,10 @@ async fn auto_reply_silent_turn_returns_no_reply() {
 /// `Err` used to collapse into `None` alongside the silent case, so the bridge
 /// read it as "auto-reply did not fire" and re-ran the identical turn — the
 /// user message landed in the same channel session twice.
+///
+/// The failure travels with the error text so the bridge can surface it as an
+/// error bubble and record a failed delivery, exactly as the ordinary path
+/// does when the kernel rejects a turn.
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_auto_reply_turn_reports_failed() {
     let (kernel, _tmp) = boot_driverless();
@@ -303,11 +307,16 @@ async fn failed_auto_reply_turn_reports_failed() {
         .check_auto_reply(missing_agent, "hello", &telegram_dm())
         .await;
 
-    assert_eq!(
-        outcome,
-        AutoReplyOutcome::Failed,
-        "a failed auto-reply turn must be reported as claimed, not as `NotFired`; \
-         the bridge would otherwise re-run the identical turn and duplicate the \
-         user message in the same channel session"
-    );
+    match outcome {
+        AutoReplyOutcome::Failed(error) => assert!(
+            !error.is_empty(),
+            "the failure text must ride along so the bridge can deliver an error \
+             bubble and record the failed delivery"
+        ),
+        other => panic!(
+            "a failed auto-reply turn must be reported as claimed, not as `{other:?}`; \
+             the bridge would otherwise re-run the identical turn and duplicate the \
+             user message in the same channel session"
+        ),
+    }
 }

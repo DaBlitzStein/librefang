@@ -2389,8 +2389,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             Err(e) => {
                 tracing::warn!(error = %e, "Auto-reply failed");
                 // A failed turn is still a claimed message: re-dispatching it
-                // would run the identical turn again in the same session.
-                AutoReplyOutcome::Failed
+                // would run the identical turn again in the same session. The
+                // error rides along so the bridge can surface it and record the
+                // delivery as failed, exactly as the ordinary path does when
+                // the kernel rejects a turn.
+                AutoReplyOutcome::Failed(e)
             }
         }
     }
