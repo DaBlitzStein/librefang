@@ -451,10 +451,11 @@ pub const MAX_EMOJI_CHARS: usize = 32;
 /// Normalize a user's identity emoji, or say why it was refused (#8339).
 ///
 /// Lives beside the field it constrains rather than in the API crate, because a value reaches [`UserConfig::emoji`] two ways — `PATCH /api/users/{name}/identity`, and an operator editing `config.toml` — and only the first had a check.
-/// `validate_config_for_reload` in the kernel calls this for every row, so a hand-edited file is bounded as soon as anything reloads it or writes it back through the API, and the two paths cannot drift apart because there is one implementation.
+/// `validate_config_for_reload` in the kernel calls this for every row, so a hand-edited file is *reported* as soon as anything reloads it or writes it back through the API, and the two paths cannot drift apart because there is one implementation.
 ///
-/// One door is deliberately left unwatched: a hand-edit that is only ever *loaded*, by `load_config` at boot, is not checked.
-/// Bounding it there would mean refusing to start the daemon over a long glyph, and an instance that will not boot is a worse outcome than one rendering a value the next write will bound.
+/// Neither hand-edit door refuses the value (#8339 review follow-up).
+/// A hand-edit that is only ever *loaded*, by `load_config` at boot, is not checked because refusing to start the daemon over a long glyph is a worse outcome than rendering one.
+/// A hand-edit that is rewritten through the API is checked but not refused, because a pre-existing value failing that check blocked every unrelated config write until the file was fixed by hand; the write path that actually owns the field still bounds it before persisting, and an unbounded glyph is stored in a file operators read and rendered into a DOM text node, not interpreted.
 ///
 /// `None` and an empty-or-whitespace string both mean "clear the stored emoji".
 ///
