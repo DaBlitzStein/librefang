@@ -12,6 +12,7 @@
 //!                                       precedence)
 //!   GET    /api/users/{name}/avatar     (bytes, headers, ETag/304, absent, 404)
 //!   DELETE /api/users/{name}/avatar     (remove → GET 404)
+//!   PUT    /api/users/{name}            (a rename moves the stored image)
 //!   PATCH  /api/users/{name}/identity   (emoji set/clear, survives a PUT of the
 //!                                       user row, surfaces on whoami)
 //!
@@ -126,6 +127,21 @@ async fn boot_with_users(users: Vec<UserConfig>, extra: Vec<UserConfig>) -> Harn
         users: all,
         ..KernelConfig::default()
     };
+
+    // Seed the config file before boot with the two paths the reload cannot
+    // recover from defaults: without them the first `[[users]]` write creates a
+    // `config.toml` that names no home, the reload falls back to
+    // `~/.librefang`, and every directory assertion in this file would probe
+    // the developer's real avatar tree instead of the fixture's (#8459).
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        format!(
+            "home_dir = {:?}\ndata_dir = {:?}\n",
+            tmp.path(),
+            tmp.path().join("data")
+        ),
+    )
+    .expect("seed config.toml");
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
     let kernel = Arc::new(kernel);
@@ -260,7 +276,7 @@ async fn upload_png(h: &Harness, name: &str, bytes: &[u8]) -> (StatusCode, serde
 ///
 /// Most of this file uses an upload as a setup step and then asserts on a later read.
 /// When the upload is what failed, that shape reports it as a puzzling failure of the *reader* — which is exactly what happened while #8459 was being chased: a mid-test reload handed the kernel a different `home_dir`, the bytes went somewhere the assertions were not looking, and the failure surfaced two calls later as `has_avatar` being false.
-/// A setup step should fail as itself.
+/// `boot_with_users` now seeds `home_dir` into the fixture's `config.toml`, so a reload keeps the tree; the setup step still fails as itself for any other reason.
 async fn upload_png_ok(h: &Harness, name: &str, bytes: &[u8]) {
     let (status, body) = upload_png(h, name, bytes).await;
     assert_eq!(status, StatusCode::OK, "upload failed: {body:?}");
@@ -1082,6 +1098,102 @@ async fn whoami_reports_the_callers_emoji_and_avatar() {
     assert_eq!(who["name"], "Watcher");
     assert!(who["emoji"].is_null(), "{who:?}");
     assert_eq!(who["has_avatar"], false, "{who:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Renaming
+// ---------------------------------------------------------------------------
+
+/// A rename carries the stored image to the new stem, because the file is keyed
+/// on `UserId::from_name(name)` and the new name derives a different uuid.
+///
+/// Without the move the picture stays under the uuid of a name that no longer
+/// exists: the renamed user's own route serves nothing, and the next person
+/// given the freed name inherits the image. Both halves are asserted, because
+/// the second is the one an operator would meet as a brand-new teammate wearing
+/// the previous holder's face.
+#[tokio::test(flavor = "multi_thread")]
+async fn renaming_a_user_moves_the_avatar_to_the_new_stem() {
+    let h = boot(vec![]).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
+
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(
+            Method::PUT,
+            "/api/users/Alice",
+            TEST_TOKEN,
+            serde_json::json!({ "name": "Alicia", "role": "user" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rename failed: {body:?}");
+    assert_eq!(body["name"], "Alicia", "{body:?}");
+
+    // (a) The file is under the new stem, and only there.
+    let dir = users_avatar_dir(&h);
+    assert_eq!(
+        file_names(&dir),
+        vec![format!("{}.png", expected_stem("Alicia"))],
+        "the picture must live under the renamed user's stem"
+    );
+
+    // (b) The renamed user still serves it: the response's `has_avatar` and the
+    // bytes the route hands back both have to agree with the directory.
+    assert_eq!(body["has_avatar"], true, "{body:?}");
+    let (status, _, bytes) =
+        send_raw(h.app.clone(), get("/api/users/Alicia/avatar", TEST_TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, TINY_PNG, "the moved file must be the same image");
+
+    // (c) The old name serves nothing.
+    let (status, _) = send(h.app.clone(), get("/api/users/Alice/avatar", TEST_TOKEN)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // (d) And the freed name starts clean for its next holder instead of
+    // handing them the previous holder's picture.
+    let (status, _) = send(
+        h.app.clone(),
+        json_req(
+            Method::POST,
+            "/api/users",
+            TEST_TOKEN,
+            serde_json::json!({ "name": "Alice", "role": "user" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, view) = send(h.app.clone(), get("/api/users/Alice", TEST_TOKEN)).await;
+    assert_eq!(
+        view["has_avatar"], false,
+        "the reused name inherited a picture: {view}"
+    );
+}
+
+/// A rename of a user who never uploaded a picture is an ordinary rename: the
+/// move tolerates a missing source rather than inventing a 500 for the common
+/// case.
+#[tokio::test(flavor = "multi_thread")]
+async fn renaming_a_user_without_an_avatar_is_not_an_error() {
+    let h = boot(vec![]).await;
+
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(
+            Method::PUT,
+            "/api/users/Watcher",
+            TEST_TOKEN,
+            serde_json::json!({ "name": "Watcher2", "role": "viewer" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rename failed: {body:?}");
+    assert_eq!(body["name"], "Watcher2", "{body:?}");
+    assert_eq!(body["has_avatar"], false, "{body:?}");
+    assert!(
+        file_names(&users_avatar_dir(&h)).is_empty(),
+        "a rename must not conjure a file out of nothing"
+    );
 }
 
 // ---------------------------------------------------------------------------
