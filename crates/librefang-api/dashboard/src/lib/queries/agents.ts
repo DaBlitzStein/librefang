@@ -184,15 +184,19 @@ export const agentQueries = {
   // gets a 401; the bytes have to be fetched and handed to the tag as an
   // object URL instead.
   //
-  // `enabled` is the caller's "this agent has one" — asking otherwise buys a
-  // guaranteed 404 per agent per render. The long `staleTime` leans on the
-  // route's `ETag` + `no-cache`: a revalidation that finds nothing changed is
-  // a bodiless 304, and a re-upload is picked up by the mutations invalidating
-  // this key rather than by polling for it.
+  // `enabled` is the caller's "there is an avatar to fetch and a mounted
+  // consumer to render it" — asking otherwise buys a guaranteed 404 per agent
+  // per render or downloads bytes nobody displays. The long `staleTime` leans
+  // on the route's `ETag` + `no-cache`: a revalidation that finds nothing
+  // changed is a bodiless 304, and a re-upload is picked up by the mutations
+  // invalidating this key rather than by polling for it.
   avatar: (agentId: string, enabled: boolean) =>
     queryOptions({
       queryKey: agentKeys.avatar(agentId),
-      queryFn: () => fetchAuthenticatedImage(agentAvatarPath(agentId)),
+      // React Query's signal is forwarded: switching agents quickly otherwise
+      // leaves the superseded image GET holding a connection slot until it
+      // finishes on its own.
+      queryFn: ({ signal }) => fetchAuthenticatedImage(agentAvatarPath(agentId), signal),
       enabled: !!agentId && enabled,
       staleTime: AVATAR_STALE_MS,
     }),
@@ -278,14 +282,27 @@ export function useAgentChannels(agentId: string, options: QueryOverrides = {}) 
  * gates the request: an agent without one would otherwise cost a 404 on every
  * render of the row that shows its initials.
  *
+ * `enabled` is the caller's answer to "is the component that renders the image
+ * actually mounted". It exists because the consumer may be conditionally
+ * rendered while this hook is not — the agents list keeps the selected agent in
+ * state after its detail drawer closes — so without it the blob would be
+ * downloaded and its object URL held for an image nothing displays.
+ *
  * Returns `undefined` while loading and when there is nothing to show, which is
  * exactly what `Avatar`'s `src` wants — it falls back to the emoji and then the
  * initials on its own, so there is no separate loading state to thread through
  * the UI.
  */
-export function useAgentAvatarUrl(agentId: string, hasAvatar: boolean): string | undefined {
-  const { data: blob } = useQuery(agentQueries.avatar(agentId, hasAvatar));
-  return useObjectUrl(blob);
+export function useAgentAvatarUrl(
+  agentId: string,
+  hasAvatar: boolean,
+  enabled = true,
+): string | undefined {
+  const { data: blob } = useQuery(agentQueries.avatar(agentId, hasAvatar && enabled));
+  // `useObjectUrl` owns the document-scoped handle and revokes it on unmount or
+  // when the blob changes; passing it nothing while the consumer is unmounted
+  // is what drops the URL a closed drawer would otherwise keep alive.
+  return useObjectUrl(enabled ? blob : undefined);
 }
 
 export function useAgentManifestHistory(agentId: string, options: QueryOverrides = {}) {
