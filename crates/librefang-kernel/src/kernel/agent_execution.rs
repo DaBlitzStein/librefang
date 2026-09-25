@@ -1321,29 +1321,16 @@ impl LibreFangKernel {
         // `reasoning_effort` is deliberately excluded from that reordering —
         // see `librefang_types::inference_params` for why the model level has
         // to keep winning there (#7770).
-        {
-            let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
-            let catalog = self.llm.model_catalog.load();
-            // The model's *effective* ceiling — the operator's
-            // `model_overrides.json` correction if one exists, otherwise the
-            // matched entry's own `max_output_tokens` (#7774). Reading the raw
-            // entry would ignore the very override that exists to correct it;
-            // `resolve_context_window` below takes the same route for the same
-            // reason. It decides `max_tokens` when neither the manifest nor the
-            // override named one, and the paired source travels with the value
-            // so an operator-corrected ceiling is not reported as a registry
-            // fact (`KnownLimit::from_effective_limits`).
-            let limits = catalog
-                .effective_limits_for_manifest(&manifest.model.provider, &manifest.model.model);
-            let known_max_output =
-                librefang_types::inference_params::KnownLimit::from_effective_limits(&limits);
-            let resolved = librefang_types::inference_params::resolve_inference_params(
-                &manifest.model,
-                catalog.get_overrides(&override_key),
-                known_max_output,
-            );
-            resolved.apply_to(&mut manifest.model);
-        }
+        //
+        // Shared with the other two dispatch paths (`messaging::send_message_ephemeral`,
+        // `messaging::send_message_streaming_with_sender_context_routing_thinking_and_session`)
+        // and the ephemeral worker spawn (#8112) — see
+        // `manifest_helpers::apply_resolved_inference_params` for why calling
+        // this from only one of the four used to matter.
+        super::manifest_helpers::apply_resolved_inference_params(
+            &self.llm.model_catalog.load(),
+            &mut manifest.model,
+        );
 
         // #5980: pre-dispatch per-provider budget gate. The provider name is
         // now finalized (model routing + key-availability fallback above), so

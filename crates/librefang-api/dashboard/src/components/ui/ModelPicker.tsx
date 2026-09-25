@@ -56,6 +56,23 @@ export interface ModelPickerProps {
   /** The current pair, or `null` when nothing is chosen yet. */
   value: ModelPickerValue | null;
   onChange: (next: ModelPickerValue) => void;
+  /**
+   * `"pair"` (default) chooses a provider and a model; `"model"` chooses a
+   * model alone, out of one flat searchable list.
+   *
+   * The second shape exists because not every field in the manifest holds a
+   * pair. `[routing] simple_model` / `medium_model` / `complex_model` and
+   * `pinned_model` are bare model names, resolved against the global catalog
+   * by `ModelCatalog::find_model` / `resolve_alias` in
+   * `crates/librefang-runtime/src/routing.rs`. Writing `provider/model` into
+   * one of those would simply not resolve, so those fields get a control that
+   * can only produce a model name.
+   *
+   * `onChange` still reports a pair in both shapes — in `"model"` the provider
+   * is carried alongside so a row can be labelled with where it came from, and
+   * callers that only store the name read `next.model`.
+   */
+  variant?: "pair" | "model";
   /** The catalog to choose from. The caller decides what is filtered out. */
   models: PickerModel[];
   /**
@@ -101,6 +118,7 @@ interface ProviderEntry {
 export function ModelPicker({
   value,
   onChange,
+  variant = "pair",
   models,
   providers,
   disabled = false,
@@ -182,21 +200,42 @@ export function ModelPicker({
     return q ? entries.filter((p) => p.id.toLowerCase().includes(q)) : entries;
   }, [entries, search]);
 
+  const modelOnly = variant === "model";
+
   const filteredModels = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const inProvider = models.filter((m) => m.provider === drilldown);
-    if (!q) return inProvider;
-    return inProvider.filter(
+    // In the `model` shape there is no provider level, so the list is the whole
+    // catalog and the provider is only a label on each row.
+    const pool = modelOnly ? models : models.filter((m) => m.provider === drilldown);
+    if (!q) return pool;
+    return pool.filter(
       (m) =>
-        m.id.toLowerCase().includes(q) || (m.display_name ?? "").toLowerCase().includes(q),
+        m.id.toLowerCase().includes(q) ||
+        (m.display_name ?? "").toLowerCase().includes(q) ||
+        // Matching the provider name too is what makes one flat list over a
+        // large catalog navigable: typing "openai" narrows to its models.
+        (modelOnly && m.provider.toLowerCase().includes(q)),
     );
-  }, [models, drilldown, search]);
+  }, [models, drilldown, search, modelOnly]);
 
-  const trigger = value?.model ? `${value.provider} / ${value.model}` : (placeholder ?? "");
+  // In the `model` shape the provider is empty by construction — those fields
+  // hold a bare name — so joining it would render a bare " / gpt-4o".
+  const trigger = value?.model
+    ? modelOnly
+      ? value.model
+      : `${value.provider} / ${value.model}`
+    : (placeholder ?? "");
 
-  const customProviderValue = custom === "provider" ? customProvider.trim() : (drilldown ?? "");
+  const customProviderValue = modelOnly
+    ? ""
+    : custom === "provider"
+      ? customProvider.trim()
+      : (drilldown ?? "");
   const customModelValue = customModel.trim();
-  const canCommitCustom = custom !== null && !!customProviderValue && !!customModelValue;
+  // A hand-entered model stands on its own in the `model` shape: those fields
+  // hold a name, not a pair, so requiring a provider would block a valid entry.
+  const canCommitCustom =
+    custom !== null && !!customModelValue && (modelOnly || !!customProviderValue);
 
   const commitCustom = () => {
     if (!canCommitCustom) return;
@@ -232,7 +271,7 @@ export function ModelPicker({
           className="absolute left-0 top-full z-50 mt-1 w-80 overflow-hidden rounded-xl border border-border-subtle bg-surface shadow-xl"
         >
           <div className="flex items-center gap-2 border-b border-border-subtle/50 p-2">
-            {drilldown && (
+            {drilldown && !modelOnly && (
               <button
                 type="button"
                 aria-label={t("common.back", { defaultValue: "Back" })}
@@ -246,7 +285,9 @@ export function ModelPicker({
               </button>
             )}
             <span className="px-1 text-[10px] font-semibold uppercase tracking-wider text-text-dim/50">
-              {drilldown ?? t("chat.select_provider", { defaultValue: "Select Provider" })}
+              {modelOnly
+                ? t("agents.form.model_id", { defaultValue: "Model" })
+                : (drilldown ?? t("chat.select_provider", { defaultValue: "Select Provider" }))}
             </span>
           </div>
 
@@ -257,13 +298,17 @@ export function ModelPicker({
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              // The literal here has to match the one the key already carries
+              // elsewhere — the locale-coverage test fails a key whose fallbacks
+              // disagree, and rightly: two spellings of the same string is how a
+              // translation ends up half-applied.
               aria-label={
-                drilldown
+                drilldown || modelOnly
                   ? t("chat.search_models", { defaultValue: "Search models..." })
                   : t("chat.search_providers", { defaultValue: "Search providers..." })
               }
               placeholder={
-                drilldown
+                drilldown || modelOnly
                   ? t("chat.search_models", { defaultValue: "Search models..." })
                   : t("chat.search_providers", { defaultValue: "Search providers..." })
               }
@@ -297,7 +342,7 @@ export function ModelPicker({
 
             {custom && (
               <div className="space-y-1.5 p-1">
-                {custom === "provider" && (
+                {custom === "provider" && !modelOnly && (
                   <input
                     autoFocus
                     type="text"
@@ -331,13 +376,14 @@ export function ModelPicker({
               </div>
             )}
 
-            {!isFetching && !custom && !drilldown && filteredProviders.length === 0 && (
+            {!isFetching && !custom && !modelOnly && !drilldown && filteredProviders.length === 0 && (
               <p className="px-2.5 py-2 text-xs text-text-dim">
                 {t("chat.no_models_found", { defaultValue: "No models found" })}
               </p>
             )}
             {!isFetching &&
               !custom &&
+              !modelOnly &&
               !drilldown &&
               filteredProviders.map((p) => {
                 const isCurrent = p.id === value?.provider;
@@ -388,14 +434,14 @@ export function ModelPicker({
                 );
               })}
 
-            {!isFetching && !custom && drilldown && filteredModels.length === 0 && (
+            {!isFetching && !custom && (modelOnly || drilldown) && filteredModels.length === 0 && (
               <p className="px-2.5 py-2 text-xs text-text-dim">
                 {t("chat.no_models_found", { defaultValue: "No models found" })}
               </p>
             )}
             {!isFetching &&
               !custom &&
-              drilldown &&
+              (modelOnly || drilldown) &&
               filteredModels.map((m) => {
                 const isActive = m.id === value?.model && m.provider === value?.provider;
                 return (
@@ -423,6 +469,13 @@ export function ModelPicker({
                       isActive && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" />
                     )}
                     <span className="truncate text-xs font-medium">{m.display_name || m.id}</span>
+                    {modelOnly && (
+                      // The same id can be served by several providers, and one
+                      // flat list has no provider level to tell them apart.
+                      <span className="ml-auto shrink-0 text-[10px] text-text-dim/40">
+                        {m.provider}
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -432,8 +485,9 @@ export function ModelPicker({
                 onClick={() => {
                   // At the provider level this takes both halves of the pair: a
                   // provider the catalog does not know has no models to drill
-                  // into. Inside a provider it takes only the model.
-                  setCustom(drilldown ? "model" : "provider");
+                  // into. Inside a provider — and in the flat `model` shape,
+                  // which has no provider level at all — only the model.
+                  setCustom(drilldown || modelOnly ? "model" : "provider");
                   setCustomProvider(value?.provider ?? "");
                   setCustomModel(value?.model ?? "");
                 }}

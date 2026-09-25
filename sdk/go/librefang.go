@@ -359,6 +359,22 @@ func (r *AgentsResource) PatchAgent(id string, data map[string]interface{}) (int
 	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s", id), data, nil)
 }
 
+func (r *AgentsResource) ServeAgentAvatar(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/avatar", id), nil, nil)
+}
+
+// UploadAgentAvatar sends a raw application/octet-stream body. An empty contentType defaults to it.
+func (r *AgentsResource) UploadAgentAvatar(id string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/agents/%s/avatar", id), body, contentType)
+}
+
+func (r *AgentsResource) DeleteAgentAvatar(id string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/avatar", id), nil, nil)
+}
+
 func (r *AgentsResource) GetAgentChannels(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/channels", id), nil, nil)
 }
@@ -489,6 +505,10 @@ func (r *AgentsResource) ResumeAgent(id string) (interface{}, error) {
 
 func (r *AgentsResource) ListAgentRuntime(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/runtime", id), nil, nil)
+}
+
+func (r *AgentsResource) SaveAgentAsAgentType(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/save-as-agent-type", id), data, nil)
 }
 
 func (r *AgentsResource) GetAgentSession(id string, query map[string]string) (interface{}, error) {
@@ -1939,6 +1959,10 @@ func (r *UsersResource) ImportUsers(data map[string]interface{}) (interface{}, e
 	return r.client.request("POST", "/api/users/import", data, nil)
 }
 
+func (r *UsersResource) ServeMyAvatar() (interface{}, error) {
+	return r.client.request("GET", "/api/users/me/avatar", nil, nil)
+}
+
 func (r *UsersResource) GetUser(name string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/users/%s", name), nil, nil)
 }
@@ -1949,6 +1973,26 @@ func (r *UsersResource) UpdateUser(name string, data map[string]interface{}) (in
 
 func (r *UsersResource) DeleteUser(name string) (interface{}, error) {
 	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s", name), nil, nil)
+}
+
+func (r *UsersResource) ServeUserAvatar(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/users/%s/avatar", name), nil, nil)
+}
+
+// UploadUserAvatar sends a raw application/octet-stream body. An empty contentType defaults to it.
+func (r *UsersResource) UploadUserAvatar(name string, body []byte, contentType string) (interface{}, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return r.client.requestRaw("POST", fmt.Sprintf("/api/users/%s/avatar", name), body, contentType)
+}
+
+func (r *UsersResource) DeleteUserAvatar(name string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s/avatar", name), nil, nil)
+}
+
+func (r *UsersResource) UpdateUserIdentity(name string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PATCH", fmt.Sprintf("/api/users/%s/identity", name), data, nil)
 }
 
 func (r *UsersResource) GetUserPolicy(name string) (interface{}, error) {

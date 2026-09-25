@@ -371,11 +371,30 @@ impl OllamaDriver {
         // Samplers are read from `options`, not the top level of the body (#8290).
         // `top_k` / `min_p` / `repeat_penalty` have the same names there as in llama.cpp.
         // `top_p` and the penalties used to arrive through `extra_body`, which this driver merges at the top level, so Ollama never applied them.
+        // #8112: the typed field wins when present; the `extra_body` copy is the
+        // fallback for callers that still pass them there, and the redundant
+        // top-level copy is stripped below so Ollama never sees two answers.
+        let extra_f32 = |key: &str| {
+            request
+                .extra_body
+                .as_ref()
+                .and_then(|m| m.get(key))
+                .and_then(serde_json::Value::as_f64)
+                .map(|v| v as f32)
+        };
+        let top_p = request.top_p.or_else(|| extra_f32("top_p"));
+        let frequency_penalty = request
+            .frequency_penalty
+            .or_else(|| extra_f32("frequency_penalty"));
+        let presence_penalty = request
+            .presence_penalty
+            .or_else(|| extra_f32("presence_penalty"));
+
         let options = if request.temperature == 0.0
             && request.max_tokens == 0
-            && request.top_p.is_none()
-            && request.frequency_penalty.is_none()
-            && request.presence_penalty.is_none()
+            && top_p.is_none()
+            && frequency_penalty.is_none()
+            && presence_penalty.is_none()
             && request.top_k.is_none()
             && request.min_p.is_none()
             && request.repeat_penalty.is_none()
@@ -384,9 +403,9 @@ impl OllamaDriver {
         } else {
             Some(OllamaOptions {
                 temperature: Some(request.temperature),
-                top_p: request.top_p,
-                frequency_penalty: request.frequency_penalty,
-                presence_penalty: request.presence_penalty,
+                top_p,
+                frequency_penalty,
+                presence_penalty,
                 top_k: request.top_k,
                 min_p: request.min_p,
                 repeat_penalty: request.repeat_penalty,
@@ -428,9 +447,25 @@ impl OllamaDriver {
             })),
             format,
             options,
-            extra_body: request.extra_body.clone(),
+            // The three keys just lifted into `options` above must not also
+            // survive at the top level, or the merge in `complete`/`stream`
+            // writes a second, Ollama-ignored copy into the wire body (#8112).
+            extra_body: without_options_sampling_keys(request.extra_body.clone()),
         })
     }
+}
+
+/// Remove the sampling keys `build_request` already lifted into `options`
+/// (#8112), so `complete`/`stream` don't also merge a redundant top-level
+/// copy that Ollama's native API ignores.
+fn without_options_sampling_keys(
+    extra: Option<BTreeMap<String, serde_json::Value>>,
+) -> Option<BTreeMap<String, serde_json::Value>> {
+    let mut extra = extra?;
+    for key in ["top_p", "frequency_penalty", "presence_penalty"] {
+        extra.remove(key);
+    }
+    (!extra.is_empty()).then_some(extra)
 }
 
 /// Strip a trailing `/v1` from a user-provided base URL when (and only
@@ -530,6 +565,10 @@ struct OllamaRequest {
 struct OllamaOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    /// Nucleus sampling. Native Ollama uses the same key name as OpenAI, but
+    /// only reads it nested under `options` — a copy at the top level of the
+    /// body (where `extra_body` merges) is silently ignored (#8112). See
+    /// [`Self::frequency_penalty`] / [`Self::presence_penalty`].
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1279,6 +1318,77 @@ mod tests {
         });
         let wire = driver.build_request(&r).expect("build");
         assert_eq!(wire.think, Some(false));
+    }
+
+    /// #8112: Ollama's native API only reads `top_p` / `frequency_penalty` /
+    /// `presence_penalty` nested under `options`; `extra_body` merges at the
+    /// top level of the wire body, where these three are silently ignored.
+    /// `build_request` must lift them into `options` instead of leaving them
+    /// for the top-level merge.
+    #[test]
+    fn build_request_lifts_sampling_extra_body_keys_into_options() {
+        let driver = OllamaDriver::new(String::new(), "http://x".to_string());
+        let mut r = req("llama3.2");
+        r.extra_body = Some(BTreeMap::from([
+            ("top_p".to_string(), serde_json::json!(0.9)),
+            ("frequency_penalty".to_string(), serde_json::json!(0.5)),
+            ("presence_penalty".to_string(), serde_json::json!(-0.5)),
+        ]));
+        let wire = driver.build_request(&r).expect("build");
+        let options = wire
+            .options
+            .expect("sampling keys must produce an options object");
+        assert_eq!(options.top_p, Some(0.9));
+        assert_eq!(options.frequency_penalty, Some(0.5));
+        assert_eq!(options.presence_penalty, Some(-0.5));
+        // And they must not ALSO survive at the top level, or `complete`/`stream`
+        // would merge a second, Ollama-ignored copy into the wire body.
+        assert!(
+            wire.extra_body.is_none(),
+            "the sampling keys were the only extra_body entries; lifting them \
+             into options must leave nothing behind: {:?}",
+            wire.extra_body
+        );
+    }
+
+    /// A non-sampling `extra_body` key (e.g. Qwen's `enable_memory`) is left
+    /// alone — only the three sampling keys move into `options`.
+    #[test]
+    fn build_request_keeps_non_sampling_extra_body_keys_at_the_top_level() {
+        let driver = OllamaDriver::new(String::new(), "http://x".to_string());
+        let mut r = req("llama3.2");
+        r.extra_body = Some(BTreeMap::from([
+            ("top_p".to_string(), serde_json::json!(0.9)),
+            ("enable_memory".to_string(), serde_json::json!(true)),
+        ]));
+        let wire = driver.build_request(&r).expect("build");
+        assert_eq!(wire.options.expect("options").top_p, Some(0.9));
+        let extra = wire.extra_body.expect("enable_memory must survive");
+        assert!(!extra.contains_key("top_p"));
+        assert_eq!(extra.get("enable_memory"), Some(&serde_json::json!(true)));
+    }
+
+    /// A sampling override alone (no temperature/max_tokens set — the
+    /// `request.temperature == 0.0 && request.max_tokens == 0` early-out)
+    /// must still produce an `options` object, or the override is silently
+    /// dropped instead of reaching the wire.
+    #[test]
+    fn build_request_produces_options_for_sampling_alone_even_with_zeroed_temperature_and_tokens() {
+        let driver = OllamaDriver::new(String::new(), "http://x".to_string());
+        let mut r = req("llama3.2");
+        r.temperature = 0.0;
+        r.max_tokens = 0;
+        r.extra_body = Some(BTreeMap::from([(
+            "top_p".to_string(),
+            serde_json::json!(0.42),
+        )]));
+        let wire = driver.build_request(&r).expect("build");
+        assert_eq!(
+            wire.options.and_then(|o| o.top_p),
+            Some(0.42),
+            "a top_p-only request must not fall through the temperature/max_tokens \
+             early-out and skip the options object entirely"
+        );
     }
 
     /// Positive control: a graded mode leaves the pre-#7946 `think: true`.

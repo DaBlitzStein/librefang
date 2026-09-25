@@ -553,7 +553,6 @@ export function TasksPage() {
 
   // Fetch all tasks (no status filter — we split client-side)
   const taskListQuery = useTaskQueue();
-
   const allTasks: TaskQueueItem[] = taskListQuery.data?.tasks ?? [];
   const validTasks = allTasks.filter(
     (task): task is TaskQueueItem & { id: string } => typeof task.id === "string" && task.id.length > 0,

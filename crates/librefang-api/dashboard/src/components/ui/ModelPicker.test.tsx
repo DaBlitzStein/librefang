@@ -208,6 +208,111 @@ describe("ModelPicker", () => {
     expect(screen.getByRole("button", { name: "openai" })).toBeEnabled();
   });
 
+  // Fields like `[routing] simple_model` hold a bare model name, resolved
+  // against the global catalog — a `provider/model` string would not resolve.
+  describe("flat model shape", () => {
+    const catalog = [
+      model("openai", "gpt-4"),
+      model("anthropic", "claude-sonnet-5"),
+      model("openai", "o3-mini", "o3 Mini"),
+    ];
+
+    it("lists every model without a provider level", () => {
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          value={null}
+          onChange={() => {}}
+          models={catalog}
+        />,
+      );
+
+      open("Simple model");
+      // All three are reachable immediately — there is no provider step.
+      expect(screen.getByRole("button", { name: "openai/gpt-4" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "anthropic/claude-sonnet-5" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "openai/o3-mini" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: i18n.t("common.back") })).not.toBeInTheDocument();
+    });
+
+    it("names the current model on the trigger without a dangling separator", () => {
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          // The form adapts a bare name into a pair with an empty provider.
+          value={{ provider: "", model: "gpt-4" }}
+          onChange={() => {}}
+          models={catalog}
+        />,
+      );
+      expect(screen.getByRole("button", { name: "Simple model: gpt-4" })).toBeInTheDocument();
+    });
+
+    it("reports the provider of the row that was picked", () => {
+      const onChange = vi.fn();
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          value={null}
+          onChange={onChange}
+          models={catalog}
+        />,
+      );
+
+      open("Simple model");
+      fireEvent.click(screen.getByRole("button", { name: "anthropic/claude-sonnet-5" }));
+      expect(onChange).toHaveBeenCalledWith({ provider: "anthropic", model: "claude-sonnet-5" });
+    });
+
+    it("narrows by provider name, which is the only way to search a flat catalog", () => {
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          value={null}
+          onChange={() => {}}
+          models={catalog}
+        />,
+      );
+
+      open("Simple model");
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "anthropic" } });
+
+      expect(screen.getByRole("button", { name: "anthropic/claude-sonnet-5" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "openai/gpt-4" })).not.toBeInTheDocument();
+    });
+
+    it("takes a hand-entered name with no provider at all", () => {
+      const onChange = vi.fn();
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          allowCustom
+          value={null}
+          onChange={onChange}
+          models={catalog}
+        />,
+      );
+
+      open("Simple model");
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("model_param.custom") }));
+
+      // No provider field: these fields hold a name, so demanding a provider
+      // would make a valid entry impossible to commit.
+      expect(screen.queryByLabelText(i18n.t("agents.form.provider"))).not.toBeInTheDocument();
+      fireEvent.change(screen.getByLabelText(i18n.t("agents.form.model_id")), {
+        target: { value: "llama-3.3-70b" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("common.confirm") }));
+
+      expect(onChange).toHaveBeenCalledWith({ provider: "", model: "llama-3.3-70b" });
+    });
+  });
+
   // The catalog is built from live discovery. When discovery finds nothing for
   // a provider — or an operator wants a model the daemon has never seen — the
   // picker has to stay usable, which is the whole reason `allowCustom` exists.

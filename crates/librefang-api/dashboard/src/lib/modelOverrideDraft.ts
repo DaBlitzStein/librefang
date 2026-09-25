@@ -1,8 +1,8 @@
 // Draft rules for the per-model limit overrides edited on the providers page.
 //
-// Extracted for the same reason `agentModelPatch.ts` exists: the rule below
-// decides both what gets saved and whether Save lights up, and keeping one copy
-// is what stops those two from drifting.
+// Extracted for the same reason the manifest form keeps one patch builder: the
+// rule below decides both what gets saved and whether Save lights up, and
+// keeping one copy is what stops those two from drifting.
 //
 // The fields edit a **preference** — how long a reply to ask this model for, how
 // much context to send it. They are not the model's catalog figures, which the

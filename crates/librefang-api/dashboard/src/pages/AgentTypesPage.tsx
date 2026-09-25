@@ -1,26 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Link } from "@tanstack/react-router";
-import { Edit2, ExternalLink, History, LayoutTemplate, Lock, Play, Plus, RotateCcw, Share2, ShieldCheck, Trash2 } from "lucide-react";
-import type {
-  AgentTemplate,
-  SpawnEphemeralResult,
-  TemplateVersionEntry,
-} from "../api";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { Edit2, ExternalLink, History, LayoutTemplate, Lock, Plus, RotateCcw, Share2, ShieldCheck, Trash2 } from "lucide-react";
+import type { AgentTemplate, TemplateVersionEntry } from "../api";
 import { useAgentType, useAgentTypeRegistryDiff, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
-import { useAgents, useTools } from "../lib/queries/agents";
+import { useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useMcpServers } from "../lib/queries/mcp";
+import { useModelRouterProfiles } from "../lib/queries/modelRouter";
 import { useModelRoutingInertReason } from "../lib/queries/config";
+import { changeSourceLabel } from "../lib/changeSource";
 import {
   useCreateAgentTypeFromToml,
   useDeleteAgentType,
   usePromoteAgentType,
   useRestoreAgentType,
   useRestoreTemplateVersion,
-  useSpawnEphemeral,
   useUpdateAgentTypeToml,
   unknownKeysWarning,
 } from "../lib/mutations/agentTypes";
@@ -47,7 +44,6 @@ import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { ApiError } from "../lib/http/errors";
 import { copyToClipboard } from "../lib/clipboard";
-import { changeSourceLabel } from "../lib/changeSource";
 
 const inputClass =
   "w-full rounded-lg border border-border-subtle bg-main/40 px-2.5 py-1.5 text-[13px] " +
@@ -93,6 +89,7 @@ function AgentTypeEditor({
   const toolsQuery = useTools();
   const skillsQuery = useSkills();
   const mcpServersQuery = useMcpServers();
+  const routerProfilesQuery = useModelRouterProfiles();
   // #8446: a template has no running agent to carry `routing_inert_reason`, so the Routing section reads the kernel-wide mode off the shared config cache, as the agent create form does.
   // The editor is mounted only while open, so this fetches nothing until then.
   const routingInertReasonQuery = useModelRoutingInertReason();
@@ -153,6 +150,15 @@ function AgentTypeEditor({
         ? mcpServersQuery.data.configured.map((s: { name: string }) => ({ name: s.name }))
         : [],
     [mcpServersQuery.data],
+  );
+
+  const routerProfileCatalog = useMemo<ManifestCatalogEntry[]>(
+    () =>
+      (routerProfilesQuery.data?.profiles ?? []).map((p) => ({
+        name: p.name,
+        description: [`${p.provider}/${p.model}`, p.cost_tier].join(" · "),
+      })),
+    [routerProfilesQuery.data],
   );
 
   const saving = createMutation.isPending || updateTomlMutation.isPending;
@@ -241,6 +247,8 @@ function AgentTypeEditor({
             skillCatalog={skillCatalog}
             toolCatalog={toolCatalog}
             mcpCatalog={mcpCatalog}
+            routerProfileCatalog={routerProfileCatalog}
+            routerProfilesEnabled={routerProfilesQuery.data?.enabled}
             nameField={isCreate ? "hidden" : "readonly"}
             routingInertReason={routingInertReasonQuery.data}
           />
@@ -260,142 +268,6 @@ function AgentTypeEditor({
           </div>
         </div>
       )}
-    </Modal>
-  );
-}
-
-/**
- * Run an agent type once, on the spot, and show what came back (#6699).
- *
- * The run is an *ephemeral worker*: no agent is registered, no session is
- * persisted, and the mission workspace is deleted when the turn ends. The only
- * thing that outlives it is the text below and the spend on the parent's ledger
- * — which is why picking the parent is a deliberate choice here and not a
- * hidden default. The parent is billed for the run, its `[resources]` quota is
- * the one enforced, and its own tool set is the ceiling on the worker's.
- */
-function QuickRunModal({
-  type,
-  onClose,
-}: {
-  type: AgentTemplate;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation();
-  const addToast = useUIStore((s) => s.addToast);
-  const agents = useAgents();
-  const spawn = useSpawnEphemeral();
-
-  const [parent, setParent] = useState("");
-  const [task, setTask] = useState("");
-  const [result, setResult] = useState<SpawnEphemeralResult | null>(null);
-
-  const candidates = useMemo(
-    () => (agents.data ?? []).filter((a) => !a.is_hand),
-    [agents.data],
-  );
-
-  useEffect(() => {
-    if (parent === "" && candidates.length > 0) setParent(candidates[0].id);
-  }, [candidates, parent]);
-
-  async function run() {
-    try {
-      const res = await spawn.mutateAsync({
-        parent,
-        message: task,
-        agent_type: type.name,
-        label: type.name,
-      });
-      setResult(res);
-    } catch (err) {
-      addToast(toastErr(err, t("agentTypes.quick_run_failed")), "error");
-    }
-  }
-
-  return (
-    <Modal
-      isOpen
-      onClose={onClose}
-      variant="panel-right"
-      size="lg"
-      title={t("agentTypes.quick_run_title", { name: type.name })}
-    >
-      <div className="space-y-4">
-        <Field label={t("agentTypes.quick_run_parent")} hint={t("agentTypes.quick_run_parent_hint")}>
-          {agents.isLoading ? (
-            <ListSkeleton rows={1} />
-          ) : candidates.length === 0 ? (
-            <p className="text-[12px] text-text-dim">{t("agentTypes.quick_run_no_agents")}</p>
-          ) : (
-            <select
-              value={parent}
-              onChange={(e) => setParent(e.target.value)}
-              className={inputClass}
-            >
-              {candidates.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
-          )}
-        </Field>
-
-        <Field label={t("agentTypes.quick_run_task")}>
-          <textarea
-            value={task}
-            onChange={(e) => setTask(e.target.value)}
-            rows={5}
-            placeholder={t("agentTypes.quick_run_task_placeholder")}
-            className={`${inputClass} resize-y`}
-            autoFocus
-          />
-        </Field>
-
-        {result && (
-          <div className="space-y-2 rounded-xl border border-border-subtle bg-main/30 px-3 py-2.5">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-text-dim">
-                {t("agentTypes.quick_run_result")}
-              </span>
-              <Badge variant="default">{result.name}</Badge>
-              <span className="text-[11px] text-text-dim">
-                {t("agentTypes.quick_run_meta", {
-                  iterations: result.iterations,
-                  tools: result.tools.length,
-                })}
-              </span>
-              {typeof result.cost_usd === "number" && (
-                <span className="text-[11px] text-text-dim">
-                  {t("agentTypes.quick_run_cost", { cost: result.cost_usd.toFixed(4) })}
-                </span>
-              )}
-            </div>
-            <p className="whitespace-pre-wrap break-words text-[13px] text-text-main">
-              {result.response}
-            </p>
-            <p className="text-[11px] text-text-dim/70">
-              {t("agentTypes.quick_run_ephemeral_note")}
-            </p>
-          </div>
-        )}
-
-        <div className="flex justify-end gap-2 pt-1">
-          <Button variant="ghost" onClick={onClose} disabled={spawn.isPending}>
-            {t("common.close")}
-          </Button>
-          <Button
-            variant="primary"
-            leftIcon={<Play className="h-3.5 w-3.5" />}
-            onClick={() => void run()}
-            isLoading={spawn.isPending}
-            disabled={parent === "" || task.trim() === ""}
-          >
-            {t("agentTypes.quick_run_submit")}
-          </Button>
-        </div>
-      </div>
     </Modal>
   );
 }
@@ -489,15 +361,6 @@ function PromotionPreviewModal({ name, onClose }: { name: string; onClose: () =>
       )}
     </Modal>
   );
-}
-
-/**
- * The stored timestamp is naive UTC. The row label and the restore confirmation
- * must read it identically, or the dialog would name a version the operator
- * cannot find in the list above it.
- */
-function versionTimestamp(v: TemplateVersionEntry): string {
-  return new Date(v.timestamp + "Z").toLocaleString();
 }
 
 /**
@@ -640,6 +503,16 @@ export function RestoreDiffModal({
 }
 
 
+
+/**
+ * The stored timestamp is naive UTC. The row label and the restore confirmation
+ * must read it identically, or the dialog would name a version the operator
+ * cannot find in the list above it.
+ */
+function versionTimestamp(v: TemplateVersionEntry): string {
+  return new Date(v.timestamp + "Z").toLocaleString();
+}
+
 function TemplateHistoryModal({
   name,
   onClose,
@@ -755,7 +628,7 @@ function TemplateHistoryModal({
 
 function AgentTypeRow({
   type,
-  onQuickRun,
+  onRun,
   onEdit,
   onDelete,
   onPromote,
@@ -764,7 +637,7 @@ function AgentTypeRow({
   onHistory,
 }: {
   type: AgentTemplate;
-  onQuickRun: () => void;
+  onRun: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onPromote: () => void;
@@ -789,14 +662,19 @@ function AgentTypeRow({
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
+
+        {/* The row's own name goes into the accessible name: every row carries
+            this same control, so a bare "Create Agent" repeated N times tells a
+            screen-reader user nothing about which type it would create. Its
+            neighbours name their own object the same way (#8166). */}
         <button
           type="button"
-          onClick={onQuickRun}
+          onClick={onRun}
           className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
-          aria-label={t("agentTypes.quick_run")}
-          title={t("agentTypes.quick_run")}
+          aria-label={`${t("agents.create_agent")}: ${type.name}`}
+          title={`${t("agents.create_agent")}: ${type.name}`}
         >
-          <Play className="h-3.5 w-3.5" />
+          <Plus className="h-3.5 w-3.5" />
         </button>
 
         {/* Read-only sanitized-manifest modal. Its own key, not
@@ -904,13 +782,13 @@ function AgentTypeRow({
 
 export function AgentTypesPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const addToast = useUIStore((s) => s.addToast);
   const types = useAgentTypes();
   const deleteMutation = useDeleteAgentType();
   const promoteMutation = usePromoteAgentType();
 
   const [editing, setEditing] = useState<{ name: string | null } | null>(null);
-  const [quickRun, setQuickRun] = useState<AgentTemplate | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [promoting, setPromoting] = useState<string | null>(null);
   const [pendingPromote, setPendingPromote] = useState<string | null>(null);
@@ -978,7 +856,7 @@ export function AgentTypesPage() {
             <AgentTypeRow
               key={`${type.source}:${type.name}`}
               type={type}
-              onQuickRun={() => setQuickRun(type)}
+              onRun={() => void navigate({ to: "/agents", search: { template: type.name } })}
               onEdit={() => setEditing({ name: type.name })}
               onDelete={() => setPendingDelete(type.name)}
               onPromote={() => setPendingPromote(type.name)}
@@ -993,8 +871,6 @@ export function AgentTypesPage() {
       {editing && (
         <AgentTypeEditor name={editing.name} onClose={() => setEditing(null)} />
       )}
-
-      {quickRun && <QuickRunModal type={quickRun} onClose={() => setQuickRun(null)} />}
 
       {promoting && (
         <PromotionPreviewModal name={promoting} onClose={() => setPromoting(null)} />

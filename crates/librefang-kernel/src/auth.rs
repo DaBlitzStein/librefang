@@ -1276,6 +1276,7 @@ mod tests {
                 tool_categories: None,
                 memory_access: None,
                 channel_tool_rules: HashMap::new(),
+                emoji: None,
             },
             UserConfig {
                 name: "Guest".to_string(),
@@ -1291,6 +1292,7 @@ mod tests {
                 tool_categories: None,
                 memory_access: None,
                 channel_tool_rules: HashMap::new(),
+                emoji: None,
             },
             UserConfig {
                 name: "ReadOnly".to_string(),
@@ -1302,6 +1304,7 @@ mod tests {
                 tool_categories: None,
                 memory_access: None,
                 channel_tool_rules: HashMap::new(),
+                emoji: None,
             },
         ]
     }
@@ -1470,6 +1473,7 @@ mod tests {
             tool_categories,
             memory_access,
             channel_tool_rules,
+            emoji: None,
         }
     }
 
@@ -2069,6 +2073,7 @@ mod channel_role_tests {
             memory_access: None,
             channel_tool_rules: HashMap::new(),
             budget: None,
+            emoji: None,
         }];
         let mgr = AuthManager::new(&configs);
         let calls = Arc::new(AtomicUsize::new(0));
