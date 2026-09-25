@@ -602,7 +602,6 @@ impl App {
                         self.dashboard.loading = false;
                         self.dashboard.status_msg = err;
                     }
-                    Tab::Agents => self.agents.status_msg = err,
                     Tab::Chat => self.chat.status_msg = Some(err),
                     Tab::Workflows => {
                         self.workflows.loading = false;
