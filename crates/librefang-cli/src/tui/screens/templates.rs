@@ -211,9 +211,12 @@ pub struct TemplatesState {
     pub showing_history: bool,
     pub history_list: ListState,
     pub history_name: String,
-    /// Armed by `R` on a registry-backed row. The overwrite it stages is not
-    /// undoable from here, so it waits for an explicit `y`.
-    pub confirm_restore: bool,
+    /// Armed by `R` on a registry-backed row: the name the operator aimed at.
+    /// The overwrite it stages is not undoable from here, so it waits for an
+    /// explicit `y`. The name is captured at arm time, not read back from the
+    /// selection on `y` — a list refresh landing behind the prompt re-selects
+    /// row 0, and the confirmation must not land on a row never chosen.
+    pub confirm_restore: Option<String>,
     /// Armed by `Enter` in the history overlay, which overwrites the agent
     /// type's manifest with one historical version. `Enter` is the key an
     /// operator presses to *open* a row, so arming rather than firing is what
@@ -264,7 +267,7 @@ impl TemplatesState {
             showing_history: false,
             history_list: ListState::default(),
             history_name: String::new(),
-            confirm_restore: false,
+            confirm_restore: None,
             confirm_restore_version: false,
         };
         state.list_state.select(Some(0));
@@ -384,19 +387,10 @@ impl TemplatesState {
         // Same two-step as the overlay above, for the `R` on a registry-backed
         // row: it replaces the agent type's manifest with the registry copy, and
         // it is one Shift away from `r` (refresh).
-        if self.confirm_restore {
+        if let Some(name) = self.confirm_restore.take() {
             if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-                self.confirm_restore = false;
-                if let Some(&idx) = self
-                    .list_state
-                    .selected()
-                    .and_then(|s| self.filtered.get(s))
-                {
-                    let name = self.templates[idx].name.clone();
-                    return TemplatesAction::RestoreFromRegistry { name };
-                }
+                return TemplatesAction::RestoreFromRegistry { name };
             }
-            self.confirm_restore = false;
             return TemplatesAction::Continue;
         }
 
@@ -453,7 +447,7 @@ impl TemplatesState {
                     if let Some(&idx) = self.filtered.get(sel) {
                         let t = &self.templates[idx];
                         if t.source == TemplateSource::Manifest {
-                            self.confirm_restore = true;
+                            self.confirm_restore = Some(t.name.clone());
                         } else {
                             self.status_msg = crate::i18n::t("tui-templates-restore-custom-only");
                         }
@@ -651,7 +645,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
     // stale "promoted …" line must not hide the question the next key answers.
     f.render_widget(
         widgets::confirm_or_status_or_hint(
-            state.confirm_restore,
+            state.confirm_restore.is_some(),
             &crate::i18n::t("tui-templates-confirm-restore"),
             &state.status_msg,
             &crate::i18n::t("tui-templates-hints"),
@@ -1015,16 +1009,68 @@ mod tests {
             state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE)),
             TemplatesAction::Continue
         ));
-        assert!(state.confirm_restore, "R did not arm the confirmation");
-
-        assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
-            TemplatesAction::RestoreFromRegistry { .. }
-        ));
         assert!(
-            !state.confirm_restore,
-            "the armed flag survived the restore"
+            state.confirm_restore.is_some(),
+            "R did not arm the confirmation"
         );
+
+        match state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)) {
+            TemplatesAction::RestoreFromRegistry { name } => assert_eq!(name, "payroll"),
+            _ => panic!("expected RestoreFromRegistry, got a different action"),
+        }
+        assert!(
+            state.confirm_restore.is_none(),
+            "the armed restore survived the confirmation"
+        );
+    }
+
+    /// A background `AgentTemplatesLoaded` calls `set_manifest_templates`,
+    /// which re-selects row 0. The armed restore must still name the row the
+    /// operator aimed at, not whichever row a refresh left under the cursor.
+    #[test]
+    fn an_armed_restore_keeps_its_target_across_a_list_refresh() {
+        let mut state = TemplatesState::new();
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "payroll".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let idx = state
+            .templates
+            .iter()
+            .position(|t| t.name == "payroll")
+            .expect("manifest row exists");
+        let pos = state
+            .filtered
+            .iter()
+            .position(|&i| i == idx)
+            .expect("payroll is reachable");
+        state.list_state.select(Some(pos));
+        state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert!(state.confirm_restore.is_some());
+
+        // `alpha` sorts before `payroll`, so the refresh moves the cursor.
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "alpha".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let selected = state.list_state.selected().expect("a row is selected");
+        assert_ne!(
+            state.templates[state.filtered[selected]].name, "payroll",
+            "the refresh really did move the cursor off payroll"
+        );
+
+        match state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)) {
+            TemplatesAction::RestoreFromRegistry { name } => assert_eq!(name, "payroll"),
+            _ => panic!("expected RestoreFromRegistry, got a different action"),
+        }
     }
 
     #[test]
@@ -1053,13 +1099,16 @@ mod tests {
 
         // Every key except `y` cancels — `n`, `Esc`, and the arrow keys alike.
         for cancel in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Down] {
-            state.confirm_restore = true;
+            state.confirm_restore = Some("payroll".to_string());
             let action = state.handle_key(KeyEvent::new(cancel, KeyModifiers::NONE));
             assert!(
                 matches!(action, TemplatesAction::Continue),
                 "{cancel:?} fired the restore instead of cancelling it"
             );
-            assert!(!state.confirm_restore, "{cancel:?} left the flag armed");
+            assert!(
+                state.confirm_restore.is_none(),
+                "{cancel:?} left the restore armed"
+            );
         }
     }
 
@@ -1090,7 +1139,10 @@ mod tests {
         state.list_state.select(Some(pos));
         state.status_msg = "stale status line".to_string();
         state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
-        assert!(state.confirm_restore, "R did not arm the confirmation");
+        assert!(
+            state.confirm_restore.is_some(),
+            "R did not arm the confirmation"
+        );
 
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
