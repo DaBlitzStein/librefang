@@ -874,6 +874,29 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn restore_agent_manifest_version(
+        &self,
+        id: &str,
+        version_id: &str,
+    ) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &[
+                "api",
+                "agents",
+                id,
+                "manifest-history",
+                version_id,
+                "restore",
+            ],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_mcp_servers(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,

@@ -97,10 +97,20 @@ impl LibreFangKernel {
             .clone()
     }
 
+    /// Serialize `entry`'s manifest to `toml_path` and record the write in the
+    /// manifest version history.
+    ///
+    /// `change_source` is forwarded verbatim to [`Self::record_manifest_version`]
+    /// — the call site names where the write came from (`model`, `skills`,
+    /// `mcp-servers`, `restore`, …) rather than this funnel guessing. The
+    /// snapshot is only recorded once the disk write succeeded: a failed write
+    /// leaves `agent.toml` at its previous content, so recording the in-memory
+    /// manifest would put a version in the history that never existed on disk.
     fn persist_full_manifest_at(
         &self,
         entry: &librefang_types::agent::AgentEntry,
         toml_path: &std::path::Path,
+        change_source: &str,
     ) {
         let Some(dir) = toml_path.parent() else {
             warn!(agent = %entry.name, "Failed to derive parent dir for manifest persist");
@@ -120,7 +130,7 @@ impl LibreFangKernel {
                     self.record_manifest_version(entry, &toml_str, "update-persist-failed");
                 } else {
                     debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
-                    self.record_manifest_version(entry, &toml_str, "update");
+                    self.record_manifest_version(entry, &toml_str, change_source);
                 }
             }
             // Not a cosmetic warning: boot reconciliation re-syncs each agent from its on-disk
@@ -157,7 +167,10 @@ impl LibreFangKernel {
     ///
     /// This is best-effort: a failure to write is logged but does not
     /// propagate as an error — the authoritative copy lives in SQLite.
-    pub fn persist_manifest_to_disk(&self, agent_id: AgentId) {
+    ///
+    /// `change_source` is the tag recorded in the version history for this
+    /// write; callers pass what actually changed (`model`, `skills`, `api`, …).
+    pub fn persist_manifest_to_disk(&self, agent_id: AgentId, change_source: &str) {
         let Some(entry) = self.agents.registry.get(agent_id) else {
             return;
         };
@@ -167,10 +180,10 @@ impl LibreFangKernel {
         let Some(current_entry) = self.agents.registry.get(agent_id) else {
             return;
         };
-        self.persist_full_manifest_at(&current_entry, &toml_path);
+        self.persist_full_manifest_at(&current_entry, &toml_path, change_source);
     }
 
-    fn persist_mcp_servers_to_disk(&self, agent_id: AgentId) {
+    fn persist_mcp_servers_to_disk(&self, agent_id: AgentId, change_source: &str) {
         let Some(entry) = self.agents.registry.get(agent_id) else {
             return;
         };
@@ -183,7 +196,7 @@ impl LibreFangKernel {
         let source = match std::fs::read_to_string(&toml_path) {
             Ok(source) => source,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.persist_full_manifest_at(&current_entry, &toml_path);
+                self.persist_full_manifest_at(&current_entry, &toml_path, change_source);
                 return;
             }
             Err(error) => {
@@ -202,6 +215,11 @@ impl LibreFangKernel {
             warn!(agent = %entry.name, "Failed to persist MCP servers to agent manifest: {error}");
         } else {
             debug!(agent = %entry.name, path = %toml_path.display(), "Persisted MCP servers to agent manifest");
+            // This path patches the `mcp_servers` line in place rather than
+            // re-serializing the whole manifest, so it does not pass through
+            // `persist_full_manifest_at` — without its own snapshot the MCP
+            // allowlist would be the one config change the History tab misses.
+            self.record_manifest_version(&current_entry, &patched, change_source);
         }
     }
 
@@ -326,7 +344,7 @@ impl LibreFangKernel {
         }
 
         // Write updated manifest to agent.toml so changes survive restart (#996, #1018)
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "model");
 
         // Clear canonical session to prevent memory poisoning from old model's responses
         let _ = self.memory.substrate.delete_canonical_session(agent_id);
@@ -511,6 +529,7 @@ impl LibreFangKernel {
         &self,
         agent_id: AgentId,
         mut new_manifest: librefang_types::agent::AgentManifest,
+        change_source: &str,
     ) -> KernelResult<()> {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
@@ -554,7 +573,7 @@ impl LibreFangKernel {
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
         // Persist to disk so the change survives a daemon restart.
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, change_source);
 
         info!(agent_id = %agent_id, "Applied and persisted updated agent manifest");
         Ok(())
@@ -692,7 +711,7 @@ impl LibreFangKernel {
         // only in SQLite and is wiped on the next restart. Mirrors
         // set_agent_tool_filters / set_agent_channels / set_agent_schedule /
         // set_agent_model, which all persist to disk.
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "skills");
 
         info!(agent_id = %agent_id, skills = ?skills, "Agent skills updated");
         Ok(())
@@ -825,7 +844,7 @@ impl LibreFangKernel {
         // reason as set_agent_skills: boot reconciliation overwrites DB-only
         // fields from the on-disk manifest, so an MCP allowlist set via the
         // dashboard would otherwise be wiped on the next restart.
-        self.persist_mcp_servers_to_disk(agent_id);
+        self.persist_mcp_servers_to_disk(agent_id, "mcp-servers");
 
         info!(agent_id = %agent_id, servers = ?servers, "Agent MCP servers updated");
         Ok(())
@@ -884,7 +903,7 @@ impl LibreFangKernel {
             }
         }
 
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "workspaces");
 
         info!(agent_id = %agent_id, "Agent named workspaces updated");
         Ok(())
@@ -914,7 +933,7 @@ impl LibreFangKernel {
         }
 
         // Persist manifest to disk so the change survives a daemon restart.
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "channels");
 
         info!(agent_id = %agent_id, channels = ?channels, "Agent channel allowlist updated");
         Ok(())
@@ -964,7 +983,7 @@ impl LibreFangKernel {
 
         // Persist to agent.toml so the change survives a daemon restart —
         // same reasoning as set_agent_channels above.
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "routing");
 
         info!(
             agent_id = %agent_id,
@@ -1041,7 +1060,7 @@ impl LibreFangKernel {
         // restart doesn't replay the stale on-disk manifest over the
         // dashboard edit (#996, #1018). Best-effort: failures are logged
         // inside `persist_manifest_to_disk`.
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "schedule");
 
         // Stop the previous loop (no-op if none was running, e.g. agent was
         // previously Reactive) so a Reactive transition actually halts the
@@ -1122,7 +1141,7 @@ impl LibreFangKernel {
             }
         }
 
-        self.persist_manifest_to_disk(agent_id);
+        self.persist_manifest_to_disk(agent_id, "tool-filters");
 
         // Invalidate cached tool list — tool filter change affects available tools
         self.prompt_metadata_cache.tools.remove(&agent_id);
@@ -1132,12 +1151,11 @@ impl LibreFangKernel {
 
     /// Best-effort record of a manifest snapshot for version history.
     ///
-    /// `change_source` vocabulary: this path is shared by every control-plane write that re-serializes the full manifest (API routes, TUI commands, and the MCP-servers fallback all funnel through the same kernel setters), so the call site cannot tell who triggered the persist.
-    /// It records two values:
-    /// - `update` — the `agent.toml` write succeeded.
-    /// - `update-persist-failed` — the in-memory manifest changed but the disk write failed, so disk and memory now disagree.
-    ///
-    /// Suspend/resume does not go through here: `persist_agent_enabled` patches the `enabled` line directly rather than re-serializing the manifest, so it records its own `suspend` / `resume` snapshots via `ManifestVersionStore` directly.
+    /// `change_source` is the call site's own tag for what changed
+    /// (`model`, `skills`, `mcp-servers`, `restore`, …). A failed snapshot
+    /// costs one history row, never the config change itself, so the error is
+    /// logged rather than propagated. The schema default `unknown` covers
+    /// rows written by a producer that does not classify its persist.
     fn record_manifest_version(
         &self,
         entry: &librefang_types::agent::AgentEntry,

@@ -159,6 +159,16 @@ export const agentQueries = {
       queryFn: () => getAgentChannels(agentId),
       enabled: !!agentId,
     }),
+  // Manifest version history (#8041) — the agent detail History tab. Disabled
+  // by default so the full TOML snapshots are only fetched while that tab is
+  // actually open.
+  manifestHistory: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.manifestHistory(agentId),
+      queryFn: () => getAgentManifestHistory(agentId),
+      enabled: false,
+      staleTime: 60_000,
+    }),
   toolsList: () =>
     queryOptions({
       queryKey: toolKeys.list(),
