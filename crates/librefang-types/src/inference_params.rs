@@ -3,7 +3,7 @@
 //!
 //! Two categories live here and they follow opposite rules.
 //!
-//! **Preferences** — `temperature`, `top_p`, `max_tokens`, `frequency_penalty`, `presence_penalty` — are what the operator wants this agent to sound like.
+//! **Preferences** — `temperature`, `top_p`, `max_tokens`, `frequency_penalty`, `presence_penalty`, `top_k`, `min_p`, `repeat_penalty` — are what the operator wants this agent to sound like.
 //! The specific setting beats the general one: agent manifest, then per-model override, then system default.
 //! That ordering is the whole point of the module: two instances of one agent type must be able to run the same model at different temperatures, and before this the per-model override overwrote both of them with one value.
 //!
@@ -176,6 +176,9 @@ pub struct ResolvedInferenceParams {
     pub top_p: Option<f32>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+    pub top_k: Option<u32>,
+    pub min_p: Option<f32>,
+    pub repeat_penalty: Option<f32>,
     /// Endpoint fact, not a preference — model level only. See the module docs.
     pub reasoning_effort: Option<String>,
     /// Transport flags carried straight through from the per-model override.
@@ -209,6 +212,11 @@ pub fn resolve_inference_params(
         presence_penalty: agent
             .presence_penalty
             .or_else(|| model.and_then(|m| m.presence_penalty)),
+        top_k: agent.top_k.or_else(|| model.and_then(|m| m.top_k)),
+        min_p: agent.min_p.or_else(|| model.and_then(|m| m.min_p)),
+        repeat_penalty: agent
+            .repeat_penalty
+            .or_else(|| model.and_then(|m| m.repeat_penalty)),
         // Model-level only, and it wins: see the module docs on #7770.
         reasoning_effort: model.and_then(|m| m.reasoning_effort.clone()),
         use_max_completion_tokens: model
@@ -221,8 +229,10 @@ pub fn resolve_inference_params(
 impl ResolvedInferenceParams {
     /// Write the resolved values back onto the manifest the runtime reads.
     ///
-    /// `max_tokens` / `temperature` land on their own fields; the rest go into
-    /// `extra_params`, which is what the drivers flatten into the request body.
+    /// Every preference lands on its own typed field, and the agent loop copies those onto the typed fields of `CompletionRequest`.
+    /// `top_p` / `frequency_penalty` / `presence_penalty` used to be written into `extra_params` instead (#8290), which reached the wire only on the drivers that merge that map, unfiltered on one and at the wrong nesting level on another.
+    /// Any copy of those keys, or of the `top_k` / `min_p` / `repeat_penalty` added beside them, left in `extra_params` is removed, so the typed value is the only one a driver sees and the per-driver gate cannot be bypassed by a stale entry.
+    /// The endpoint facts below still travel in `extra_params`.
     ///
     /// `reasoning_effort` is *removed* when the model level does not set it, not
     /// merely left alone. A stale `extra_params["reasoning_effort"]` on the
@@ -232,18 +242,16 @@ impl ResolvedInferenceParams {
     pub fn apply_to(&self, model: &mut ModelConfig) {
         model.max_tokens = Some(self.max_tokens);
         model.temperature = Some(self.temperature);
+        model.top_p = self.top_p;
+        model.frequency_penalty = self.frequency_penalty;
+        model.presence_penalty = self.presence_penalty;
+        model.top_k = self.top_k;
+        model.min_p = self.min_p;
+        model.repeat_penalty = self.repeat_penalty;
         let ep = &mut model.extra_params;
-        set_or_clear(ep, "top_p", self.top_p.map(|v| serde_json::json!(v)));
-        set_or_clear(
-            ep,
-            "frequency_penalty",
-            self.frequency_penalty.map(|v| serde_json::json!(v)),
-        );
-        set_or_clear(
-            ep,
-            "presence_penalty",
-            self.presence_penalty.map(|v| serde_json::json!(v)),
-        );
+        for key in TYPED_SAMPLING_KEYS {
+            ep.remove(key);
+        }
         set_or_clear(
             ep,
             "reasoning_effort",
@@ -260,6 +268,16 @@ impl ResolvedInferenceParams {
         }
     }
 }
+
+/// The sampling preferences that travel as typed `CompletionRequest` fields and must therefore never also appear in `extra_params`.
+const TYPED_SAMPLING_KEYS: [&str; 6] = [
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "top_k",
+    "min_p",
+    "repeat_penalty",
+];
 
 fn set_or_clear(
     map: &mut std::collections::BTreeMap<String, serde_json::Value>,
@@ -386,12 +404,87 @@ mod tests {
         resolve_inference_params(&agent, None).apply_to(&mut applied);
         assert_eq!(applied.temperature, Some(0.2));
         assert_eq!(applied.max_tokens, Some(DEFAULT_MODEL_MAX_TOKENS));
+        assert_eq!(applied.top_p, Some(0.8));
+        assert_eq!(applied.presence_penalty, None);
+    }
+
+    /// #8290: the three sampling preferences travel on typed fields, never through `extra_params`.
+    /// That map reached the wire only on the drivers that merge it, so a value placed there was silently dropped on Anthropic and Gemini and sent unfiltered to every OpenAI-compatible endpoint.
+    #[test]
+    fn apply_to_keeps_sampling_preferences_out_of_extra_params() {
+        let agent = ModelConfig {
+            top_p: Some(0.8),
+            frequency_penalty: Some(0.25),
+            ..Default::default()
+        };
+        let model = ModelOverrides {
+            presence_penalty: Some(-0.5),
+            ..Default::default()
+        };
+        let mut applied = agent.clone();
+        // A stale copy from before the typed fields existed must not survive to override the gate.
+        applied
+            .extra_params
+            .insert("top_p".into(), serde_json::json!(0.1));
+        applied
+            .extra_params
+            .insert("enable_memory".into(), serde_json::json!(true));
+        resolve_inference_params(&agent, Some(&model)).apply_to(&mut applied);
+
+        assert_eq!(applied.top_p, Some(0.8));
+        assert_eq!(applied.frequency_penalty, Some(0.25));
+        assert_eq!(applied.presence_penalty, Some(-0.5));
+        for key in TYPED_SAMPLING_KEYS {
+            assert!(
+                !applied.extra_params.contains_key(key),
+                "{key} must not be duplicated into extra_params"
+            );
+        }
+        // The escape hatch keeps carrying everything else.
         assert_eq!(
-            applied.extra_params.get("top_p"),
-            Some(&serde_json::json!(0.8_f32))
+            applied.extra_params.get("enable_memory"),
+            Some(&serde_json::json!(true))
         );
-        // Unset knobs are absent rather than serialized as null.
-        assert!(!applied.extra_params.contains_key("presence_penalty"));
+    }
+
+    /// #8290 part 2: `top_k` / `min_p` / `repeat_penalty` follow the same precedence as the other preferences — agent first, then the per-model override — and land on the typed fields, not in `extra_params`.
+    #[test]
+    fn local_model_samplers_resolve_agent_first_and_stay_typed() {
+        let agent = ModelConfig {
+            top_k: Some(40),
+            ..Default::default()
+        };
+        let model = ModelOverrides {
+            top_k: Some(20),
+            min_p: Some(0.05),
+            repeat_penalty: Some(1.1),
+            ..Default::default()
+        };
+        let r = resolve_inference_params(&agent, Some(&model));
+        assert_eq!(r.top_k, Some(40), "the agent's own value wins");
+        assert_eq!(r.min_p, Some(0.05), "inherited from the model override");
+        assert_eq!(r.repeat_penalty, Some(1.1));
+
+        let mut applied = agent.clone();
+        // Values an operator put in the escape hatch before these fields existed must not reach a driver past its gate.
+        for key in ["top_k", "min_p", "repeat_penalty"] {
+            applied
+                .extra_params
+                .insert(key.into(), serde_json::json!(1));
+        }
+        r.apply_to(&mut applied);
+        assert_eq!(applied.top_k, Some(40));
+        assert_eq!(applied.min_p, Some(0.05));
+        assert_eq!(applied.repeat_penalty, Some(1.1));
+        assert!(
+            applied.extra_params.is_empty(),
+            "{:?}",
+            applied.extra_params
+        );
+
+        // Nothing set anywhere: nothing is sent.
+        let r = resolve_inference_params(&ModelConfig::default(), None);
+        assert_eq!((r.top_k, r.min_p, r.repeat_penalty), (None, None, None));
     }
 
     #[test]
