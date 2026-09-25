@@ -3,6 +3,10 @@
 // document-scoped handle that lives until it is revoked, so a drawer that stays
 // mounted while the user clicks through a list of agents leaks one per click
 // unless the effect cleans up.
+//
+// The request itself is gated on the drawer being open: selecting an agent in
+// the list (or the desktop auto-select on first paint) must not download an
+// image whose only consumer is not mounted.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
@@ -79,6 +83,39 @@ describe("useAgentAvatarUrl", () => {
     renderHook(() => useAgentAvatarUrl("", true), { wrapper });
 
     expect(http.fetchAuthenticatedImage).not.toHaveBeenCalled();
+  });
+
+  it("does not request the blob while the drawer that renders it is closed", async () => {
+    const { wrapper } = createQueryClientWrapper();
+
+    // AgentsPage keeps `detailAgent` selected after the drawer closes, so
+    // without the third gate the auto-selected agent's image is downloaded and
+    // kept for a header that is not mounted.
+    const { result } = renderHook(() => useAgentAvatarUrl("agent-1", true, false), { wrapper });
+
+    expect(result.current).toBeUndefined();
+    expect(http.fetchAuthenticatedImage).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
+  });
+
+  it("fetches when the drawer opens, and lets the URL go when it closes", async () => {
+    vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(pngBlob());
+    const { wrapper } = createQueryClientWrapper();
+
+    const { result, rerender } = renderHook(
+      ({ open }: { open: boolean }) => useAgentAvatarUrl("agent-1", true, open),
+      { wrapper, initialProps: { open: false } },
+    );
+    expect(http.fetchAuthenticatedImage).not.toHaveBeenCalled();
+
+    rerender({ open: true });
+    await waitFor(() => expect(result.current).toBe("blob:test/1"));
+
+    // Re-closing must not leave the handle alive: the blob stays in the query
+    // cache, but nothing renders it until the drawer reopens.
+    rerender({ open: false });
+    await waitFor(() => expect(result.current).toBeUndefined());
+    expect(revoked).toEqual(["blob:test/1"]);
   });
 
   it("fetches the agent's own avatar path and returns an object URL for it", async () => {

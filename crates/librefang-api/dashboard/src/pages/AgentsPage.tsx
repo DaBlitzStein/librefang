@@ -952,8 +952,16 @@ export function AgentsPage() {
   const detailIdentity = (detailAgent as AgentView | null)?.identity;
   // Gated on "this agent has one" so an agent without an avatar costs no
   // request at all; `undefined` while loading or absent, which is what `Avatar`
-  // wants — it falls back to the initials on its own.
-  const detailAvatarSrc = useAgentAvatarUrl(detailAgent?.id ?? "", !!detailIdentity?.avatar_url);
+  // wants — it falls back to the initials on its own. Also gated on the drawer
+  // being open: the only consumer is the drawer's header, and `detailAgent`
+  // stays selected after the drawer closes (the inline detail panel outlives
+  // it), so without that second gate the auto-selected agent's image would be
+  // downloaded and its object URL held for nothing to render.
+  const detailAvatarSrc = useAgentAvatarUrl(
+    detailAgent?.id ?? "",
+    !!detailIdentity?.avatar_url,
+    detailDrawerOpen,
+  );
 
   const rawDeleteMutation = useDeleteAgent();
   const handleDeleteSuccess = (agentId: string) => {

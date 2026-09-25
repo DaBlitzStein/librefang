@@ -173,11 +173,12 @@ export const agentQueries = {
   // gets a 401; the bytes have to be fetched and handed to the tag as an
   // object URL instead.
   //
-  // `enabled` is the caller's "this agent has one" — asking otherwise buys a
-  // guaranteed 404 per agent per render. The long `staleTime` leans on the
-  // route's `ETag` + `no-cache`: a revalidation that finds nothing changed is
-  // a bodiless 304, and a re-upload is picked up by the mutations invalidating
-  // this key rather than by polling for it.
+  // `enabled` is the caller's "there is an avatar to fetch and a mounted
+  // consumer to render it" — asking otherwise buys a guaranteed 404 per agent
+  // per render or downloads bytes nobody displays. The long `staleTime` leans
+  // on the route's `ETag` + `no-cache`: a revalidation that finds nothing
+  // changed is a bodiless 304, and a re-upload is picked up by the mutations
+  // invalidating this key rather than by polling for it.
   avatar: (agentId: string, enabled: boolean) =>
     queryOptions({
       queryKey: agentKeys.avatar(agentId),
@@ -272,16 +273,29 @@ export function useAgentChannels(agentId: string, options: QueryOverrides = {}) 
  * gates the request: an agent without one would otherwise cost a 404 on every
  * render of the row that shows its initials.
  *
+ * `enabled` is the caller's answer to "is the component that renders the image
+ * actually mounted". It exists because the consumer may be conditionally
+ * rendered while this hook is not — the agents list keeps the selected agent in
+ * state after its detail drawer closes — so without it the blob would be
+ * downloaded and its object URL held for an image nothing displays.
+ *
  * Returns `undefined` while loading and when there is nothing to show, which is
  * exactly what `Avatar`'s `src` wants — it falls back to the initials on its
  * own, so there is no separate loading state to thread through the UI.
  */
-export function useAgentAvatarUrl(agentId: string, hasAvatar: boolean): string | undefined {
-  const { data: blob } = useQuery(agentQueries.avatar(agentId, hasAvatar));
+export function useAgentAvatarUrl(
+  agentId: string,
+  hasAvatar: boolean,
+  enabled = true,
+): string | undefined {
+  const { data: blob } = useQuery(agentQueries.avatar(agentId, hasAvatar && enabled));
   const [objectUrl, setObjectUrl] = useState<string | undefined>(undefined);
 
   useEffect(() => {
-    if (!blob) {
+    // The effect depends on `enabled` too: a drawer that closes revokes the
+    // handle in this cleanup, so a closed consumer does not keep an object URL
+    // alive for an image that is no longer rendered.
+    if (!enabled || !blob) {
       setObjectUrl(undefined);
       return;
     }
@@ -294,7 +308,7 @@ export function useAgentAvatarUrl(agentId: string, hasAvatar: boolean): string |
       // initials the fallback is there to give.
       setObjectUrl(undefined);
     };
-  }, [blob]);
+  }, [blob, enabled]);
 
   return objectUrl;
 }
