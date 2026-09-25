@@ -16,7 +16,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, MutexGuard as StdMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{
+    Arc, MutexGuard as StdMutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 use tokio::io::BufReader;
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
@@ -670,6 +672,14 @@ struct SpawnCtx {
     child: Arc<Mutex<Option<tokio::process::Child>>>,
     status: Arc<std::sync::Mutex<ChannelStatus>>,
     caps: Arc<RwLock<Caps>>,
+    /// `account_id` the adapter's `ready` event declared, retained as an
+    /// outbound-resolution alias only
+    /// ([`ChannelAdapter::reported_account_id`]). Not a routing identity —
+    /// `account_id()` answers the config `name` — but an inbound turn can
+    /// carry this reported value in its `metadata["account_id"]` (the
+    /// adapter stamps its own), and a send auto-filled from that must still
+    /// find this instance.
+    reported_account_id_cell: Arc<OnceLock<Option<String>>>,
     typing_tx: mpsc::Sender<TypingEvent>,
     tx: mpsc::Sender<ChannelMessage>,
     shutdown_rx: watch::Receiver<bool>,
@@ -1167,6 +1177,7 @@ async fn spawn_once(
     let adapter_name = ctx.name.clone();
     let status_clone = ctx.status.clone();
     let caps = ctx.caps.clone();
+    let reported_account_id_cell = ctx.reported_account_id_cell.clone();
     let reader_stdin = ctx.stdin_tx.clone();
     let typing_tx = ctx.typing_tx.clone();
     let tx = ctx.tx.clone();
@@ -1201,12 +1212,18 @@ async fn spawn_once(
                                             params.notification_recipients.clone();
                                         caps_guard.header_rules = params.header_rules.clone();
                                     }
-                                    // `params.account_id` is deliberately not
-                                    // retained: the routing identity of a
-                                    // sidecar is its config `name` (see
-                                    // `SidecarAdapter::account_id`), and the
-                                    // field stays on the wire only so adapters
-                                    // that report one keep parsing.
+                                    // Retained as an outbound-resolution alias
+                                    // only (`reported_account_id`), never as a
+                                    // routing identity: the routing identity
+                                    // of a sidecar is its config `name`
+                                    // (see `SidecarAdapter::account_id`). The
+                                    // adapter can stamp this reported value
+                                    // into its messages' `metadata["account_id"]`,
+                                    // and a `channel_send` / `channel_dm`
+                                    // auto-filled from that metadata must
+                                    // still resolve to this instance.
+                                    let _ = reported_account_id_cell
+                                        .set(params.account_id.clone());
                                     match classify_protocol_version(params.protocol_version) {
                                         ProtocolSkew::Match => info!(
                                             adapter = %adapter_name,
@@ -1654,6 +1671,15 @@ pub struct SidecarAdapter {
     status: Arc<std::sync::Mutex<ChannelStatus>>,
     /// Capabilities declared by the adapter's `ready` event.
     caps: Arc<RwLock<Caps>>,
+    /// `account_id` the adapter's `ready` event declared — set once, answered
+    /// by [`ChannelAdapter::reported_account_id`] as an outbound-resolution
+    /// alias. A sync `&str` return cannot borrow a lock guard, hence the
+    /// `OnceLock`; it also pins the value to the first `ready`, so a ready
+    /// after a supervised restart cannot change it (the `set` is a no-op once
+    /// initialized). That is intentional — the reported identity is stable
+    /// adapter identity, and a restarted child reporting a different one
+    /// would indicate a misconfigured adapter, not a value to adopt.
+    reported_account_id_cell: Arc<OnceLock<Option<String>>>,
     /// Sender half feeding `typing_events()`. The reader pushes inbound
     /// `Typing` events here best-effort.
     typing_tx: mpsc::Sender<TypingEvent>,
@@ -1789,6 +1815,7 @@ impl SidecarAdapter {
             supervisor: Mutex::new(None),
             status: Arc::new(std::sync::Mutex::new(ChannelStatus::default())),
             caps: Arc::new(RwLock::new(Caps::default())),
+            reported_account_id_cell: Arc::new(OnceLock::new()),
             typing_tx,
             typing_rx: Arc::new(std::sync::Mutex::new(Some(typing_rx))),
             sup: SupCfg::from_config(config),
@@ -1848,6 +1875,7 @@ impl ChannelAdapter for SidecarAdapter {
             child: self.child.clone(),
             status: self.status.clone(),
             caps: self.caps.clone(),
+            reported_account_id_cell: self.reported_account_id_cell.clone(),
             typing_tx: self.typing_tx.clone(),
             tx: tx.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
@@ -2333,8 +2361,29 @@ impl ChannelAdapter for SidecarAdapter {
     /// tool at all. When a sidecar does report one and it differs from
     /// the config name, it names a key the router never stores, so it
     /// cannot be a routing identity either.
+    ///
+    /// It does still need to *resolve*: the reported value is what the
+    /// adapter stamps into its messages' `metadata["account_id"]`, and an
+    /// outbound send auto-filled from that metadata must find this
+    /// instance. See [`ChannelAdapter::reported_account_id`], the alias
+    /// the send resolver matches in addition to this name.
     fn account_id(&self) -> Option<&str> {
         Some(&self.name)
+    }
+
+    /// The `account_id` the adapter reported in its `ready` event, if any.
+    ///
+    /// Not a routing identity: [`ChannelAdapter::account_id`] is the config
+    /// name the router seeds its keys with, and every routing lookup keeps
+    /// using that. This value is a *resolution alias* only — the value the
+    /// adapter may stamp into its messages' `metadata["account_id"]`, which
+    /// `channel_send` / `channel_dm` auto-fill from the originating turn.
+    /// Without it, a send carrying the reported id finds no adapter at all
+    /// once `account_id()` answers the config name.
+    fn reported_account_id(&self) -> Option<&str> {
+        self.reported_account_id_cell
+            .get()
+            .and_then(|o| o.as_deref())
     }
 }
 
@@ -3741,6 +3790,9 @@ mod tests {
         // the reader stamps — #8408). Every other method here degrades to
         // the pre-`ready` default.
         assert_eq!(a.account_id(), Some("dummy"));
+        // The reported alias IS `ready`-gated: it is a wire value, and no
+        // frame has been seen yet.
+        assert!(a.reported_account_id().is_none());
         assert!(a.notification_recipients().is_empty());
         assert!(!a.suppress_error_responses());
         assert!(a.fetch_headers_for("https://x/y").is_empty());
@@ -4204,6 +4256,17 @@ mod tests {
             Some("bot-a"),
             "the account the approval lookup builds its key from must be the \
              config name, not the ready-event account_id"
+        );
+
+        // ...but the reported value stays available as the outbound resolver's
+        // alias: the adapter may stamp it into inbound metadata, and a
+        // `channel_send` / `channel_dm` auto-filled from that must still find
+        // this instance (#8418 review).
+        assert_eq!(
+            adapter.reported_account_id(),
+            Some("ready-acct"),
+            "the ready-event account_id must remain resolvable as the \
+             `reported_account_id` alias while `account_id()` answers the config name"
         );
 
         adapter.stop().await.unwrap();
