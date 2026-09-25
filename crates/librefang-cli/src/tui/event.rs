@@ -231,8 +231,11 @@ pub enum AppEvent {
     /// first `w` that arrived after the second one had loaded was accepted
     /// and the newer one discarded (#7835).
     AgentWorkspacesLoaded(String, u64, Vec<(String, String, String)>),
-    /// The shared-folders write came back 2xx.
-    AgentWorkspacesUpdated(String),
+    /// The shared-folders write came back 2xx. The second field is the edit
+    /// session that staged it, so a save landing after `Esc` + `w` (same
+    /// agent, same sub-screen, new session) is dropped instead of closing
+    /// the new editor and stamping its status line (#7835 review).
+    AgentWorkspacesUpdated(String, u64),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
@@ -2154,8 +2157,10 @@ fn canonical_workspace_mode(raw: &str) -> &'static str {
 ///
 /// Declarations without a string `path` (mount-based, or malformed) are not
 /// rows the editor can render, so they are skipped here and preserved
-/// verbatim on save. A manifest without a `[workspaces]` table yields no
-/// rows.
+/// verbatim on save. A declaration carrying a `mount` key is skipped for the
+/// same reason even when it also carries a `path`: rendering it as an
+/// editable row and writing it back would drop the `mount` (#7835 review).
+/// A manifest without a `[workspaces]` table yields no rows.
 fn workspaces_editor_rows(manifest: &toml::Value) -> Vec<(String, String, String)> {
     manifest
         .get("workspaces")
@@ -2163,6 +2168,9 @@ fn workspaces_editor_rows(manifest: &toml::Value) -> Vec<(String, String, String
         .map(|t| {
             t.iter()
                 .filter_map(|(name, decl)| {
+                    if decl.get("mount").is_some() {
+                        return None;
+                    }
                     let path = decl.get("path").and_then(toml::Value::as_str)?;
                     let mode = decl
                         .get("mode")
@@ -2192,6 +2200,7 @@ pub fn spawn_update_agent_workspaces(
     backend: BackendRef,
     agent_id: String,
     workspaces: Vec<(String, String, String)>,
+    generation: u64,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
@@ -2232,7 +2241,7 @@ pub fn spawn_update_agent_workspaces(
             })();
             match outcome {
                 Ok(()) => {
-                    let _ = tx.send(AppEvent::AgentWorkspacesUpdated(agent_id));
+                    let _ = tx.send(AppEvent::AgentWorkspacesUpdated(agent_id, generation));
                 }
                 Err(message) => {
                     let _ = tx.send(AppEvent::FetchError(message));
@@ -2316,13 +2325,18 @@ fn rebuild_manifest_with_workspaces(
         .as_table_mut()
         .ok_or(WorkspacesRebuildError::ManifestUnreadable)?;
     // Copy the declarations the editor does not render before replacing the
-    // table, so they survive the save untouched.
+    // table, so they survive the save untouched. "Not rendered" is the exact
+    // complement of `workspaces_editor_rows`: no string `path`, or a `mount`
+    // key (even beside a `path`), which the row model has no field for.
     let preserved: Vec<(String, toml::Value)> = table
         .get("workspaces")
         .and_then(toml::Value::as_table)
         .map(|t| {
             t.iter()
-                .filter(|(_, decl)| decl.get("path").and_then(toml::Value::as_str).is_none())
+                .filter(|(_, decl)| {
+                    decl.get("mount").is_some()
+                        || decl.get("path").and_then(toml::Value::as_str).is_none()
+                })
                 .map(|(name, decl)| (name.clone(), decl.clone()))
                 .collect()
         })
@@ -6983,6 +6997,53 @@ mode = "r"
         );
         // The default mode is not materialized as an explicit key.
         assert_eq!(value["workspaces"]["library"].get("mode"), None);
+    }
+
+    /// A declaration carrying both `mount` and `path` is still mount-based:
+    /// the row model has no field for the mount, so rendering it as an
+    /// editable row and writing it back would silently drop the mount —
+    /// turning a declaration the kernel resolves as a mount into a plain
+    /// `path` one, or vice versa (#7835 review).
+    #[test]
+    fn a_mount_declaration_is_not_an_editable_row_even_beside_a_path() {
+        let manifest = r#"
+name = "deanna"
+[workspaces.vault]
+mount = "/data/vault"
+path = "shared/legacy"
+mode = "readonly"
+"#;
+
+        assert!(
+            workspaces_editor_rows(&toml::from_str(manifest).unwrap()).is_empty(),
+            "the editor cannot render a mount; it must not offer a row that would erase it"
+        );
+
+        let rebuilt = rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "readwrite".to_string(),
+            )],
+        )
+        .unwrap();
+        let value: toml::Value = toml::from_str(&rebuilt).unwrap();
+        let vault = &value["workspaces"]["vault"];
+        assert_eq!(
+            vault.get("mount").and_then(toml::Value::as_str),
+            Some("/data/vault"),
+            "the mount key must survive the save"
+        );
+        assert_eq!(
+            vault.get("path").and_then(toml::Value::as_str),
+            Some("shared/legacy"),
+            "the declaration is preserved verbatim, not rewritten as a row"
+        );
+        assert_eq!(
+            value["workspaces"]["library"]["path"].as_str(),
+            Some("shared/library")
+        );
     }
 
     #[test]

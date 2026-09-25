@@ -120,6 +120,12 @@ pub struct AgentSelectState {
     /// which makes whichever reply arrives first the accepted one and the
     /// newer one the discarded one.
     pub ws_generation: u64,
+    /// Set by the first `s` when a half-filled row would be dropped, so the
+    /// save waits for a confirming second press and the warning stays on the
+    /// editor's status line instead of being overwritten by the success
+    /// message before the operator can read it. Any edit to the rows clears
+    /// it, so the warning describes the save it gates.
+    pub ws_drop_confirmed: bool,
     pub available_mcp: Vec<(String, bool)>,
     pub mcp_cursor: usize,
     // Channel allowlist editor. Detail-only: agent creation writes no `channels`
@@ -217,9 +223,13 @@ pub enum AgentAction {
     /// Load the agent's `[workspaces]` table for the shared-folders editor.
     FetchAgentWorkspaces(String),
     /// Write the edited shared folders back to the agent's manifest.
+    /// `generation` is the edit session that produced the rows, echoed back
+    /// on the reply so a save landing after `Esc` + `w` cannot be mistaken
+    /// for the new session's.
     UpdateWorkspaces {
         id: String,
         workspaces: Vec<(String, String, String)>,
+        generation: u64,
     },
     /// No action yet, keep rendering.
     Continue,
@@ -346,6 +356,7 @@ impl AgentSelectState {
             ws_buf: String::new(),
             ws_loaded: false,
             ws_generation: 0,
+            ws_drop_confirmed: false,
         }
     }
 
@@ -699,6 +710,13 @@ impl AgentSelectState {
                     self.ws_editing = None;
                     self.ws_buf.clear();
                     self.ws_loaded = false;
+                    self.ws_drop_confirmed = false;
+                    // A message from the last time this editor was open (or
+                    // from any other pane on this tab) is not about the rows
+                    // being opened now; the editor paints `status_msg`, so
+                    // leaving it would show a stale warning over a freshly
+                    // fetched table (#7835 review).
+                    self.status_msg.clear();
                     // Bumping here, not at the reply, is what makes the guard
                     // a late-response one: this `w` and the fetch it spawns
                     // share the new value, and every earlier fetch keeps the
@@ -1201,6 +1219,13 @@ impl AgentSelectState {
     /// escalating a read-only folder to read-write by default.
     fn commit_workspace_field(&mut self, row: usize, field: u8) {
         let v = std::mem::take(&mut self.ws_buf);
+        // A message left from the last `s` (or from refusing this same field
+        // a keystroke ago) is about the value being replaced now; the refusal
+        // below sets a fresh one.
+        self.status_msg.clear();
+        // Committing edits a row, so an earlier "yes, drop the empty ones" no
+        // longer describes what `s` would send.
+        self.ws_drop_confirmed = false;
         if let Some(entry) = self.workspaces.get_mut(row) {
             match field {
                 0 => entry.0 = v,
@@ -1208,6 +1233,15 @@ impl AgentSelectState {
                 _ => {
                     if let Some(m) = Self::parse_mode_input(&v) {
                         entry.2 = m.to_string();
+                    } else if !v.trim().is_empty() {
+                        // Keep the previous mode rather than defaulting to the
+                        // more permissive one — but say so, instead of
+                        // discarding the buffer as if it had been accepted
+                        // (#7835 review).
+                        self.status_msg = crate::i18n::t_args(
+                            "tui-agents-workspaces-mode-invalid",
+                            &[("value", v.trim())],
+                        );
                     }
                 }
             }
@@ -1282,12 +1316,14 @@ impl AgentSelectState {
                 self.ws_cursor += 1;
             }
             KeyCode::Char('a') => {
+                self.ws_drop_confirmed = false;
                 self.workspaces
                     .push(("".into(), "".into(), "readwrite".into()));
                 self.ws_cursor = self.workspaces.len() - 1;
                 self.ws_editing = Some((self.ws_cursor, 0));
             }
             KeyCode::Char('d') if len > 0 => {
+                self.ws_drop_confirmed = false;
                 self.workspaces.remove(self.ws_cursor);
                 if self.ws_cursor >= self.workspaces.len() && self.ws_cursor > 0 {
                     self.ws_cursor -= 1;
@@ -1303,6 +1339,9 @@ impl AgentSelectState {
             }
             KeyCode::Char('s') => {
                 if let Some(ref detail) = self.detail {
+                    // A message from an earlier attempt describes that
+                    // attempt, not this one.
+                    self.status_msg.clear();
                     // A row that is not an abandoned edit but still cannot
                     // become a declaration the kernel resolves is refused here,
                     // before the two-request round trip. `resolve_workspace_decl`
@@ -1333,12 +1372,22 @@ impl AgentSelectState {
                         .filter(|(n, p, _)| !n.trim().is_empty() && !p.trim().is_empty())
                         .map(|(n, p, m)| (n.trim().to_string(), p.trim().to_string(), m.clone()))
                         .collect();
-                    if entries.len() < total {
+                    if entries.len() < total && !self.ws_drop_confirmed {
+                        // The first `s` only warns. Saving right away would
+                        // close the editor and let the success event overwrite
+                        // this message before it could be read — the operator
+                        // would be told the save succeeded and never learn a
+                        // row was dropped. Keeping them in the editor on the
+                        // status line that paints it makes the warning a
+                        // confirmation step instead (#7835 review).
+                        self.ws_drop_confirmed = true;
                         self.status_msg = crate::i18n::t("tui-agents-workspaces-row-dropped");
+                        return AgentAction::Continue;
                     }
                     return AgentAction::UpdateWorkspaces {
                         id: detail.id.clone(),
                         workspaces: entries,
+                        generation: self.ws_generation,
                     };
                 }
                 self.sub = AgentSubScreen::AgentDetail;
@@ -2963,13 +3012,98 @@ mod workspaces_tests {
             .workspaces
             .push(("library".into(), "shared/library".into(), "rw".into()));
         state.workspaces.push(("".into(), "".into(), "rw".into()));
+        // The first `s` only warns (see the confirmation test below); the
+        // second one is the confirmed save.
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('s'))),
+            AgentAction::Continue
+        ));
         match state.handle_key(key(KeyCode::Char('s'))) {
-            AgentAction::UpdateWorkspaces { id, workspaces } => {
+            AgentAction::UpdateWorkspaces { id, workspaces, .. } => {
                 assert_eq!(id, "agent-1");
                 assert_eq!(workspaces.len(), 1);
                 assert_eq!(workspaces[0].0, "library");
             }
             other => panic!("expected update, got {other:?}"),
+        }
+    }
+
+    /// The first `s` that would drop a half-filled row only warns and stays in
+    /// the editor, where `draw_edit_workspaces` paints the warning. Saving on
+    /// that same keypress let `AgentWorkspacesUpdated` replace `status_msg`
+    /// with the success message while the request was still in flight, so the
+    /// operator was told the save succeeded and never learned a row was left
+    /// out (#7835 review).
+    #[test]
+    fn save_waits_for_a_confirming_press_before_dropping_a_half_typed_row() {
+        let mut state = editing_state();
+        state.workspaces.push((
+            "library".into(),
+            "shared/library".into(),
+            "readwrite".into(),
+        ));
+        state
+            .workspaces
+            .push(("half".into(), "".into(), "readwrite".into()));
+
+        assert!(
+            matches!(
+                state.handle_key(key(KeyCode::Char('s'))),
+                AgentAction::Continue
+            ),
+            "the first `s` must not send a table with a row about to be dropped"
+        );
+        assert!(
+            !state.status_msg.is_empty(),
+            "the operator must be told the row would be dropped"
+        );
+        let rendered = rendered_edit_workspaces(&state);
+        assert!(
+            rendered.contains(state.status_msg.trim()),
+            "the warning must be readable on the editor before the save: {rendered:?}"
+        );
+
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            AgentAction::UpdateWorkspaces { workspaces, .. } => {
+                assert_eq!(
+                    workspaces.len(),
+                    1,
+                    "the confirming press saves the complete row"
+                );
+            }
+            other => panic!("expected the confirmed update, got {other:?}"),
+        }
+    }
+
+    /// A confirmation describes one exact table. Changing the rows (here by
+    /// deleting the dropped one) invalidates it, so the next `s` is judged
+    /// against what is on screen rather than an acknowledgement of something
+    /// else.
+    #[test]
+    fn editing_the_rows_resets_the_drop_confirmation() {
+        let mut state = editing_state();
+        state.workspaces.push((
+            "library".into(),
+            "shared/library".into(),
+            "readwrite".into(),
+        ));
+        state
+            .workspaces
+            .push(("half".into(), "".into(), "readwrite".into()));
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('s'))),
+            AgentAction::Continue
+        ));
+
+        state.ws_cursor = 1;
+        state.handle_key(key(KeyCode::Char('d')));
+
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            AgentAction::UpdateWorkspaces { workspaces, .. } => {
+                assert_eq!(workspaces.len(), 1);
+                assert_eq!(workspaces[0].0, "library");
+            }
+            other => panic!("expected a direct update after the rows changed, got {other:?}"),
         }
     }
 
@@ -2984,6 +3118,22 @@ mod workspaces_tests {
         state
             .workspaces
             .push(("half".into(), "".into(), "readwrite".into()));
+        // First press: the warning, still painted in the editor.
+        assert!(matches!(
+            state.handle_key(key(KeyCode::Char('s'))),
+            AgentAction::Continue
+        ));
+        assert!(
+            !state.status_msg.is_empty(),
+            "dropping a half-typed row must surface a message, not fail silently"
+        );
+        let rendered = rendered_edit_workspaces(&state);
+        assert!(
+            rendered.contains(state.status_msg.trim()),
+            "the status message must actually be painted, not just set: {rendered:?}"
+        );
+
+        // Confirming press: the trimmed values are what gets sent.
         match state.handle_key(key(KeyCode::Char('s'))) {
             AgentAction::UpdateWorkspaces { workspaces, .. } => {
                 assert_eq!(workspaces.len(), 1);
@@ -2998,15 +3148,6 @@ mod workspaces_tests {
             }
             other => panic!("expected update, got {other:?}"),
         }
-        assert!(
-            !state.status_msg.is_empty(),
-            "dropping a half-typed row must surface a message, not fail silently"
-        );
-        let rendered = rendered_edit_workspaces(&state);
-        assert!(
-            rendered.contains(state.status_msg.trim()),
-            "the status message must actually be painted, not just set: {rendered:?}"
-        );
     }
 
     /// A row that is not a half-typed edit but still cannot become a
@@ -3116,6 +3257,37 @@ mod workspaces_tests {
             state.workspaces[0].2, "readonly",
             "unrecognized mode input must not default to the more permissive read-write"
         );
+        assert!(
+            state.status_msg.contains("garbage"),
+            "refusing the mode must name the refused value, not silently discard it: {:?}",
+            state.status_msg
+        );
+        let painted: String = state.status_msg.trim().chars().take(24).collect();
+        let rendered = rendered_edit_workspaces(&state);
+        assert!(
+            rendered.contains(&painted),
+            "the refusal must be painted where the operator is looking: {rendered:?}"
+        );
+    }
+
+    /// `w` resets the editor's rows and cursor but used to leave `status_msg`
+    /// alone, so the freshly fetched table opened under a message about the
+    /// previous agent (or about some other pane of the tab) — the editor is
+    /// the only surface that paints `status_msg` here.
+    #[test]
+    fn opening_the_editor_clears_a_stale_status_message() {
+        let mut state = editing_state();
+        state.status_msg = "stale message".to_string();
+        state.sub = AgentSubScreen::AgentDetail;
+
+        state.handle_key(key(KeyCode::Char('w')));
+
+        assert!(
+            state.status_msg.is_empty(),
+            "a message from before the fetch must not hang over the new table: {:?}",
+            state.status_msg
+        );
+        assert!(matches!(state.sub, AgentSubScreen::EditWorkspaces));
     }
 
     #[test]

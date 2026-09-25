@@ -852,17 +852,18 @@ impl App {
                     }
                 }
             }
-            AppEvent::AgentWorkspacesUpdated(id) => {
-                // Guard on both the agent id and the sub-screen. This is
-                // stricter than `AgentWorkspacesLoaded` above, which only
-                // checks the id: that arm just refreshes `workspaces` in
-                // place, harmless to apply even if the operator has moved
-                // to a different sub-screen, while this arm also moves
-                // `sub` — which would eject them from wherever they went.
+            AppEvent::AgentWorkspacesUpdated(id, generation) => {
+                // Guard on the agent id, the sub-screen and the edit session.
+                // The id and sub-screen keep a save from ejecting the operator
+                // from wherever they moved on to; the generation catches the
+                // case they did not move away from the editor but re-entered
+                // it: `s` → `Esc` → `w` bumps the generation, so a reply to
+                // the first save is stale even though the new editor is open
+                // on the same agent and sub-screen (#7835 review).
                 // The PATCH is a two-request round trip, so this can land
-                // after the operator has moved on to editing something
-                // else (or a different agent).
-                if self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id.clone())
+                // after the operator has moved on (or opened a new session).
+                if generation == self.agents.ws_generation
+                    && self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id.clone())
                     && matches!(self.agents.sub, agents::AgentSubScreen::EditWorkspaces)
                 {
                     self.agents.status_msg =
@@ -2202,12 +2203,17 @@ impl App {
                     );
                 }
             }
-            agents::AgentAction::UpdateWorkspaces { id, workspaces } => {
+            agents::AgentAction::UpdateWorkspaces {
+                id,
+                workspaces,
+                generation,
+            } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_update_agent_workspaces(
                         backend,
                         id,
                         workspaces,
+                        generation,
                         self.event_tx.clone(),
                     );
                 }
@@ -3813,7 +3819,10 @@ mod agent_workspaces_event_tests {
         });
         app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
 
-        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-1".to_string()));
+        app.handle_event(AppEvent::AgentWorkspacesUpdated(
+            "agent-1".to_string(),
+            app.agents.ws_generation,
+        ));
 
         assert!(
             matches!(app.agents.sub, agents::AgentSubScreen::AgentDetail),
@@ -3839,7 +3848,10 @@ mod agent_workspaces_event_tests {
         });
         app.agents.sub = agents::AgentSubScreen::EditModelParams;
 
-        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-1".to_string()));
+        app.handle_event(AppEvent::AgentWorkspacesUpdated(
+            "agent-1".to_string(),
+            app.agents.ws_generation,
+        ));
 
         assert!(
             matches!(app.agents.sub, agents::AgentSubScreen::EditModelParams),
@@ -3851,11 +3863,46 @@ mod agent_workspaces_event_tests {
         );
 
         app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
-        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-2".to_string()));
+        app.handle_event(AppEvent::AgentWorkspacesUpdated(
+            "agent-2".to_string(),
+            app.agents.ws_generation,
+        ));
 
         assert!(
             matches!(app.agents.sub, agents::AgentSubScreen::EditWorkspaces),
             "a save for a different agent than the one on screen must not move the operator"
+        );
+    }
+
+    /// The case the agent-id and sub-screen guards cannot catch: `s` → `Esc`
+    /// → `w` on the *same* agent re-opens the editor (bumping
+    /// `ws_generation`) while the first save is still in flight. When it
+    /// lands, the id and sub-screen both match, so without the generation
+    /// check it closes the editor the operator has just re-entered and
+    /// stamps "updated" over a table that was never saved.
+    #[test]
+    fn workspaces_updated_event_ignored_for_a_superseded_edit_session() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.detail = Some(agents::AgentDetail {
+            id: "agent-1".to_string(),
+            ..Default::default()
+        });
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+
+        // The save was staged in session 1; the operator has since re-opened
+        // the editor (session 2).
+        app.agents.ws_generation = 2;
+
+        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-1".to_string(), 1));
+
+        assert!(
+            matches!(app.agents.sub, agents::AgentSubScreen::EditWorkspaces),
+            "a save from a superseded `w` must not close the new editor"
+        );
+        assert!(
+            app.agents.status_msg.is_empty(),
+            "it must not stamp its success message over the new session either"
         );
     }
 
