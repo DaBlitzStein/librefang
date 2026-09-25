@@ -363,18 +363,18 @@ impl TemplatesState {
                     let next = (i + 1) % total;
                     self.history_list.select(Some(next));
                 }
-                KeyCode::Enter if total > 0 => {
+                KeyCode::Enter
+                    if total > 0
+                        && self
+                            .history_list
+                            .selected()
+                            .and_then(|i| self.version_history.get(i))
+                            .is_some() =>
+                {
                     // Arm, don't fire. `Enter` is how an operator inspects a row,
                     // and this one overwrites the agent type's manifest with the
                     // version under the cursor.
-                    if self
-                        .history_list
-                        .selected()
-                        .and_then(|i| self.version_history.get(i))
-                        .is_some()
-                    {
-                        self.confirm_restore_version = true;
-                    }
+                    self.confirm_restore_version = true;
                 }
                 _ => {}
             }
