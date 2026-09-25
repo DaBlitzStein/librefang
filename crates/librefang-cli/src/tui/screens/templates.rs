@@ -647,25 +647,17 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
     }
 
     // ── Hints / status ──
-    if !state.status_msg.is_empty() {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                format!("  {}", state.status_msg),
-                Style::default().fg(theme::YELLOW),
-            )])),
-            chunks[3],
-        );
-    } else {
-        f.render_widget(
-            widgets::confirm_or_status_or_hint(
-                state.confirm_restore,
-                &crate::i18n::t("tui-templates-confirm-restore"),
-                "",
-                &crate::i18n::t("tui-templates-hints"),
-            ),
-            chunks[3],
-        );
-    }
+    // The armed prompt outranks a status message, as it does on Extensions: a
+    // stale "promoted …" line must not hide the question the next key answers.
+    f.render_widget(
+        widgets::confirm_or_status_or_hint(
+            state.confirm_restore,
+            &crate::i18n::t("tui-templates-confirm-restore"),
+            &state.status_msg,
+            &crate::i18n::t("tui-templates-hints"),
+        ),
+        chunks[3],
+    );
 }
 
 fn draw_version_history(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
@@ -1069,6 +1061,54 @@ mod tests {
             );
             assert!(!state.confirm_restore, "{cancel:?} left the flag armed");
         }
+    }
+
+    /// The prompt is the whole point of the two-step. Rendering it only when
+    /// `status_msg` is empty let a stale "promoted …" line hide an armed
+    /// restore, so the next keystroke looked like it did nothing.
+    #[test]
+    fn an_armed_restore_renders_over_a_stale_status_message() {
+        let mut state = TemplatesState::new();
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "payroll".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let idx = state
+            .templates
+            .iter()
+            .position(|t| t.name == "payroll")
+            .expect("manifest row exists");
+        let pos = state
+            .filtered
+            .iter()
+            .position(|&i| i == idx)
+            .expect("payroll is reachable");
+        state.list_state.select(Some(pos));
+        state.status_msg = "stale status line".to_string();
+        state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert!(state.confirm_restore, "R did not arm the confirmation");
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), &mut state))
+            .expect("the templates screen must render");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        let prompt = crate::i18n::t("tui-templates-confirm-restore");
+        assert!(
+            rendered.contains(&prompt),
+            "the armed prompt must outrank the stale status line.\nlooked for: {prompt}\nrendered:\n{rendered}"
+        );
     }
 
     #[test]
