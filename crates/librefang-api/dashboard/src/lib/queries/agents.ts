@@ -175,13 +175,6 @@ export const agentQueries = {
       queryFn: listTools,
       staleTime: STALE_MS,
     }),
-  manifestHistory: (agentId: string) =>
-    queryOptions({
-      queryKey: agentKeys.manifestHistory(agentId),
-      queryFn: () => getAgentManifestHistory(agentId),
-      enabled: !!agentId,
-      staleTime: 60_000,
-    }),
 };
 
 export function useAgents(
