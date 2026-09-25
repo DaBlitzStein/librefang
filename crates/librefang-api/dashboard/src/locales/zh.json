@@ -297,7 +297,8 @@
       "avatar_removed": "头像已删除",
       "avatar_remove_failed": "删除头像失败",
       "avatar_type_rejected": "头像必须是 PNG、JPEG、GIF 或 WebP 图片。不接受 SVG。",
-      "avatar_too_large": "该图片为 {{size}} MB，上限为 {{limit}} MB。"
+      "avatar_too_large": "该图片为 {{size}} MB，上限为 {{limit}} MB。",
+      "provisioned_hint": "此代理由部署在 {{source}} 中声明 — 守护进程拒绝在此写入身份，请在相应文件中更改外观。"
     },
     "model": "模型",
     "provider": "供应商",

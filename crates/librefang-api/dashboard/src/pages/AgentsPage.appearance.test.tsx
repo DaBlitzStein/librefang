@@ -71,10 +71,18 @@ beforeEach(() => {
 
 const AGENT = "agent-1";
 
-function renderSection(identity?: { emoji?: string; avatar_url?: string; color?: string }) {
+function renderSection(
+  identity?: { emoji?: string; avatar_url?: string; color?: string },
+  provisioned?: { source: string } | null,
+) {
   const onChanged = vi.fn();
   const view = render(
-    <AgentAppearanceSection agentId={AGENT} identity={identity} onChanged={onChanged} />,
+    <AgentAppearanceSection
+      agentId={AGENT}
+      identity={identity}
+      provisioned={provisioned}
+      onChanged={onChanged}
+    />,
   );
   return { ...view, onChanged };
 }
@@ -156,9 +164,9 @@ describe("emoji editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     // Verbatim from `guard_provisioned_write` — the 423 the daemon returns for
-    // an agent the deployment provisions. The dashboard cannot pre-empt it:
-    // nothing in the agent payload says whether an agent is provisioned, so
-    // relaying the message is the only way the operator learns why.
+    // an agent the deployment provisions. A provisioned agent's controls are
+    // locked (see below), so this is the fallback for any other server-side
+    // refusal: the message is relayed rather than replaced.
     updateIdentity.mock.calls[0][1].onError(
       new Error("this resource is provisioned by the deployment"),
     );
@@ -180,6 +188,19 @@ describe("avatar upload", () => {
     renderSection({ avatar_url: `/api/agents/${AGENT}/avatar` });
     expect(screen.getByRole("button", { name: "Replace" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+  });
+
+  it("lets a file with no MIME type through for the daemon to sniff", () => {
+    renderSection({});
+    // What a browser reports for an extension-less file picked through "All
+    // files". The list is a courtesy; the daemon decides by sniffing the
+    // bytes, so an empty `type` must not be refused here.
+    const file = fileOfSize("picture", "", 1024);
+
+    fireEvent.change(fileInput(), { target: { files: [file] } });
+
+    expect(uploadAvatar).toHaveBeenCalledTimes(1);
+    expect(uploadAvatar.mock.calls[0][0]).toEqual({ agentId: AGENT, file });
   });
 
   it("accepts exactly the four types the daemon stores, and not SVG", () => {
@@ -220,7 +241,8 @@ describe("avatar upload", () => {
     });
 
     expect(uploadAvatar).not.toHaveBeenCalled();
-    expect(addToast).toHaveBeenCalledWith("That image is 2.0 MB; the limit is 2 MB.", "error");
+    // Rounded up: "2.0 MB; the limit is 2 MB" would contradict itself.
+    expect(addToast).toHaveBeenCalledWith("That image is 2.1 MB; the limit is 2 MB.", "error");
   });
 
   it("accepts a file exactly at the cap", () => {
@@ -278,6 +300,51 @@ describe("avatar removal", () => {
     deleteAvatar.mock.calls[0][1].onSuccess();
     expect(onChanged).toHaveBeenCalledTimes(1);
     expect(addToast).toHaveBeenCalledWith("Avatar removed", "success");
+  });
+});
+
+describe("a provisioned agent", () => {
+  const SOURCE = "/etc/librefang/agents/researcher/agent.toml";
+
+  it("locks every control and names the file that owns the appearance", () => {
+    renderSection({ emoji: "🤖", avatar_url: `/api/agents/${AGENT}/avatar` }, { source: SOURCE });
+
+    // `guard_provisioned_write` answers 423 to all three writes, so none of
+    // them may be offered as if they worked (#8354). The emoji field is the
+    // one that is enabled without the gate; the Save button is disabled
+    // because the draft is unchanged, and stays disabled.
+    expect(screen.getByLabelText("Emoji")).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Emoji"), { target: { value: "🦊" } });
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Replace" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Remove" })).toBeDisabled();
+    expect(screen.getByText(new RegExp(SOURCE.replace(/[/.]/g, "\\$&")))).toBeInTheDocument();
+  });
+
+  it("does not spend an upload, even if a change event is dispatched anyway", () => {
+    renderSection({}, { source: SOURCE });
+
+    fireEvent.change(fileInput(), {
+      target: { files: [fileOfSize("me.png", "image/png", 1024)] },
+    });
+
+    expect(uploadAvatar).not.toHaveBeenCalled();
+    expect(updateIdentity).not.toHaveBeenCalled();
+    expect(deleteAvatar).not.toHaveBeenCalled();
+  });
+
+  it("still renders the stored identity read-only", () => {
+    renderSection({ emoji: "🤖", avatar_url: `/api/agents/${AGENT}/avatar` }, { source: SOURCE });
+
+    expect(screen.getByLabelText("Emoji")).toHaveValue("🤖");
+    expect(screen.getByRole("button", { name: "Replace" })).toBeInTheDocument();
+  });
+
+  it("leaves an operator-created agent editable", () => {
+    renderSection({ emoji: "🤖" }, null);
+
+    expect(screen.getByLabelText("Emoji")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Upload" })).toBeEnabled();
   });
 });
 

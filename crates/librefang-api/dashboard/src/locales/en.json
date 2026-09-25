@@ -297,7 +297,8 @@
       "avatar_removed": "Avatar removed",
       "avatar_remove_failed": "Failed to remove the avatar",
       "avatar_type_rejected": "An avatar must be a PNG, JPEG, GIF or WebP image. SVG is not accepted.",
-      "avatar_too_large": "That image is {{size}} MB; the limit is {{limit}} MB."
+      "avatar_too_large": "That image is {{size}} MB; the limit is {{limit}} MB.",
+      "provisioned_hint": "This agent is provisioned by the deployment in {{source}} — the daemon refuses identity writes here, so change the appearance in that file."
     },
     "model": "Model",
     "provider": "Provider",

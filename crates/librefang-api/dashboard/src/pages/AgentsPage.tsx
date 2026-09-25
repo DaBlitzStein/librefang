@@ -8,6 +8,7 @@ import {
   type AgentDetail,
   type AgentIdentity,
   type AgentItem,
+  type AgentProvenance,
   type CloneAgentResult,
   type PromptVersion,
   type ToolDefinition,
@@ -221,10 +222,15 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
 export function AgentAppearanceSection({
   agentId,
   identity,
+  provisioned,
   onChanged,
 }: {
   agentId: string;
   identity?: AgentIdentity;
+  /** The deployment's provenance for this agent, when it has one. Every write
+   *  below answers `423 Locked` for such an agent, so the controls are locked
+   *  here rather than left to discover it by pressing (#8354). */
+  provisioned?: AgentProvenance | null;
   onChanged: () => void;
 }) {
   const { t } = useTranslation();
@@ -234,6 +240,7 @@ export function AgentAppearanceSection({
   const deleteAvatarMutation = useDeleteAgentAvatar();
   const storedEmoji = identity?.emoji ?? "";
   const hasAvatar = !!identity?.avatar_url;
+  const isProvisioned = !!provisioned;
   const [emojiDraft, setEmojiDraft] = useState(storedEmoji);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -248,7 +255,7 @@ export function AgentAppearanceSection({
   /** PATCH the emoji. Colour is left alone — the body omits it, and #6608 made
    *  an omitted field preserve its stored value rather than null it. */
   function saveEmoji() {
-    if (updateIdentityMutation.isPending) return;
+    if (isProvisioned || updateIdentityMutation.isPending) return;
     const next = emojiDraft.trim();
     if (next === storedEmoji) return;
     updateIdentityMutation.mutate(
@@ -280,16 +287,21 @@ export function AgentAppearanceSection({
    *  decides the format by sniffing the bytes, so a `.png` that is really
    *  something else is refused there whatever the browser said here. Checking
    *  first only avoids spending an upload that was never going to be accepted,
-   *  and lets the message name the actual problem. */
+   *  and lets the message name the actual problem.
+   *
+   *  An empty `file.type` is passed through rather than refused: a browser
+   *  reports that for an extension-less file picked via "All files", and the
+   *  type list is a courtesy — the daemon's sniffing is what accepts or
+   *  rejects the bytes. */
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const input = event.target;
     const file = input.files?.[0];
     // Cleared before any early return, so picking the same file twice in a row
     // still fires `change` — the value is what the browser compares against.
     input.value = "";
-    if (!file) return;
+    if (!file || isProvisioned) return;
 
-    if (!(ALLOWED_AGENT_AVATAR_TYPES as readonly string[]).includes(file.type)) {
+    if (file.type && !(ALLOWED_AGENT_AVATAR_TYPES as readonly string[]).includes(file.type)) {
       addToast(
         t("agents.identity.avatar_type_rejected", {
           defaultValue: "An avatar must be a PNG, JPEG, GIF or WebP image. SVG is not accepted.",
@@ -302,7 +314,11 @@ export function AgentAppearanceSection({
       addToast(
         t("agents.identity.avatar_too_large", {
           defaultValue: "That image is {{size}} MB; the limit is {{limit}} MB.",
-          size: (file.size / (1024 * 1024)).toFixed(1),
+          // Rounded up, so a rejection can never render as "2.0 MB; the limit
+          // is 2 MB": to-one-decimal rounding let 2 MiB + 1 byte do exactly
+          // that. Ceiling at the first decimal keeps the named size strictly
+          // above the cap for every file this branch rejects.
+          size: (Math.ceil(file.size / (100 * 1024)) / 10).toFixed(1),
           limit: (MAX_AGENT_AVATAR_BYTES / (1024 * 1024)).toFixed(0),
         }),
         "error",
@@ -327,7 +343,7 @@ export function AgentAppearanceSection({
   }
 
   function removeAvatar() {
-    if (deleteAvatarMutation.isPending) return;
+    if (isProvisioned || deleteAvatarMutation.isPending) return;
     deleteAvatarMutation.mutate(agentId, {
       onSuccess: () => {
         onChanged();
@@ -367,12 +383,13 @@ export function AgentAppearanceSection({
               maxLength={16}
               placeholder={t("agents.identity.emoji_placeholder", { defaultValue: "None" })}
               aria-label={t("agents.identity.emoji", { defaultValue: "Emoji" })}
-              className="w-24 px-2 py-1 rounded-md border border-border-subtle bg-surface text-lg text-center outline-none focus:border-brand"
+              disabled={isProvisioned}
+              className="w-24 px-2 py-1 rounded-md border border-border-subtle bg-surface text-lg text-center outline-none focus:border-brand disabled:opacity-50 disabled:cursor-not-allowed"
             />
             <button
               type="button"
               onClick={saveEmoji}
-              disabled={updateIdentityMutation.isPending || emojiDraft.trim() === storedEmoji}
+              disabled={isProvisioned || updateIdentityMutation.isPending || emojiDraft.trim() === storedEmoji}
               className="px-3 py-1 rounded-lg text-xs font-semibold bg-brand text-white hover:bg-brand/90 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
             >
               {updateIdentityMutation.isPending ? t("common.saving") : t("common.save")}
@@ -393,7 +410,7 @@ export function AgentAppearanceSection({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={uploadAvatarMutation.isPending}
+              disabled={isProvisioned || uploadAvatarMutation.isPending}
               className="px-3 py-1 rounded-lg text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
             >
               {uploadAvatarMutation.isPending
@@ -406,7 +423,7 @@ export function AgentAppearanceSection({
               <button
                 type="button"
                 onClick={removeAvatar}
-                disabled={deleteAvatarMutation.isPending}
+                disabled={isProvisioned || deleteAvatarMutation.isPending}
                 className="px-3 py-1 rounded-lg text-xs font-semibold text-error border border-error/30 hover:bg-error/10 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
               >
                 {t("common.remove", { defaultValue: "Remove" })}
@@ -415,9 +432,14 @@ export function AgentAppearanceSection({
           </div>
         </DetailRow>
         <p className="text-[11px] text-text-dim leading-relaxed">
-          {t("agents.identity.avatar_hint", {
-            defaultValue: "PNG, JPEG, GIF or WebP, up to 2 MB. SVG is not accepted. The image is stored by the daemon and served only to signed-in callers.",
-          })}
+          {isProvisioned
+            ? t("agents.identity.provisioned_hint", {
+                defaultValue: "This agent is provisioned by the deployment in {{source}} — the daemon refuses identity writes here, so change the appearance in that file.",
+                source: provisioned?.source,
+              })
+            : t("agents.identity.avatar_hint", {
+                defaultValue: "PNG, JPEG, GIF or WebP, up to 2 MB. SVG is not accepted. The image is stored by the daemon and served only to signed-in callers.",
+              })}
         </p>
       </div>
     </section>
@@ -3449,6 +3471,7 @@ export function AgentsPage() {
               <AgentAppearanceSection
                 agentId={detailAgent.id}
                 identity={detailIdentity}
+                provisioned={detailAgent.provisioned}
                 onChanged={() => { void refreshDetailAgent(detailAgent.id); }}
               />
 

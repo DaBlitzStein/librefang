@@ -88,7 +88,12 @@ describe("useAgentAvatarUrl", () => {
     const { result } = renderHook(() => useAgentAvatarUrl("agent-1", true), { wrapper });
 
     await waitFor(() => expect(result.current).toBe("blob:test/1"));
-    expect(http.fetchAuthenticatedImage).toHaveBeenCalledWith("/api/agents/agent-1/avatar");
+    // The request must carry React Query's signal: without it a superseded
+    // fetch is not cancelled and holds a connection slot until it ends.
+    expect(http.fetchAuthenticatedImage).toHaveBeenCalledWith(
+      "/api/agents/agent-1/avatar",
+      expect.any(AbortSignal),
+    );
   });
 
   it("revokes the object URL on unmount", async () => {

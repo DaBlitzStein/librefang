@@ -297,7 +297,8 @@
       "avatar_removed": "Usunięto awatar",
       "avatar_remove_failed": "Nie udało się usunąć awatara",
       "avatar_type_rejected": "Awatar musi być obrazem PNG, JPEG, GIF lub WebP. SVG nie jest akceptowany.",
-      "avatar_too_large": "Ten obraz ma {{size}} MB, a limit to {{limit}} MB."
+      "avatar_too_large": "Ten obraz ma {{size}} MB, a limit to {{limit}} MB.",
+      "provisioned_hint": "Ten agent jest zdefiniowany przez wdrożenie w {{source}} — demon odrzuca tutaj zapisy tożsamości, więc zmień wygląd w tym pliku."
     },
     "model": "Model",
     "provider": "Dostawca",

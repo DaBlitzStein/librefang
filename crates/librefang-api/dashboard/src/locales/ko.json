@@ -297,7 +297,8 @@
       "avatar_removed": "아바타를 삭제했습니다",
       "avatar_remove_failed": "아바타를 삭제하지 못했습니다",
       "avatar_type_rejected": "아바타는 PNG, JPEG, GIF 또는 WebP 이미지여야 합니다. SVG는 허용되지 않습니다.",
-      "avatar_too_large": "이 이미지는 {{size}}MB이며, 한도는 {{limit}}MB입니다."
+      "avatar_too_large": "이 이미지는 {{size}}MB이며, 한도는 {{limit}}MB입니다.",
+      "provisioned_hint": "이 에이전트는 배포에서 {{source}}에 선언했습니다. 데몬이 여기서의 ID 쓰기를 거부하므로 해당 파일에서 외형을 변경하세요."
     },
     "model": "모델",
     "provider": "공급자",

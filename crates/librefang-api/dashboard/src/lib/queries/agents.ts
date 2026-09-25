@@ -181,7 +181,10 @@ export const agentQueries = {
   avatar: (agentId: string, enabled: boolean) =>
     queryOptions({
       queryKey: agentKeys.avatar(agentId),
-      queryFn: () => fetchAuthenticatedImage(agentAvatarPath(agentId)),
+      // React Query's signal is forwarded: switching agents quickly otherwise
+      // leaves the superseded image GET holding a connection slot until it
+      // finishes on its own.
+      queryFn: ({ signal }) => fetchAuthenticatedImage(agentAvatarPath(agentId), signal),
       enabled: !!agentId && enabled,
       staleTime: AVATAR_STALE_MS,
     }),
