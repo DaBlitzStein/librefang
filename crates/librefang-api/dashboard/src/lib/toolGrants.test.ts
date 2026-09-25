@@ -204,6 +204,25 @@ describe("mcpGroupCardState (#7749 review)", () => {
     expect(isMcpGroupCardActionable("grantable")).toBe(true);
     expect(isMcpGroupCardActionable("wildcard")).toBe(false);
     expect(isMcpGroupCardActionable("hard-disabled")).toBe(false);
+    expect(isMcpGroupCardActionable("hand-controlled")).toBe(false);
+  });
+
+  it("hands the MCP grant to the Hand definition for a hand-derived agent", () => {
+    // `set_agent_mcp_servers` rejects a hand-derived agent with a 400
+    // ("Hand-derived agent MCP servers are controlled by the Hand definition"),
+    // so every card must read as inert — including a card that would otherwise
+    // be `grantable` and offer a `+` that stages a doomed write (#7835 review).
+    expect(
+      mcpGroupCardState({ granted: false, mode: "allowlist", hardDisabled: false, handControlled: true }),
+    ).toBe("hand-controlled");
+    expect(
+      mcpGroupCardState({ granted: true, mode: "allowlist", hardDisabled: false, handControlled: true }),
+    ).toBe("hand-controlled");
+    // The hand flag outranks the other two inert reasons: it is the one the
+    // operator has to fix in the Hand, not on this card.
+    expect(
+      mcpGroupCardState({ granted: true, mode: "all", hardDisabled: true, handControlled: true }),
+    ).toBe("hand-controlled");
   });
 });
 

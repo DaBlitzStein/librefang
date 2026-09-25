@@ -304,6 +304,7 @@ describe("ChannelsSection (#7742)", () => {
     });
   });
 });
+
 // #8446: the create form warned that Stable mode makes `[routing]` inert, but the existing-agent editor rendered the same Routing section silently.
 describe("ManifestEditorForm (#8446)", () => {
   function renderEditor(routing_inert_reason: "stable_mode" | null) {

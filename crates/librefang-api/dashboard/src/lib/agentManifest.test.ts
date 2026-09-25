@@ -878,6 +878,19 @@ reasoning_mode = "max"
     expect(out).not.toContain("reasoning_mode");
   });
 
+  it("refuses a present-but-non-array fallback_models instead of reading it as disable-all", () => {
+    // #7835 review: a string/table value is neither the absent key (inherit)
+    // nor `[]` (disable all). Mapping it to `[]` let the form open on invalid
+    // input and then write the explicit deny-all statement on the next save.
+    const parsed = parseManifestToml(`name = "agent"
+description = "test"
+fallback_models = "gpt-4"
+`);
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.message).toBe("fallback_models_not_an_array");
+  });
+
   it("round-trips a declared fallback_models = [] without re-enabling global fallbacks", () => {
     // #7749 review: `fallback_models = []` is the disable-all statement; an
     // omitted key inherits the global fallback_providers. A form that

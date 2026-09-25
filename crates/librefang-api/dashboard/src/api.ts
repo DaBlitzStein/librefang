@@ -1786,6 +1786,7 @@ export async function setAgentChannels(
     { channels },
   );
 }
+
 export interface AgentToolsResponse {
   capabilities_tools?: string[] | null;
   tool_allowlist?: string[] | null;
