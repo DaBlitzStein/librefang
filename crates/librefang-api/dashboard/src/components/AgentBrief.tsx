@@ -155,7 +155,9 @@ export function AgentBrief({
     },
     {
       l: t("agents.kpi.tools", { defaultValue: "Tools" }),
-      v: String(toolsCount),
+      // `toolsCount` is `number | null` and defaults to null: a caller with no
+      // declared-tool count must read as "unknown", not the literal "null".
+      v: toolsCount != null ? String(toolsCount) : "—",
       m: toolsMeta,
     },
   ];
