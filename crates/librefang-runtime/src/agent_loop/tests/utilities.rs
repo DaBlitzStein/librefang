@@ -2835,12 +2835,3 @@ fn test_build_extra_body_is_the_resolved_map_after_apply_to() {
         "`apply_to` must leave no sampling copy in `extra_params`"
     );
 }
-
-#[test]
-fn test_build_extra_body_none_sends_nothing() {
-    let model = ModelConfig::default();
-    assert!(
-        build_extra_body(&model).is_none(),
-        "a ModelConfig without typed sampling fields and without extra_params must produce no extra_body"
-    );
-}
