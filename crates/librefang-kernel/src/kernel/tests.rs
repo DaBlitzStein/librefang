@@ -3337,7 +3337,7 @@ fn update_manifest_notifies_registry_watchers_exactly_once_per_tags_change() {
     replacement.tags = vec!["beta".to_string()];
 
     kernel
-        .update_manifest(agent_id, replacement)
+        .update_manifest(agent_id, replacement, "test")
         .expect("manifest update should succeed");
 
     assert!(
@@ -16203,7 +16203,7 @@ fn suspend_and_resume_each_record_a_manifest_version_snapshot() {
     // (`spawn_agent_inner` sets up the workspace but does not itself write the
     // manifest file) — write the baseline first, matching a real agent that was
     // loaded from an on-disk manifest before ever being suspended.
-    kernel.persist_manifest_to_disk(agent_id);
+    kernel.persist_manifest_to_disk(agent_id, "test");
 
     kernel
         .suspend_agent(agent_id)
