@@ -270,6 +270,14 @@ pub fn remove_sidecar_block(path: &Path, name: &str) -> Result<bool, String> {
         let Some(aot_item) = doc.get_mut("sidecar_channels") else {
             return Ok(false);
         };
+        // `sidecar_channels = []` is the shape `state_empty_sidecar_channels`
+        // (and the cross-file walk that calls it) writes to express a
+        // deletion, so it means "the section is stated and empty", not
+        // "malformed" — a repeat removal is a no-op returning `false`, which
+        // the DELETE handler maps to its 404.
+        if aot_item.as_array().is_some_and(|array| array.is_empty()) {
+            return Ok(false);
+        }
         let aot = aot_item.as_array_of_tables_mut().ok_or_else(|| {
             "config.toml: `sidecar_channels` is not an array-of-tables".to_string()
         })?;
@@ -292,13 +300,40 @@ pub fn remove_sidecar_block(path: &Path, name: &str) -> Result<bool, String> {
     if !removed_any {
         return Ok(false);
     }
-    // Drop a now-empty array entirely rather than leaving a bare `sidecar_channels = []`.
+    // Drop a now-empty array rather than leaving a bare `sidecar_channels = []`
+    // behind in this file. The caller (`remove_sidecar_block_anywhere`) owns the
+    // cross-file decision: when no reachable file states the section any more
+    // it writes the explicit empty array once, in the root, so the reload
+    // overlay (#8459/#8460) can express the deletion — a root-level `[]` from
+    // this single file would instead shadow the entries an included file still
+    // declares, because the root wins the include merge.
     if now_empty {
         doc.remove("sidecar_channels");
     }
 
     atomic_write(path, &doc.to_string())?;
     Ok(true)
+}
+
+/// State an empty `sidecar_channels` section in `path` explicitly.
+///
+/// Both delete paths need this when the document would otherwise not state
+/// `sidecar_channels` at all: the reconcile path of
+/// `DELETE /api/channels/sidecar/{name}` deletes a channel that lives only in
+/// the running config (no block to strip anywhere on disk), and
+/// `remove_sidecar_block_anywhere` reaches the same state after stripping the
+/// last block. Without the write, the reload overlay (#8459/#8460) reads the
+/// missing key as "keep the live value" and the channel survives its own
+/// deletion. Callers must have verified that no reachable file already states
+/// the section — a `[]` written while an included file still declares entries
+/// would shadow them, because the root wins the include merge.
+pub fn state_empty_sidecar_channels(path: &Path) -> Result<(), String> {
+    let original = read_existing_or_empty(path)?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("parse {path:?}: {e}"))?;
+    doc.insert("sidecar_channels", value(Array::new()));
+    atomic_write(path, &doc.to_string())
 }
 
 #[cfg(test)]
