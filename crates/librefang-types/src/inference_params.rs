@@ -707,7 +707,7 @@ mod tests {
             ..Default::default()
         };
         let mut applied = agent.clone();
-        resolve_inference_params(&agent, Some(&model)).apply_to(&mut applied);
+        resolve_inference_params(&agent, Some(&model), None).apply_to(&mut applied);
 
         assert_eq!(applied.top_p, Some(0.5));
         assert_eq!(applied.frequency_penalty, Some(0.25));
@@ -735,7 +735,7 @@ mod tests {
             ..Default::default()
         };
         let mut applied = agent.clone();
-        resolve_inference_params(&agent, Some(&model)).apply_to(&mut applied);
+        resolve_inference_params(&agent, Some(&model), None).apply_to(&mut applied);
         assert_eq!(applied.top_p, Some(0.8));
         assert_eq!(
             applied.extra_params.get("top_p"),
@@ -746,7 +746,7 @@ mod tests {
         // a `null` the driver would flatten onto the wire.
         let agent = ModelConfig::default();
         let mut applied = agent.clone();
-        resolve_inference_params(&agent, None).apply_to(&mut applied);
+        resolve_inference_params(&agent, None, None).apply_to(&mut applied);
         assert_eq!(applied.top_p, None);
         assert!(!applied.extra_params.contains_key("top_p"));
     }
