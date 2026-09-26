@@ -412,9 +412,14 @@ model = "test-model"
             .contains("second write"),
         "rows are newest first: {versions:?}"
     );
+    // The tag is the call site's own: `PATCH /api/agents/{id}` persists through
+    // `persist_manifest_to_disk(agent_id, "api")` (`routes/agents/config.rs`),
+    // and `record_manifest_version` forwards it verbatim (#807576f2b). The API
+    // is that call site, so "api" is what the history must report — the
+    // dashboard's diff view keys off this string.
     assert_eq!(
-        versions[0]["change_source"], "update",
-        "a successful persist records the 'update' change_source"
+        versions[0]["change_source"], "api",
+        "a successful persist records the route's own 'api' change_source"
     );
 
     // The exact timestamp shape is a contract with the dashboard — see the
