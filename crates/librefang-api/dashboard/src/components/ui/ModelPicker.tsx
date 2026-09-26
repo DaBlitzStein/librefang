@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { ArrowLeft, ArrowRight, ChevronDown, Loader2, Pencil } from "lucide-react";
 import { cn } from "../../lib/cn";
@@ -21,18 +29,17 @@ export interface PickerProvider {
   id: string;
   reachable?: boolean;
   auth_status?: string;
-  model_count?: number;
 }
 
 /**
  * Pick a provider and a model out of the live catalog.
  *
  * Extracted from the switcher that lived inline in `ChatPage`, which was the
- * only searchable single-select in the dashboard: every other model field in
- * the app is an `<input type="text">` where the operator is expected to know an
- * id by heart. The agent's own model, the three complexity tiers, the fallbacks
- * and the per-modality routes all use this instead, so the same choice looks
- * and behaves the same wherever it is made.
+ * only searchable model select in the dashboard: every other model field was an
+ * `<input type="text">` where the operator was expected to know an id by heart.
+ * The manifest editor's routing tiers, fallbacks and pinned model use it, so
+ * the same choice looks and behaves the same wherever it is made. The main
+ * model field predates it and keeps its own pair of selects.
  *
  * Two levels rather than one flat list because the catalog runs to hundreds of
  * ids across dozens of providers and `id` is only unique *within* a provider —
@@ -125,6 +132,8 @@ export function ModelPicker({
   const [customProvider, setCustomProvider] = useState("");
   const [customModel, setCustomModel] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popoverId = useId();
 
   // A click anywhere else closes it. Not `onBlur`: the trigger and the list are
   // separate nodes, so moving focus between them would close the popover the
@@ -140,14 +149,21 @@ export function ModelPicker({
 
   // Escape closes, and it closes from anywhere inside — including while the
   // search box has focus, which is where focus lands on open.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open]);
+  //
+  // The handler is local to the picker instead of a private `document`
+  // listener, and it calls `preventDefault()`: `Modal`'s shared Escape stack
+  // (`handleModalEscape` in `Modal.tsx`) bails on `event.defaultPrevented`, so
+  // this is what keeps Escape with the picker open from also closing a `Modal`
+  // the picker is nested in. Same pattern as `MultiSelectCmdk`.
+  const handleKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!open || e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    setOpen(false);
+    // The popover unmounts with focus inside it; without this, focus falls to
+    // `<body>` and the next Tab restarts at the top of the document.
+    triggerRef.current?.focus();
+  };
 
   // Each open starts at the top level, never drilled into the last provider
   // browsed: landing in a provider you did not choose reads as the wrong list
@@ -167,15 +183,26 @@ export function ModelPicker({
       providers && providers.length
         ? providers.map((p) => ({
             id: p.id,
-            count: counts.get(p.id) ?? p.model_count ?? 0,
+            // Count what drilling in will actually show, not the server's
+            // unfiltered total: `models` is what the caller filtered, so a
+            // provider whose models were all filtered out must read "0" rather
+            // than advertise a count the drill-down cannot produce.
+            count: counts.get(p.id) ?? 0,
             unavailable: p.reachable === false || p.auth_status === "missing",
           }))
         : [...counts.entries()].map(([id, count]) => ({ id, count }));
+    // A caller-supplied `providers` list can omit the current value's provider
+    // (configured in the manifest but absent from discovery). Without a row the
+    // current value would be neither shown nor re-selectable, the exact
+    // stranding the `blocked` carve-out below exists to prevent.
+    if (value?.provider && !list.some((p) => p.id === value.provider)) {
+      list.push({ id: value.provider, count: counts.get(value.provider) ?? 0 });
+    }
     // Alphabetical, matching the chat switcher — a list that reorders itself
     // between the two places the same provider appears is the thing that makes
     // an operator hunt for a row that "moved".
     return list.sort((a, b) => a.id.localeCompare(b.id));
-  }, [models, providers]);
+  }, [models, providers, value?.provider]);
 
   const filteredProviders = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -205,8 +232,9 @@ export function ModelPicker({
   };
 
   return (
-    <div ref={rootRef} className={cn("relative", className)}>
+    <div ref={rootRef} className={cn("relative", className)} onKeyDown={handleKeyDown}>
       <button
+        ref={triggerRef}
         type="button"
         disabled={disabled}
         // Composed, not replaced: naming the control "Agent model" alone would
@@ -214,6 +242,7 @@ export function ModelPicker({
         aria-label={`${label}: ${trigger || t("common.none", { defaultValue: "None" })}`}
         aria-expanded={open}
         aria-haspopup="dialog"
+        aria-controls={open ? popoverId : undefined}
         onClick={() => setOpen((o) => !o)}
         className={cn(
           "flex w-full items-center justify-between gap-2 rounded-xl border border-border-subtle bg-main px-3 py-2 text-left text-sm",
@@ -228,6 +257,8 @@ export function ModelPicker({
 
       {open && (
         <div
+          id={popoverId}
+          role="dialog"
           aria-label={label}
           className="absolute left-0 top-full z-50 mt-1 w-80 overflow-hidden rounded-xl border border-border-subtle bg-surface shadow-xl"
         >
@@ -237,6 +268,17 @@ export function ModelPicker({
                 type="button"
                 aria-label={t("common.back", { defaultValue: "Back" })}
                 onClick={() => {
+                  // One step up. With the hand-entry panel open that step is
+                  // back to the list underneath it, not all the way to the
+                  // provider level: clearing only `drilldown` here used to
+                  // leave `custom` set with nothing rendering except a Confirm
+                  // that could never enable.
+                  if (custom) {
+                    setCustom(null);
+                    setCustomProvider("");
+                    setCustomModel("");
+                    return;
+                  }
                   setDrilldown(null);
                   setSearch("");
                 }}
@@ -320,24 +362,36 @@ export function ModelPicker({
                   placeholder={t("agents.form.model_id", { defaultValue: "Model" })}
                   className="w-full rounded-lg border border-border-subtle bg-main px-2.5 py-1.5 text-xs focus:border-brand focus:outline-none"
                 />
-                <button
-                  type="button"
-                  disabled={!canCommitCustom}
-                  onClick={commitCustom}
-                  className="w-full rounded-lg bg-brand/10 px-2.5 py-1.5 text-xs font-medium text-brand transition-colors hover:bg-brand/20 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {t("common.confirm", { defaultValue: "Confirm" })}
-                </button>
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustom(null);
+                      setCustomProvider("");
+                      setCustomModel("");
+                    }}
+                    className="flex-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-text-dim transition-colors hover:bg-surface-hover"
+                  >
+                    {t("common.cancel", { defaultValue: "Cancel" })}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canCommitCustom}
+                    onClick={commitCustom}
+                    className="flex-1 rounded-lg bg-brand/10 px-2.5 py-1.5 text-xs font-medium text-brand transition-colors hover:bg-brand/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {t("common.confirm", { defaultValue: "Confirm" })}
+                  </button>
+                </div>
               </div>
             )}
 
-            {!isFetching && !custom && !drilldown && filteredProviders.length === 0 && (
+            {!custom && !drilldown && !isFetching && filteredProviders.length === 0 && (
               <p className="px-2.5 py-2 text-xs text-text-dim">
                 {t("chat.no_models_found", { defaultValue: "No models found" })}
               </p>
             )}
-            {!isFetching &&
-              !custom &&
+            {!custom &&
               !drilldown &&
               filteredProviders.map((p) => {
                 const isCurrent = p.id === value?.provider;
@@ -351,7 +405,7 @@ export function ModelPicker({
                   <button
                     key={p.id}
                     type="button"
-                    disabled={blocked}
+                    disabled={blocked || busy}
                     // The count is part of the visible text; naming the row
                     // exactly by its provider keeps "openai 12" from being read
                     // out as the provider's name.
@@ -388,13 +442,12 @@ export function ModelPicker({
                 );
               })}
 
-            {!isFetching && !custom && drilldown && filteredModels.length === 0 && (
+            {!custom && drilldown && !isFetching && filteredModels.length === 0 && (
               <p className="px-2.5 py-2 text-xs text-text-dim">
                 {t("chat.no_models_found", { defaultValue: "No models found" })}
               </p>
             )}
-            {!isFetching &&
-              !custom &&
+            {!custom &&
               drilldown &&
               filteredModels.map((m) => {
                 const isActive = m.id === value?.model && m.provider === value?.provider;
@@ -402,6 +455,7 @@ export function ModelPicker({
                   <button
                     key={`${m.provider}/${m.id}`}
                     type="button"
+                    disabled={busy}
                     // Qualified by provider: the same model id under two
                     // providers is two different rows, and an ambiguous name
                     // would make them indistinguishable to a screen reader too.
@@ -426,16 +480,23 @@ export function ModelPicker({
                   </button>
                 );
               })}
-            {!isFetching && allowCustom && !custom && (
+            {allowCustom && !custom && (
               <button
                 type="button"
+                disabled={busy}
                 onClick={() => {
                   // At the provider level this takes both halves of the pair: a
                   // provider the catalog does not know has no models to drill
                   // into. Inside a provider it takes only the model.
-                  setCustom(drilldown ? "model" : "provider");
-                  setCustomProvider(value?.provider ?? "");
-                  setCustomModel(value?.model ?? "");
+                  const atProviderLevel = !drilldown;
+                  setCustom(atProviderLevel ? "provider" : "model");
+                  setCustomProvider(atProviderLevel ? (value?.provider ?? "") : (drilldown ?? ""));
+                  // Only prefill the model when it belongs to the provider
+                  // being drilled into: `value.model` under a different
+                  // provider is not a pair that exists, and prefilling it left
+                  // Confirm enabled for `{provider: "openai", model:
+                  // "<some anthropic model>"}` after a single click.
+                  setCustomModel(drilldown === value?.provider ? (value?.model ?? "") : "");
                 }}
                 className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-text-dim transition-colors hover:bg-surface-hover"
               >
