@@ -143,7 +143,7 @@ describe("ModelPicker", () => {
     expect(screen.getByRole("button", { name: "openai" })).toBeInTheDocument();
   });
 
-  it("closes on Escape even with the search box focused", () => {
+  it("closes on Escape with the search box focused, restoring focus to the trigger", () => {
     render(
       <ModelPicker
         label="Agent model"
@@ -160,8 +160,17 @@ describe("ModelPicker", () => {
     open();
     expect(trigger).toHaveAttribute("aria-expanded", "true");
 
-    fireEvent.keyDown(document, { key: "Escape" });
+    const search = screen.getByRole("textbox");
+    search.focus();
+    expect(search).toHaveFocus();
+
+    // The handler is local and calls `preventDefault()`, so a `Modal` the
+    // picker is nested in does not also close on the same key — it bails on
+    // `defaultPrevented`. `fireEvent` returns false when default is prevented.
+    expect(fireEvent.keyDown(search, { key: "Escape" })).toBe(false);
     expect(trigger).toHaveAttribute("aria-expanded", "false");
+    // Without the restore, focus falls to `<body>` when the popover unmounts.
+    expect(trigger).toHaveFocus();
   });
 
   it("will not drill into a provider the catalog cannot serve", () => {
@@ -195,7 +204,11 @@ describe("ModelPicker", () => {
         value={{ provider: "groq", model: "llama-3" }}
         onChange={() => {}}
         models={[model("groq", "llama-3"), model("openai", "gpt-4")]}
-        providers={[provider("openai"), provider("groq", { reachable: false })]}
+        providers={[
+          provider("openai"),
+          provider("groq", { reachable: false }),
+          provider("cohere", { reachable: false }),
+        ]}
       />,
     );
 
@@ -204,8 +217,201 @@ describe("ModelPicker", () => {
     expect(groq).toBeEnabled();
     expect(groq).toHaveAttribute("aria-current", "true");
 
-    // The same provider stays blocked for a value that is not the current one.
+    // A *different* unavailable provider, not the current value, stays blocked.
+    expect(screen.getByRole("button", { name: "cohere" })).toBeDisabled();
+    // An available provider is enabled.
     expect(screen.getByRole("button", { name: "openai" })).toBeEnabled();
+  });
+
+  it("returns from the hand-entry panel on Back instead of stranding it", () => {
+    render(
+      <ModelPicker
+        label="Agent model"
+        allowCustom
+        value={{ provider: "anthropic", model: "claude-sonnet-5" }}
+        onChange={() => {}}
+        models={[model("openai", "gpt-4"), model("anthropic", "claude-sonnet-5")]}
+        providers={[provider("openai"), provider("anthropic")]}
+      />,
+    );
+
+    open();
+    fireEvent.click(screen.getByRole("button", { name: "openai" }));
+    fireEvent.click(screen.getByRole("button", { name: i18n.t("model_param.custom") }));
+
+    // The hand-entry panel, with the model empty because the current value
+    // belongs to another provider.
+    expect(screen.getByLabelText(i18n.t("agents.form.model_id"))).toHaveValue("");
+
+    fireEvent.click(screen.getByRole("button", { name: i18n.t("common.back") }));
+
+    // Back to the model list of the provider we drilled into — not the provider
+    // level, and not a hand-entry panel left with a Confirm that cannot enable.
+    expect(screen.getByRole("button", { name: "openai/gpt-4" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: i18n.t("common.confirm") })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: i18n.t("model_param.custom") })).toBeInTheDocument();
+  });
+
+  it("gives the hand-entry panel an explicit cancel", () => {
+    render(
+      <ModelPicker
+        label="Agent model"
+        allowCustom
+        value={null}
+        onChange={() => {}}
+        models={[]}
+        providers={[]}
+      />,
+    );
+
+    open();
+    fireEvent.click(screen.getByRole("button", { name: i18n.t("model_param.custom") }));
+    expect(screen.getByLabelText(i18n.t("agents.form.provider"))).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: i18n.t("common.cancel") }));
+
+    expect(screen.queryByLabelText(i18n.t("agents.form.provider"))).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(i18n.t("agents.form.model_id"))).not.toBeInTheDocument();
+    // The provider list (empty here) and the Custom row are reachable again.
+    expect(screen.getByRole("button", { name: i18n.t("model_param.custom") })).toBeInTheDocument();
+  });
+
+  it("does not prefill a model that belongs to a different provider", () => {
+    const onChange = vi.fn();
+    render(
+      <ModelPicker
+        label="Agent model"
+        allowCustom
+        value={{ provider: "anthropic", model: "claude-sonnet-5" }}
+        onChange={onChange}
+        models={[model("openai", "gpt-4"), model("anthropic", "claude-sonnet-5")]}
+        providers={[provider("openai"), provider("anthropic")]}
+      />,
+    );
+
+    open();
+    fireEvent.click(screen.getByRole("button", { name: "openai" }));
+    fireEvent.click(screen.getByRole("button", { name: i18n.t("model_param.custom") }));
+
+    const modelInput = screen.getByLabelText(i18n.t("agents.form.model_id"));
+    // Not `claude-sonnet-5`: that pair does not exist and prefilling it left
+    // Confirm enabled for one wrong click.
+    expect(modelInput).toHaveValue("");
+    expect(screen.getByRole("button", { name: i18n.t("common.confirm") })).toBeDisabled();
+
+    fireEvent.change(modelInput, { target: { value: "gpt-6" } });
+    fireEvent.click(screen.getByRole("button", { name: i18n.t("common.confirm") }));
+    expect(onChange).toHaveBeenCalledWith({ provider: "openai", model: "gpt-6" });
+  });
+
+  it("counts only the models it was handed, not the server's unfiltered total", () => {
+    render(
+      <ModelPicker
+        label="Agent model"
+        value={null}
+        onChange={() => {}}
+        models={[model("openai", "gpt-4")]}
+        providers={[provider("openai"), provider("groq", { model_count: 12 })]}
+      />,
+    );
+
+    open();
+    // groq is listed but every one of its models was filtered out, so it must
+    // read 0 rather than advertise 12 rows the drill-down cannot produce.
+    expect(screen.getByRole("button", { name: "groq" })).toHaveTextContent("0");
+    expect(screen.getByRole("button", { name: "groq" })).not.toHaveTextContent("12");
+    expect(screen.getByRole("button", { name: "openai" })).toHaveTextContent("1");
+  });
+
+  it("keeps the current provider reachable when the providers prop omits it", () => {
+    render(
+      <ModelPicker
+        label="Agent model"
+        value={{ provider: "groq", model: "llama-3" }}
+        onChange={() => {}}
+        models={[model("groq", "llama-3")]}
+        providers={[provider("openai")]}
+      />,
+    );
+
+    open();
+    const groq = screen.getByRole("button", { name: "groq" });
+    expect(groq).toBeEnabled();
+    expect(groq).toHaveAttribute("aria-current", "true");
+
+    fireEvent.click(groq);
+    expect(screen.getByRole("button", { name: "groq/llama-3" })).toBeInTheDocument();
+  });
+
+  it("freezes the model rows while a write is in flight", () => {
+    const base = {
+      label: "Agent model",
+      value: { provider: "openai", model: "gpt-4" },
+      onChange: () => {},
+      models: [model("openai", "gpt-4"), model("openai", "gpt-5")],
+      providers: [provider("openai")],
+    };
+    const { rerender } = render(<ModelPicker {...base} busy={false} />);
+
+    open();
+    fireEvent.click(screen.getByRole("button", { name: "openai" }));
+    // Re-render with the write in flight, as happens after a commit that keeps
+    // the popover open. `pointer-events-none` alone would not stop Tab+Enter.
+    rerender(<ModelPicker {...base} busy />);
+
+    expect(screen.getByRole("button", { name: "openai/gpt-5" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "openai/gpt-4" })).toBeDisabled();
+  });
+
+  it("keeps the open list during a background refetch instead of blanking it", () => {
+    render(
+      <ModelPicker
+        label="Agent model"
+        isFetching
+        allowCustom
+        value={{ provider: "openai", model: "gpt-4" }}
+        onChange={() => {}}
+        models={[model("openai", "gpt-4")]}
+        providers={[provider("openai")]}
+      />,
+    );
+
+    open();
+    // The selection, the provider row and the Custom row survive a refetch;
+    // only the empty state is suppressed while the spinner shows.
+    expect(screen.getByRole("button", { name: "openai" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: i18n.t("model_param.custom") })).toBeInTheDocument();
+    expect(screen.getByText(i18n.t("chat.loading_models"))).toBeInTheDocument();
+  });
+
+  it("shows the loading state, not 'No models found', on a first load", () => {
+    render(
+      <ModelPicker
+        label="Agent model"
+        isFetching
+        value={null}
+        onChange={() => {}}
+        models={[]}
+        providers={[]}
+      />,
+    );
+
+    open();
+    expect(screen.getByText(i18n.t("chat.loading_models"))).toBeInTheDocument();
+    expect(screen.queryByText(i18n.t("chat.no_models_found"))).not.toBeInTheDocument();
+  });
+
+  it("exposes the popover as the dialog the trigger promises", () => {
+    render(
+      <ModelPicker label="Agent model" value={null} onChange={() => {}} models={[]} providers={[]} />,
+    );
+
+    const trigger = screen.getByRole("button", { name: /^Agent model:/ });
+    expect(trigger).not.toHaveAttribute("aria-controls");
+
+    open();
+    const dialog = screen.getByRole("dialog", { name: "Agent model" });
+    expect(trigger).toHaveAttribute("aria-controls", dialog.id);
   });
 
   // Fields like `[routing] simple_model` hold a bare model name, resolved
@@ -248,6 +454,49 @@ describe("ModelPicker", () => {
         />,
       );
       expect(screen.getByRole("button", { name: "Simple model: gpt-4" })).toBeInTheDocument();
+    });
+
+    it("marks the configured model current even though the pair's provider is empty", () => {
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          // The form adapts a bare name into a pair with an empty provider.
+          value={{ provider: "", model: "gpt-4" }}
+          onChange={() => {}}
+          models={catalog}
+        />,
+      );
+
+      open("Simple model");
+      // The id matches; comparing `provider` too would leave it unmarked.
+      expect(screen.getByRole("button", { name: "openai/gpt-4" })).toHaveAttribute(
+        "aria-current",
+        "true",
+      );
+      expect(screen.getByRole("button", { name: "anthropic/claude-sonnet-5" })).not.toHaveAttribute(
+        "aria-current",
+      );
+    });
+
+    it("cancels hand entry back to the flat list", () => {
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          allowCustom
+          value={null}
+          onChange={() => {}}
+          models={catalog}
+        />,
+      );
+
+      open("Simple model");
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("model_param.custom") }));
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("common.cancel") }));
+
+      expect(screen.getByRole("button", { name: "openai/gpt-4" })).toBeInTheDocument();
+      expect(screen.queryByLabelText(i18n.t("agents.form.model_id"))).not.toBeInTheDocument();
     });
 
     it("reports the provider of the row that was picked", () => {
