@@ -140,6 +140,16 @@ pub fn upsert_sidecar_block(
     let aot_item = doc
         .entry("sidecar_channels")
         .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
+    // `state_empty_sidecar_channels` deliberately leaves `sidecar_channels = []`
+    // behind when the last block is deleted: that is "the section is declared
+    // and empty", not a malformed document. Promote the plain empty array to an
+    // empty array-of-tables so a configure that follows a delete can append;
+    // without this the upsert fails with "not an array-of-tables" and every
+    // retry of the dashboard's add-channel form answers 500 until the operator
+    // hand-edits config.toml.
+    if aot_item.is_value() && aot_item.as_array().is_some_and(|a| a.is_empty()) {
+        *aot_item = Item::ArrayOfTables(ArrayOfTables::new());
+    }
     let aot = aot_item
         .as_array_of_tables_mut()
         .ok_or_else(|| "config.toml: `sidecar_channels` is not an array-of-tables".to_string())?;
@@ -458,5 +468,59 @@ mod tests {
                 "unexpected tempfile name shape: {name}"
             );
         }
+    }
+
+    /// A configure that follows the deletion of the last block must append
+    /// into the state the delete leaves behind.
+    ///
+    /// `state_empty_sidecar_channels` writes `sidecar_channels = []` on purpose
+    /// (the reload overlay reads a missing key as "keep the live value"), so the
+    /// upsert has to treat that plain empty array as "declared and empty" and
+    /// promote it to an array-of-tables. Before it did, the delete → add-channel
+    /// round trip answered 500 on every retry until an operator hand-edited
+    /// `config.toml`.
+    #[test]
+    fn configure_after_a_delete_appends_into_an_explicitly_empty_section() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "sidecar_channels = []\n").unwrap();
+        let env = BTreeMap::new();
+
+        upsert_sidecar_block(
+            &path,
+            "telegram",
+            "telegram",
+            "python",
+            &["-m", "adapter"],
+            &env,
+            &[],
+            None,
+        )
+        .unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("\"telegram\""),
+            "the new block must land in the explicitly empty section: {written}"
+        );
+
+        // A second configure keeps both blocks: the promoted array-of-tables
+        // must survive the next read.
+        upsert_sidecar_block(
+            &path,
+            "email",
+            "email",
+            "python",
+            &["-m", "adapter"],
+            &env,
+            &[],
+            None,
+        )
+        .unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("\"telegram\"") && written.contains("\"email\""),
+            "both blocks must survive a second configure: {written}"
+        );
     }
 }
