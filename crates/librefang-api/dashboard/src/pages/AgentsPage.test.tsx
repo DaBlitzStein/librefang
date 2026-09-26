@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cloneResultNotice, createDrawerSeed, hasTokenFootprintData, SystemPromptSection, DescriptionSection, ChannelsSection, ManifestEditorForm } from "./AgentsPage";
+import { cloneResultNotice, resolveDrawerSeed, hasTokenFootprintData, SystemPromptSection, DescriptionSection, ChannelsSection, ManifestEditorForm } from "./AgentsPage";
 import { emptyManifestExtras, emptyManifestForm } from "../lib/agentManifest";
 import { usePatchAgent, useSetAgentChannels } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
@@ -51,22 +51,32 @@ const useSetAgentChannelsMock = useSetAgentChannels as unknown as ReturnType<typ
 // render harness, so this is the only thing pinning the mapping from the
 // `template` search param to what the drawer opens on; the param name itself is
 // the contract with the sender on /agent-types.
-describe("createDrawerSeed", () => {
-  it("opens the drawer on the template tab with the named type", () => {
-    expect(createDrawerSeed("researcher")).toEqual({
-      createMode: "template",
+describe("resolveDrawerSeed", () => {
+  it("opens the drawer on the template tab with a type the list knows", () => {
+    expect(resolveDrawerSeed("researcher", ["researcher", "analyst"])).toEqual({
+      kind: "template",
       templateName: "researcher",
     });
   });
 
   it("opens nothing when the param is absent", () => {
-    expect(createDrawerSeed(undefined)).toBeNull();
+    expect(resolveDrawerSeed(undefined, ["researcher"])).toEqual({ kind: "none" });
   });
 
   // No agent type can be named "", and admitting it would open the drawer on an
   // empty picker with Create disabled and no way back.
   it("opens nothing for an empty value", () => {
-    expect(createDrawerSeed("")).toBeNull();
+    expect(resolveDrawerSeed("", ["researcher"])).toEqual({ kind: "none" });
+  });
+
+  // A stale bookmark, a renamed or deleted type, or a typo. The drawer still
+  // opens, but on the blank form tab with a notice, not on a `<select>` whose
+  // value matches no option.
+  it("reports an unknown name so the caller can degrade visibly", () => {
+    expect(resolveDrawerSeed("ghost", ["researcher", "analyst"])).toEqual({
+      kind: "unknown",
+      templateName: "ghost",
+    });
   });
 });
 

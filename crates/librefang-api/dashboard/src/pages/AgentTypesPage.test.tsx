@@ -140,6 +140,7 @@ const OTHER_TYPE: AgentTemplate = {
   model: "claude-sonnet-5",
   source: "agent-type",
   editable: true,
+  from_registry: false,
 };
 
 const DETAIL: AgentTypeDetail = {

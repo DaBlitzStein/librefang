@@ -99,7 +99,18 @@ export function QuickRunModal({
     setParent(preferred ? preferred.id : candidates[0].id);
   }, [candidates, parent, initialParent]);
 
+  // Clearing the result on any parameter change keeps it from being read as
+  // the outcome of a run the operator is *about* to start: a stale worker name,
+  // iteration count and cost left on screen after the task, parent or type moved
+  // describes a run that no longer matches the form. It is also cleared at the
+  // start of a run and on failure, so the panel never shows the previous run's
+  // text while a new one is in flight or after one errors.
+  useEffect(() => {
+    setResult(null);
+  }, [parent, typeName, task]);
+
   async function run() {
+    setResult(null);
     try {
       const res = await spawn.mutateAsync({
         parent,
@@ -111,9 +122,19 @@ export function QuickRunModal({
       });
       setResult(res);
     } catch (err) {
+      setResult(null);
       addToast(toastErr(err, t("agents.quick_run_failed")), "error");
     }
   }
+
+  // Escape and a backdrop click both route to `onClose`, so an in-flight run
+  // has to be guarded here the same way the Close button is: dismissing it
+  // mid-run leaves the parent billed, the response unrecoverable, and no agent,
+  // session or workspace left to inspect.
+  const handleClose = () => {
+    if (spawn.isPending) return;
+    onClose();
+  };
 
   // Name what is about to run: the type when one is picked, otherwise the
   // agent standing in for it.
@@ -122,7 +143,8 @@ export function QuickRunModal({
   return (
     <Modal
       isOpen
-      onClose={onClose}
+      onClose={handleClose}
+      disableBackdropClose={spawn.isPending}
       variant="panel-right"
       size="lg"
       title={
@@ -214,7 +236,7 @@ export function QuickRunModal({
         )}
 
         <div className="flex justify-end gap-2 pt-1">
-          <Button variant="ghost" onClick={onClose} disabled={spawn.isPending}>
+          <Button variant="ghost" onClick={handleClose} disabled={spawn.isPending}>
             {t("common.close")}
           </Button>
           <Button

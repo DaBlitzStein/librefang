@@ -372,20 +372,35 @@ export function SystemPromptSection({
 
 /**
  * What the create drawer should open on when `/agents` was reached with a
- * `template` search param, or `null` when it was not.
+ * `template` search param.
  *
  * Pure and exported on purpose: `AgentsPage` has no render harness (it holds
  * some twenty hooks), so a rule left inline in the effect below would be
  * covered by nothing, and the param name is the contract with the sender on
  * `/agent-types`.
+ *
+ * `knownNames` is the fetched agent-type list. It is required rather than
+ * optional because `validateSearch` cannot do this check — it runs before any
+ * page data exists — so the only place that can reject a stale bookmark, a
+ * renamed or deleted type or a typo is here, where the list has arrived.
+ * An unknown name is its own state, not `null`: the drawer still opens, but on
+ * the blank form tab with a notice rather than a `<select>` matching no option.
  */
-export function createDrawerSeed(
+export type DrawerSeed =
+  | { kind: "none" }
+  | { kind: "template"; templateName: string }
+  | { kind: "unknown"; templateName: string };
+
+export function resolveDrawerSeed(
   template: string | undefined,
-): { createMode: "template"; templateName: string } | null {
+  knownNames: readonly string[],
+): DrawerSeed {
   // Falsy covers both "no param" and the empty string `validateSearch` would
   // otherwise admit.
-  if (!template) return null;
-  return { createMode: "template", templateName: template };
+  if (!template) return { kind: "none" };
+  return knownNames.includes(template)
+    ? { kind: "template", templateName: template }
+    : { kind: "unknown", templateName: template };
 }
 
 /**
@@ -591,6 +606,9 @@ export function AgentsPage() {
   // The `template` search param, set by the agent-types page's Run button.
   // Deliberately not named `search`: the local state below is the agent filter.
   const { template: routeTemplate } = useSearch({ from: "/agents" });
+  // The last `?template=` value the seed effect acted on, so a refetch does not
+  // re-run its side effects.
+  const handledTemplate = useRef<string | null>(null);
   const [search, setSearch] = useState("");
   const [detailAgent, setDetailAgent] = useState<AgentDetail | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -686,7 +704,9 @@ export function AgentsPage() {
   const addToast = useUIStore((s) => s.addToast);
   useCreateShortcut(() => setShowCreate(true));
   const templatesQuery = useAgentTemplates({
-    enabled: showCreate && createMode === "template",
+    // Keep the list warm while a `template` param is being validated, so the
+    // drawer can tell a real type from a stale bookmark before it opens.
+    enabled: (showCreate && createMode === "template") || routeTemplate != null,
   });
   const localizedTemplates = useMemo(
     () =>
@@ -1246,13 +1266,45 @@ export function AgentsPage() {
   // instantiate that type, so the create drawer opens on the template tab with
   // the type already selected. Run used to ask which *existing* agent to fork
   // instead, which answers a different question than the button asks.
+  //
+  // `validateSearch` can only reject the empty string — it runs before any page
+  // data exists. An unknown `?template=` (a stale bookmark, a renamed or deleted
+  // type, a typo) would otherwise open the drawer on the Template tab with a
+  // `<select>` whose value matches no option while Create stays enabled and POSTs
+  // the bogus name. The membership check therefore needs the fetched list, so
+  // this waits for it and degrades to a blank form tab with a visible notice.
   useEffect(() => {
-    const seed = createDrawerSeed(routeTemplate);
-    if (!seed) return;
+    const seed = resolveDrawerSeed(
+      routeTemplate,
+      (templatesQuery.data ?? []).map((template) => template.name),
+    );
+    if (seed.kind === "none") {
+      handledTemplate.current = null;
+      return;
+    }
+    if (templatesQuery.isPending) return;
+    // Process each distinct param once: a refetch replaces `data` with a new
+    // reference and must not re-open the drawer or re-fire the notice.
+    if (handledTemplate.current === seed.templateName) return;
+    handledTemplate.current = seed.templateName;
+
     setShowCreate(true);
-    setCreateMode(seed.createMode);
+    if (seed.kind === "unknown") {
+      setCreateMode("form");
+      setTemplateName("");
+      addToast(
+        t("agents.template_not_found", {
+          name: seed.templateName,
+          defaultValue:
+            "Agent type '{{name}}' no longer exists — pick a template or start from scratch.",
+        }),
+        "error",
+      );
+      return;
+    }
+    setCreateMode("template");
     setTemplateName(seed.templateName);
-  }, [routeTemplate]);
+  }, [routeTemplate, templatesQuery.isPending, templatesQuery.data, addToast, t]);
 
   // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
   // serialized output into the textarea so advanced users can keep editing.
