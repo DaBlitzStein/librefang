@@ -324,6 +324,36 @@ describe("agentManifest validator", () => {
     expect(validateManifestForm(form)).toEqual([]);
   });
 
+  // The validator now reads `MODEL_PARAM_RANGES` via `isValidParamValue`
+  // instead of a local bounds table, so it covers the endpoint limits the
+  // controls render from the same table (#8112 review).
+  it("flags the endpoint limits the shared table also governs", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.max_tokens = "4294967296"; // one past the u32 ceiling
+    form.model.context_window = "0"; // below the minimum of 1
+    form.model.max_output_tokens = "1.5"; // not a whole number
+
+    const errors = validateManifestForm(form);
+    expect(errors).toContain("model.max_tokens");
+    expect(errors).toContain("model.context_window");
+    expect(errors).toContain("model.max_output_tokens");
+  });
+
+  it("accepts a whole endpoint limit at its ceiling and empty as inherit", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.max_tokens = "4294967295";
+    form.model.context_window = "200000";
+    form.model.max_output_tokens = "";
+
+    expect(validateManifestForm(form)).toEqual([]);
+  });
+
   it("accepts the largest TOML integer for a continuous schedule", () => {
     const form = emptyManifestForm();
     form.name = "agent";

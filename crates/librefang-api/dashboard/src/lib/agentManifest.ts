@@ -6,6 +6,11 @@
 // survives a round-trip back through the form.
 
 import { parse, stringify, TomlError, type TomlTable } from "smol-toml";
+// The parameter-range table lives next to the control that renders it (#8332),
+// and `isValidParamValue` is the one rule every editor applies. Importing it
+// here rather than restating the bounds keeps a single source of truth, the
+// same one `lib/agentModelPatch.ts` reads (#8112 review).
+import { isValidParamValue, MODEL_PARAM_NAMES } from "../components/ui/ModelParamField";
 
 let _nextUid = 1;
 export const generateUid = (): string => String(_nextUid++);
@@ -520,17 +525,6 @@ const parseFloatish = (raw: string): number | null => {
   if (!Number.isFinite(n)) return null;
   if (n < 0) return null; // all our float fields are cost/quota — never negative
   return n;
-};
-
-// The number inputs declare min/max, but min/max does not stop pasted or
-// programmatic values on a non-submitted form. `PATCH /api/agents/{id}/model`
-// rejects an out-of-range sampling value with an explicit 400 rather than
-// clamping it; `validateManifestForm` (below) mirrors those same ranges so
-// this editor reports the same conflict instead of silently rewriting the
-// number to one the operator never chose (#8112 review).
-const isInRange = (raw: string, min: number, max: number): boolean => {
-  const v = parseSignedFloat(raw);
-  return v === null || (v >= min && v <= max);
 };
 
 const writeStringScalar = (lines: string[], key: string, value: string): void => {
@@ -1066,13 +1060,18 @@ export const validateManifestForm = (
       errors.push("response_format.schema");
     }
   }
-  // Sampling preferences — same ranges `PATCH /api/agents/{id}/model` enforces
-  // (crates/librefang-api/src/routes/agents/config.rs), so an out-of-range
-  // value is reported here too instead of reaching the TOML at all (#8112).
-  if (!isInRange(form.model.temperature, 0, 2)) errors.push("model.temperature");
-  if (!isInRange(form.model.top_p, 0, 1)) errors.push("model.top_p");
-  if (!isInRange(form.model.frequency_penalty, -2, 2)) errors.push("model.frequency_penalty");
-  if (!isInRange(form.model.presence_penalty, -2, 2)) errors.push("model.presence_penalty");
+  // Sampling preferences and endpoint limits — `isValidParamValue` is the
+  // single rule the controls render from (`MODEL_PARAM_RANGES`), so this cannot
+  // drift from the ranges `PATCH /api/agents/{id}/model` enforces
+  // (crates/librefang-api/src/routes/agents/config.rs). Iterating the table
+  // also covers `max_tokens` (a real `u32` ceiling) and `context_window` /
+  // `max_output_tokens` (at least 1), which the form serializes unchecked
+  // (#8112 review). An empty field is the inherit rung, not a value.
+  for (const param of MODEL_PARAM_NAMES) {
+    const raw = form.model[param];
+    if (raw.trim() === "") continue;
+    if (!isValidParamValue(param, raw)) errors.push(`model.${param}`);
+  }
   // Folder rows: duplicate names produce a duplicate TOML key (hard parse
   // failure on the daemon), and `path` mirrors the kernel's rule — relative
   // to workspaces_dir, no `..`. A mount row carries an absolute host path
