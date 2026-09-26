@@ -35,6 +35,25 @@ describe("CollapsibleSection", () => {
     );
   });
 
+  it("stays open on recovery, so clearing one error does not collapse the section being edited", () => {
+    const { rerender } = render(
+      <CollapsibleSection title="Routing" invalid>
+        <p>body</p>
+      </CollapsibleSection>,
+    );
+    const details = screen.getByText("Routing").closest("details");
+    expect(details).toHaveAttribute("open");
+
+    // `invalid` going back to false must not yank the section shut — the
+    // operator may have just fixed one of two errors and be mid-edit.
+    rerender(
+      <CollapsibleSection title="Routing" invalid={false}>
+        <p>body</p>
+      </CollapsibleSection>,
+    );
+    expect(details).toHaveAttribute("open");
+  });
+
   it("is a real details/summary, so the keyboard and toggle behaviour come free", () => {
     const { container } = render(
       <CollapsibleSection title="Routing">
