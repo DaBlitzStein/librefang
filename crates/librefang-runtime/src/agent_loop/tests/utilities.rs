@@ -2749,43 +2749,50 @@ fn record_loop_guard_outcome_does_not_pace_ordinary_calls_that_mention_status() 
     );
 }
 
-// --- Tests for build_extra_body (#8112 typed sampling fields) ---
+// --- Tests for build_extra_body (#8290 typed sampling fields) ---
 #[test]
-fn test_build_extra_body_merges_typed_sampling_fields() {
+fn test_build_extra_body_does_not_duplicate_typed_sampling_fields() {
+    // #8290: these travel as typed `CompletionRequest` fields. Deriving them
+    // into `extra_body` as well put `top_p` on an OpenAI body twice and, on
+    // Ollama, at the top level where its samplers are never read.
     let model = ModelConfig {
         top_p: Some(0.9),
         frequency_penalty: Some(0.5),
         presence_penalty: Some(-0.5),
         ..Default::default()
     };
-    let body = build_extra_body(&model).expect("typed sampling fields must produce a body");
-    // `f32` widens to `f64` inside `serde_json::Value`, so compare numerically
-    // with a tolerance instead of against the `f64` literal.
-    let v = |k: &str| body.get(k).and_then(serde_json::Value::as_f64).unwrap();
-    assert!((v("top_p") - 0.9).abs() < 1e-6);
-    assert!((v("frequency_penalty") - 0.5).abs() < 1e-6);
-    assert!((v("presence_penalty") - (-0.5)).abs() < 1e-6);
+    assert!(
+        build_extra_body(&model).is_none(),
+        "typed sampling fields must not be merged into extra_body"
+    );
 }
 
 #[test]
-fn test_build_extra_body_typed_field_overrides_extra_params_key() {
-    // The agent manifest's typed field is the operator's intent; a stale
-    // `extra_params` key of the same name (e.g. left by an older form or a
-    // model-catalog override) must not win.
+fn test_build_extra_body_passes_the_escape_hatch_through_unchanged() {
+    // Whatever an operator puts in `extra_params` is carried verbatim —
+    // including a legacy sampling key, which only the resolver's `apply_to`
+    // strips (on the paths that run it). The typed field is not merged in, so
+    // there is no second spelling to disagree with.
     let model = ModelConfig {
         top_p: Some(0.9),
-        extra_params: BTreeMap::from([("top_p".to_string(), serde_json::json!(0.1))]),
+        extra_params: BTreeMap::from([
+            ("enable_memory".to_string(), serde_json::json!(true)),
+            ("top_p".to_string(), serde_json::json!(0.1)),
+        ]),
         ..Default::default()
     };
     let body = build_extra_body(&model).expect("non-empty body");
-    let v = body
-        .get("top_p")
-        .and_then(serde_json::Value::as_f64)
-        .unwrap();
-    assert!(
-        (v - 0.9).abs() < 1e-6,
-        "typed field must override the legacy extra_params key"
+    assert_eq!(
+        body.get("enable_memory"),
+        Some(&serde_json::json!(true)),
+        "the escape hatch keeps carrying everything else"
     );
+    assert_eq!(
+        body.get("top_p"),
+        Some(&serde_json::json!(0.1)),
+        "the map is projected as written, not edited"
+    );
+    assert_eq!(model.top_p, Some(0.9), "the typed field is left untouched");
 }
 
 #[test]
@@ -2793,22 +2800,21 @@ fn test_build_extra_body_none_sends_nothing() {
     let model = ModelConfig::default();
     assert!(
         build_extra_body(&model).is_none(),
-        "a ModelConfig without typed sampling fields and without extra_params must produce no extra_body"
+        "a ModelConfig with neither typed sampling fields nor extra_params must produce no extra_body"
     );
 }
-/// #8112 review: `build_extra_body` derives these three from the typed fields,
-/// which made it a second evaluation of the precedence chain rather than the
-/// request-construction site of one. After `apply_to` the typed field carries
-/// the *resolved* value, so the derived body and the resolved map are the same
-/// map — pinned end to end here instead of by reading the two functions.
+
+/// #8290: after `apply_to` the resolved value lives on the typed field and
+/// nowhere else, so a manifest with only typed sampling fields builds no
+/// `extra_body` at all — the typed field is the single carrier, not one of two
+/// spellings of the same knob.
 #[test]
-fn test_build_extra_body_is_the_resolved_map_after_apply_to() {
+fn test_build_extra_body_is_empty_when_only_typed_fields_are_resolved() {
     use librefang_types::inference_params::resolve_inference_params;
     use librefang_types::model_catalog::ModelOverrides;
 
     // The value comes from the per-model override; the agent manifest leaves
-    // the typed field unset. This is the shape that used to leave the typed
-    // field reading "inherit" while the map carried the override.
+    // the typed field unset.
     let agent = ModelConfig::default();
     let overrides = ModelOverrides {
         top_p: Some(0.5),
@@ -2817,21 +2823,13 @@ fn test_build_extra_body_is_the_resolved_map_after_apply_to() {
     let mut resolved_manifest = agent.clone();
     resolve_inference_params(&agent, Some(&overrides), None).apply_to(&mut resolved_manifest);
 
-    let body = build_extra_body(&resolved_manifest).expect("the override must reach the body");
-    let derived = body
-        .get("top_p")
-        .and_then(serde_json::Value::as_f64)
-        .expect("top_p on the wire");
-    assert!((derived - 0.5).abs() < 1e-6, "got {derived}");
-
-    // The typed field and the map hold the same number, so the derivation
-    // above cannot disagree with the resolution.
-    assert_eq!(resolved_manifest.top_p, Some(0.5));
-    // `apply_to` removes any sampling copy from `extra_params`: the typed field
-    // is the resolved truth, and the body above is the derived projection of
-    // it — there is no second, independently writable spelling.
+    assert_eq!(resolved_manifest.top_p, Some(0.5), "the typed field wins");
     assert!(
         !resolved_manifest.extra_params.contains_key("top_p"),
         "`apply_to` must leave no sampling copy in `extra_params`"
+    );
+    assert!(
+        build_extra_body(&resolved_manifest).is_none(),
+        "the resolved value must travel typed, with no extra_body copy"
     );
 }

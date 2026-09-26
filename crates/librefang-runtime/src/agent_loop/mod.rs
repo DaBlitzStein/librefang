@@ -468,39 +468,24 @@ pub(super) fn redact_images_for_text_only(mut messages: Vec<Message>, model: &st
     messages
 }
 
-/// Merge the typed sampling fields into the request's `extra_body` map.
+/// Project the manifest's untyped escape hatch onto the request's `extra_body` map.
 ///
-/// `top_p` / `frequency_penalty` / `presence_penalty` are typed [`ModelConfig`]
-/// fields (#8112) but have no slot in [`CompletionRequest`]; the drivers flatten
-/// `extra_body` into the API request body, which is the same wire position
-/// these OpenAI-compatible parameters occupied when they were untyped
-/// `extra_params` keys. Merging at the single request-construction site keeps
-/// one wire path, and a `None` field sends nothing — providers without the
-/// parameter are unaffected. `BTreeMap` key order stays deterministic (#3298).
+/// `extra_params` carries the endpoint facts that have no typed slot
+/// (`reasoning_effort`, `use_max_completion_tokens`, `force_max_tokens`, …) and
+/// anything an operator adds by hand; the drivers flatten the map into the API
+/// request body where their wire expects it. `BTreeMap` key order stays
+/// deterministic (#3298), and an empty map sends nothing.
 ///
-/// **This is a projection, not a second resolution.** The precedence chain —
-/// agent manifest, then per-model override, then system default — is evaluated
-/// once, in `librefang_types::inference_params::ResolvedInferenceParams::apply_to`,
-/// which writes the resolved value onto the typed field *and* into
-/// `extra_params`. So on every path the kernel resolved, the insert below
-/// rewrites a key with the number already in it and the body is exactly the
-/// resolved map. It still has to run for callers that reach the loop without
-/// going through that resolution — this crate is a library and cannot reach the
-/// kernel's catalog — which is why the typed field stays a carrier rather than
-/// being deleted in favour of reading the map only. Do not add a precedence
-/// rule here; a fourth knob belongs in the resolver.
+/// The sampling preferences are deliberately **not** derived into this map.
+/// They are typed [`ModelConfig`] fields (#8290) that the agent loop copies
+/// straight onto the typed [`CompletionRequest`] fields, and
+/// `ResolvedInferenceParams::apply_to` strips any stale copy from `extra_params`.
+/// Re-deriving them here made the body a second, independently writable
+/// spelling of one knob: `top_p` went out twice on an OpenAI-compatible body
+/// and, for Ollama, at the document top level where its samplers are never
+/// read — the exact wire misplacement #8290 fixed.
 pub(super) fn build_extra_body(model: &ModelConfig) -> Option<BTreeMap<String, serde_json::Value>> {
-    let mut body = model.extra_params.clone();
-    if let Some(v) = model.top_p {
-        body.insert("top_p".to_string(), serde_json::json!(v));
-    }
-    if let Some(v) = model.frequency_penalty {
-        body.insert("frequency_penalty".to_string(), serde_json::json!(v));
-    }
-    if let Some(v) = model.presence_penalty {
-        body.insert("presence_penalty".to_string(), serde_json::json!(v));
-    }
-    (!body.is_empty()).then_some(body)
+    (!model.extra_params.is_empty()).then(|| model.extra_params.clone())
 }
 
 /// Run the agent execution loop for a single user message.
