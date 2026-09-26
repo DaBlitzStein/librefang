@@ -19,6 +19,7 @@ pub const MAX_VERSIONS_PER_AGENT: usize = 50;
 ///
 /// `agent_name` is denormalised on purpose: it is the name at snapshot time, so a rename leaves old rows carrying the historical name.
 /// `change_source` is a short tag naming the write outcome — the kernel persist path writes `update` on success and `update-persist-failed` when the disk write failed after the in-memory manifest had already changed.
+/// `persist_agent_enabled` writes `suspend` / `resume`, or `suspend-persist-failed` / `resume-persist-failed` when its own `enabled`-line write failed.
 /// The schema default `unknown` covers rows written by any future writer that does not classify its persist.
 #[derive(Debug, Clone)]
 pub struct ManifestVersionRow {

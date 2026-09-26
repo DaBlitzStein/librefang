@@ -59,6 +59,25 @@ fn register_agent_watcher_slot(
     guard.push(handle);
 }
 
+/// Re-serialize a patched `agent.toml` into the canonical layout
+/// `persist_full_manifest_at` records, so suspend/resume history rows are
+/// directly comparable with the `update` rows they sit next to.
+///
+/// `persist_agent_enabled` writes the operator's file with only the `enabled`
+/// line patched, preserving comments and key order. Snapshotting that text
+/// verbatim (the pre-fix behaviour) makes consecutive rows alternate between
+/// the operator's layout and the serializer's, so the History tab reports
+/// nearly every line as changed when only `enabled` moved (#8041).
+///
+/// Falls back to the raw text when the file does not parse; by then the caller
+/// has already written it, so the best available record is what is on disk.
+fn normalized_manifest_snapshot(content: &str) -> String {
+    match toml::from_str::<librefang_types::agent::AgentManifest>(content) {
+        Ok(manifest) => toml::to_string_pretty(&manifest).unwrap_or_else(|_| content.to_string()),
+        Err(_) => content.to_string(),
+    }
+}
+
 impl LibreFangKernel {
     /// Get session token usage and estimated cost for an agent.
     pub fn session_usage_cost(&self, agent_id: AgentId) -> KernelResult<(u64, u64, f64)> {
@@ -310,23 +329,41 @@ impl LibreFangKernel {
                     // Append after [agent] section or at end
                     format!("{content}\nenabled = {enabled}\n")
                 };
-                if let Err(e) = atomic_write_toml(&toml_path, &new_content) {
-                    warn!("Failed to persist enabled={enabled} for {name}: {e}");
-                    return;
-                }
                 // Suspend/resume rewrites agent.toml outside `persist_full_manifest_at`
                 // (this function patches the `enabled` line directly rather than
                 // re-serializing the whole manifest), so it must record its own
                 // history snapshot or the History tab silently misses every
                 // suspend/resume (#8041).
+                //
+                // Record the serializer's canonical layout, not `new_content`:
+                // `new_content` is the operator's file with one line patched, so a
+                // hand-written manifest (comments, key order) would alternate with
+                // the `update` rows' `toml::to_string_pretty` output and make two
+                // neighbouring snapshots differ on nearly every line when only
+                // `enabled` moved (#8041).
+                let snapshot = normalized_manifest_snapshot(&new_content);
+                let change_source = if enabled { "resume" } else { "suspend" };
                 let store =
                     librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
-                let change_source = if enabled { "resume" } else { "suspend" };
-                if let Err(e) =
-                    store.record_version(&agent_id.to_string(), name, &new_content, change_source)
-                {
-                    warn!("Failed to record manifest version snapshot for {name}: {e}");
+                let record = |source: &str| {
+                    if let Err(e) =
+                        store.record_version(&agent_id.to_string(), name, &snapshot, source)
+                    {
+                        warn!("Failed to record manifest version snapshot for {name}: {e}");
+                    }
+                };
+                if let Err(e) = atomic_write_toml(&toml_path, &new_content) {
+                    warn!("Failed to persist enabled={enabled} for {name}: {e}");
+                    // The in-memory state already changed and the disk write just
+                    // failed, so record the attempted snapshot as `*-persist-failed`
+                    // before returning — mirroring `persist_full_manifest_at`'s
+                    // `update-persist-failed` branch. Going silent here leaves the
+                    // registry suspended while disk still says `enabled = true`, with
+                    // no history row explaining the disagreement (#8041).
+                    record(&format!("{change_source}-persist-failed"));
+                    return;
                 }
+                record(change_source);
             }
             Err(e) => warn!("Failed to read agent TOML for {name}: {e}"),
         }
