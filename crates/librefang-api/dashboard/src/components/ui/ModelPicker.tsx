@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { ArrowLeft, ArrowRight, ChevronDown, Loader2, Pencil } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, Loader2, Pencil, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 
 /**
@@ -99,6 +99,12 @@ export interface ModelPickerProps {
    * a custom rung beside their presets.
    */
   allowCustom?: boolean;
+  /**
+   * Clear the current value. Rendered as a "None" row in the flat `model`
+   * shape: those fields distinguish "absent" from a set id, so a picker that
+   * can only ever set a name cannot undo one.
+   */
+  onClear?: () => void;
   /** A write is in flight: the list is frozen and the active row spins. */
   busy?: boolean;
   /** True while the catalog is still arriving. */
@@ -130,6 +136,7 @@ export function ModelPicker({
   providers,
   disabled = false,
   allowCustom = false,
+  onClear,
   busy = false,
   isFetching = false,
   error = null,
@@ -429,6 +436,23 @@ export function ModelPicker({
                   </button>
                 </div>
               </div>
+            )}
+
+            {!custom && modelOnly && !!value?.model && onClear && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  onClear();
+                  setOpen(false);
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-text-dim transition-colors hover:bg-surface-hover"
+              >
+                <X className="h-3 w-3 shrink-0 text-text-dim/50" />
+                <span className="text-xs font-medium">
+                  {t("common.none", { defaultValue: "None" })}
+                </span>
+              </button>
             )}
 
             {!custom && !modelOnly && !drilldown && !isFetching && filteredProviders.length === 0 && (

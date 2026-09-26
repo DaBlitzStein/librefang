@@ -98,6 +98,14 @@ interface AgentManifestFormProps {
     max_output_tokens?: number;
     limits_known?: boolean;
   }[];
+  /**
+   * State of the query that produced `models`. Without it a catalog that is
+   * still loading, or failed to load, reads the same as an empty one and the
+   * pickers claim "No models found" instead of showing the spinner or a retry.
+   */
+  modelsFetching?: boolean;
+  modelsError?: boolean;
+  onModelsRetry?: () => void;
   invalidFields: Set<string>;
   // Read-only view of preserved-but-not-form-renderable extras. We show
   // a hint next to dropdowns whose form widget can't represent the
@@ -153,6 +161,9 @@ export function AgentManifestForm({
   onChange,
   providers,
   models,
+  modelsFetching = false,
+  modelsError = false,
+  onModelsRetry,
   invalidFields,
   extras,
   skillCatalog,
@@ -186,18 +197,37 @@ export function AgentManifestForm({
   const updateRouting = (patch: Partial<ManifestFormState["routing"]>): void =>
     onChange({ ...value, routing: { ...value.routing, ...patch } });
 
+  // The main model field holds an id without a provider, so it only offers a
+  // list once a provider is chosen; before that the free-text fallback below
+  // takes over. `models` may be the unfiltered catalog (the routing tiers and
+  // fallbacks need it whole), so this narrows it back for this field.
   const filteredModels = useMemo(
-    () => (value.model.provider ? models.filter((m) => m.provider === value.model.provider) : models),
+    () => (value.model.provider ? models.filter((m) => m.provider === value.model.provider) : []),
     [models, value.model.provider],
   );
 
   // The picker wants `{ id }` rather than `{ name }`. Memoised because it is
   // passed to every fallback row, and a fresh array each render would defeat
   // the picker's own memoisation of its provider list.
-  const providerPickerList = useMemo(
-    () => providerOptions.map((p) => ({ id: p.name })),
-    [providerOptions],
-  );
+  // The picker's "keep the current provider reachable" guard can only fire if
+  // that provider is in the list it is handed. A fallback whose provider was
+  // dropped from discovery — key removed since — must still be re-selectable,
+  // so union the fallbacks' providers in alongside the configured ones.
+  const providerPickerList = useMemo(() => {
+    const names = new Set(providerOptions.map((p) => p.name));
+    for (const fb of value.fallback_models ?? []) {
+      if (fb.provider) names.add(fb.provider);
+    }
+    return [...names].map((id) => ({ id }));
+  }, [providerOptions, value.fallback_models]);
+
+  // Shared by every catalog-backed picker below: a loading or failed catalog
+  // must not render as an empty one.
+  const pickerCatalog = {
+    isFetching: modelsFetching,
+    error: modelsError ? t("chat.unable_to_load_models") : null,
+    onRetry: onModelsRetry,
+  };
 
   // Build {options, meta} pairs for the skill/tool finders (#5049).
   // The catalog is union-ed with the user's current selection so
@@ -887,6 +917,7 @@ export function AgentManifestForm({
                   }
                   models={models}
                   providers={providerPickerList}
+                  {...pickerCatalog}
                 />
               </div>
               <input
@@ -1081,7 +1112,9 @@ export function AgentManifestForm({
                   allowCustom
                   value={asModelName(value.routing.simple_model)}
                   onChange={(next) => updateRouting({ simple_model: next.model })}
+                  onClear={() => updateRouting({ simple_model: "" })}
                   models={models}
+                  {...pickerCatalog}
                 />
               </Field>
               <Field label={t("agents.form.medium_model")}>
@@ -1091,7 +1124,9 @@ export function AgentManifestForm({
                   allowCustom
                   value={asModelName(value.routing.medium_model)}
                   onChange={(next) => updateRouting({ medium_model: next.model })}
+                  onClear={() => updateRouting({ medium_model: "" })}
                   models={models}
+                  {...pickerCatalog}
                 />
               </Field>
               <Field label={t("agents.form.complex_model")}>
@@ -1101,7 +1136,9 @@ export function AgentManifestForm({
                   allowCustom
                   value={asModelName(value.routing.complex_model)}
                   onChange={(next) => updateRouting({ complex_model: next.model })}
+                  onClear={() => updateRouting({ complex_model: "" })}
                   models={models}
+                  {...pickerCatalog}
                 />
               </Field>
             </div>
@@ -1363,7 +1400,9 @@ export function AgentManifestForm({
               allowCustom
               value={asModelName(value.pinned_model)}
               onChange={(next) => update({ pinned_model: next.model })}
+              onClear={() => update({ pinned_model: "" })}
               models={models}
+              {...pickerCatalog}
             />
           </Field>
           <Field label={t("agents.form.workspace")}>
