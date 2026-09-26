@@ -499,6 +499,43 @@ describe("ModelPicker", () => {
       expect(screen.queryByLabelText(i18n.t("agents.form.model_id"))).not.toBeInTheDocument();
     });
 
+    it("clears the current value through the None row when the caller offers one", () => {
+      const onClear = vi.fn();
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          value={{ provider: "", model: "gpt-4" }}
+          onChange={() => {}}
+          onClear={onClear}
+          models={catalog}
+        />,
+      );
+
+      open("Simple model");
+      // Only when the caller passes `onClear`: a picker that cannot clear must
+      // not offer a row that does nothing.
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("common.none") }));
+      expect(onClear).toHaveBeenCalledTimes(1);
+    });
+
+    it("offers no clear row without an onClear handler", () => {
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          value={{ provider: "", model: "gpt-4" }}
+          onChange={() => {}}
+          models={catalog}
+        />,
+      );
+
+      open("Simple model");
+      expect(
+        screen.queryByRole("button", { name: i18n.t("common.none") }),
+      ).not.toBeInTheDocument();
+    });
+
     it("reports the provider of the row that was picked", () => {
       const onChange = vi.fn();
       render(

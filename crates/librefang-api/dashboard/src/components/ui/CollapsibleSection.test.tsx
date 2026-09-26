@@ -35,6 +35,28 @@ describe("CollapsibleSection", () => {
     );
   });
 
+  it("does not clip a child popover once open", () => {
+    // `overflow-hidden` trims the body to the rounded corners while folded, but
+    // it also clipped the absolutely-positioned model picker popover a child
+    // renders. The clip is released once `open` is set on the element.
+    render(
+      <CollapsibleSection title="Routing" defaultOpen>
+        <p>body</p>
+      </CollapsibleSection>,
+    );
+    const details = screen.getByText("Routing").closest("details")!;
+    expect(details.className).toContain("group-open:overflow-visible");
+  });
+
+  it("keeps the clip while folded", () => {
+    render(
+      <CollapsibleSection title="Routing">
+        <p>body</p>
+      </CollapsibleSection>,
+    );
+    expect(screen.getByText("Routing").closest("details")!.className).toContain("overflow-hidden");
+  });
+
   it("is a real details/summary, so the keyboard and toggle behaviour come free", () => {
     const { container } = render(
       <CollapsibleSection title="Routing">
