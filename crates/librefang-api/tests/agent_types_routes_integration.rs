@@ -31,7 +31,9 @@ use librefang_api::server;
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use serde_json::{json, Value as Json};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use tempfile::TempDir;
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
