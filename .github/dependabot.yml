@@ -9,7 +9,32 @@ updates:
     labels:
       - "dependencies"
     groups:
+      # The OpenTelemetry crates share one minor and must move together: bumping one alone puts two copies of `opentelemetry` in the graph and breaks the build (#8455–#8458).
+      # 0.x minor bumps are breaking, so `cargo-minor-patch` never catches them; this group takes every update type, and it is listed first because a dependency goes to the first group it matches.
+      opentelemetry:
+        patterns:
+          - "opentelemetry*"
+          - "tracing-opentelemetry"
       cargo-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Rust sidecar SDK and the Telegram sidecar the release archive ships.
+  # Each is its own workspace root with a committed Cargo.lock (#8124), so the root entry above does not see them.
+  # CI checks both at their declared rust-version with `--locked`; a bump that raises the floor goes red there and must raise `rust-version` in the same PR.
+  - package-ecosystem: "cargo"
+    directories:
+      - "/sdk/rust/librefang-sidecar"
+      - "/sdk/rust/librefang-sidecar-telegram"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      sidecar-cargo-minor-patch:
         update-types:
           - "minor"
           - "patch"
