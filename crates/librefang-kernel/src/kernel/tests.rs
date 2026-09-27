@@ -18414,14 +18414,16 @@ fn ephemeral_spawn_wires_every_capability_the_permanent_path_wires() {
 /// The ephemeral path calls `run_agent_loop` directly and stamps no
 /// `SenderContext`, so it bypasses both strip-before-stamp sites
 /// (`kernel/agent_execution.rs`, `kernel/messaging.rs`) that drop the reserved
-/// `sender_*` keys a manifest declares (#8409 review).
+/// `sender_*` keys a manifest declares (#8409 review). Both manifests the
+/// spawn can select — the parent's clone and a loaded agent-type template —
+/// must be stripped.
 ///
-/// The transform itself is unit-tested in `ephemeral_spawn.rs`
-/// (`worker_manifest_from_parent`); this pins the spawn path to it. Reverting
-/// the call site to a bare `parent.manifest.clone()` leaves those unit tests —
-/// and every capability assertion above — green, while the parent's declared
-/// `sender_channel = "webui"` plus a target's derivable `UserId` UUID reaches
-/// `resolve_webui_sender` on the worker's tool calls.
+/// The transforms themselves are unit-tested in `ephemeral_spawn.rs`
+/// (`worker_manifest_from_parent`, `worker_manifest_from_template`); this pins
+/// the spawn path to them. Reverting a call site to the unstripped manifest
+/// leaves those unit tests — and every capability assertion above — green,
+/// while the declared `sender_channel = "webui"` plus a target's derivable
+/// `UserId` UUID reaches `resolve_webui_sender` on the worker's tool calls.
 #[test]
 fn ephemeral_spawn_strips_declared_sender_metadata_from_the_inherited_manifest() {
     let ephemeral = include_str!("ephemeral_spawn.rs");
@@ -18430,6 +18432,13 @@ fn ephemeral_spawn_strips_declared_sender_metadata_from_the_inherited_manifest()
         "the ephemeral worker must inherit the parent's manifest through \
          `worker_manifest_from_parent`, which strips the reserved `sender_*` \
          keys before the manifest is handed to `run_agent_loop`"
+    );
+    assert!(
+        ephemeral.contains("worker_manifest_from_template(template)"),
+        "the ephemeral worker spawned from an agent type must run on the \
+         template manifest through `worker_manifest_from_template`, which \
+         strips the reserved `sender_*` keys before the manifest is handed to \
+         `run_agent_loop`"
     );
 }
 

@@ -209,7 +209,12 @@ impl LibreFangKernel {
                 // is about answering "where did this agent come from" in the
                 // catalog, and this run never enters it.
                 let declared = template.capabilities.tools.clone();
-                (template, Some(declared))
+                // The template is loaded from disk like any `agent.toml`, and
+                // this path calls `run_agent_loop` directly without stamping a
+                // verified `SenderContext`, so a reserved `sender_*` key it
+                // declares must not ride along — same reason as the parent
+                // clone below (#8409 review).
+                (worker_manifest_from_template(template), Some(declared))
             }
             // No agent type: the worker is a side task of the parent, so it
             // inherits the parent's persona and model unless told otherwise.
@@ -686,6 +691,27 @@ fn worker_manifest_from_parent(
     manifest
 }
 
+/// The manifest an ephemeral worker spawned from an agent type runs under:
+/// the loaded template's, minus any reserved `sender_*` metadata it declared.
+///
+/// The sibling of [`worker_manifest_from_parent`], and there for the same
+/// reason: this path calls `run_agent_loop` directly and stamps no
+/// `SenderContext`, so it passes through neither strip-before-stamp entry
+/// point (`kernel::agent_execution` and `kernel::messaging`). A template is an
+/// `agent.toml` on disk like any other, so a declared
+/// `sender_channel = "webui"` plus a target's derivable `UserId` UUID would
+/// otherwise reach `resolve_webui_sender` on the worker's tool calls as a
+/// forged identity (#8409 review).
+///
+/// Takes the template by value — the caller has loaded and consumed it, so the
+/// strip needs no clone.
+fn worker_manifest_from_template(
+    mut template: librefang_types::agent::AgentManifest,
+) -> librefang_types::agent::AgentManifest {
+    librefang_types::agent::strip_reserved_sender_metadata(&mut template.metadata);
+    template
+}
+
 /// Apply an `EphemeralModelOverride` to the worker's manifest.
 ///
 /// With no `agent_type` the worker manifest is the parent's, cloned through
@@ -992,49 +1018,43 @@ mod model_override_tests {
 
 #[cfg(test)]
 mod sender_metadata_tests {
-    use super::worker_manifest_from_parent;
+    use super::{worker_manifest_from_parent, worker_manifest_from_template};
     use librefang_types::agent::{AgentManifest, UserId};
 
-    /// #8409 review: `agent_execution.rs` and `messaging.rs` strip a
-    /// manifest's reserved `sender_*` keys before stamping a turn's verified
-    /// `SenderContext`; this spawn path calls `run_agent_loop` directly and
-    /// stamps nothing, so the copy of the parent manifest the worker runs
-    /// with must be stripped here instead.
-    ///
-    /// A parent-declared `sender_channel = "webui"` plus the victim's
-    /// derivable `UserId` UUID is the exact pair #8409 closed for the other
-    /// entry points: `resolve_webui_sender` reads it, and the worker's tool
-    /// calls assume that user's policy on a sender-less turn.
-    #[test]
-    fn a_parents_declared_sender_identity_does_not_reach_the_worker() {
-        let mut parent = AgentManifest {
-            name: "forging-parent".to_string(),
+    /// A manifest declaring the #8409 forgery pair — `sender_channel =
+    /// "webui"` plus the victim's derivable `UserId` UUID — and a non-reserved
+    /// key that must survive.
+    fn forged_identity_manifest(name: &str) -> AgentManifest {
+        let mut manifest = AgentManifest {
+            name: name.to_string(),
             ..Default::default()
         };
-        parent.metadata.insert(
+        manifest.metadata.insert(
             "sender_channel".to_string(),
             serde_json::Value::String("webui".to_string()),
         );
-        parent.metadata.insert(
+        manifest.metadata.insert(
             "sender_user_id".to_string(),
             serde_json::Value::String(UserId::from_name("victim").to_string()),
         );
-        // A non-reserved key is left alone.
-        parent.metadata.insert(
+        manifest.metadata.insert(
             "keep_me".to_string(),
             serde_json::Value::String("yes".to_string()),
         );
+        manifest
+    }
 
-        let worker = worker_manifest_from_parent(&parent);
-
+    /// The strip and preservation halves of the claim, shared by the parent
+    /// and template cases.
+    fn assert_sender_identity_stripped(worker: &AgentManifest, source: &str) {
         assert!(
             !worker.metadata.contains_key("sender_channel"),
-            "a parent-declared sender_channel reached the worker's manifest, got: {:?}",
+            "a {source}-declared sender_channel reached the worker's manifest, got: {:?}",
             worker.metadata.get("sender_channel")
         );
         assert!(
             !worker.metadata.contains_key("sender_user_id"),
-            "a parent-declared sender_user_id reached the worker's manifest, got: {:?}",
+            "a {source}-declared sender_user_id reached the worker's manifest, got: {:?}",
             worker.metadata.get("sender_user_id")
         );
         assert_eq!(
@@ -1042,6 +1062,20 @@ mod sender_metadata_tests {
             Some("yes"),
             "the strip must only touch reserved sender keys"
         );
+    }
+
+    /// #8409 review: `agent_execution.rs` and `messaging.rs` strip a
+    /// manifest's reserved `sender_*` keys before stamping a turn's verified
+    /// `SenderContext`; this spawn path calls `run_agent_loop` directly and
+    /// stamps nothing, so the copy of the parent manifest the worker runs
+    /// with must be stripped here instead.
+    #[test]
+    fn a_parents_declared_sender_identity_does_not_reach_the_worker() {
+        let parent = forged_identity_manifest("forging-parent");
+
+        let worker = worker_manifest_from_parent(&parent);
+
+        assert_sender_identity_stripped(&worker, "parent");
         assert_eq!(
             parent
                 .metadata
@@ -1049,6 +1083,23 @@ mod sender_metadata_tests {
                 .and_then(|v| v.as_str()),
             Some("webui"),
             "the worker runs on a stripped copy; the parent's own manifest must not be mutated"
+        );
+    }
+
+    /// The same claim for the agent-type branch: a template is an `agent.toml`
+    /// on disk like any other, and this branch also reaches `run_agent_loop`
+    /// directly without stamping a verified `SenderContext`, so a reserved
+    /// `sender_*` key it declares must not reach the worker either.
+    #[test]
+    fn a_templates_declared_sender_identity_does_not_reach_the_worker() {
+        let template = forged_identity_manifest("forging-template");
+
+        let worker = worker_manifest_from_template(template);
+
+        assert_sender_identity_stripped(&worker, "template");
+        assert_eq!(
+            worker.name, "forging-template",
+            "the template's non-metadata fields are the worker's and must survive the strip"
         );
     }
 }
