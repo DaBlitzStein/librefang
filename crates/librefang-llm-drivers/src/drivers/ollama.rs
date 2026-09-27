@@ -436,9 +436,9 @@ impl OllamaDriver {
     }
 }
 
-/// Remove the sampling keys `build_request` already lifted into `options`
-/// (#8112), so `complete`/`stream` don't also merge a redundant top-level
-/// copy that Ollama's native API ignores.
+/// Remove a stale sampling copy from `extra_body` (#8290): the samplers travel
+/// typed and are read from `options`, so a legacy map entry must not also be
+/// merged at the top level, where Ollama's native API ignores it.
 fn without_options_sampling_keys(
     extra: Option<BTreeMap<String, serde_json::Value>>,
 ) -> Option<BTreeMap<String, serde_json::Value>> {
@@ -1297,13 +1297,13 @@ mod tests {
         assert_eq!(wire.think, Some(false));
     }
 
-    /// #8112: Ollama's native API only reads `top_p` / `frequency_penalty` /
-    /// `presence_penalty` nested under `options`; `extra_body` merges at the
-    /// top level of the wire body, where these three are silently ignored.
-    /// `build_request` must lift them into `options` instead of leaving them
-    /// for the top-level merge.
+    /// #8290: the typed [`CompletionRequest`] fields are the only source for
+    /// Ollama's samplers. A stale `extra_body` copy must neither be lifted into
+    /// `options` nor survive at the top level of the body, where Ollama would
+    /// ignore it. (Before #8290 these three arrived through `extra_body`; this
+    /// pins that the lifting is gone rather than that the mapping exists.)
     #[test]
-    fn build_request_lifts_sampling_extra_body_keys_into_options() {
+    fn build_request_does_not_lift_stale_sampling_keys_out_of_extra_body() {
         let driver = OllamaDriver::new(String::new(), "http://x".to_string());
         let mut r = req("llama3.2");
         r.extra_body = Some(BTreeMap::from([
@@ -1312,34 +1312,37 @@ mod tests {
             ("presence_penalty".to_string(), serde_json::json!(-0.5)),
         ]));
         let wire = driver.build_request(&r).expect("build");
-        let options = wire
-            .options
-            .expect("sampling keys must produce an options object");
-        assert_eq!(options.top_p, Some(0.9));
-        assert_eq!(options.frequency_penalty, Some(0.5));
-        assert_eq!(options.presence_penalty, Some(-0.5));
-        // And they must not ALSO survive at the top level, or `complete`/`stream`
-        // would merge a second, Ollama-ignored copy into the wire body.
+        assert_eq!(
+            wire.options.and_then(|o| o.top_p),
+            None,
+            "no typed top_p is set, so no value exists to send"
+        );
         assert!(
             wire.extra_body.is_none(),
-            "the sampling keys were the only extra_body entries; lifting them \
-             into options must leave nothing behind: {:?}",
+            "a stale extra_body sampling key must be stripped, not merged at the \
+             top level where Ollama ignores it: {:?}",
             wire.extra_body
         );
     }
 
     /// A non-sampling `extra_body` key (e.g. Qwen's `enable_memory`) is left
-    /// alone — only the three sampling keys move into `options`.
+    /// alone; the sampling preferences travel typed, and a stale copy in the
+    /// map is dropped before the top-level merge (#8290).
     #[test]
     fn build_request_keeps_non_sampling_extra_body_keys_at_the_top_level() {
         let driver = OllamaDriver::new(String::new(), "http://x".to_string());
         let mut r = req("llama3.2");
+        r.top_p = Some(0.9);
         r.extra_body = Some(BTreeMap::from([
-            ("top_p".to_string(), serde_json::json!(0.9)),
+            ("top_p".to_string(), serde_json::json!(0.1)),
             ("enable_memory".to_string(), serde_json::json!(true)),
         ]));
         let wire = driver.build_request(&r).expect("build");
-        assert_eq!(wire.options.expect("options").top_p, Some(0.9));
+        assert_eq!(
+            wire.options.expect("options").top_p,
+            Some(0.9),
+            "the typed field is the single source, not the stale map copy"
+        );
         let extra = wire.extra_body.expect("enable_memory must survive");
         assert!(!extra.contains_key("top_p"));
         assert_eq!(extra.get("enable_memory"), Some(&serde_json::json!(true)));
@@ -1355,10 +1358,7 @@ mod tests {
         let mut r = req("llama3.2");
         r.temperature = 0.0;
         r.max_tokens = 0;
-        r.extra_body = Some(BTreeMap::from([(
-            "top_p".to_string(),
-            serde_json::json!(0.42),
-        )]));
+        r.top_p = Some(0.42);
         let wire = driver.build_request(&r).expect("build");
         assert_eq!(
             wire.options.and_then(|o| o.top_p),

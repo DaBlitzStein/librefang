@@ -1290,7 +1290,7 @@ mod apply_resolved_inference_params_tests {
     /// `kernel::tests::top_p_catalog_override_reaches_*`, which drive real
     /// turns to a mocked backend and read the literal wire body.
     #[test]
-    fn catalog_override_lands_in_extra_params_when_the_agent_leaves_top_p_unset() {
+    fn catalog_override_lands_on_the_typed_top_p_field_when_the_agent_leaves_it_unset() {
         let catalog = catalog_with_top_p_override(0.5);
         let mut model = inheriting_agent_model();
         assert!(
@@ -1301,10 +1301,11 @@ mod apply_resolved_inference_params_tests {
 
         apply_resolved_inference_params(&catalog, &mut model);
 
-        assert_eq!(
-            model.extra_params.get("top_p"),
-            Some(&serde_json::json!(0.5_f32))
-        );
+        // #8290: the resolved value lands on the typed field the agent loop
+        // carries onto `CompletionRequest`; `extra_params` must not hold a
+        // second copy that only some drivers read.
+        assert_eq!(model.top_p, Some(0.5));
+        assert!(!model.extra_params.contains_key("top_p"));
     }
 
     /// An explicit agent-level preference still wins over the catalog
@@ -1318,10 +1319,8 @@ mod apply_resolved_inference_params_tests {
 
         apply_resolved_inference_params(&catalog, &mut model);
 
-        assert_eq!(
-            model.extra_params.get("top_p"),
-            Some(&serde_json::json!(0.1_f32))
-        );
+        assert_eq!(model.top_p, Some(0.1));
+        assert!(!model.extra_params.contains_key("top_p"));
     }
 }
 
