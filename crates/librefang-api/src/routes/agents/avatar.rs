@@ -347,8 +347,6 @@ pub async fn upload_agent_avatar(
 }
 
 /// GET /api/agents/{id}/avatar — the stored image.
-
-/// GET /api/agents/{id}/avatar — the stored image.
 ///
 /// Authenticated like every other `/api/` route, which is the point: the alternative placement under `~/.librefang/dashboard/` would have been an unauthenticated GET.
 #[utoipa::path(
