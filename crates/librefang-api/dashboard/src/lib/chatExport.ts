@@ -35,12 +35,15 @@ export interface ExportOptions {
   exportedAt: Date;
 }
 
-/** `2026-09-12 17:20` — sortable, unambiguous, no locale surprises. */
+/** `2026-09-12 08:20Z` — ISO-8601 in UTC: sortable across exports, no locale
+ *  surprises, and the zone is carried in the value. Reading the exporter's
+ *  local clock without a marker made two files of the same session look hours
+ *  apart with no way to tell which zone either was written in. */
 function stamp(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return (
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
-    `${pad(d.getHours())}:${pad(d.getMinutes())}`
+    `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
+    `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}Z`
   );
 }
 
