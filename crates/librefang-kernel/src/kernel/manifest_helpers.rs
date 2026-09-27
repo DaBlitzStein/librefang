@@ -713,7 +713,7 @@ pub(super) fn peer_scoped_key(
 /// Defined in `librefang_types::agent::SYSTEM_TAG_PREFIXES` so the kernel's
 /// [`merge_agent_tags`] and the API's save-as-agent-type snapshot agree on which
 /// tags are kernel-owned; see that definition for why the set matters.
-
+///
 /// Merge an incoming tag list over the tags an agent is currently running with.
 ///
 /// System-owned tags are taken from `live` and operator-owned tags from `incoming`, so a caller that submits a whole manifest can freely rewrite the operator half without being able to forge, drop or preserve-by-accident the kernel half.
