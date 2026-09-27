@@ -30,6 +30,14 @@ const TOOL_OPTIONS: &[(&str, &str)] = &[
 
 const DEFAULT_TOOLS: &[bool] = &[true, false, true, true, true, true, false, false, false];
 
+/// Lines `PageUp`/`PageDown` move in the manifest-history TOML pane.
+///
+/// A fixed step rather than the pane height because the handler has no `Rect`;
+/// ten lines is roughly half the right pane at the usual terminal size, enough
+/// to make the trailing `[model]` / `[resources]` tables reachable without
+/// overshooting the whole snapshot in one keypress.
+const MANIFEST_HISTORY_PAGE: u16 = 10;
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum AgentSubScreen {
     /// Pick an existing agent or "create new"
@@ -156,6 +164,14 @@ pub struct AgentSelectState {
     /// agent-tab message, so a skills or channels error arriving while a history
     /// fetch is outstanding would otherwise be rendered as this fetch's reason.
     pub manifest_history_error: Option<String>,
+    /// First visible line of the selected snapshot's TOML.
+    ///
+    /// The right pane shows a full `agent.toml`, which is far taller than the
+    /// pane; without this the tables at the end of the serializer's output —
+    /// `[model]`, `[resources]`, `[capabilities]` — are simply unreachable.
+    /// Reset to 0 whenever the selection changes, so the operator starts each
+    /// snapshot at the top.
+    pub manifest_history_scroll: u16,
 
     // Result
     pub spawned_toml: Option<String>,
@@ -326,6 +342,7 @@ impl AgentSelectState {
             manifest_history_list: ListState::default(),
             manifest_history_loading: false,
             manifest_history_error: None,
+            manifest_history_scroll: 0,
             available_skills: Vec::new(),
             skill_cursor: 0,
             available_mcp: Vec::new(),
@@ -374,6 +391,7 @@ impl AgentSelectState {
         self.manifest_history_list.select(None);
         self.manifest_history_loading = false;
         self.manifest_history_error = None;
+        self.manifest_history_scroll = 0;
         self.spawned_toml = None;
         self.status_msg.clear();
         self.search_active = false;
@@ -747,6 +765,7 @@ impl AgentSelectState {
                     // Cleared so any reason the pane shows afterwards belongs to
                     // this fetch and not to an earlier one.
                     self.manifest_history_error = None;
+                    self.manifest_history_scroll = 0;
                     self.sub = AgentSubScreen::ManifestHistory;
                     return AgentAction::FetchManifestHistory(id);
                 }
@@ -771,10 +790,25 @@ impl AgentSelectState {
                 let i = self.manifest_history_list.selected().unwrap_or(0);
                 let next = if i == 0 { len - 1 } else { i - 1 };
                 self.manifest_history_list.select(Some(next));
+                // New snapshot under the cursor: start it at the top.
+                self.manifest_history_scroll = 0;
             }
             KeyCode::Down | KeyCode::Char('j') if len > 0 => {
                 let i = self.manifest_history_list.selected().unwrap_or(0);
                 self.manifest_history_list.select(Some((i + 1) % len));
+                self.manifest_history_scroll = 0;
+            }
+            // The TOML is taller than the pane; page through it rather than
+            // cutting the trailing tables off with no way to reach them (#8231).
+            KeyCode::PageDown => {
+                self.manifest_history_scroll = self
+                    .manifest_history_scroll
+                    .saturating_add(MANIFEST_HISTORY_PAGE);
+            }
+            KeyCode::PageUp => {
+                self.manifest_history_scroll = self
+                    .manifest_history_scroll
+                    .saturating_sub(MANIFEST_HISTORY_PAGE);
             }
             _ => {}
         }
@@ -785,6 +819,7 @@ impl AgentSelectState {
     pub fn set_manifest_history(&mut self, versions: Vec<ManifestVersion>) {
         self.manifest_history_loading = false;
         self.manifest_history_error = None;
+        self.manifest_history_scroll = 0;
         self.manifest_history_list
             .select((!versions.is_empty()).then_some(0));
         self.manifest_history = versions;
@@ -2356,6 +2391,7 @@ fn draw_manifest_history(f: &mut Frame, area: Rect, state: &mut AgentSelectState
         Paragraph::new(toml)
             .style(theme::dim_style())
             .wrap(ratatui::widgets::Wrap { trim: false })
+            .scroll((state.manifest_history_scroll, 0))
             .block(
                 Block::default()
                     .borders(Borders::LEFT)
@@ -2542,6 +2578,71 @@ mod tests {
         state.handle_key(press(KeyCode::Esc));
 
         assert!(state.sub == AgentSubScreen::AgentDetail);
+    }
+
+    /// #8231 review: the TOML pane had no scroll offset, so everything past the
+    /// pane height — the `[model]`, `[resources]`, `[capabilities]` tables the
+    /// serializer writes last — was unreachable. PageDown must move the pane and
+    /// a line below the fold must become visible.
+    #[test]
+    fn page_down_reveals_toml_below_the_pane_height() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        // 80 short lines so the tail is far below the ~20-row pane and no line
+        // wraps, keeping the assertion a direct check on the scroll offset.
+        let toml = (0..80)
+            .map(|i| format!("line_{i:03} = {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        state.set_manifest_history(vec![ManifestVersion {
+            timestamp: "2026-09-07 10:00:00".to_string(),
+            change_source: "api".to_string(),
+            manifest_toml: toml,
+        }]);
+
+        let before = render(&mut state);
+        assert!(
+            before.contains("line_000"),
+            "the top of the snapshot must be visible first:\n{before}"
+        );
+        assert!(
+            !before.contains("line_050"),
+            "the tail must start off-screen, or scrolling proves nothing:\n{before}"
+        );
+
+        for _ in 0..5 {
+            state.handle_key(press(KeyCode::PageDown));
+        }
+        let after = render(&mut state);
+        assert!(
+            after.contains("line_050"),
+            "paging must reveal content past the fold:\n{after}"
+        );
+        assert!(
+            !after.contains("line_000"),
+            "the top must have scrolled away:\n{after}"
+        );
+    }
+
+    /// Paging is scoped to the TOML pane; moving the snapshot cursor resets it
+    /// so the next snapshot opens at its head rather than inheriting the offset.
+    #[test]
+    fn changing_the_selected_snapshot_resets_the_scroll_offset() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(vec![
+            version("2026-09-07 10:00:00"),
+            version("2026-09-06 09:00:00"),
+        ]);
+
+        state.handle_key(press(KeyCode::PageDown));
+        assert_eq!(state.manifest_history_scroll, MANIFEST_HISTORY_PAGE);
+
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(
+            state.manifest_history_scroll, 0,
+            "a new snapshot must start at the top"
+        );
     }
 
     #[test]
