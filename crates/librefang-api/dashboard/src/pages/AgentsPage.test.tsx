@@ -240,6 +240,23 @@ describe("DescriptionSection (#7742)", () => {
 
     expect(screen.getByRole("textbox")).toHaveValue("changed elsewhere");
   });
+
+  it("follows a server-side change after this section's own save (#7835 re-gate)", () => {
+    // Full sequence: local edit → the parent refresh moves `current` to the
+    // saved text (draft === current, pristine by intent) → another client
+    // changes the description. The seed used to stay anchored to the pre-edit
+    // text, so the dirty guard was permanently true and the section never
+    // followed; the next save would then write the stale draft back.
+    const view = renderDescription("original description");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "updated description" } });
+    view.rerenderDescription("updated description"); // post-save refresh
+
+    view.rerenderDescription("changed elsewhere");
+
+    expect(screen.getByRole("textbox")).toHaveValue("changed elsewhere");
+    // Followed, therefore clean again: no Save is offered over the fresh text.
+    expect(screen.getByRole("button", { name: /common\.save/i })).toBeDisabled();
+  });
 });
 
 function renderChannels() {

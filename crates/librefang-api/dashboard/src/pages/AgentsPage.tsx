@@ -404,6 +404,16 @@ export function DescriptionSection({
   // `key` the parent sets on this section.
   const seeded = useRef(current);
   useEffect(() => {
+    // Pristine by intent: the draft matches the persisted value, so re-anchor
+    // the seed to it. The parent's post-save refresh moves `current` to the
+    // draft and this is the only moment the two agree; without the re-anchor
+    // the seed stays on the pre-edit text, the dirty guard below never lets
+    // the follow branch run again, and a later server-side change is silently
+    // clobbered by the next save (#7835 re-gate).
+    if (draft === current) {
+      seeded.current = current;
+      return;
+    }
     if (draft !== seeded.current) return; // dirty: keep the operator's text
     if (current !== seeded.current) {
       seeded.current = current;
