@@ -57,7 +57,14 @@ export function Field({
   const labelNode = (
     <>
       {label}
-      {required && <span className="ml-0.5 text-error">*</span>}
+      {/* Decoration only: `aria-hidden` keeps it out of the control's
+          accessible name, so an `htmlFor` label is announced as "Name",
+          not "Name*" (#8403 review). */}
+      {required && (
+        <span aria-hidden="true" className="ml-0.5 text-error">
+          *
+        </span>
+      )}
     </>
   );
 
