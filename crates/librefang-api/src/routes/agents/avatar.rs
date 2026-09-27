@@ -133,7 +133,8 @@ fn store_avatar_url(state: &AppState, agent_id: AgentId, avatar_url: Option<Stri
         (status = 404, description = "No such agent", body = crate::types::JsonObject),
         (status = 413, description = "Image larger than the cap", body = crate::types::JsonObject),
         (status = 415, description = "Bytes are not a supported image", body = crate::types::JsonObject),
-        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
+        (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject),
+        (status = 500, description = "The avatar directory or file could not be written, or the stored avatar reference could not be updated", body = crate::types::JsonObject)
     )
 )]
 pub async fn upload_agent_avatar(
@@ -222,11 +223,35 @@ pub async fn upload_agent_avatar(
         // avoid; it would just have arrived through the registry instead of the
         // disk.
         //
-        // Keeping it costs less than it looks. When the agent already had one,
-        // its `avatar_url` still marks the standard route and that route now
-        // serves the new image — the upload effectively landed. When it did not,
-        // the file sits unmarked until the next upload sets the marker.
-        return json_error(StatusCode::NOT_FOUND, t.t("api-error-agent-not-found"));
+        // The *other* candidates are still cleared here, before the early
+        // return, and that is not optional: `find_avatar` probes in a fixed
+        // order (`png -> jpg -> gif -> webp`), so leaving the old `{id}.png`
+        // beside the new `{id}.webp` means the route keeps serving the old
+        // picture while this request 404s — the bytes landed but never become
+        // visible. Sweeping here is what makes the comment's claim ("that route
+        // now serves the new image") true; without it the claim only held when
+        // the format did not change.
+        librefang_types::media::remove_avatars_except(&avatars_dir, &id, ext);
+        // The failure is reported for what it is: an agent that vanished
+        // between `resolve_agent` and the identity write is a 404, but a live
+        // agent whose registry rejected the write is the daemon's error, not
+        // the caller's — the same split the delete path makes. Sweeping first
+        // is safe in both cases: the canonical route serves the new bytes, and
+        // a vanished agent has nothing left to read.
+        return match state.kernel.agent_registry().get(agent_id) {
+            None => json_error(StatusCode::NOT_FOUND, t.t("api-error-agent-not-found")),
+            Some(_) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    "Avatar stored but the identity write failed; the stored avatar reference was left unchanged"
+                );
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "The avatar was stored, but the agent's avatar reference could not be updated."
+                        .to_string(),
+                )
+            }
+        };
     }
 
     // Only now, with the new file in place, are the other candidates cleared.
@@ -257,7 +282,15 @@ pub async fn upload_agent_avatar(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "The image", content_type = "image/png"),
+        // The bytes decide the media type (`image_content_type` re-sniffs on
+        // every read), so all four sniffable formats are documented here, not
+        // just the PNG the extension table happens to probe first.
+        (status = 200, description = "The image, one of the four sniffable image types", content(
+            ("image/png"),
+            ("image/jpeg"),
+            ("image/gif"),
+            ("image/webp"),
+        )),
         (status = 304, description = "Unchanged since the caller's `If-None-Match`"),
         (status = 400, description = "Invalid agent id", body = crate::types::JsonObject),
         (status = 404, description = "No such agent, or no avatar set", body = crate::types::JsonObject)
@@ -307,7 +340,7 @@ pub async fn serve_agent_avatar(
     // being one fixed path per agent, a cache-busting query string would be
     // the alternative, and that would mean putting caller-influenced text back
     // into the one field this change exists to close.
-    let etag = format!("\"{:016x}\"", content_hash(&bytes));
+    let etag = format!("\"{}\"", content_hash(&bytes));
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
@@ -385,18 +418,21 @@ pub async fn delete_agent_avatar(
         .into_response()
 }
 
-/// FNV-1a over the bytes, for the `ETag`.
+/// SHA-256 over the bytes, for the `ETag`.
 ///
-/// A validator only has to change when the content does; it is not a security
-/// claim about the bytes, so this avoids pulling a cryptographic digest into
-/// the request path for a value the client only compares for equality.
-fn content_hash(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
+/// This is emitted as a *strong* validator (no `W/`), which is a claim that two
+/// responses with the same tag are byte-identical. FNV-1a made that claim and
+/// could not support it: its collisions are cheap to construct, so a caller who
+/// can upload avatars could replace an image with one whose tag matched and a
+/// browser that cached the first would keep rendering the superseded picture
+/// (the route sets `no-cache`, so revalidation is the only refresh path). A
+/// real digest costs one pass over at most two MiB — already in memory — and
+/// `sha2` is a dependency of this crate, so there is nothing to trade off.
+fn content_hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -442,6 +478,19 @@ mod tests {
         let mut changed = TINY_PNG.to_vec();
         changed.push(0);
         assert_ne!(content_hash(TINY_PNG), content_hash(&changed));
+    }
+
+    /// The validator must be a real digest, not FNV-1a.
+    ///
+    /// Pinned to the SHA-256 of the empty string: FNV-1a over the same input is
+    /// `0xcbf29ce484222325`, so a regression to the old hash fails here rather
+    /// than shipping an ETag that is cheap to collide on purpose.
+    #[test]
+    fn the_etag_is_sha256_not_fnv() {
+        assert_eq!(
+            content_hash(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     /// Every extension the store can produce must be one the finder probes.
