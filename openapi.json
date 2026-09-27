@@ -860,7 +860,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "GET /api/agents/{id}/avatar — the stored image.",
+        "summary": "GET /api/agents/{id}/avatar — the stored image.\nGET /api/agents/{id}/avatar — the stored image.",
         "description": "Authenticated like every other `/api/` route, which is the point: the alternative placement under `~/.librefang/dashboard/` would have been an unauthenticated GET.",
         "operationId": "serve_agent_avatar",
         "parameters": [
