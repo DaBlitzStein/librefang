@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_types::agent::UserId;
@@ -109,9 +109,50 @@ fn resolve_user(state: &AppState, name: &str) -> Result<UserConfig, Box<axum::re
 /// The server-derived file stem for a user's avatar.
 ///
 /// Takes the **configured** user rather than the requested name so that the value passed to the filesystem is visibly not the string from the URL — see the module docs.
-/// The mapping is stable (UUIDv5 under a fixed namespace), so a rename of the `[[users]]` entry moves the avatar to a new stem rather than making the old one reachable.
+/// The mapping is stable (UUIDv5 under a fixed namespace), so a rename gives the user a new stem — and the file has to be moved to it explicitly, or the old stem keeps the only copy.
+/// [`super::update_user`] does that with [`move_user_avatar`] after the row is persisted, which is what stops a later holder of the freed name from inheriting the picture.
 fn avatar_id(user: &UserConfig) -> String {
     UserId::from_name(&user.name).to_string()
+}
+
+/// Move a renamed user's stored image from the old stem to the new one.
+///
+/// The stem is derived from the name ([`avatar_id`]), so without this a rename
+/// leaves the file under the uuid of a name that no longer exists: the renamed
+/// user's route serves nothing, and the next holder of the freed name inherits
+/// the picture.
+/// It is the same residue [`super::delete_user`] sweeps when a row goes away,
+/// except that here the row survives and the image moves with it.
+/// [`super::update_user`] calls this strictly after the `[[users]]` write, so a
+/// rename the config refused cannot have carried the picture away first.
+///
+/// Each candidate is moved with one `fs::rename` inside one directory, so the
+/// move is atomic and the file is never absent from both stems.
+/// The normal directory holds a single one, because an upload clears the other
+/// extensions; moving all four anyway takes a shadow file left by a crash
+/// between an upload's write and its clear out of the freed stem, where it
+/// would otherwise become the next holder's image.
+/// A missing source is not an error — a user who never uploaded one has
+/// nothing to move.
+/// A real failure is returned rather than swallowed: the picture has a live
+/// owner whose route now serves nothing, and `update_user` reports it.
+pub(crate) fn move_user_avatar(
+    dir: &std::path::Path,
+    old_name: &str,
+    new_name: &str,
+) -> std::io::Result<()> {
+    let old_id = UserId::from_name(old_name).to_string();
+    let new_id = UserId::from_name(new_name).to_string();
+    for ext in librefang_types::media::AVATAR_EXTENSIONS {
+        let old_path = librefang_types::media::avatar_path(dir, &old_id, ext);
+        let new_path = librefang_types::media::avatar_path(dir, &new_id, ext);
+        match std::fs::rename(&old_path, &new_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// `PATCH /api/users/{name}/identity` — the emoji that stands for this user.
@@ -181,29 +222,23 @@ pub async fn upload_user_avatar(
             format!("Could not create the avatar directory: {error}"),
         );
     }
-    // Write the bytes to a temp file beside the target and rename it into
-    // place, and only then clear the candidates that would shadow it. Every
-    // failure the filesystem can report therefore arrives before anything is
-    // taken away: clearing the slot first would mean disk full, `EPERM` or a
-    // read-only mount deletes the picture the operator had and then answers
-    // 500 with nothing written.
-    // The temp file sits in the same directory, so the rename stays within one
-    // filesystem and is atomic on POSIX: a reader sees the old image or the new
-    // one, never a half-written file.
+    // Write the bytes through `crate::atomic_write` — a staging file beside
+    // the target, `fsync`, then a rename — and only then clear the candidates
+    // that would shadow it. Every failure the filesystem can report therefore
+    // arrives before anything is taken away: clearing the slot first would
+    // mean disk full, `EPERM` or a read-only mount deletes the picture the
+    // operator had and then answers 500 with nothing written.
+    //
+    // The staging name carries the process id and a per-process counter, which
+    // is the #8349 hardening and the reason this is not a hand-rolled
+    // `{uuid}.{ext}.tmp`: that name was derived from the subject alone, so two
+    // concurrent uploads for the same user truncated each other's bytes and
+    // whichever renamed last published a splice of the two.
     let id = avatar_id(&user);
     let path = librefang_types::media::avatar_path(&dir, &id, ext);
-    let tmp = path.with_extension(format!("{ext}.tmp"));
-    if let Err(error) = std::fs::write(&tmp, &body) {
-        return err_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Could not write the avatar: {error}"),
-        );
-    }
-
-    if let Err(error) = std::fs::rename(&tmp, &path) {
+    if let Err(error) = crate::atomic_write(&path, &body) {
         // Nothing has been cleared either, so the refusal costs the caller
         // nothing beyond the request itself.
-        let _ = std::fs::remove_file(&tmp);
         return err_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Could not store the avatar: {error}"),
@@ -271,7 +306,7 @@ pub async fn serve_user_avatar(
     // immediately while an unchanged avatar costs one 304 per page load.
     // `no-cache` means "revalidate", not "do not store" — the route path is
     // fixed per user, so a cache-busting query string would be the alternative.
-    let etag = format!("\"{:016x}\"", content_hash(&bytes));
+    let etag = format!("\"{}\"", content_hash(&bytes));
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
@@ -353,7 +388,22 @@ pub async fn serve_my_avatar(
     // second place for the re-sniffing rule to be lost.
     // Going through the handler instead of the router also means a user named
     // `me` still gets their own picture — see the note above.
-    serve_user_avatar(State(state), Path(user.name), headers).await
+    let mut response = serve_user_avatar(State(state), Path(user.name), headers).await;
+    // This literal path is a single cache key for every credential — unlike the
+    // `{name}` sibling, whose subject is in the URL — so the shared `no-cache`
+    // it inherits is not enough behind a proxy or CDN configured to cache
+    // `/api/*`: without `private` and `Vary: Authorization`, the first caller's
+    // picture can be served to the second. `no-cache` still forces
+    // revalidation, so this narrows a cross-credential hit rather than
+    // introducing one.
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, private"),
+    );
+    response
+        .headers_mut()
+        .append(header::VARY, HeaderValue::from_static("Authorization"));
+    response
 }
 
 /// DELETE /api/users/{name}/avatar — remove the stored image.
@@ -451,18 +501,21 @@ pub async fn update_user_identity(
     }
 }
 
-/// FNV-1a over the bytes, for the `ETag`.
+/// SHA-256 over the bytes, for the `ETag`.
 ///
-/// A validator only has to change when the content does; it is not a security
-/// claim about the bytes, so this avoids pulling a cryptographic digest into
-/// the request path for a value the client only compares for equality.
-fn content_hash(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
+/// This is emitted as a *strong* validator (no `W/`), which is a claim that two
+/// responses with the same tag are byte-identical. FNV-1a made that claim and
+/// could not support it: its collisions are cheap to construct, so a caller who
+/// can upload avatars could replace an image with one whose tag matched and a
+/// browser that cached the first would keep rendering the superseded picture
+/// (the route sets `no-cache`, so revalidation is the only refresh path). A
+/// real digest costs one pass over at most two MiB — already in memory — and
+/// `sha2` is a dependency of this crate, so there is nothing to trade off.
+fn content_hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -576,6 +629,45 @@ mod tests {
         assert!(!users.starts_with(config.home_dir.join("dashboard")));
     }
 
+    /// A rename moves every candidate to the new stem and frees the old one.
+    ///
+    /// Both files exist here because a crash between an upload's write and its
+    /// clear can leave a shadow candidate; if it stayed under the old stem, the
+    /// next user to take the freed name would inherit a stale format.
+    #[test]
+    fn moving_an_avatar_carries_every_candidate_to_the_new_stem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = UserId::from_name("Alice").to_string();
+        let new = UserId::from_name("Alicia").to_string();
+        std::fs::write(
+            librefang_types::media::avatar_path(dir.path(), &old, "png"),
+            b"png",
+        )
+        .expect("write png");
+        std::fs::write(
+            librefang_types::media::avatar_path(dir.path(), &old, "gif"),
+            b"gif",
+        )
+        .expect("write gif");
+
+        move_user_avatar(dir.path(), "Alice", "Alicia").expect("move");
+
+        assert_eq!(
+            std::fs::read(librefang_types::media::avatar_path(dir.path(), &new, "png"))
+                .expect("png at the new stem"),
+            b"png"
+        );
+        assert_eq!(
+            std::fs::read(librefang_types::media::avatar_path(dir.path(), &new, "gif"))
+                .expect("gif at the new stem"),
+            b"gif"
+        );
+        assert!(
+            librefang_types::media::find_avatar(dir.path(), &old).is_none(),
+            "nothing may be left under the old stem"
+        );
+    }
+
     #[test]
     fn the_etag_tracks_the_content() {
         let png = b"\x89PNG\r\n\x1a\n";
@@ -583,5 +675,18 @@ mod tests {
         let mut changed = png.to_vec();
         changed.push(0);
         assert_ne!(content_hash(png), content_hash(&changed));
+    }
+
+    /// The validator must be a real digest, not FNV-1a.
+    ///
+    /// Pinned to the SHA-256 of the empty string: FNV-1a over the same input is
+    /// `0xcbf29ce484222325`, so a regression to the old hash fails here rather
+    /// than shipping an ETag that is cheap to collide on purpose.
+    #[test]
+    fn the_etag_is_sha256_not_fnv() {
+        assert_eq!(
+            content_hash(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 }
