@@ -306,7 +306,7 @@ pub async fn serve_user_avatar(
     // immediately while an unchanged avatar costs one 304 per page load.
     // `no-cache` means "revalidate", not "do not store" — the route path is
     // fixed per user, so a cache-busting query string would be the alternative.
-    let etag = format!("\"{:016x}\"", content_hash(&bytes));
+    let etag = format!("\"{}\"", content_hash(&bytes));
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
@@ -501,18 +501,21 @@ pub async fn update_user_identity(
     }
 }
 
-/// FNV-1a over the bytes, for the `ETag`.
+/// SHA-256 over the bytes, for the `ETag`.
 ///
-/// A validator only has to change when the content does; it is not a security
-/// claim about the bytes, so this avoids pulling a cryptographic digest into
-/// the request path for a value the client only compares for equality.
-fn content_hash(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
+/// This is emitted as a *strong* validator (no `W/`), which is a claim that two
+/// responses with the same tag are byte-identical. FNV-1a made that claim and
+/// could not support it: its collisions are cheap to construct, so a caller who
+/// can upload avatars could replace an image with one whose tag matched and a
+/// browser that cached the first would keep rendering the superseded picture
+/// (the route sets `no-cache`, so revalidation is the only refresh path). A
+/// real digest costs one pass over at most two MiB — already in memory — and
+/// `sha2` is a dependency of this crate, so there is nothing to trade off.
+fn content_hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -703,5 +706,18 @@ mod tests {
         let mut changed = png.to_vec();
         changed.push(0);
         assert_ne!(content_hash(png), content_hash(&changed));
+    }
+
+    /// The validator must be a real digest, not FNV-1a.
+    ///
+    /// Pinned to the SHA-256 of the empty string: FNV-1a over the same input is
+    /// `0xcbf29ce484222325`, so a regression to the old hash fails here rather
+    /// than shipping an ETag that is cheap to collide on purpose.
+    #[test]
+    fn the_etag_is_sha256_not_fnv() {
+        assert_eq!(
+            content_hash(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 }
