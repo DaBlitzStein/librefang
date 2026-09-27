@@ -61,6 +61,7 @@ import { useModels } from "../lib/queries/models";
 import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
 import { useWhoami } from "../lib/queries/authz";
+import { useModelRoutingInertReason } from "../lib/queries/config";
 import { AgentManifestForm } from "../components/AgentManifestForm";
 import type { ManifestSectionId } from "../components/AgentManifestForm";
 import { sectionForInvalidField } from "../components/AgentManifestForm";
@@ -1252,6 +1253,10 @@ export function AgentsPage() {
         : undefined,
     [mcpServersQuery.data],
   );
+  // #8446: a new agent has no detail payload to carry `routing_inert_reason`, so the form's Routing section reads the kernel mode off the shared config cache, fetched only while the form is open.
+  const routingInertReasonQuery = useModelRoutingInertReason({
+    enabled: showCreate && createMode === "form",
+  });
   const serializedFormToml = useMemo(
     () => serializeManifestForm(formState, formExtras),
     [formState, formExtras],
@@ -1958,6 +1963,10 @@ export function AgentsPage() {
             mcpCatalog={mcpCatalogForForm}
             routerProfileCatalog={routerProfileCatalog}
             routerProfilesEnabled={routerProfilesQuery.data?.enabled}
+            // An existing agent carries the kernel's answer on its detail
+            // payload (#8479), so the Routing section warns from that rather
+            // than from a second config fetch.
+            routingInertReason={agent.routing_inert_reason ?? null}
             // Identity is decided by the panel header's rename control; a
             // second editable Name field here would be a second answer to the
             // same question.
@@ -3876,6 +3885,7 @@ export function AgentsPage() {
                 mcpCatalog={mcpCatalogForForm}
                 routerProfileCatalog={routerProfileCatalog}
                 routerProfilesEnabled={routerProfilesQuery.data?.enabled}
+                routingInertReason={routingInertReasonQuery.data}
               />
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">

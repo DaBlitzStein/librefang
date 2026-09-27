@@ -95,6 +95,9 @@ pub struct OpenAIDriver {
     /// after the first try, so the request is issued at most `max_retries + 1`
     /// times. Sourced from `DriverConfig.max_retries` (default 3).
     max_retries: u32,
+    /// Which of the non-OpenAI samplers (`top_k`, `min_p`, `repeat_penalty`) this endpoint reads, and under which names (#8290).
+    /// Set from the provider name at construction; the default sends none of them.
+    sampler_dialect: LocalSamplerDialect,
 }
 
 impl OpenAIDriver {
@@ -140,6 +143,7 @@ impl OpenAIDriver {
             request_timeout_secs,
             emit_caller_trace_headers: true,
             max_retries: 3,
+            sampler_dialect: LocalSamplerDialect::default(),
         }
     }
 
@@ -189,6 +193,7 @@ impl OpenAIDriver {
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
             max_retries: 3,
+            sampler_dialect: LocalSamplerDialect::default(),
         }
     }
 
@@ -614,6 +619,76 @@ impl OpenAIDriver {
         self.max_retries = max_retries;
         self
     }
+
+    /// Declare which runtime or gateway this endpoint is, so the samplers the OpenAI API lacks reach it (#8290).
+    /// See [`LocalSamplerDialect::for_provider`].
+    pub fn with_sampler_dialect(mut self, dialect: LocalSamplerDialect) -> Self {
+        self.sampler_dialect = dialect;
+        self
+    }
+}
+
+/// The OpenAI-compatible endpoints that read samplers the OpenAI API does not have (#8290).
+///
+/// `top_k`, `min_p` and `repeat_penalty` are not Chat Completions parameters: `api.openai.com` answers an unknown body field with a 400, and hosted gateways differ in whether they reject, ignore or forward one.
+/// So the OpenAI-format driver sends them only to an endpoint known to read them, under the name that endpoint reads, and drops them (logged at `debug`) everywhere else.
+/// There is no `extra_params` route around that drop: `ModelConfig` parses a `top_k` / `min_p` / `repeat_penalty` key onto its typed field, and `ResolvedInferenceParams::apply_to` removes any copy left in the map.
+/// So an endpoint that is not listed here does not receive them at all, which is why OpenRouter is listed: before these were typed, a `top_k` in an OpenRouter agent's `[model]` table reached it through `extra_params`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LocalSamplerDialect {
+    /// Not a known local runtime or listed gateway — `api.openai.com` and every other hosted gateway. None of the three is sent.
+    #[default]
+    Standard,
+    /// llama.cpp `llama-server`: its `/v1/chat/completions` accepts the native `/completion` samplers `top_k`, `min_p` and `repeat_penalty`.
+    LlamaCpp,
+    /// LM Studio: its OpenAI-compatible endpoint documents `top_k` and `repeat_penalty`, and not `min_p`.
+    LmStudio,
+    /// vLLM: `top_k`, `min_p`, and the repetition penalty under its own name, `repetition_penalty`.
+    Vllm,
+    /// OpenRouter: documents `top_k`, `min_p` and `repetition_penalty`, and ignores a parameter the routed model does not support rather than rejecting the request.
+    OpenRouter,
+}
+
+impl LocalSamplerDialect {
+    /// The dialect for a configured provider name.
+    ///
+    /// `vllm`, `lmstudio` and `openrouter` are registry providers.
+    /// llama.cpp has no registry entry, so a custom provider whose name says it is llama.cpp (`llamacpp`, `llama.cpp`, `llama-cpp`, `llama_cpp`, `llama-server`) opts in; any other name is [`Self::Standard`].
+    pub fn for_provider(provider: &str) -> Self {
+        match provider.to_ascii_lowercase().as_str() {
+            "vllm" => Self::Vllm,
+            "openrouter" => Self::OpenRouter,
+            "lmstudio" => Self::LmStudio,
+            "llamacpp" | "llama.cpp" | "llama-cpp" | "llama_cpp" | "llama-server" => Self::LlamaCpp,
+            _ => Self::Standard,
+        }
+    }
+
+    fn accepts_top_k(self) -> bool {
+        !matches!(self, Self::Standard)
+    }
+
+    fn accepts_min_p(self) -> bool {
+        matches!(self, Self::LlamaCpp | Self::Vllm | Self::OpenRouter)
+    }
+
+    /// The wire name of the repetition penalty, when this runtime has one.
+    fn repeat_penalty_key(self) -> Option<RepeatPenaltyKey> {
+        match self {
+            Self::Standard => None,
+            Self::LlamaCpp | Self::LmStudio => Some(RepeatPenaltyKey::RepeatPenalty),
+            Self::Vllm | Self::OpenRouter => Some(RepeatPenaltyKey::RepetitionPenalty),
+        }
+    }
+}
+
+/// The two spellings of the same multiplicative repetition penalty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepeatPenaltyKey {
+    /// llama.cpp and the runtimes built on it.
+    RepeatPenalty,
+    /// vLLM (and Hugging Face `transformers`), and OpenRouter.
+    RepetitionPenalty,
 }
 
 /// Build the merged custom-header map for an outbound OpenAI-driver request.
@@ -657,6 +732,24 @@ struct OaiRequest {
     max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    /// Typed sampling preferences (#8290), omitted for the models whose sampling is fixed — see [`sampling_is_fixed`].
+    /// An `extra_body` entry of the same name still overrides them, as it does every other standard field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frequency_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_penalty: Option<f32>,
+    /// Non-OpenAI samplers, set only for a [`LocalSamplerDialect`] that reads them.
+    /// At most one of `repeat_penalty` / `repetition_penalty` is ever set: they are one parameter under two runtimes' names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeat_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repetition_penalty: Option<f32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OaiTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -979,64 +1072,12 @@ fn temperature_must_be_one(model: &str) -> bool {
     m.starts_with("kimi-k2") || m == "kimi-k2.5" || m == "kimi-k2.5-0711"
 }
 
-/// The three sampling knobs that reach the wire through `extra_body` rather
-/// than a typed request field (#8112's `top_p` / `frequency_penalty` /
-/// `presence_penalty`, built by the runtime's `build_extra_body`).
+/// Whether `top_p` / `frequency_penalty` / `presence_penalty` must be left off for this model (#8290).
 ///
-/// A model that [`rejects_temperature`] rejects these too, with the identical
-/// `unsupported_parameter` error — OpenAI fixes `temperature`, `top_p`, `n`
-/// at 1 and `presence_penalty` / `frequency_penalty` at 0 for reasoning
-/// models, since they don't vary sampling the way chat models do. Only
-/// `temperature` had a proactive-omit and strip-and-retry guard before this;
-/// these three went out unguarded and turned into an unrecoverable 400 on a
-/// reasoning model until an operator cleared the field by hand.
-const EXTRA_BODY_SAMPLING_PARAMS: &[&str] = &["top_p", "frequency_penalty", "presence_penalty"];
-
-/// Drop the [`EXTRA_BODY_SAMPLING_PARAMS`] keys from `extra_body` when the
-/// model is one that [`rejects_temperature`] — same rationale as that
-/// function's own doc comment: proactively omit what the model will 400 on
-/// rather than spend a retry finding out.
-fn strip_rejected_sampling_params(
-    model: &str,
-    extra_body: &mut Option<BTreeMap<String, serde_json::Value>>,
-) {
-    if !rejects_temperature(model) {
-        return;
-    }
-    if let Some(map) = extra_body.as_mut() {
-        for key in EXTRA_BODY_SAMPLING_PARAMS {
-            map.remove(*key);
-        }
-        if map.is_empty() {
-            *extra_body = None;
-        }
-    }
-}
-
-/// Strip the first `extra_body` sampling parameter a reasoning model just
-/// rejected via a `400 unsupported_parameter`, so the retry does not repeat
-/// exactly the request that failed. Mirrors the `temperature` strip-and-retry
-/// arm below, for the three knobs that reach the wire through `extra_body`
-/// instead of a typed field.
-///
-/// Strips at most one key per call, like the `temperature` arm — a request
-/// that named two rejected knobs needs two retries, which the caller's
-/// `attempt < max_retries` loop already affords. Returns the key that was
-/// stripped, for the warning log.
-fn strip_rejected_extra_body_sampling_param(
-    body: &str,
-    extra_body: &mut Option<BTreeMap<String, serde_json::Value>>,
-) -> Option<&'static str> {
-    if !crate::llm_driver::llm_errors::is_unsupported_parameter_error(body) {
-        return None;
-    }
-    let lower = body.to_lowercase();
-    let map = extra_body.as_mut()?;
-    let rejected = *EXTRA_BODY_SAMPLING_PARAMS
-        .iter()
-        .find(|k| lower.contains(**k) && map.contains_key(**k))?;
-    map.remove(rejected);
-    Some(rejected)
+/// The reasoning models that reject `temperature` reject the rest of the sampling set with the same `unsupported_parameter` 400, and the Kimi K2 line pins every sampler to a fixed value and errors on any other.
+/// Both are the same fact — this model's sampling is not tunable — so both predicates feed one gate rather than each parameter growing its own model list.
+fn sampling_is_fixed(model: &str) -> bool {
+    rejects_temperature(model) || temperature_must_be_one(model)
 }
 
 #[derive(Debug, Serialize)]
@@ -1556,12 +1597,50 @@ impl OpenAIDriver {
             (Some(request.max_tokens), None)
         };
 
-        let mut extra_body = request.extra_body.clone();
-        // #8112: reasoning models reject `top_p` / `frequency_penalty` /
-        // `presence_penalty` exactly like they reject `temperature` — proactively
-        // drop them here instead of spending a retry to find out, same as
-        // `rejects_temperature` a few lines below already does for `temperature`.
-        strip_rejected_sampling_params(&request.model, &mut extra_body);
+        let extra_body = request.extra_body.clone();
+
+        let sampling_fixed = sampling_is_fixed(&request.model);
+        let sampling = |value: Option<f32>| value.filter(|_| !sampling_fixed);
+        let dialect = self.sampler_dialect;
+        let top_k = request
+            .top_k
+            .filter(|_| !sampling_fixed && dialect.accepts_top_k());
+        let min_p = sampling(request.min_p).filter(|_| dialect.accepts_min_p());
+        let repeat = sampling(request.repeat_penalty);
+        let (repeat_penalty, repetition_penalty) = match dialect.repeat_penalty_key() {
+            Some(RepeatPenaltyKey::RepeatPenalty) => (repeat, None),
+            Some(RepeatPenaltyKey::RepetitionPenalty) => (None, repeat),
+            None => (None, None),
+        };
+        {
+            use super::sampling::wide;
+            // Everything the caller set that is not going out, for the "I set it and nothing changed" question.
+            let dropped = |set: Option<f64>, sent: bool| set.filter(|_| !sent);
+            super::sampling::log_dropped(
+                "openai",
+                &request.model,
+                &[
+                    ("top_p", dropped(wide(request.top_p), !sampling_fixed)),
+                    (
+                        "frequency_penalty",
+                        dropped(wide(request.frequency_penalty), !sampling_fixed),
+                    ),
+                    (
+                        "presence_penalty",
+                        dropped(wide(request.presence_penalty), !sampling_fixed),
+                    ),
+                    ("top_k", dropped(wide(request.top_k), top_k.is_some())),
+                    ("min_p", dropped(wide(request.min_p), min_p.is_some())),
+                    (
+                        "repeat_penalty",
+                        dropped(
+                            wide(request.repeat_penalty),
+                            repeat_penalty.or(repetition_penalty).is_some(),
+                        ),
+                    ),
+                ],
+            );
+        }
 
         // Per-provider reasoning translation (#7946). The mode reaching here is
         // already resolved (per-call > per-agent > global > compiled default) —
@@ -1591,6 +1670,13 @@ impl OpenAIDriver {
             } else {
                 Some(request.temperature)
             },
+            top_p: sampling(request.top_p),
+            frequency_penalty: sampling(request.frequency_penalty),
+            presence_penalty: sampling(request.presence_penalty),
+            top_k,
+            min_p,
+            repeat_penalty,
+            repetition_penalty,
             tools: oai_tools,
             tool_choice,
             stream: false,
@@ -1773,24 +1859,6 @@ impl LlmDriver for OpenAIDriver {
                     ))
                     .await;
                     continue;
-                }
-
-                // #8112: the same reasoning models reject `top_p` /
-                // `frequency_penalty` / `presence_penalty` with the identical
-                // `unsupported_parameter` error, but those reach the wire through
-                // `extra_body` rather than a typed field — same shape as the
-                // `temperature` strip above, just on the map instead of a struct field.
-                if status == 400 && attempt < max_retries {
-                    if let Some(param) =
-                        strip_rejected_extra_body_sampling_param(&body, &mut oai_request.extra_body)
-                    {
-                        warn!(model = %oai_request.model, param, "Stripping unsupported extra_body sampling param for this model");
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            100 * (attempt as u64 + 1),
-                        ))
-                        .await;
-                        continue;
-                    }
                 }
 
                 // A gateway that will not forward the reasoning control rejects the request before the model sees it (#7769).
@@ -2247,22 +2315,6 @@ impl LlmDriver for OpenAIDriver {
                     ))
                     .await;
                     continue;
-                }
-
-                // #8112: same reasoning models, same `unsupported_parameter` error,
-                // for the three sampling knobs that reach the wire through
-                // `extra_body` instead of a typed field. See the non-streaming arm above.
-                if status == 400 && attempt < max_retries {
-                    if let Some(param) =
-                        strip_rejected_extra_body_sampling_param(&body, &mut oai_request.extra_body)
-                    {
-                        warn!(model = %oai_request.model, param, "Stripping unsupported extra_body sampling param for this model (stream)");
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            100 * (attempt as u64 + 1),
-                        ))
-                        .await;
-                        continue;
-                    }
                 }
 
                 // A gateway that will not forward the reasoning control rejects the request before the model sees it (#7769).
@@ -3400,97 +3452,6 @@ mod tests {
         assert!(!rejects_temperature("plain-model-placeholder"));
         assert!(!rejects_temperature("llama-3.3-70b-versatile"));
         assert!(!rejects_temperature("deepseek-chat"));
-    }
-
-    // ----- #8112: extra_body sampling params on reasoning models -----
-
-    #[test]
-    fn test_strip_rejected_sampling_params_drops_all_three_for_a_reasoning_model() {
-        let mut extra_body = Some(BTreeMap::from([
-            ("top_p".to_string(), serde_json::json!(0.9)),
-            ("frequency_penalty".to_string(), serde_json::json!(0.5)),
-            ("presence_penalty".to_string(), serde_json::json!(-0.5)),
-            ("enable_memory".to_string(), serde_json::json!(true)),
-        ]));
-        strip_rejected_sampling_params("o3-mini", &mut extra_body);
-        let map = extra_body.expect("enable_memory must survive, so the map is not emptied");
-        assert!(!map.contains_key("top_p"));
-        assert!(!map.contains_key("frequency_penalty"));
-        assert!(!map.contains_key("presence_penalty"));
-        assert_eq!(map.get("enable_memory"), Some(&serde_json::json!(true)));
-    }
-
-    #[test]
-    fn test_strip_rejected_sampling_params_empties_to_none_when_nothing_else_remains() {
-        let mut extra_body = Some(BTreeMap::from([(
-            "top_p".to_string(),
-            serde_json::json!(0.9),
-        )]));
-        strip_rejected_sampling_params("o1", &mut extra_body);
-        assert!(
-            extra_body.is_none(),
-            "an extra_body left empty by the strip must become None, not Some({{}})"
-        );
-    }
-
-    #[test]
-    fn test_strip_rejected_sampling_params_leaves_normal_models_untouched() {
-        let mut extra_body = Some(BTreeMap::from([(
-            "top_p".to_string(),
-            serde_json::json!(0.9),
-        )]));
-        strip_rejected_sampling_params("gpt-4o", &mut extra_body);
-        assert_eq!(
-            extra_body,
-            Some(BTreeMap::from([(
-                "top_p".to_string(),
-                serde_json::json!(0.9)
-            )]))
-        );
-    }
-
-    #[test]
-    fn test_strip_rejected_extra_body_sampling_param_removes_the_named_key() {
-        let mut extra_body = Some(BTreeMap::from([
-            ("top_p".to_string(), serde_json::json!(0.9)),
-            ("frequency_penalty".to_string(), serde_json::json!(0.5)),
-        ]));
-        let body = r#"{"error":{"message":"Unsupported parameter: 'top_p' is not supported with this model.","type":"invalid_request_error","param":"top_p","code":"unsupported_parameter"}}"#;
-        let stripped = strip_rejected_extra_body_sampling_param(body, &mut extra_body);
-        assert_eq!(stripped, Some("top_p"));
-        let map = extra_body.expect("frequency_penalty must survive");
-        assert!(!map.contains_key("top_p"));
-        assert_eq!(map.get("frequency_penalty"), Some(&serde_json::json!(0.5)));
-    }
-
-    #[test]
-    fn test_strip_rejected_extra_body_sampling_param_ignores_unrelated_400() {
-        let mut extra_body = Some(BTreeMap::from([(
-            "top_p".to_string(),
-            serde_json::json!(0.9),
-        )]));
-        let body = r#"{"error":{"message":"invalid JSON","type":"invalid_request_error"}}"#;
-        assert_eq!(
-            strip_rejected_extra_body_sampling_param(body, &mut extra_body),
-            None
-        );
-        assert_eq!(
-            extra_body,
-            Some(BTreeMap::from([(
-                "top_p".to_string(),
-                serde_json::json!(0.9)
-            )]))
-        );
-    }
-
-    #[test]
-    fn test_strip_rejected_extra_body_sampling_param_none_when_map_absent() {
-        let mut extra_body = None;
-        let body = r#"{"error":{"message":"Unsupported parameter: 'top_p'","code":"unsupported_parameter"}}"#;
-        assert_eq!(
-            strip_rejected_extra_body_sampling_param(body, &mut extra_body),
-            None
-        );
     }
 
     // ----- uses_completion_tokens tests -----
@@ -4867,6 +4828,13 @@ mod tests {
             max_tokens: Some(4096),
             max_completion_tokens: None,
             temperature: Some(0.7),
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_k: None,
+            min_p: None,
+            repeat_penalty: None,
+            repetition_penalty: None,
             tools: vec![],
             tool_choice: None,
             stream: false,
@@ -4920,6 +4888,13 @@ mod tests {
                 max_tokens: Some(4096),
                 max_completion_tokens: None,
                 temperature: Some(0.7),
+                top_p: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                top_k: None,
+                min_p: None,
+                repeat_penalty: None,
+                repetition_penalty: None,
                 tools: vec![],
                 tool_choice: None,
                 stream: false,
@@ -4960,6 +4935,230 @@ mod tests {
         );
     }
 
+    /// A `CompletionRequest` with every typed sampling parameter set, for the #8290 wire tests.
+    fn sampling_request(model: &str) -> librefang_llm_driver::CompletionRequest {
+        librefang_llm_driver::CompletionRequest {
+            model: model.to_string(),
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message::user("hi")]),
+            max_tokens: 128,
+            temperature: 0.7,
+            top_p: Some(0.9),
+            frequency_penalty: Some(0.5),
+            presence_penalty: Some(-0.25),
+            ..Default::default()
+        }
+    }
+
+    /// The wire body exactly as `complete()` / `stream()` send it: serialized, then `extra_body` merged on top.
+    fn sent_body(req: &librefang_llm_driver::CompletionRequest) -> serde_json::Value {
+        let driver = OpenAIDriver::new(String::new(), "https://api.openai.com/v1".to_string());
+        let oai = driver.build_request(req).expect("build_request");
+        let mut body = serde_json::to_value(&oai).unwrap();
+        merge_extra_body(&oai.extra_body, &mut body);
+        body
+    }
+
+    /// #8290: the typed sampling parameters are top-level Chat Completions fields.
+    #[test]
+    fn sampling_params_are_top_level_fields() {
+        let body = sent_body(&sampling_request("gpt-4o"));
+        assert_eq!(body["top_p"], serde_json::json!(0.9_f32));
+        assert_eq!(body["frequency_penalty"], serde_json::json!(0.5_f32));
+        assert_eq!(body["presence_penalty"], serde_json::json!(-0.25_f32));
+        assert_eq!(body["temperature"], serde_json::json!(0.7_f32));
+
+        // Unset stays off the wire rather than serializing as null.
+        let body = sent_body(&librefang_llm_driver::CompletionRequest {
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            ..sampling_request("gpt-4o")
+        });
+        for key in ["top_p", "frequency_penalty", "presence_penalty"] {
+            assert!(body.get(key).is_none(), "{key}: {body}");
+        }
+    }
+
+    /// Reasoning models reject the whole sampling set with a 400, and the Kimi K2 line errors on any non-default sampler.
+    /// While these parameters travelled in `extra_body` they were forwarded to both unfiltered.
+    #[test]
+    fn sampling_params_are_dropped_for_models_with_fixed_sampling() {
+        for model in ["o3-mini", "o1", "o4-mini", "gpt-5-mini", "kimi-k2.5"] {
+            let body = sent_body(&sampling_request(model));
+            for key in ["top_p", "frequency_penalty", "presence_penalty"] {
+                assert!(body.get(key).is_none(), "{model} got {key}: {body}");
+            }
+        }
+    }
+
+    /// The wire body for `req` from a driver declared as `dialect`.
+    fn sent_body_as(
+        dialect: LocalSamplerDialect,
+        req: &librefang_llm_driver::CompletionRequest,
+    ) -> serde_json::Value {
+        let driver = OpenAIDriver::new(String::new(), "http://127.0.0.1:8000/v1".to_string())
+            .with_sampler_dialect(dialect);
+        let oai = driver.build_request(req).expect("build_request");
+        let mut body = serde_json::to_value(&oai).unwrap();
+        merge_extra_body(&oai.extra_body, &mut body);
+        body
+    }
+
+    /// A request with the three local-runtime samplers set (#8290 part 2).
+    fn local_sampler_request(model: &str) -> librefang_llm_driver::CompletionRequest {
+        librefang_llm_driver::CompletionRequest {
+            top_k: Some(40),
+            min_p: Some(0.05),
+            repeat_penalty: Some(1.1),
+            ..sampling_request(model)
+        }
+    }
+
+    const LOCAL_SAMPLER_KEYS: [&str; 4] =
+        ["top_k", "min_p", "repeat_penalty", "repetition_penalty"];
+
+    /// #8290 part 2: `top_k` / `min_p` / `repeat_penalty` are not Chat Completions parameters, and `api.openai.com` answers an unknown body field with a 400.
+    /// The default dialect — every provider that is not a known local runtime — sends none of them, while the standard samplers still go out.
+    #[test]
+    fn local_samplers_are_not_sent_to_a_standard_endpoint() {
+        let body = sent_body(&local_sampler_request("gpt-4o"));
+        for key in LOCAL_SAMPLER_KEYS {
+            assert!(body.get(key).is_none(), "{key}: {body}");
+        }
+        assert_eq!(body["top_p"], serde_json::json!(0.9_f32));
+    }
+
+    /// llama.cpp's `llama-server` reads its native samplers on `/v1/chat/completions`, under llama.cpp's own names.
+    #[test]
+    fn llama_cpp_gets_top_k_min_p_and_repeat_penalty() {
+        let body = sent_body_as(
+            LocalSamplerDialect::LlamaCpp,
+            &local_sampler_request("qwen3-8b"),
+        );
+        assert_eq!(body["top_k"], serde_json::json!(40));
+        assert_eq!(body["min_p"], serde_json::json!(0.05_f32));
+        assert_eq!(body["repeat_penalty"], serde_json::json!(1.1_f32));
+        assert!(body.get("repetition_penalty").is_none(), "{body}");
+    }
+
+    /// LM Studio documents `top_k` and `repeat_penalty` on its OpenAI-compatible endpoint, and not `min_p`, so `min_p` is dropped rather than guessed at.
+    #[test]
+    fn lm_studio_gets_top_k_and_repeat_penalty_but_no_min_p() {
+        let body = sent_body_as(
+            LocalSamplerDialect::LmStudio,
+            &local_sampler_request("qwen3-8b"),
+        );
+        assert_eq!(body["top_k"], serde_json::json!(40));
+        assert_eq!(body["repeat_penalty"], serde_json::json!(1.1_f32));
+        assert!(body.get("min_p").is_none(), "{body}");
+        assert!(body.get("repetition_penalty").is_none(), "{body}");
+    }
+
+    /// vLLM spells the same penalty `repetition_penalty`; a `repeat_penalty` key would be ignored there, so the driver renames it and never sends both.
+    #[test]
+    fn vllm_gets_the_penalty_under_its_own_name() {
+        let body = sent_body_as(
+            LocalSamplerDialect::Vllm,
+            &local_sampler_request("qwen3-8b"),
+        );
+        assert_eq!(body["top_k"], serde_json::json!(40));
+        assert_eq!(body["min_p"], serde_json::json!(0.05_f32));
+        assert_eq!(body["repetition_penalty"], serde_json::json!(1.1_f32));
+        assert!(body.get("repeat_penalty").is_none(), "{body}");
+    }
+
+    /// OpenRouter documents all three, with the penalty under the `repetition_penalty` name, and ignores one the routed model lacks.
+    /// Before the samplers were typed, a `top_k` in an OpenRouter agent's `[model]` table reached it through `extra_params`; the typed path has to keep sending it, because no other path is left.
+    #[test]
+    fn openrouter_gets_all_three_with_the_penalty_as_repetition_penalty() {
+        let body = sent_body_as(
+            LocalSamplerDialect::OpenRouter,
+            &local_sampler_request("meta-llama/llama-3.3-70b-instruct"),
+        );
+        assert_eq!(body["top_k"], serde_json::json!(40));
+        assert_eq!(body["min_p"], serde_json::json!(0.05_f32));
+        assert_eq!(body["repetition_penalty"], serde_json::json!(1.1_f32));
+        assert!(body.get("repeat_penalty").is_none(), "{body}");
+    }
+
+    /// The fixed-sampling gate from part 1 covers the new samplers too, whatever the dialect, and unset values stay off the wire.
+    #[test]
+    fn local_samplers_respect_fixed_sampling_and_unset() {
+        for dialect in [
+            LocalSamplerDialect::LlamaCpp,
+            LocalSamplerDialect::LmStudio,
+            LocalSamplerDialect::Vllm,
+            LocalSamplerDialect::OpenRouter,
+        ] {
+            let body = sent_body_as(dialect, &local_sampler_request("o3-mini"));
+            for key in LOCAL_SAMPLER_KEYS {
+                assert!(
+                    body.get(key).is_none(),
+                    "{dialect:?} o3-mini got {key}: {body}"
+                );
+            }
+            let body = sent_body_as(dialect, &sampling_request("qwen3-8b"));
+            for key in LOCAL_SAMPLER_KEYS {
+                assert!(
+                    body.get(key).is_none(),
+                    "{dialect:?} sent unset {key}: {body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sampler_dialect_follows_the_provider_name() {
+        assert_eq!(
+            LocalSamplerDialect::for_provider("vllm"),
+            LocalSamplerDialect::Vllm
+        );
+        assert_eq!(
+            LocalSamplerDialect::for_provider("lmstudio"),
+            LocalSamplerDialect::LmStudio
+        );
+        assert_eq!(
+            LocalSamplerDialect::for_provider("openrouter"),
+            LocalSamplerDialect::OpenRouter
+        );
+        for name in [
+            "llamacpp",
+            "llama.cpp",
+            "llama-cpp",
+            "llama_cpp",
+            "llama-server",
+            "LlamaCpp",
+        ] {
+            assert_eq!(
+                LocalSamplerDialect::for_provider(name),
+                LocalSamplerDialect::LlamaCpp,
+                "{name}"
+            );
+        }
+        for name in ["openai", "groq", "together", "azure-openai", "nvidia"] {
+            assert_eq!(
+                LocalSamplerDialect::for_provider(name),
+                LocalSamplerDialect::Standard,
+                "{name}"
+            );
+        }
+    }
+
+    /// `extra_params` stays the escape hatch: an explicit entry still wins over the typed value, as it does for every other standard field.
+    #[test]
+    fn extra_body_still_overrides_typed_sampling_params() {
+        let mut extra = BTreeMap::new();
+        extra.insert("top_p".to_string(), serde_json::json!(0.3));
+        extra.insert("enable_memory".to_string(), serde_json::json!(true));
+        let body = sent_body(&librefang_llm_driver::CompletionRequest {
+            extra_body: Some(extra),
+            ..sampling_request("qwen3.6")
+        });
+        assert_eq!(body["top_p"], serde_json::json!(0.3));
+        assert_eq!(body["enable_memory"], serde_json::json!(true));
+        assert_eq!(body.to_string().matches("\"top_p\"").count(), 1, "{body}");
+    }
+
     #[test]
     fn test_oai_request_extra_body_none_skipped() {
         let req = OaiRequest {
@@ -4974,6 +5173,13 @@ mod tests {
             max_tokens: Some(100),
             max_completion_tokens: None,
             temperature: Some(0.5),
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_k: None,
+            min_p: None,
+            repeat_penalty: None,
+            repetition_penalty: None,
             tools: vec![],
             tool_choice: None,
             stream: false,

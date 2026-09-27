@@ -228,7 +228,13 @@ export interface SkillItem {
   runtime?: string;
   enabled?: boolean;
   author?: string;
+  /** Number of tools the skill provides. */
   tools_count?: number;
+  /** Built-in tools the skill needs granted (manifest `[requirements]`); empty when it declares none. */
+  required_tools?: string[];
+  required_tools_count?: number;
+  /** Host capabilities the skill needs granted (manifest `[requirements]`); empty when it declares none. */
+  required_capabilities?: string[];
   tags?: string[];
   source?: {
     type?: string;
@@ -276,7 +282,12 @@ export interface SkillDetail {
   license: string;
   tags: string[];
   runtime: string;
+  /** Tools the skill provides. */
   tools: SkillToolInfo[];
+  /** Built-in tools the skill needs granted (manifest `[requirements]`); empty when it declares none. */
+  required_tools: string[];
+  /** Host capabilities the skill needs granted (manifest `[requirements]`); empty when it declares none. */
+  required_capabilities: string[];
   has_prompt_context: boolean;
   prompt_context_length: number;
   prompt_context?: string | null;
@@ -1496,6 +1507,9 @@ export interface AgentModelDetail {
   top_p?: number | null;
   frequency_penalty?: number | null;
   presence_penalty?: number | null;
+  top_k?: number | null;
+  min_p?: number | null;
+  repeat_penalty?: number | null;
   /** Endpoint limits rather than sampling preferences. */
   context_window?: number | null;
   max_output_tokens?: number | null;
@@ -1553,6 +1567,8 @@ export interface AgentDetail {
   source_template?: string;
   /** Tokens the daemon injects into every request for this agent — identity, tools, skills (#7976). */
   injected_footprint_tokens?: number;
+  /** See {@link ModelRoutingInertReason}. `null` when routing is live. */
+  routing_inert_reason?: ModelRoutingInertReason | null;
 }
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
@@ -1645,6 +1661,9 @@ export async function patchAgentConfig(
     top_p?: number | null;
     frequency_penalty?: number | null;
     presence_penalty?: number | null;
+    top_k?: number | null;
+    min_p?: number | null;
+    repeat_penalty?: number | null;
     context_window?: number | null;
     max_output_tokens?: number | null;
     web_search_augmentation?: "off" | "auto" | "always";
@@ -2342,12 +2361,22 @@ export async function restoreAgentTypeFromRegistry(
 // Template version history
 // ---------------------------------------------------------------------------
 
+/**
+ * What produced a stored version, as the server writes it.
+ *
+ * `create`, `dashboard` and `restore` are the `record_template_version` call sites in `routes/agent_templates.rs`; `toml` is reserved for the raw-TOML save path that #8028 adds, so the label is ready before that producer lands; `unknown` is the SQLite column default (`crates/librefang-memory/src/migration.rs`), which no producer writes but an older row can carry.
+ * Every entry needs an `agentTypes.change_source.<value>` locale key — render through `changeSourceLabel` in `lib/changeSource.ts`, never the raw token.
+ */
+export const CHANGE_SOURCES = ["create", "dashboard", "restore", "toml", "unknown"] as const;
+export type ChangeSource = (typeof CHANGE_SOURCES)[number];
+
 export interface TemplateVersionEntry {
   id: number;
   template_name: string;
   timestamp: string;
   manifest_toml: string;
-  change_source: string;
+  // The column is free text on the server, so a producer this list does not know yet still type-checks and renders verbatim.
+  change_source: ChangeSource | (string & {});
 }
 
 export async function getTemplateHistory(
@@ -2629,6 +2658,37 @@ export async function listModelRouterProfiles(): Promise<ModelRouterProfiles> {
   return get<ModelRouterProfiles>("/api/model-router/profiles");
 }
 
+export interface AgentModelRouting {
+  mode: "fixed" | "flexible";
+  allowed_profiles: string[];
+  cost_budget?: CostTier | null;
+  default_profile?: string | null;
+  /// Per-agent router opt-out (#7781 review). `true` means the router never
+  /// touches this agent even in `flexible` mode — surfaced so the panel can
+  /// warn an operator their allowlist/budget edits have no effect.
+  fixed?: boolean;
+  /** Why the kernel will not route this agent's model whatever is stored here, or `null` when routing is live (#8446).
+   *  Response-only: the server ignores it on a PUT. */
+  routing_inert_reason?: ModelRoutingInertReason | null;
+  /** `agent.toml: pinned_model` — what Stable mode runs instead of any routed choice; `null` means the manifest model. Response-only. */
+  pinned_model?: string | null;
+}
+
+/** Why no router chooses an agent's model (#8446).
+ *  `"stable_mode"`: the kernel runs in Stable mode, which freezes model choice to `pinned_model` (else the manifest model) and runs neither the profile router nor the tier router. */
+export type ModelRoutingInertReason = "stable_mode";
+
+export async function getAgentModelRouting(agentId: string): Promise<AgentModelRouting> {
+  return get<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`);
+}
+
+export async function updateAgentModelRouting(
+  agentId: string,
+  routing: AgentModelRouting,
+): Promise<AgentModelRouting> {
+  return put<AgentModelRouting>(`/api/agents/${encodeURIComponent(agentId)}/model_routing`, routing);
+}
+
 export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {
   const query = new URLSearchParams();
   if (params?.provider) query.set("provider", params.provider);
@@ -2667,6 +2727,9 @@ export interface ModelOverrides {
   max_tokens?: number;
   frequency_penalty?: number;
   presence_penalty?: number;
+  top_k?: number;
+  min_p?: number;
+  repeat_penalty?: number;
   reasoning_effort?: string;
   use_max_completion_tokens?: boolean;
   no_system_role?: boolean;

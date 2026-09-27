@@ -13,6 +13,7 @@ import {
   generateUid,
 } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
+import type { ModelRoutingInertReason } from "../api";
 
 /// The tri-state caption for a memory capability field (#7749 review):
 /// `null` is the omitted key (unrestricted), `[]` is the declared-empty deny.
@@ -245,6 +246,11 @@ interface AgentManifestFormProps {
    * indistinguishable from no error.
    */
   advanced?: boolean;
+  /**
+   * Why the kernel will not run the tier router this section configures (#8446).
+   * `"stable_mode"` shows a warning in the Routing section; absent or `null` means routing is live.
+   */
+  routingInertReason?: ModelRoutingInertReason | null;
 }
 
 /**
@@ -343,6 +349,7 @@ export function AgentManifestForm({
   routerProfileCatalog,
   routerProfilesEnabled,
   nameField = "editable",
+  routingInertReason,
   sections,
   advanced = false,
 }: AgentManifestFormProps) {
@@ -656,6 +663,24 @@ export function AgentManifestForm({
             value={value.model.presence_penalty}
             onChange={(next) => updateModel({ presence_penalty: next })}
             invalid={invalidFields.has("model.presence_penalty")}
+          />
+        </div>
+        <p className="text-[11px] text-text-dim">{t("model_param.local_samplers_hint")}</p>
+        <div className="grid grid-cols-2 gap-3">
+          <ModelParamField
+            param="top_k"
+            value={value.model.top_k}
+            onChange={(next) => updateModel({ top_k: next })}
+          />
+          <ModelParamField
+            param="min_p"
+            value={value.model.min_p}
+            onChange={(next) => updateModel({ min_p: next })}
+          />
+          <ModelParamField
+            param="repeat_penalty"
+            value={value.model.repeat_penalty}
+            onChange={(next) => updateModel({ repeat_penalty: next })}
           />
         </div>
         <ModelParamField
@@ -2053,6 +2078,11 @@ export function AgentManifestForm({
       </FormSection>
 
       <FormSection id="routing" shows={shows} title={t("agents.form.routing")} defaultOpen={false}>
+        {routingInertReason === "stable_mode" && (
+          <div className="mb-2">
+            <ExtrasOverrideHint message={t("agents.form.routing_stable_inert")} />
+          </div>
+        )}
         <Toggle
           label={t("agents.form.routing_enabled")}
           checked={value.routing.enabled}

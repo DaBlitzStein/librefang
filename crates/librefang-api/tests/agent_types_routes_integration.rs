@@ -1979,3 +1979,6 @@ async fn templates_list_flags_from_registry_per_row() {
     cleanup(unsynced);
     cleanup(live);
 }
+// ---------------------------------------------------------------------------
+// The raw-TOML write path (#8028)
+// ---------------------------------------------------------------------------

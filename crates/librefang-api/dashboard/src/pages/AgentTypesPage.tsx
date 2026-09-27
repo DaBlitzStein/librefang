@@ -2,7 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Edit2, ExternalLink, History, LayoutTemplate, Lock, Plus, RotateCcw, Share2, ShieldCheck, Trash2 } from "lucide-react";
-import type { AgentTemplate, TemplateVersionEntry } from "../api";
+import type {
+  AgentTemplate,
+  TemplateVersionEntry,
+} from "../api";
 import { useAgentType, useAgentTypeRegistryDiff, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
@@ -10,6 +13,7 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useMcpServers } from "../lib/queries/mcp";
 import { useModelRouterProfiles } from "../lib/queries/modelRouter";
+import { useModelRoutingInertReason } from "../lib/queries/config";
 import {
   useCreateAgentTypeFromToml,
   useDeleteAgentType,
@@ -42,6 +46,7 @@ import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { ApiError } from "../lib/http/errors";
 import { copyToClipboard } from "../lib/clipboard";
+import { changeSourceLabel } from "../lib/changeSource";
 
 const inputClass =
   "w-full rounded-lg border border-border-subtle bg-main/40 px-2.5 py-1.5 text-[13px] " +
@@ -88,6 +93,9 @@ function AgentTypeEditor({
   const skillsQuery = useSkills();
   const mcpServersQuery = useMcpServers();
   const routerProfilesQuery = useModelRouterProfiles();
+  // #8446: a template has no running agent to carry `routing_inert_reason`, so the Routing section reads the kernel-wide mode off the shared config cache, as the agent create form does.
+  // The editor is mounted only while open, so this fetches nothing until then.
+  const routingInertReasonQuery = useModelRoutingInertReason();
 
   const [newName, setNewName] = useState("");
   const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
@@ -244,6 +252,7 @@ function AgentTypeEditor({
             mcpCatalog={mcpCatalog}
             routerProfileCatalog={routerProfileCatalog}
             routerProfilesEnabled={routerProfilesQuery.data?.enabled}
+            routingInertReason={routingInertReasonQuery.data}
             nameField={isCreate ? "hidden" : "readonly"}
           />
 
@@ -507,6 +516,23 @@ function versionTimestamp(v: TemplateVersionEntry): string {
   return new Date(v.timestamp + "Z").toLocaleString();
 }
 
+/**
+ * Render one side of a registry-diff row as text.
+ *
+ * Six of the twelve fields the diff compares are string lists, so the array
+ * case is the common one here, not an edge case: rendering `tools` as
+ * `["read_file","write_file"]` spends most of a 200px truncating cell on
+ * quotes and brackets, where `read_file, write_file` fits.
+ *
+ * An absent `provider` or `model` arrives as JSON `null`, which stringifies to
+ * the literal word `null` and reads as a value the operator set rather than
+ * one that is not there — an em dash, matching the empty-list case, says
+ * "nothing" in the one way the table already uses.
+ *
+ * Anything else falls back to JSON rather than `String(value)`, which would
+ * flatten a structured value to `[object Object]` and hide the difference the
+ * row exists to show.
+ */
 function TemplateHistoryModal({
   name,
   onClose,
@@ -570,7 +596,9 @@ function TemplateHistoryModal({
                   <span className="text-[12px] font-medium text-text-main">
                     {versionTimestamp(v)}
                   </span>
-                  <Badge variant="default" className="ml-2">{v.change_source}</Badge>
+                  <Badge variant="default" className="ml-2" title={v.change_source}>
+                    {changeSourceLabel(t, v.change_source)}
+                  </Badge>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
                   <button
@@ -610,7 +638,7 @@ function TemplateHistoryModal({
         message={t("agentTypes.confirm_restore", {
           name,
           timestamp: pendingRestore ? versionTimestamp(pendingRestore) : "",
-          source: pendingRestore?.change_source ?? "",
+          source: pendingRestore ? changeSourceLabel(t, pendingRestore.change_source) : "",
         })}
         tone="destructive"
       />

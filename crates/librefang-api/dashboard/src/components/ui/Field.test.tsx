@@ -54,6 +54,19 @@ describe("Field", () => {
     expect(screen.getByRole("textbox")).not.toBeRequired();
   });
 
+  it("keeps the required asterisk out of the control's accessible name", () => {
+    render(
+      <Field label="Name" htmlFor="name" required>
+        <input id="name" />
+      </Field>,
+    );
+    expect(screen.getByText("*")).toHaveAttribute("aria-hidden", "true");
+    // The accessible name is "Name", not "Name*". `getByRole` resolves it
+    // through the accessibility tree (which drops `aria-hidden` decoration),
+    // unlike `getByLabelText`, whose matcher reads raw text content.
+    expect(screen.getByRole("textbox", { name: "Name" })).toBeInTheDocument();
+  });
+
   it("renders the error only when the field is also marked invalid", () => {
     const { rerender } = render(
       <Field label="Name" error="Required">

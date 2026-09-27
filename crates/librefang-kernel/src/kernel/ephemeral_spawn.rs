@@ -1017,3 +1017,26 @@ mod model_override_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod ephemeral_session_tests {
+    use super::new_ephemeral_session;
+    use librefang_types::agent::AgentId;
+
+    /// Regression for #7991 review: the ephemeral worker's session is
+    /// `incognito`, so `save_session` is never called on it — nothing
+    /// downstream can ever read a `parent_session_id` stamped here. Pins
+    /// the value at the point of construction, since no round-trip
+    /// through the database can distinguish the two (both leave
+    /// `sessions` untouched either way).
+    #[test]
+    fn ephemeral_session_has_no_parent_session_id() {
+        let session = new_ephemeral_session(AgentId::new(), "test mission".to_string());
+        assert!(
+            session.parent_session_id.is_none(),
+            "an ephemeral worker's session is never persisted (incognito=true \
+             suppresses save_session), so a parent pointer here is a write \
+             nobody reads and falsely implies lineage `children_of` could find"
+        );
+    }
+}

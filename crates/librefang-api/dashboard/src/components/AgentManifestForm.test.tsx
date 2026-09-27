@@ -50,6 +50,7 @@ function Harness({
   providers = [{ name: "openai" }],
   nameField,
   sections,
+  routingInertReason,
   onState,
 }: {
   skillCatalog?: ManifestCatalogEntry[];
@@ -63,6 +64,7 @@ function Harness({
   providers?: { name: string }[];
   nameField?: "editable" | "readonly" | "hidden";
   sections?: ManifestSectionId[];
+  routingInertReason?: "stable_mode" | null;
   /** Receives every state the form produces, so a test can read what would be saved. */
   onState?: (next: ManifestFormState) => void;
 }) {
@@ -85,6 +87,7 @@ function Harness({
       routerProfilesEnabled={routerProfilesEnabled}
       nameField={nameField}
       sections={sections}
+      routingInertReason={routingInertReason}
     />
   );
 }
@@ -407,6 +410,9 @@ describe("AgentManifestForm — inference parameters", () => {
       "model_param.top_p",
       "model_param.frequency_penalty",
       "model_param.presence_penalty",
+      "model_param.top_k",
+      "model_param.min_p",
+      "model_param.repeat_penalty",
     ]) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
@@ -438,6 +444,9 @@ describe("AgentManifestForm — inference parameters", () => {
       "top_p",
       "frequency_penalty",
       "presence_penalty",
+      "top_k",
+      "min_p",
+      "repeat_penalty",
     ]) {
       const field = screen.getByText(`model_param.${param}`).closest("div") as HTMLElement;
       expect(within(field).getByRole("button", { name: "model_param.inherit" })).toHaveAttribute(
@@ -483,7 +492,7 @@ describe("AgentManifestForm — inference parameters", () => {
     const user = userEvent.setup();
     render(<Harness />);
 
-    // Scoped to the response-length field: the form now renders seven ladders,
+    // Scoped to the response-length field: the form now renders ten ladders,
     // so an unscoped "first custom button" is whichever one the layout happens
     // to put first.
     const lengthField = screen.getByText("model_param.max_tokens").closest("div") as HTMLElement;
@@ -1158,5 +1167,20 @@ describe("AgentManifestForm — a validation error opens its folded section", ()
     expect(
       (document.querySelector('[data-section="skill_workshop"]') as HTMLDetailsElement).open,
     ).toBe(false);
+  });
+});
+
+// #8446: Stable mode runs no router, so a `[routing]` block written here is saved and never applied.
+describe("AgentManifestForm — routing in Stable mode", () => {
+  it("warns in the Routing section that routing has no effect in Stable mode", () => {
+    render(<Harness routingInertReason="stable_mode" />);
+
+    expect(screen.getByText("agents.form.routing_stable_inert")).toBeInTheDocument();
+  });
+
+  it("shows no Stable-mode warning while routing is live", () => {
+    render(<Harness routingInertReason={null} />);
+
+    expect(screen.queryByText("agents.form.routing_stable_inert")).not.toBeInTheDocument();
   });
 });

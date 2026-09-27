@@ -187,7 +187,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) -> bool;
+    ) -> crate::goal_runner::GoalRunStart;
     /// Stop an active goal run. Returns whether a run was stopped.
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
     /// Stop an active goal run from a caller that has already written the goal
@@ -213,7 +213,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) -> bool;
+    ) -> crate::goal_runner::GoalRunStart;
     /// Snapshot the observable state of a goal's run, if one is active.
     fn goal_run_state(
         &self,
@@ -411,6 +411,16 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn persist_manifest_to_disk(&self, agent_id: AgentId);
     fn reload_agent_from_disk(&self, agent_id: AgentId) -> KernelResult<()>;
     fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()>;
+    /// Rename an agent and carry the new name into its IDENTITY.md front matter.
+    /// See [`LibreFangKernel::rename_agent`] for the full contract.
+    fn rename_agent(&self, agent_id: AgentId, new_name: String) -> KernelResult<()>;
+    /// Write an agent's personality into its IDENTITY.md front matter (#8447).
+    /// See [`LibreFangKernel::set_agent_personality`] for the full contract.
+    fn set_agent_personality(
+        &self,
+        agent_id: AgentId,
+        personality: &librefang_types::agent::AgentPersonality,
+    ) -> KernelResult<()>;
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()>;
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()>;
     fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()>;
@@ -1034,7 +1044,7 @@ impl KernelApi for LibreFangKernel {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) -> bool {
+    ) -> crate::goal_runner::GoalRunStart {
         self.goal_run_start(
             goal_id,
             agent_id,
@@ -1063,7 +1073,7 @@ impl KernelApi for LibreFangKernel {
         verify_agent_id: Option<AgentId>,
         verify_max_retries: Option<u32>,
         evaluator_model: Option<String>,
-    ) -> bool {
+    ) -> crate::goal_runner::GoalRunStart {
         self.goal_run_resume(
             goal_id,
             agent_id,
@@ -1313,6 +1323,16 @@ impl KernelApi for LibreFangKernel {
     }
     fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()> {
         Self::update_manifest(self, agent_id, new_manifest)
+    }
+    fn rename_agent(&self, agent_id: AgentId, new_name: String) -> KernelResult<()> {
+        Self::rename_agent(self, agent_id, new_name)
+    }
+    fn set_agent_personality(
+        &self,
+        agent_id: AgentId,
+        personality: &librefang_types::agent::AgentPersonality,
+    ) -> KernelResult<()> {
+        Self::set_agent_personality(self, agent_id, personality)
     }
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()> {
         Self::set_agent_skills(self, agent_id, skills)
