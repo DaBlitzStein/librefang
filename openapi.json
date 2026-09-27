@@ -876,9 +876,12 @@
         ],
         "responses": {
           "200": {
-            "description": "The image",
+            "description": "The image, one of the four sniffable image types",
             "content": {
-              "image/png": {}
+              "image/png": {},
+              "image/jpeg": {},
+              "image/gif": {},
+              "image/webp": {}
             }
           },
           "304": {
@@ -987,6 +990,16 @@
           },
           "423": {
             "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The avatar directory or file could not be written, or the stored avatar reference could not be updated",
             "content": {
               "application/json": {
                 "schema": {
