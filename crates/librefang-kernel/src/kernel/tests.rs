@@ -3527,12 +3527,12 @@ async fn boot_kernel_with_catalog_top_p_override() -> (
 
 /// Every request the mock recorded must carry the catalog's `top_p`.
 ///
-/// Native Ollama nests sampling knobs under `options` (#8112 — see the
-/// ollama.rs fix): a bare top-level `top_p` would mean the merge point
-/// regressed back to the pre-fix behaviour that Ollama silently ignores.
+/// Native Ollama nests sampling knobs under `options` (#8290): a bare
+/// top-level `top_p` would mean the merge point regressed back to the
+/// pre-fix behaviour that Ollama silently ignores.
 /// `f32` widens to `f64` inside the resolved value, so compare with a
 /// tolerance rather than against the `f64` literal (same reasoning as
-/// `test_build_extra_body_merges_typed_sampling_fields` in agent_loop's tests).
+/// `build_request_places_sampling_params_in_options` in the Ollama tests).
 async fn assert_every_request_carries_catalog_top_p(
     backend: &wiremock::MockServer,
     expected: usize,
