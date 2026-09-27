@@ -24,6 +24,7 @@ import {
   isToolAllowed,
   isToolBlocked,
   mcpGroupCardState,
+  mcpServerListsEqual,
   resolveMcpGrantMode,
   toggleMcpServerGrant,
   type McpGroupCardState,
@@ -395,9 +396,20 @@ export function DescriptionSection({
 
   const current = description ?? "";
   const [draft, setDraft] = useState(current);
+  // Follow the persisted value only while the draft is pristine. The parent
+  // re-renders this section after an unrelated save — the full manifest editor
+  // PATCHes the same manifest and `refreshDetailAgent` moves `description` —
+  // and reseeding unconditionally wiped text the operator had typed but not
+  // yet saved (#7835 review). A selection change still reseeds through the
+  // `key` the parent sets on this section.
+  const seeded = useRef(current);
   useEffect(() => {
-    setDraft(current);
-  }, [current]);
+    if (draft !== seeded.current) return; // dirty: keep the operator's text
+    if (current !== seeded.current) {
+      seeded.current = current;
+      setDraft(current);
+    }
+  }, [current, draft]);
 
   const patchAgent = usePatchAgent();
   const dirty = draft !== current;
@@ -1245,6 +1257,14 @@ export function AgentsPage() {
   // parse (the drawer's own TOML source is the server, not a sibling tab),
   // not a bidirectional textarea round-trip.
   const openManifestEditor = () => {
+    // A hand-derived agent's manifest belongs to the Hand definition: the PATCH
+    // succeeds and persists to agent.toml, but the next hand activation
+    // re-materializes the role's manifest and silently reverts the edit
+    // (#7835 review). Opening an editor whose save can only report a lie is
+    // what the rename lock exists to prevent, so gate this entry point the
+    // same way. The button is hidden for hands too; this covers the case where
+    // the selected agent changed while the button was mounted.
+    if (detailAgent?.is_hand) return;
     setManifestEditorSeeded(false);
     setManifestEditorErrors(new Set());
     setManifestEditorParseError(null);
@@ -2288,9 +2308,13 @@ export function AgentsPage() {
     // server-as-of-last-fetch baseline `isMcpDirty` compares against.
     const persistedMcpServers = agent.mcp_servers ?? [];
     const mcpDraftArr = mcpServersDraft ?? persistedMcpServers;
+    // `mcpServerListsEqual`, not `Array.includes`: the kernel matches server
+    // names after `normalizeMcpName`, so revoking and re-granting the same
+    // server under another spelling is not a change to save. A raw includes
+    // marked it dirty and Save rewrote agent.toml with the normalized name
+    // the operator never chose (#7835 review).
     const isMcpDirty = mcpServersDraft !== null &&
-      (mcpServersDraft.length !== persistedMcpServers.length ||
-        mcpServersDraft.some((n) => !persistedMcpServers.includes(n)));
+      !mcpServerListsEqual(mcpServersDraft, persistedMcpServers);
     // The kernel gates MCP on `!mcp_disabled && !mcp_servers.is_empty()`, and `tools_disabled` short-circuits every tool before that.
     // Both hard switches have to fold into "none", or an `mcp_disabled` agent with `mcp_servers = ["*"]` renders as a live grant.
     // Once the operator stages an edit, the mode is re-derived from the draft array alone (mirrors `usesAll`/`isBuiltinDirty` for capabilities_tools) rather than the server's last-known mode string, so a fresh single-server grant reads as "allowlist" immediately instead of staying pinned at the persisted "none".
@@ -2490,6 +2514,13 @@ export function AgentsPage() {
     const pendingMcpServers: string[] = (tabAgentMcpQuery.data?.pending ?? [])
       .slice()
       .sort();
+    // A pending server contributes no tools, so it renders no group card in
+    // either list. Before this the banner was read-only, which left a grant to
+    // a server that failed to connect — a typo in config.toml, or a server
+    // since removed — impossible to undo from the tab that owns MCP grants
+    // (#7835 review). The chips carry the same staged flow as a card: the
+    // draft update arms Save, and a click toggles between revoke and restore.
+    const mcpPendingRevocable = agent.is_hand !== true && !mcpHardDisabled;
 
     // Which list a group belongs to is not one question — see `isGroupAssigned`.
     const groupIsAssigned = ([name, tools]: [string, ToolDefinition[]]) =>
@@ -2595,15 +2626,47 @@ export function AgentsPage() {
                 })}
               </div>
               <div className="flex flex-wrap gap-1.5 mt-2">
-                {pendingMcpServers.map((name) => (
-                  <span
-                    key={name}
-                    className="font-mono text-[10.5px] rounded px-1.5 py-0.5 bg-main/60 border border-border-subtle text-text-main"
-                    data-testid="agent-pending-mcp-item"
-                  >
-                    {name}
-                  </span>
-                ))}
+                {pendingMcpServers.map((name) => {
+                  // Read off the draft, not just the (stale-until-save) query:
+                  // a struck-through chip has been staged for removal, and a
+                  // second click restores the grant.
+                  const staged = isMcpServerGranted(name, mcpDraftArr, mcpModeEffective);
+                  return (
+                    <span
+                      key={name}
+                      className={`font-mono text-[10.5px] rounded px-1.5 py-0.5 bg-main/60 border border-border-subtle text-text-main inline-flex items-center gap-1 ${
+                        staged ? "" : "opacity-50 line-through"
+                      }`}
+                      data-testid="agent-pending-mcp-item"
+                    >
+                      {name}
+                      {mcpPendingRevocable && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setMcpServersDraft((prev) =>
+                              toggleMcpServerGrant(prev ?? persistedMcpServers, name),
+                            )
+                          }
+                          className="text-text-dim hover:text-red-400 transition-colors p-0.5"
+                          title={
+                            staged
+                              ? t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })
+                              : t("agents.detail.tools_remove_group", { defaultValue: "Remove entire group" })
+                          }
+                          aria-label={
+                            staged
+                              ? `${t("common.add", { defaultValue: "Add" })} ${name}`
+                              : `${t("common.remove", { defaultValue: "Remove" })} ${name}`
+                          }
+                          data-testid="agent-pending-mcp-revoke"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -3245,27 +3308,35 @@ export function AgentsPage() {
                   only cover a fraction of AgentManifest's fields — this is
                   the discoverable "long path" to everything else
                   (resources, autonomy, response format, routing, …)
-                  without dropping to SSH + agent.toml. */}
-              <button
-                type="button"
-                onClick={openManifestEditor}
-                className="w-full flex items-center justify-between gap-3 rounded-lg border border-dashed border-brand/40 bg-brand/5 px-4 py-3 text-left hover:bg-brand/10 transition-colors"
-              >
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-brand">
-                    {t("agents.detail.edit_full_manifest", { defaultValue: "Edit full configuration" })}
-                  </p>
-                  <p className="text-[11px] text-text-dim mt-0.5 leading-relaxed">
-                    {t("agents.detail.edit_full_manifest_hint", {
-                      defaultValue: "Every manifest field — resources, capabilities, autonomy, response format, and more.",
-                    })}
-                  </p>
-                </div>
-                <ChevronRight className="w-4 h-4 text-brand shrink-0" />
-              </button>
+                  without dropping to SSH + agent.toml.
+                  Hidden for a hand-derived agent: `update_manifest` pins the
+                  name and re-merges `hand:*` tags, so the PATCH would answer
+                  200 and persist to agent.toml, but the next hand activation
+                  re-materializes the manifest from the Hand definition and
+                  silently reverts it (#7835 review). */}
+              {!detailAgent.is_hand && (
+                <button
+                  type="button"
+                  onClick={openManifestEditor}
+                  className="w-full flex items-center justify-between gap-3 rounded-lg border border-dashed border-brand/40 bg-brand/5 px-4 py-3 text-left hover:bg-brand/10 transition-colors"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-brand">
+                      {t("agents.detail.edit_full_manifest", { defaultValue: "Edit full configuration" })}
+                    </p>
+                    <p className="text-[11px] text-text-dim mt-0.5 leading-relaxed">
+                      {t("agents.detail.edit_full_manifest_hint", {
+                        defaultValue: "Every manifest field — resources, capabilities, autonomy, response format, and more.",
+                      })}
+                    </p>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-brand shrink-0" />
+                </button>
+              )}
 
               {/* Description */}
               <DescriptionSection
+                key={detailAgent.id}
                 agentId={detailAgent.id}
                 description={(detailAgent as AgentView).description ?? ""}
                 onSaved={() => void refreshDetailAgent(detailAgent.id, detailAgent.is_hand)}
