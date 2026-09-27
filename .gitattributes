@@ -4,7 +4,9 @@
 crates/librefang-api/tests/fixtures/**/*.json text eol=lf
 crates/librefang-rl-export/tests/fixtures/kernel_redaction_patterns.txt text eol=lf
 
-# login_page.html is embedded verbatim via include_str! and its inline <script> is pinned by an exact SHA-256 in the CSP (middleware.rs).
-# A Windows checkout with core.autocrlf=true rewrites it to CRLF, which shifts the hash and fails dashboard_login_page_script_is_allowed_by_csp_hash on Windows only.
-# Pin it to LF so the embedded bytes match CI on every OS.
+# Both of these pages carry an inline <script> pinned by an exact SHA-256 in the CSP (middleware.rs).
+# login_page.html is embedded verbatim via include_str!; dashboard/index.html is the SPA shell Vite copies into the bundle byte-for-byte.
+# A Windows checkout with core.autocrlf=true rewrites either to CRLF, which shifts the hash: the daemon then serves a page whose inline script the CSP rejects, and dashboard_inline_scripts_are_allowed_by_csp_hash fails on the Windows shard only.
+# Pin them to LF so the hashed bytes match CI on every OS.
 crates/librefang-api/src/login_page.html text eol=lf
+crates/librefang-api/dashboard/index.html text eol=lf

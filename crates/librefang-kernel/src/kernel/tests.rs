@@ -3542,7 +3542,13 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
 
     // Post and claim a task so status = in_progress.
     let task_id = mem
-        .task_post("Stuck work", "Worker will stall", Some("worker"), None)
+        .task_post(
+            "Stuck work",
+            "Worker will stall",
+            Some("worker"),
+            None,
+            librefang_memory::TaskQueueCaps::UNLIMITED,
+        )
         .await
         .expect("post");
     let claimed = mem
@@ -3581,6 +3587,87 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0]["id"], task_id);
     assert_eq!(pending[0]["assigned_to"], "");
+
+    kernel.shutdown();
+}
+
+/// `[queue] max_depth_global` reaches the kernel's enqueue, and reaching it answers `QuotaExceeded` rather than `Internal`.
+///
+/// The distinction is the whole point of wiring it: `Internal` reaches an HTTP client as a scrubbed 500, which says "the daemon broke" and invites an immediate retry of the request the cap just declined. `QuotaExceeded` maps to 429 (#8219).
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_depth_cap_reaches_task_post_and_answers_as_a_quota() {
+    use librefang_runtime::kernel_handle::TaskQueue;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.queue.max_depth_global = 1;
+    // The shipped 3600s default spawns a sweep at boot; off so it cannot race the assertions.
+    config.queue.task_ttl_secs = 0;
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+    kernel.clone().set_self_handle();
+
+    kernel
+        .task_post("first", "body", None, None)
+        .await
+        .expect("the first post fits the cap");
+
+    let err = kernel
+        .task_post("second", "body", None, None)
+        .await
+        .expect_err("the second post exceeds max_depth_global = 1");
+    assert!(
+        matches!(
+            err,
+            librefang_runtime::kernel_handle::KernelOpError::QuotaExceeded(_)
+        ),
+        "a full queue must not be flattened into Internal: {err:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// The cap is read from the live config on every post, so `POST /api/config/reload` moves it without a restart.
+///
+/// Capturing it at boot would have made a knob in a section whose other fields hot-reload quietly restart-required, which is the class of bug `docs/operations/config-reload.md` exists to prevent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reloaded_queue_depth_cap_takes_effect_without_a_restart() {
+    use librefang_runtime::kernel_handle::TaskQueue;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.queue.max_depth_global = 1;
+    config.queue.task_ttl_secs = 0;
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+    kernel.clone().set_self_handle();
+
+    kernel.task_post("first", "body", None, None).await.unwrap();
+    kernel
+        .task_post("second", "body", None, None)
+        .await
+        .expect_err("at the cap");
+
+    let mut raised = (*kernel.config.load_full()).clone();
+    raised.queue.max_depth_global = 10;
+    kernel.config.store(Arc::new(raised));
+
+    kernel
+        .task_post("second", "body", None, None)
+        .await
+        .expect("the raised cap is in force on the next post");
 
     kernel.shutdown();
 }
@@ -10999,12 +11086,16 @@ fn goal_run_start_reports_unset_self_handle() {
     let goal_id = librefang_types::goal::GoalId::new();
     let agent_id = AgentId::new();
 
-    assert!(!kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None));
+    assert_eq!(
+        kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None),
+        crate::goal_runner::GoalRunStart::Unavailable,
+        "an unset self-handle is a fault on this host, not a missing goal"
+    );
     assert!(kernel.goal_run_status(goal_id).is_none());
 }
 
 /// #7785 review: `goal_run_start` used to end with `self.workflows.goal_runner.start(...); true`,
-/// discarding the runner's own refusal — `GoalRunner::start` returns `false`
+/// discarding the runner's own refusal — `GoalRunner::start` answers `GoalNotFound`
 /// when the goal is missing from the shared store (the race a deletion wins
 /// against a caller's stale read). The goal here is simply never seeded, the
 /// same "not found when the runner loads it" condition, and self_handle is
@@ -11018,8 +11109,9 @@ fn goal_run_start_propagates_the_runners_refusal_of_a_missing_goal() {
     let goal_id = librefang_types::goal::GoalId::new();
     let agent_id = AgentId::new();
 
-    assert!(
-        !kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None),
+    assert_eq!(
+        kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None),
+        crate::goal_runner::GoalRunStart::GoalNotFound,
         "a goal absent from the store must not be reported as started"
     );
     assert!(kernel.goal_run_status(goal_id).is_none());
@@ -14889,6 +14981,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
     let stale_session = librefang_memory::session::Session {
         id: stale_session_id,
         agent_id,
+        parent_session_id: None,
         messages: vec![],
         context_window_tokens: 0,
         label: None,
@@ -14912,6 +15005,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
     let active_session = librefang_memory::session::Session {
         id: active_session_id,
         agent_id,
+        parent_session_id: None,
         messages: vec![
             librefang_types::message::Message::user("hello"),
             librefang_types::message::Message::assistant("world"),
@@ -15171,6 +15265,7 @@ async fn streaming_turn_on_non_canonical_session_survives_in_turn_auto_compactio
         .save_session(&MemSession {
             id: pinned_session_id,
             agent_id,
+            parent_session_id: None,
             messages: (0..SEEDED_MESSAGES)
                 .map(|i| Message::user(format!("seeded message {i}")))
                 .collect(),
@@ -15332,6 +15427,7 @@ async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below
     let session = MemSession {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages,
         context_window_tokens: 0,
         label: None,
@@ -19101,6 +19197,201 @@ fn spawn_warns_that_a_per_agent_tool_exec_backend_does_not_route_tool_calls_8221
         !quiet.text().contains("#8221"),
         "an explicit local override must not warn; captured: {:?}",
         quiet.text()
+    );
+
+    kernel.shutdown();
+}
+
+/// Regression for #7991 review: `reset_session` (and `reboot_session`, which
+/// shares the same `reset_one_session` implementation) used to delete the
+/// target session through the cascading `delete_session`, so resetting a
+/// session that had spawned sub-agent children silently deleted the whole
+/// descendant subtree with it — a "reset this one chat" call that took
+/// unrelated delegated audit trail down too, with nothing in the return
+/// value to say so.
+///
+/// Uses `reboot_session` (not `reset_session`) so the test doesn't need a
+/// working aux LLM client — `save_session_summary` only runs on the
+/// `reset_session` path, and its `>= 2 messages` gate is irrelevant here;
+/// the fix under test is about the delete primitive, not the summary.
+#[tokio::test(flavor = "multi_thread")]
+async fn resetting_a_session_does_not_cascade_delete_its_children() {
+    let kernel = cascade_test_kernel();
+    let agent_id = register_test_agent(&kernel, "reset-lineage-parent");
+
+    let parent = kernel.memory.substrate.create_session(agent_id).unwrap();
+    let child = librefang_memory::session::Session {
+        id: SessionId::new(),
+        agent_id,
+        parent_session_id: Some(parent.id),
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    kernel.memory.substrate.save_session(&child).unwrap();
+
+    kernel
+        .reboot_session(agent_id, ResetScope::Session(parent.id))
+        .await
+        .expect("reboot must succeed");
+
+    assert!(
+        kernel
+            .memory
+            .substrate
+            .get_session(child.id)
+            .unwrap()
+            .is_some(),
+        "resetting the parent must not cascade-delete a child session — \
+         that is what the cascading `delete_session` is for, and \
+         `reset_session`/`reboot_session` must use the non-cascading \
+         `delete_session_only` instead"
+    );
+    let recreated_parent = kernel
+        .memory
+        .substrate
+        .get_session(parent.id)
+        .unwrap()
+        .expect("the parent sid must be recreated empty at the same id");
+    assert!(recreated_parent.messages.is_empty());
+}
+
+/// A rename must reach the next turn's prompt, not only the file on disk (#8469).
+///
+/// The workspace identity files are cached for `PROMPT_CACHE_TTL`, so a rename that rewrote IDENTITY.md without dropping the cache entry would keep serving the old `name:` for up to 30 s after `PATCH` reported success.
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_agent_drops_cached_identity_so_the_next_turn_sees_the_new_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-rename-identity-cache");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "cache-a".to_string(),
+        description: "rename identity cache test agent".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let workspace = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must be registered")
+        .manifest
+        .workspace
+        .expect("spawned agent has a workspace");
+
+    let warmed = kernel.cached_workspace_metadata(&workspace, false);
+    assert!(
+        warmed
+            .identity_md
+            .as_deref()
+            .is_some_and(|md| md.contains("\nname: cache-a\n")),
+        "the warmed cache must hold the spawn-time IDENTITY.md, got: {:?}",
+        warmed.identity_md
+    );
+
+    kernel
+        .rename_agent(agent_id, "cache-b".to_string())
+        .expect("rename should succeed");
+
+    let identity = kernel
+        .cached_workspace_metadata(&workspace, false)
+        .identity_md
+        .expect("IDENTITY.md must still be readable after the rename");
+    assert!(
+        identity.contains("\nname: cache-b\n") && !identity.contains("\nname: cache-a\n"),
+        "the next prompt build must see the renamed IDENTITY.md, not the cached one: {identity}"
+    );
+
+    kernel.shutdown();
+}
+
+/// A personality edit must reach the next turn's prompt, not only the file on disk (#8447).
+///
+/// The workspace identity files are cached for `PROMPT_CACHE_TTL`, so a write that did not drop the cache entry would keep serving the old front matter after `PATCH` reported success.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_agent_personality_drops_cached_identity_so_the_next_turn_sees_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-personality-cache");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "personality-cache".to_string(),
+        description: "personality identity cache test agent".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let workspace = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must be registered")
+        .manifest
+        .workspace
+        .expect("spawned agent has a workspace");
+
+    let warmed = kernel.cached_workspace_metadata(&workspace, false);
+    assert!(
+        warmed
+            .identity_md
+            .as_deref()
+            .is_some_and(|md| md.contains("\nvibe: helpful\n")),
+        "the warmed cache must hold the spawn-time IDENTITY.md, got: {:?}",
+        warmed.identity_md
+    );
+
+    kernel
+        .set_agent_personality(
+            agent_id,
+            &librefang_types::agent::AgentPersonality {
+                vibe: Some("technical".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("personality write should succeed");
+
+    let identity = kernel
+        .cached_workspace_metadata(&workspace, false)
+        .identity_md
+        .expect("IDENTITY.md must still be readable after the write");
+    assert!(
+        identity.contains("\nvibe: technical\n") && !identity.contains("\nvibe: helpful\n"),
+        "the next prompt build must see the new front matter, not the cached one: {identity}"
+    );
+
+    let unknown = kernel.set_agent_personality(
+        AgentId::new(),
+        &librefang_types::agent::AgentPersonality {
+            vibe: Some("x".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(
+            unknown,
+            Err(KernelError::LibreFang(LibreFangError::AgentNotFound(_)))
+        ),
+        "{unknown:?}"
     );
 
     kernel.shutdown();

@@ -27,6 +27,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use librefang_kernel::goal_runner::GoalRunStart;
 use librefang_types::agent::AgentId;
 use librefang_types::goal::GoalId;
 use std::collections::HashSet;
@@ -221,6 +222,14 @@ pub async fn resume_goal_run(
     start_or_resume(state, id, body, true).await
 }
 
+/// The 500 a start or resume answers when the goal's stored run state could not be read, or the kernel cannot drive a run yet (#8427).
+fn unreadable_run_state_response(id: &str) -> JsonResponse {
+    ApiErrorResponse::internal(format!(
+        "The run for goal '{id}' could not start: its stored state could not be read or the kernel is not ready. Any paused progress is kept; see the daemon log, then retry."
+    ))
+    .into_json_tuple()
+}
+
 /// Shared body of [`start_goal_run`] and [`resume_goal_run`].
 ///
 /// `require_paused` is the only difference between the two: the kernel
@@ -239,23 +248,6 @@ async fn start_or_resume(
         Ok(parsed) => parsed,
         Err(error) => return error,
     };
-
-    // Read once and reuse below: `/start` also auto-resumes from an existing
-    // checkpoint (same as `/resume`), so both routes need the checkpoint's
-    // iteration count to validate an explicit `max_iterations` against it.
-    let run_state = state.kernel.goal_run_state(goal_id);
-    let paused_run = run_state
-        .as_ref()
-        .filter(|run| run.phase == librefang_types::goal::GoalRunPhase::Paused);
-
-    if require_paused && paused_run.is_none() {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "This goal has no paused run to resume. Use POST /api/goals/{id}/start to begin a new run."
-            })),
-        );
-    }
 
     // Same swallow as #6654/#6653 on a start rather than a read: the old catch-all `_ => Vec::new()` folded a substrate failure into the empty array, so an unreadable store answered `404 Goal '<id>' not found` for a goal that exists — sending the operator to re-create it instead of to the host.
     // Only a genuinely absent / non-array key is an empty list.
@@ -277,6 +269,46 @@ async fn start_or_resume(
             return ApiErrorResponse::not_found(format!("Goal '{id}' not found")).into_json_tuple();
         }
     };
+
+    // Read once and reuse below: `/start` also auto-resumes from an existing
+    // checkpoint (same as `/resume`), so both routes need the checkpoint's
+    // iteration count to validate an explicit `max_iterations` against it.
+    //
+    // Deliberately after the goal lookup, not before it. `require_paused` is a
+    // precondition on a goal that exists; running it first answered a
+    // well-formed but unknown id with 409 and the advice "use POST
+    // /api/goals/{id}/start instead" — a start that would itself 404, since
+    // `/start` is this same function with `require_paused: false` and reaches
+    // the lookup above.
+    //
+    // `/stop`, `/pause` and `/run` are not the comparison here: none of them
+    // looks the goal up, and all three deliberately answer 200 with `stopped` /
+    // `paused` / `running: false` for an id that does not exist. `/start` is,
+    // because it shares this body — the two must not disagree about whether a
+    // goal exists.
+    let run_state = state.kernel.goal_run_state(goal_id);
+    let paused_run = run_state
+        .as_ref()
+        .filter(|run| run.phase == librefang_types::goal::GoalRunPhase::Paused);
+
+    if require_paused && paused_run.is_none() {
+        // `goal_run_state` answers `None` for a paused run whose checkpoint the substrate could not read, because it has no other source for one (#8427).
+        // Rendering that as "no paused run, use /start" sends the operator away from a checkpoint that may well exist, so ask the checkpoint key directly and refuse with the same 500 a start gets over the same failure.
+        if let Err(e) = state.kernel.memory_substrate().structured_get(
+            goals_shared_agent_id(),
+            &librefang_kernel::goal_runner::goal_pause_key(goal_id),
+        ) {
+            tracing::warn!(goal_id = %id, error = %e, "Cannot resume goal run: its pause checkpoint could not be read");
+            return unreadable_run_state_response(&id);
+        }
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "This goal has no paused run to resume. Use POST /api/goals/{id}/start to begin a new run."
+            })),
+        );
+    }
+
     // Distinguish "never assigned" from "assigned, but the stored id is not a
     // UUID" (#6562).
     // Create and update now reject a non-UUID `agent_id` at the boundary, but goals written before that fix still carry `""` or other junk, and reporting them as unassigned sends the operator to a field that already looks filled in.
@@ -395,15 +427,20 @@ async fn start_or_resume(
             evaluator_model,
         )
     };
-    if !started {
-        // #7785 review: the only way `start_goal_run` refuses is the goal
-        // vanishing between the read above and the runner's own reload —
-        // a delete racing this request. That is "the goal is gone", a 404,
-        // not the 500 an internal-fault response implies.
-        return ApiErrorResponse::not_found(format!(
-            "Goal '{id}' was deleted before its run could start"
-        ))
-        .into_json_tuple();
+    match started {
+        GoalRunStart::Started => {}
+        // #7785 review: the goal vanished between the read above and the
+        // runner's own reload — a delete racing this request. That is "the
+        // goal is gone", a 404, not the 500 an internal-fault response implies.
+        GoalRunStart::GoalNotFound => {
+            return ApiErrorResponse::not_found(format!(
+                "Goal '{id}' was deleted before its run could start"
+            ))
+            .into_json_tuple();
+        }
+        // The runner could not read the goal or its pause checkpoint, or the kernel cannot drive a run yet (#8427).
+        // Reporting that as a deleted goal sent the operator to re-create a goal that exists; the runner has logged the cause with the goal id, and has left any checkpoint in place for a retry.
+        GoalRunStart::Unavailable => return unreadable_run_state_response(&id),
     }
 
     // Flip the goal to in_progress so the dashboard reflects the active run.
@@ -440,12 +477,23 @@ async fn start_or_resume(
         );
     }
 
-    match state.kernel.goal_run_state(goal_id) {
+    // `started` above already answered "did the run start".
+    // This read only describes it, and an empty answer does not mean the start failed: it means the run has already reached a terminal phase, so the loop dropped its own registry entry and a resume has already cleared the pause checkpoint `state()` would otherwise fall back to.
+    // That is still not a failed start, so it answers 200 with a null run — the same thing `GET /api/goals/{id}/run` says for the same state.
+    //
+    // It used to read eight times across yields, because `GoalRunner::state()` took the run's state lock with `try_lock` and so reported a busy run as a missing one (#8388, #8391).
+    // `state()` waits for that lock now, so a run that is alive is never the empty answer here and one read settles it.
+    let run_state = state.kernel.goal_run_state(goal_id);
+
+    match run_state {
         Some(run) => (
             StatusCode::OK,
             Json(serde_json::json!({ "ok": true, "run": run })),
         ),
-        None => ApiErrorResponse::internal("Failed to start goal run").into_json_tuple(),
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "run": serde_json::Value::Null })),
+        ),
     }
 }
 

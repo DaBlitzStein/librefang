@@ -34,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.9.14"
+version = "2026.9.19"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -191,7 +191,7 @@ psl = "2"
 tera = { version = "2", default-features = false }
 
 # WASM sandbox
-wasmtime = "47"
+wasmtime = "48"
 
 # HTTP server (for API daemon)
 axum = { version = "0.8", features = ["ws"] }
