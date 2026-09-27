@@ -15705,6 +15705,152 @@ fn suspend_resume_actually_transition_in_memory_state() {
     kernel.shutdown();
 }
 
+/// A suspend whose `agent.toml` write fails must still record the disagreement:
+/// `suspend_agent` has already moved the registry to `Suspended`, so going
+/// silent leaves the registry saying suspended, disk still saying
+/// `enabled = true`, and the History tab showing no row at all.
+#[test]
+fn a_failed_suspend_write_records_a_persist_failed_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-kernel-suspend-persist-failed-8504");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let name = "suspend-persist-failed-agent";
+    let agent_dir = config.effective_agent_workspaces_dir().join(name);
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: name.to_string(),
+                source_template: None,
+                description: "exercises a failed suspend write".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    kernel.persist_manifest_to_disk(agent_id, "test");
+    assert_eq!(
+        store
+            .list_for_agent(&agent_id.to_string(), 10)
+            .unwrap()
+            .len(),
+        1,
+        "the baseline full persist must be the only row before the failing suspend"
+    );
+
+    // Remove the directory's write bit so `atomic_write_toml`'s `create_new`
+    // staging file cannot be created. The manifest itself stays readable, which
+    // is the branch under test: read succeeds, write fails.
+    let mut perms = std::fs::metadata(&agent_dir).unwrap().permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(&agent_dir, perms).unwrap();
+
+    let suspend_result = kernel.suspend_agent(agent_id);
+
+    let mut perms = std::fs::metadata(&agent_dir).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&agent_dir, perms).unwrap();
+
+    suspend_result.expect("suspend is best-effort on the disk write and still returns Ok");
+    let after = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    assert_eq!(
+        after.first().map(|v| v.change_source.as_str()),
+        Some("suspend-persist-failed"),
+        "a suspend whose disk write failed must record the disagreement instead of going silent: {after:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// `persist_agent_enabled` writes the operator's file with only the `enabled`
+/// line patched. Recording that text verbatim would place the operator's
+/// comments next to the `update` rows' `toml::to_string_pretty` output, so two
+/// neighbouring snapshots would differ on nearly every line when only
+/// `enabled` moved. The recorded snapshot must be the serializer's layout.
+#[test]
+fn a_suspend_snapshot_is_normalized_to_the_serializer_layout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-suspend-normalized-8504");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let name = "suspend-normalized-agent";
+    let manifest_path = config
+        .effective_agent_workspaces_dir()
+        .join(name)
+        .join("agent.toml");
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: name.to_string(),
+                source_template: None,
+                description: "exercises snapshot normalization".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    kernel.persist_manifest_to_disk(agent_id, "test");
+
+    let original = std::fs::read_to_string(&manifest_path).expect("baseline manifest on disk");
+    std::fs::write(
+        &manifest_path,
+        format!("# operator note: keep this comment\n{original}"),
+    )
+    .expect("hand-written manifest");
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed");
+
+    let after = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    let newest = after.first().expect("suspend snapshot");
+    assert_eq!(newest.change_source, "suspend");
+    assert!(
+        !newest.manifest_toml.contains("# operator note"),
+        "the snapshot must use the serializer's canonical layout, not the hand-written file text:\n{}",
+        newest.manifest_toml
+    );
+    assert!(
+        newest.manifest_toml.contains("enabled = false"),
+        "the normalized snapshot must still carry the toggled value:\n{}",
+        newest.manifest_toml
+    );
+
+    kernel.shutdown();
+}
+
 /// #5137: `sync_default_model_agents` previously discarded update and save errors, so a provider switch could half-apply with no signal.
 /// The legacy concrete row must still migrate successfully.
 /// An agent carrying `default/default` must retain that sentinel because execution-time resolution now follows the effective global model.

@@ -21,8 +21,11 @@ pub const MAX_VERSIONS_PER_AGENT: usize = 50;
 /// so a rename leaves old rows carrying the historical name.
 /// `change_source` is a short tag naming what wrote the snapshot; each
 /// `persist_manifest_to_disk` call site in the kernel passes its own (see
-/// [`ManifestVersionStore::record_version`]). The schema default `unknown`
-/// covers rows written by a writer that does not classify its persist.
+/// [`ManifestVersionStore::record_version`]). `persist_agent_enabled` bypasses
+/// that funnel and writes `suspend` / `resume`, or `suspend-persist-failed` /
+/// `resume-persist-failed` when its own `enabled`-line write failed. The schema
+/// default `unknown` covers rows written by a writer that does not classify its
+/// persist.
 #[derive(Debug, Clone)]
 pub struct ManifestVersionRow {
     pub id: i64,
