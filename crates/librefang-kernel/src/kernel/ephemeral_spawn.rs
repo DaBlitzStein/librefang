@@ -213,7 +213,12 @@ impl LibreFangKernel {
             }
             // No agent type: the worker is a side task of the parent, so it
             // inherits the parent's persona and model unless told otherwise.
-            None => (parent.manifest.clone(), None),
+            // The clone goes through `worker_manifest_from_parent` rather than
+            // `parent.manifest.clone()`: this path calls `run_agent_loop`
+            // directly and stamps no verified `SenderContext`, so a reserved
+            // `sender_*` key the parent declares must not ride along (#8409
+            // review).
+            None => (worker_manifest_from_parent(&parent.manifest), None),
         };
 
         let tools = self.ephemeral_tool_set(
@@ -659,11 +664,33 @@ impl LibreFangKernel {
     }
 }
 
+/// The manifest an ephemeral worker spawned without an agent type runs under:
+/// the parent's, minus any reserved `sender_*` metadata the parent declared.
+///
+/// This spawn path calls `run_agent_loop` directly and stamps no
+/// `SenderContext`, so it passes through neither entry point that strips the
+/// reserved keys before stamping a verified sender (`kernel::agent_execution`
+/// and `kernel::messaging`). Left on the clone, a parent `agent.toml` declaring
+/// `sender_channel = "webui"` plus a target's derivable `UserId` UUID would
+/// reach `resolve_webui_sender` on the worker's tool calls as a forged
+/// identity, and the worker would assume that user's policy on a sender-less
+/// turn (#8409 review).
+///
+/// The rest of the parent's metadata is the worker's metadata, so only the
+/// reserved keys are removed.
+fn worker_manifest_from_parent(
+    parent: &librefang_types::agent::AgentManifest,
+) -> librefang_types::agent::AgentManifest {
+    let mut manifest = parent.clone();
+    librefang_types::agent::strip_reserved_sender_metadata(&mut manifest.metadata);
+    manifest
+}
+
 /// Apply an `EphemeralModelOverride` to the worker's manifest.
 ///
-/// With no `agent_type` the worker manifest is `parent.manifest.clone()`, so
-/// every provider- or model-keyed field arrives describing the **parent's**
-/// model. None of them travels with an override, and the permanent spawn path
+/// With no `agent_type` the worker manifest is the parent's, cloned through
+/// [`worker_manifest_from_parent`], so every provider- or model-keyed field
+/// arrives describing the **parent's** model. None of them travels with an override, and the permanent spawn path
 /// never carries them because it builds a fresh manifest from the profile
 /// (#7789 review).
 ///
@@ -959,6 +986,69 @@ mod model_override_tests {
             manifest.model.extra_params.is_empty(),
             "OpenAI's reasoning_effort posted to anthropic, got: {:?}",
             manifest.model.extra_params
+        );
+    }
+}
+
+#[cfg(test)]
+mod sender_metadata_tests {
+    use super::worker_manifest_from_parent;
+    use librefang_types::agent::{AgentManifest, UserId};
+
+    /// #8409 review: `agent_execution.rs` and `messaging.rs` strip a
+    /// manifest's reserved `sender_*` keys before stamping a turn's verified
+    /// `SenderContext`; this spawn path calls `run_agent_loop` directly and
+    /// stamps nothing, so the copy of the parent manifest the worker runs
+    /// with must be stripped here instead.
+    ///
+    /// A parent-declared `sender_channel = "webui"` plus the victim's
+    /// derivable `UserId` UUID is the exact pair #8409 closed for the other
+    /// entry points: `resolve_webui_sender` reads it, and the worker's tool
+    /// calls assume that user's policy on a sender-less turn.
+    #[test]
+    fn a_parents_declared_sender_identity_does_not_reach_the_worker() {
+        let mut parent = AgentManifest {
+            name: "forging-parent".to_string(),
+            ..Default::default()
+        };
+        parent.metadata.insert(
+            "sender_channel".to_string(),
+            serde_json::Value::String("webui".to_string()),
+        );
+        parent.metadata.insert(
+            "sender_user_id".to_string(),
+            serde_json::Value::String(UserId::from_name("victim").to_string()),
+        );
+        // A non-reserved key is left alone.
+        parent.metadata.insert(
+            "keep_me".to_string(),
+            serde_json::Value::String("yes".to_string()),
+        );
+
+        let worker = worker_manifest_from_parent(&parent);
+
+        assert!(
+            !worker.metadata.contains_key("sender_channel"),
+            "a parent-declared sender_channel reached the worker's manifest, got: {:?}",
+            worker.metadata.get("sender_channel")
+        );
+        assert!(
+            !worker.metadata.contains_key("sender_user_id"),
+            "a parent-declared sender_user_id reached the worker's manifest, got: {:?}",
+            worker.metadata.get("sender_user_id")
+        );
+        assert_eq!(
+            worker.metadata.get("keep_me").and_then(|v| v.as_str()),
+            Some("yes"),
+            "the strip must only touch reserved sender keys"
+        );
+        assert_eq!(
+            parent
+                .metadata
+                .get("sender_channel")
+                .and_then(|v| v.as_str()),
+            Some("webui"),
+            "the worker runs on a stripped copy; the parent's own manifest must not be mutated"
         );
     }
 }
