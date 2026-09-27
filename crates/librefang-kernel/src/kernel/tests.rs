@@ -15731,6 +15731,158 @@ fn suspend_and_resume_each_record_a_manifest_version_snapshot() {
     kernel.shutdown();
 }
 
+/// #8041: a suspend whose `agent.toml` write fails must still record the
+/// disagreement. `suspend_agent` has already moved the registry to
+/// `Suspended`, so going silent here leaves the registry saying suspended,
+/// disk still saying `enabled = true`, and the History tab showing no row at
+/// all — the exact scenario `update-persist-failed` exists for, on the other
+/// writer of the same file.
+#[test]
+fn a_failed_suspend_write_records_a_persist_failed_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-kernel-suspend-persist-failed-8041");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let name = "suspend-persist-failed-agent";
+    let agent_dir = config.effective_agent_workspaces_dir().join(name);
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: name.to_string(),
+                source_template: None,
+                description: "exercises a failed suspend write".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    kernel.persist_manifest_to_disk(agent_id);
+    assert_eq!(
+        store
+            .list_for_agent(&agent_id.to_string(), 10)
+            .unwrap()
+            .len(),
+        1,
+        "the baseline full persist must be the only row before the failing suspend"
+    );
+
+    // Remove the directory's write bit so `atomic_write_toml`'s `create_new`
+    // staging file cannot be created. The manifest itself stays readable, which
+    // is the branch under test: read succeeds, write fails.
+    let mut perms = std::fs::metadata(&agent_dir).unwrap().permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(&agent_dir, perms).unwrap();
+
+    let suspend_result = kernel.suspend_agent(agent_id);
+
+    // Restore write access before asserting so the tempdir can be cleaned up.
+    let mut perms = std::fs::metadata(&agent_dir).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&agent_dir, perms).unwrap();
+
+    suspend_result.expect("suspend is best-effort on the disk write and still returns Ok");
+    let after = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    assert_eq!(
+        after.first().map(|v| v.change_source.as_str()),
+        Some("suspend-persist-failed"),
+        "a suspend whose disk write failed must record the disagreement instead of going silent: {after:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// #8041: `persist_agent_enabled` writes the operator's file with only the
+/// `enabled` line patched. Recording that text verbatim would place the
+/// operator's comments and key order next to the `update` rows'
+/// `toml::to_string_pretty` output, so two neighbouring snapshots would differ
+/// on nearly every line when only `enabled` moved. The recorded snapshot must
+/// be the serializer's canonical layout.
+#[test]
+fn a_suspend_snapshot_is_normalized_to_the_serializer_layout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-suspend-normalized-8041");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let name = "suspend-normalized-agent";
+    let manifest_path = config
+        .effective_agent_workspaces_dir()
+        .join(name)
+        .join("agent.toml");
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: name.to_string(),
+                source_template: None,
+                description: "exercises snapshot normalization".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    kernel.persist_manifest_to_disk(agent_id);
+
+    // A hand-written file the patch path preserves verbatim: a leading comment
+    // the TOML serializer would never emit.
+    let original = std::fs::read_to_string(&manifest_path).expect("baseline manifest on disk");
+    std::fs::write(
+        &manifest_path,
+        format!("# operator note: keep this comment\n{original}"),
+    )
+    .expect("hand-written manifest");
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed");
+
+    let after = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    let newest = after.first().expect("suspend snapshot");
+    assert_eq!(newest.change_source, "suspend");
+    assert!(
+        !newest.manifest_toml.contains("# operator note"),
+        "the snapshot must use the serializer's canonical layout, not the hand-written file text:\n{}",
+        newest.manifest_toml
+    );
+    assert!(
+        newest.manifest_toml.contains("enabled = false"),
+        "the normalized snapshot must still carry the toggled value:\n{}",
+        newest.manifest_toml
+    );
+
+    kernel.shutdown();
+}
+
 /// #5137: `sync_default_model_agents` previously discarded update and save errors, so a provider switch could half-apply with no signal.
 /// The legacy concrete row must still migrate successfully.
 /// An agent carrying `default/default` must retain that sentinel because execution-time resolution now follows the effective global model.
@@ -19466,6 +19618,85 @@ fn changing_the_mcp_allowlist_records_a_manifest_version_snapshot() {
         !newest.manifest_toml.contains("seeded-server"),
         "the snapshot must be the patched file, not a stale manifest: {}",
         newest.manifest_toml
+    );
+
+    kernel.shutdown();
+}
+
+/// A personality edit must reach the next turn's prompt, not only the file on disk (#8447).
+///
+/// The workspace identity files are cached for `PROMPT_CACHE_TTL`, so a write that did not drop the cache entry would keep serving the old front matter after `PATCH` reported success.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_agent_personality_drops_cached_identity_so_the_next_turn_sees_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-personality-cache");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "personality-cache".to_string(),
+        description: "personality identity cache test agent".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let workspace = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must be registered")
+        .manifest
+        .workspace
+        .expect("spawned agent has a workspace");
+
+    let warmed = kernel.cached_workspace_metadata(&workspace, false);
+    assert!(
+        warmed
+            .identity_md
+            .as_deref()
+            .is_some_and(|md| md.contains("\nvibe: helpful\n")),
+        "the warmed cache must hold the spawn-time IDENTITY.md, got: {:?}",
+        warmed.identity_md
+    );
+
+    kernel
+        .set_agent_personality(
+            agent_id,
+            &librefang_types::agent::AgentPersonality {
+                vibe: Some("technical".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("personality write should succeed");
+
+    let identity = kernel
+        .cached_workspace_metadata(&workspace, false)
+        .identity_md
+        .expect("IDENTITY.md must still be readable after the write");
+    assert!(
+        identity.contains("\nvibe: technical\n") && !identity.contains("\nvibe: helpful\n"),
+        "the next prompt build must see the new front matter, not the cached one: {identity}"
+    );
+
+    let unknown = kernel.set_agent_personality(
+        AgentId::new(),
+        &librefang_types::agent::AgentPersonality {
+            vibe: Some("x".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(
+            unknown,
+            Err(KernelError::LibreFang(LibreFangError::AgentNotFound(_)))
+        ),
+        "{unknown:?}"
     );
 
     kernel.shutdown();

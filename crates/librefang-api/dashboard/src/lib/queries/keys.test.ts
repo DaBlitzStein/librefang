@@ -56,6 +56,21 @@ describe("query key factories", () => {
       expect(agentKeys.details()).toEqual(["agents", "detail"]);
       expect(agentKeys.detail("abc")).toEqual(["agents", "detail", "abc"]);
       expect(agentKeys.templates()).toEqual(["agents", "templates"]);
+      expect(agentKeys.mcpServers("abc")).toEqual([
+        "agents",
+        "mcpServers",
+        "abc",
+      ]);
+      expect(agentKeys.manifest("abc")).toEqual([
+        "agents",
+        "manifest",
+        "abc",
+      ]);
+      expect(agentKeys.channels("abc")).toEqual([
+        "agents",
+        "channels",
+        "abc",
+      ]);
       expect(agentKeys.sessions("abc")).toEqual([
         "agents",
         "sessions",
@@ -104,6 +119,30 @@ describe("query key factories", () => {
       const l = agentKeys.list({ includeHands: false });
       const ls = agentKeys.lists();
       expect(l.slice(0, ls.length)).toEqual(ls);
+    });
+
+    // #8041: `manifestHistory` used to be a sibling of `details()`, so every
+    // mutation that produced a snapshot had to remember a second explicit
+    // invalidation — and suspend/resume, which invalidate only `lists()`,
+    // could not reach it at all even though they now record a snapshot of
+    // their own. Nesting it under `detail(agentId)` makes one invalidation
+    // cover both.
+    it("nests manifestHistory under detail, so detail invalidation reaches it", () => {
+      expect(agentKeys.manifestHistory("abc")).toEqual([
+        ...agentKeys.detail("abc"),
+        "manifestHistory",
+      ]);
+      const prefix = agentKeys.detail("abc");
+      expect(agentKeys.manifestHistory("abc").slice(0, prefix.length)).toEqual(
+        prefix,
+      );
+    });
+
+    // The nesting must not make one agent's history invalidate another's.
+    it("scopes manifestHistory per agent", () => {
+      expect(agentKeys.manifestHistory("abc")).not.toEqual(
+        agentKeys.manifestHistory("xyz"),
+      );
     });
   });
 
@@ -374,6 +413,11 @@ describe("query key factories", () => {
       expect(agentKeys.lists().slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.details().slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.templates().slice(0, prefix.length)).toEqual(prefix);
+      expect(agentKeys.mcpServers("x").slice(0, prefix.length)).toEqual(
+        prefix,
+      );
+      expect(agentKeys.manifest("x").slice(0, prefix.length)).toEqual(prefix);
+      expect(agentKeys.channels("x").slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.sessions("x").slice(0, prefix.length)).toEqual(
         prefix,
       );

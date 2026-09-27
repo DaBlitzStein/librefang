@@ -19,6 +19,7 @@ pub const MAX_VERSIONS_PER_AGENT: usize = 50;
 ///
 /// `agent_name` is denormalised on purpose: it is the name at snapshot time, so a rename leaves old rows carrying the historical name.
 /// `change_source` is a short tag naming the write outcome — the kernel persist path writes `update` on success and `update-persist-failed` when the disk write failed after the in-memory manifest had already changed.
+/// `persist_agent_enabled` writes `suspend` / `resume`, or `suspend-persist-failed` / `resume-persist-failed` when its own `enabled`-line write failed.
 /// The schema default `unknown` covers rows written by any future writer that does not classify its persist.
 #[derive(Debug, Clone)]
 pub struct ManifestVersionRow {
@@ -234,6 +235,30 @@ mod tests {
         let deleted = store.delete_for_agent("a1").unwrap();
         assert_eq!(deleted, 2);
         assert!(store.list_for_agent("a1", 10).unwrap().is_empty());
+    }
+
+    /// `delete_cascade` above only proves this store can clear its own table; removing
+    /// an agent goes through `AGENT_SCOPED_TABLES` instead, and nothing at that delete
+    /// site names `manifest_versions`.
+    /// Drop the entry and every test here still passes while a deleted agent's manifest
+    /// history survives it, with no error and no orphan the caller can see.
+    #[test]
+    fn remove_agent_purges_manifest_versions() {
+        let pool = test_pool();
+        let store = ManifestVersionStore::new(pool.clone());
+        let agent = librefang_types::agent::AgentId(uuid::Uuid::new_v4());
+        let agent_id = agent.0.to_string();
+
+        store
+            .record_version(&agent_id, "agent", "name = \"v1\"", "dashboard")
+            .unwrap();
+        assert_eq!(store.list_for_agent(&agent_id, 10).unwrap().len(), 1);
+
+        crate::structured::StructuredStore::new(pool)
+            .remove_agent(agent)
+            .unwrap();
+
+        assert!(store.list_for_agent(&agent_id, 10).unwrap().is_empty());
     }
 
     /// A disk-full write records `update-persist-failed` with the

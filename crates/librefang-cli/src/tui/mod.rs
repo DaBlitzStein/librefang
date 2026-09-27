@@ -488,6 +488,8 @@ impl App {
                 default_profile,
                 fixed,
                 available,
+                stable_mode,
+                pinned_model,
             } => {
                 // Populate the routing editor from the agent's real stored
                 // state, not from whatever the previous screen left behind.
@@ -506,6 +508,8 @@ impl App {
                     .unwrap_or(0);
                 self.agents.router_default_profile = default_profile;
                 self.agents.router_fixed = fixed;
+                self.agents.routing_stable_mode = stable_mode;
+                self.agents.router_pinned_model = pinned_model;
                 self.agents.routing_loaded = true;
             }
             AppEvent::AgentModelRoutingUpdated(id) => {
@@ -617,12 +621,10 @@ impl App {
                         self.dashboard.loading = false;
                         self.dashboard.status_msg = err;
                     }
-                    // Covers every failure the shared-folders editor can hit
-                    // (fetch, unreadable manifest, duplicate name on save) —
-                    // without this arm they fell into `_ => {}` and vanished
-                    // (#7835). #8231's agents tab needs it for the same reason:
-                    // a fetch failure from another sub-screen of this tab has
-                    // to reach `status_msg` instead of vanishing.
+                    // Agent-tab sub-screen errors — skills, MCP servers,
+                    // channels, and model-parameters editors — land in
+                    // `status_msg` and are shown on the agent list rather than
+                    // disappearing into the exhaustive match's fallback.
                     //
                     // It deliberately writes nothing but `status_msg`, unlike
                     // every other arm here. The manifest-history pane keeps its
@@ -1411,14 +1413,18 @@ impl App {
                 }
                 _ => {}
             }
-            // Tab cycling: Tab / Shift+Tab
-            if key.code == KeyCode::Tab && key.modifiers.is_empty() {
-                self.next_tab();
-                return;
-            }
-            if key.code == KeyCode::BackTab {
-                self.prev_tab();
-                return;
+            // Tab cycling: Tab / Shift+Tab — except on a screen that moves field focus with them (the workflow step editor, #7724), where F-keys, Alt+digit and Ctrl+arrows still switch tabs.
+            let screen_owns_tab =
+                self.active_tab == Tab::Workflows && self.workflows.owns_tab_key();
+            if !screen_owns_tab {
+                if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+                    self.next_tab();
+                    return;
+                }
+                if key.code == KeyCode::BackTab {
+                    self.prev_tab();
+                    return;
+                }
             }
             // Tab cycling: Ctrl+Left/Right
             if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -3978,5 +3984,51 @@ mod manifest_history_dispatch_tests {
             "an unrelated agent-tab failure is not the history fetch's reason"
         );
         assert_eq!(app.agents.status_msg, "Failed to save skills");
+    }
+}
+
+#[cfg(test)]
+mod workflow_step_editor_tab_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn app_on_the_workflows_tab() -> App {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.phase = Phase::Main;
+        app.active_tab = Tab::Workflows;
+        app
+    }
+
+    /// The step editor moves field focus with Tab and Shift-Tab and has no other way to reach the agent and prompt fields, so the global tab cycling must not swallow those keys on the steps page (#7724).
+    /// Driving `App::handle_key` rather than `WorkflowState::handle_key` is the point: the screen-level tests never pass through the global handler.
+    #[test]
+    fn tab_moves_focus_in_the_step_editor_instead_of_switching_tabs() {
+        let mut app = app_on_the_workflows_tab();
+        app.workflows.list_state.select(Some(0)); // no workflows, so row 0 is "Create new"
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.workflows.create_step, 2, "must be on the steps page");
+        assert_eq!(app.workflows.step_focus, workflows::StepEditorFocus::Name);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(
+            app.active_tab == Tab::Workflows,
+            "Tab on the steps page must not leave the Workflows tab"
+        );
+        assert_eq!(app.workflows.step_focus, workflows::StepEditorFocus::Source);
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert!(app.active_tab == Tab::Workflows);
+        assert_eq!(app.workflows.step_focus, workflows::StepEditorFocus::Name);
+    }
+
+    /// Off the steps page Tab still cycles tabs, so the exemption is scoped to the one page that needs it.
+    #[test]
+    fn tab_still_switches_tabs_from_the_workflow_list() {
+        let mut app = app_on_the_workflows_tab();
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(app.active_tab != Tab::Workflows);
     }
 }

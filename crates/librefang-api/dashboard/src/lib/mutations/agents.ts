@@ -26,6 +26,8 @@ import {
   resetAgentSession,
   updateAgentTools,
   setAgentSkills,
+  setAgentMcpServers,
+  setAgentChannels,
   getAgentTemplateToml,
 } from "../http/client";
 import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
@@ -70,6 +72,9 @@ export type AgentConfigPatch = {
   top_p?: number | null;
   frequency_penalty?: number | null;
   presence_penalty?: number | null;
+  top_k?: number | null;
+  min_p?: number | null;
+  repeat_penalty?: number | null;
   // Endpoint limits, not sampling preferences: an over-limit request is
   // reported in the response's `warnings` and stored as sent, never clamped.
   context_window?: number | null;
@@ -112,12 +117,21 @@ export function useStopAgent() {
   });
 }
 
+/**
+ * Suspend an agent.
+ *
+ * Invalidates `detail(agentId)` as well as the list because suspending
+ * rewrites `agent.toml` and records a `suspend` manifest-version snapshot
+ * (#8041) — and `manifestHistory` lives under the detail key, so the open
+ * History tab picks up the row this request just wrote.
+ */
 export function useSuspendAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: suspendAgent,
-    onSuccess: () => {
+    onSuccess: (_data, agentId) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
@@ -157,12 +171,14 @@ export function useDeleteAgent() {
   });
 }
 
+/** Resume an agent. Same invalidation set as `useSuspendAgent`, for the same reason. */
 export function useResumeAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: resumeAgent,
-    onSuccess: () => {
+    onSuccess: (_data, agentId) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
@@ -170,8 +186,18 @@ export function useResumeAgent() {
 
 /**
  * Manifest-level partial update: name, description, system_prompt,
- * mcp_servers, model. Distinct from `usePatchAgentRuntimeConfig`, which
- * targets the role-appropriate model-tuning endpoint.
+ * mcp_servers, model, schedule — or, via `manifest_toml`, a full-manifest
+ * replacement (#7742: the dashboard's full manifest editor). Distinct from
+ * `usePatchAgentRuntimeConfig`, which targets the role-appropriate
+ * model-tuning endpoint.
+ *
+ * `manifest_toml` can touch nearly every manifest field in one request, so
+ * its invalidation fan-out is broader than the other partial fields:
+ * `agentKeys.manifest(id)` (the editor's own seed read), `mcpServers(id)`,
+ * `skills(id)`, and `tools(id)` all derive from the same manifest and would
+ * otherwise show stale state until their own PUT/GET is separately
+ * triggered. Cheap to over-invalidate here since `manifest_toml` PATCHes
+ * are infrequent, user-initiated saves, not a hot path.
  */
 export function usePatchAgent() {
   const qc = useQueryClient();
@@ -190,12 +216,20 @@ export function usePatchAgent() {
         mcp_servers?: string[];
         schedule?: AgentSchedulePatch;
         auto_evolve?: boolean;
+        manifest_toml?: string;
       };
     }) => patchAgent(agentId, body),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      // Reaches `manifestHistory` too — it is nested under this key.
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
-      qc.invalidateQueries({ queryKey: agentKeys.manifestHistory(variables.agentId) });
+      if (variables.body.manifest_toml !== undefined) {
+        qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
+      }
     },
   });
 }
@@ -217,6 +251,7 @@ export function usePatchAgentRuntimeConfig() {
       : patchAgentConfig(agentId, config),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      // Reaches `manifestHistory` too — it is nested under this key.
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.manifestHistory(variables.agentId) });
       if (variables.isHand) {
@@ -233,7 +268,9 @@ export function usePatchAgentRuntimeConfig() {
  * - `agentKeys.lists()` because the model/provider badge surfaced in the
  *   agent list row comes from the live manifest.
  * - `agentKeys.detail(agentId)` because the config panel bound to this
- *   hook reads the same manifest fields.
+ *   hook reads the same manifest fields — and, through the nested
+ *   `manifestHistory` key, the History tab, since restoring the HAND.toml
+ *   defaults rewrites the manifest and records a snapshot.
  * - `handKeys.details()` because the hand-detail view shows per-role
  *   runtime override state; the coordinator agent's clear is observable
  *   through any cached hand detail that references this agent's role.
@@ -564,8 +601,64 @@ export function useSetAgentSkills() {
   });
 }
 
+/**
+ * PUT /agents/{id}/mcp_servers — replace the agent's MCP server grant list
+ * (#6565 follow-up). Powers the group-level MCP grant/revoke on the agent
+ * detail Tools tab, which previously could only read MCP grant state and
+ * pointed the operator at a non-existent "MCP servers tab" to change it.
+ * `agentKeys.detail(id)` carries the `mcp_servers` / `mcp_servers_mode`
+ * fields this tab reads, so invalidating it is what actually refreshes the
+ * grant state; `agentKeys.mcpServers(id)` is invalidated too for forward
+ * compatibility with a future dedicated GET hook.
+ */
+export function useSetAgentMcpServers() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      mcpServers,
+    }: {
+      agentId: string;
+      mcpServers: string[];
+    }) => setAgentMcpServers(agentId, mcpServers),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+    },
+  });
+}
+
 export function useAgentTemplateToml() {
   return useMutation({
     mutationFn: getAgentTemplateToml,
+  });
+}
+
+/**
+ * PUT /agents/{id}/channels — replace the agent's channel allowlist (#7742).
+ * Powers the Configure drawer's Channels section, the previously-missing
+ * client for a route that has existed since `config.rs` shipped
+ * `get_agent_channels` / `set_agent_channels` with zero call sites.
+ *
+ * Invalidates:
+ * - `agentKeys.channels(id)` — the section's own read (assigned / available / mode).
+ * - `agentKeys.detail(id)` — forward-compatible with a future `channels` field
+ *   on the curated detail payload, mirroring the `mcpServers` mutation's note.
+ */
+export function useSetAgentChannels() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      channels,
+    }: {
+      agentId: string;
+      channels: string[];
+    }) => setAgentChannels(agentId, channels),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+    },
   });
 }
