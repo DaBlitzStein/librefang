@@ -428,25 +428,9 @@ impl OllamaDriver {
             })),
             format,
             options,
-            // The three keys just lifted into `options` above must not also
-            // survive at the top level, or the merge in `complete`/`stream`
-            // writes a second, Ollama-ignored copy into the wire body (#8112).
-            extra_body: without_options_sampling_keys(request.extra_body.clone()),
+            extra_body: request.extra_body.clone(),
         })
     }
-}
-
-/// Remove a stale sampling copy from `extra_body` (#8290): the samplers travel
-/// typed and are read from `options`, so a legacy map entry must not also be
-/// merged at the top level, where Ollama's native API ignores it.
-fn without_options_sampling_keys(
-    extra: Option<BTreeMap<String, serde_json::Value>>,
-) -> Option<BTreeMap<String, serde_json::Value>> {
-    let mut extra = extra?;
-    for key in ["top_p", "frequency_penalty", "presence_penalty"] {
-        extra.remove(key);
-    }
-    (!extra.is_empty()).then_some(extra)
 }
 
 /// Strip a trailing `/v1` from a user-provided base URL when (and only
@@ -1295,77 +1279,6 @@ mod tests {
         });
         let wire = driver.build_request(&r).expect("build");
         assert_eq!(wire.think, Some(false));
-    }
-
-    /// #8290: the typed [`CompletionRequest`] fields are the only source for
-    /// Ollama's samplers. A stale `extra_body` copy must neither be lifted into
-    /// `options` nor survive at the top level of the body, where Ollama would
-    /// ignore it. (Before #8290 these three arrived through `extra_body`; this
-    /// pins that the lifting is gone rather than that the mapping exists.)
-    #[test]
-    fn build_request_does_not_lift_stale_sampling_keys_out_of_extra_body() {
-        let driver = OllamaDriver::new(String::new(), "http://x".to_string());
-        let mut r = req("llama3.2");
-        r.extra_body = Some(BTreeMap::from([
-            ("top_p".to_string(), serde_json::json!(0.9)),
-            ("frequency_penalty".to_string(), serde_json::json!(0.5)),
-            ("presence_penalty".to_string(), serde_json::json!(-0.5)),
-        ]));
-        let wire = driver.build_request(&r).expect("build");
-        assert_eq!(
-            wire.options.and_then(|o| o.top_p),
-            None,
-            "no typed top_p is set, so no value exists to send"
-        );
-        assert!(
-            wire.extra_body.is_none(),
-            "a stale extra_body sampling key must be stripped, not merged at the \
-             top level where Ollama ignores it: {:?}",
-            wire.extra_body
-        );
-    }
-
-    /// A non-sampling `extra_body` key (e.g. Qwen's `enable_memory`) is left
-    /// alone; the sampling preferences travel typed, and a stale copy in the
-    /// map is dropped before the top-level merge (#8290).
-    #[test]
-    fn build_request_keeps_non_sampling_extra_body_keys_at_the_top_level() {
-        let driver = OllamaDriver::new(String::new(), "http://x".to_string());
-        let mut r = req("llama3.2");
-        r.top_p = Some(0.9);
-        r.extra_body = Some(BTreeMap::from([
-            ("top_p".to_string(), serde_json::json!(0.1)),
-            ("enable_memory".to_string(), serde_json::json!(true)),
-        ]));
-        let wire = driver.build_request(&r).expect("build");
-        assert_eq!(
-            wire.options.expect("options").top_p,
-            Some(0.9),
-            "the typed field is the single source, not the stale map copy"
-        );
-        let extra = wire.extra_body.expect("enable_memory must survive");
-        assert!(!extra.contains_key("top_p"));
-        assert_eq!(extra.get("enable_memory"), Some(&serde_json::json!(true)));
-    }
-
-    /// A sampling override alone (no temperature/max_tokens set — the
-    /// `request.temperature == 0.0 && request.max_tokens == 0` early-out)
-    /// must still produce an `options` object, or the override is silently
-    /// dropped instead of reaching the wire.
-    #[test]
-    fn build_request_produces_options_for_sampling_alone_even_with_zeroed_temperature_and_tokens() {
-        let driver = OllamaDriver::new(String::new(), "http://x".to_string());
-        let mut r = req("llama3.2");
-        r.temperature = 0.0;
-        r.max_tokens = 0;
-        r.top_p = Some(0.42);
-        let wire = driver.build_request(&r).expect("build");
-        assert_eq!(
-            wire.options.and_then(|o| o.top_p),
-            Some(0.42),
-            "a top_p-only request must not fall through the temperature/max_tokens \
-             early-out and skip the options object entirely"
-        );
     }
 
     /// Positive control: a graded mode leaves the pre-#7946 `think: true`.

@@ -1290,22 +1290,25 @@ mod apply_resolved_inference_params_tests {
     /// `kernel::tests::top_p_catalog_override_reaches_*`, which drive real
     /// turns to a mocked backend and read the literal wire body.
     #[test]
-    fn catalog_override_lands_on_the_typed_top_p_field_when_the_agent_leaves_it_unset() {
+    fn catalog_override_lands_on_the_typed_field_when_the_agent_leaves_top_p_unset() {
         let catalog = catalog_with_top_p_override(0.5);
         let mut model = inheriting_agent_model();
         assert!(
-            !model.extra_params.contains_key("top_p"),
+            model.top_p.is_none() && !model.extra_params.contains_key("top_p"),
             "precondition: the agent sets no top_p of its own, so the catalog \
              override is the only source that can put one on the wire"
         );
 
         apply_resolved_inference_params(&catalog, &mut model);
 
-        // #8290: the resolved value lands on the typed field the agent loop
-        // carries onto `CompletionRequest`; `extra_params` must not hold a
-        // second copy that only some drivers read.
         assert_eq!(model.top_p, Some(0.5));
-        assert!(!model.extra_params.contains_key("top_p"));
+        // The typed field is the sole carrier: `extra_params` is for
+        // non-typed extras only and must not grow a second spelling of it.
+        assert!(
+            !model.extra_params.contains_key("top_p"),
+            "the resolved value must not be duplicated into extra_params: {:?}",
+            model.extra_params
+        );
     }
 
     /// An explicit agent-level preference still wins over the catalog
@@ -1320,7 +1323,11 @@ mod apply_resolved_inference_params_tests {
         apply_resolved_inference_params(&catalog, &mut model);
 
         assert_eq!(model.top_p, Some(0.1));
-        assert!(!model.extra_params.contains_key("top_p"));
+        assert!(
+            !model.extra_params.contains_key("top_p"),
+            "the agent's own value stays typed-only: {:?}",
+            model.extra_params
+        );
     }
 }
 

@@ -18,7 +18,7 @@ use crate::web_search::WebToolsContext;
 use librefang_memory::session::Session;
 use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
 use librefang_skills::registry::SkillRegistry;
-use librefang_types::agent::{AgentManifest, ModelConfig};
+use librefang_types::agent::AgentManifest;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{Memory, MemoryFilter, MemorySource};
 use librefang_types::memory::{MemoryFragment, MemoryId};
@@ -27,7 +27,7 @@ use librefang_types::message::{
 };
 use librefang_types::model_catalog::VisionSupport;
 use librefang_types::tool::{AgentLoopSignal, DecisionTrace, ToolCall, ToolDefinition};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -466,26 +466,6 @@ pub(super) fn redact_images_for_text_only(mut messages: Vec<Message>, model: &st
         );
     }
     messages
-}
-
-/// Project the manifest's untyped escape hatch onto the request's `extra_body` map.
-///
-/// `extra_params` carries the endpoint facts that have no typed slot
-/// (`reasoning_effort`, `use_max_completion_tokens`, `force_max_tokens`, …) and
-/// anything an operator adds by hand; the drivers flatten the map into the API
-/// request body where their wire expects it. `BTreeMap` key order stays
-/// deterministic (#3298), and an empty map sends nothing.
-///
-/// The sampling preferences are deliberately **not** derived into this map.
-/// They are typed [`ModelConfig`] fields (#8290) that the agent loop copies
-/// straight onto the typed [`CompletionRequest`] fields, and
-/// `ResolvedInferenceParams::apply_to` strips any stale copy from `extra_params`.
-/// Re-deriving them here made the body a second, independently writable
-/// spelling of one knob: `top_p` went out twice on an OpenAI-compatible body
-/// and, for Ollama, at the document top level where its samplers are never
-/// read — the exact wire misplacement #8290 fixed.
-pub(super) fn build_extra_body(model: &ModelConfig) -> Option<BTreeMap<String, serde_json::Value>> {
-    (!model.extra_params.is_empty()).then(|| model.extra_params.clone())
 }
 
 /// Run the agent execution loop for a single user message.
@@ -1385,7 +1365,11 @@ async fn run_agent_loop_inner(
             prompt_cache_strategy,
             response_format: manifest.response_format.clone(),
             timeout_secs: timeout_override,
-            extra_body: build_extra_body(&manifest.model),
+            extra_body: if manifest.model.extra_params.is_empty() {
+                None
+            } else {
+                Some(manifest.model.extra_params.clone())
+            },
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),
