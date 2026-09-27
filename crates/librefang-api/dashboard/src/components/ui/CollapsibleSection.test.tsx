@@ -38,14 +38,17 @@ describe("CollapsibleSection", () => {
   it("does not clip a child popover once open", () => {
     // `overflow-hidden` trims the body to the rounded corners while folded, but
     // it also clipped the absolutely-positioned model picker popover a child
-    // renders. The clip is released once `open` is set on the element.
+    // renders. The clip is released once `open` is set on the element. The
+    // `open:` variant matches the element itself; `group-open:` would compile
+    // to a descendant selector and never match, so pin the working token.
     render(
       <CollapsibleSection title="Routing" defaultOpen>
         <p>body</p>
       </CollapsibleSection>,
     );
     const details = screen.getByText("Routing").closest("details")!;
-    expect(details.className).toContain("group-open:overflow-visible");
+    expect(details.className).toContain("open:overflow-visible");
+    expect(details.className).not.toContain("group-open:overflow-visible");
   });
 
   it("keeps the clip while folded", () => {
