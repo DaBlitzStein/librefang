@@ -322,6 +322,16 @@ async fn save_agent_as_agent_type_round_trip() {
         saved.workspace.is_none(),
         "workspace must be cleared on save: {content}"
     );
+    // `agent_purge` reads this to leave a same-named type alone; without it the
+    // purge would delete the operator's copy when the source agent is removed.
+    assert_eq!(
+        saved
+            .metadata
+            .get(librefang_types::agent_type_store::SAVED_FROM_AGENT_METADATA_KEY)
+            .and_then(|value| value.as_str()),
+        Some("researcher-live"),
+        "the snapshot must record its source agent for agent_purge: {content}"
+    );
 
     // It shows up on the Agent Types list, editable/deletable like any
     // other template (point 1: only real templates are listed).
