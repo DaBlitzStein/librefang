@@ -701,6 +701,34 @@ fn legacy_session_cookie_clears() -> [&'static str; 2] {
     ]
 }
 
+/// The three `Set-Cookie` headers shared by login, session mint and logout:
+/// `primary` (the new session or the `Path=/` clear) plus the two legacy
+/// `/dashboard` clears.
+///
+/// [`axum::response::AppendHeaders`] is load-bearing. A bare
+/// `[(HeaderName, String); N]` response-parts impl calls `HeaderMap::insert`,
+/// which *replaces* every value already associated with the name: stacking the
+/// three pairs in a plain tuple array left only the last legacy clear on the
+/// wire, so no login response ever carried the live `librefang_session` cookie
+/// and logout never emitted its `Path=/` clear. `AppendHeaders` uses
+/// `HeaderMap::append` and keeps all three (#8416 CI).
+fn session_cookie_headers(
+    primary: String,
+) -> axum::response::AppendHeaders<[(axum::http::HeaderName, String); 3]> {
+    let [legacy_clear_plain, legacy_clear_secure] = legacy_session_cookie_clears();
+    axum::response::AppendHeaders([
+        (axum::http::header::SET_COOKIE, primary),
+        (
+            axum::http::header::SET_COOKIE,
+            legacy_clear_plain.to_string(),
+        ),
+        (
+            axum::http::header::SET_COOKIE,
+            legacy_clear_secure.to_string(),
+        ),
+    ])
+}
+
 /// Dashboard credential login — validates username/password using Argon2id
 /// (with transparent fallback from legacy plaintext passwords) and returns
 /// a randomly generated session token with expiration metadata.
@@ -986,20 +1014,9 @@ pub(crate) async fn dashboard_login(
                 session_cookie_attrs(peer_addr.ip(), &headers, &state.trusted_proxies),
                 crate::password_hash::DEFAULT_SESSION_TTL_SECS
             );
-            let [legacy_clear_plain, legacy_clear_secure] = legacy_session_cookie_clears();
             (
                 axum::http::StatusCode::OK,
-                [
-                    (axum::http::header::SET_COOKIE, cookie),
-                    (
-                        axum::http::header::SET_COOKIE,
-                        legacy_clear_plain.to_string(),
-                    ),
-                    (
-                        axum::http::header::SET_COOKIE,
-                        legacy_clear_secure.to_string(),
-                    ),
-                ],
+                session_cookie_headers(cookie),
                 axum::response::Json(serde_json::json!({
                     "ok": true,
                     "token": token.token,
@@ -1049,20 +1066,9 @@ pub(crate) async fn mint_dashboard_session(
         session_cookie_attrs(peer_ip, headers, &state.trusted_proxies),
         crate::password_hash::DEFAULT_SESSION_TTL_SECS
     );
-    let [legacy_clear_plain, legacy_clear_secure] = legacy_session_cookie_clears();
     (
         axum::http::StatusCode::OK,
-        [
-            (axum::http::header::SET_COOKIE, cookie),
-            (
-                axum::http::header::SET_COOKIE,
-                legacy_clear_plain.to_string(),
-            ),
-            (
-                axum::http::header::SET_COOKIE,
-                legacy_clear_secure.to_string(),
-            ),
-        ],
+        session_cookie_headers(cookie),
         axum::response::Json(serde_json::json!({
             "ok": true,
             "token": token.token,
@@ -1194,20 +1200,9 @@ pub(crate) async fn dashboard_logout(
     );
     // Also evict the legacy `/dashboard`-scoped cookie, which the `Path=/`
     // clear above cannot reach (see `legacy_session_cookie_clears`).
-    let [legacy_clear_plain, legacy_clear_secure] = legacy_session_cookie_clears();
     (
         axum::http::StatusCode::OK,
-        [
-            (axum::http::header::SET_COOKIE, expired_cookie),
-            (
-                axum::http::header::SET_COOKIE,
-                legacy_clear_plain.to_string(),
-            ),
-            (
-                axum::http::header::SET_COOKIE,
-                legacy_clear_secure.to_string(),
-            ),
-        ],
+        session_cookie_headers(expired_cookie),
         axum::response::Json(serde_json::json!({"ok": true})),
     )
         .into_response()
