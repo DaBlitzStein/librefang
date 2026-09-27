@@ -2692,16 +2692,22 @@ mod tests {
         const BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
         const TICK: std::time::Duration = std::time::Duration::from_millis(20);
         let hint_path = tmp.path().join(API_KEY_HINT_FILE);
-        let mut waited = std::time::Duration::ZERO;
-        while !hint_path.exists() && waited < BUDGET {
+        // Measured on the wall clock, not by counting ticks: a nominal 20 ms
+        // sleep overshoots under load, so `waited += TICK` understates how long
+        // the loop actually blocked and turns BUDGET into a lower bound rather
+        // than a ceiling. On the failure path it also printed exactly BUDGET,
+        // since BUDGET is an exact multiple of TICK, making the message a
+        // restatement of the constant.
+        let started = std::time::Instant::now();
+        while !hint_path.exists() && started.elapsed() < BUDGET {
             tokio::time::sleep(TICK).await;
-            waited += TICK;
         }
         let body = std::fs::read_to_string(&hint_path).unwrap_or_else(|error| {
             panic!(
                 "authenticating with a plaintext master key must leave a hint at {} \
-                 within {BUDGET:?}; gave up after {waited:?}: {error}",
-                hint_path.display()
+                 within {BUDGET:?}; gave up after {:?}: {error}",
+                hint_path.display(),
+                started.elapsed()
             )
         });
         assert!(body.contains("api_key_hash"));
