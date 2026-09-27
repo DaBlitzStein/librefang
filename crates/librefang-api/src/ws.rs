@@ -1309,25 +1309,49 @@ fn is_liveness_ping(text: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The canonical ids of every configured `[[users]]` entry, from the same
+/// auth snapshot the kernel's RBAC gate resolves against.
+///
+/// `webui_sender_identity` uses this so the API layer only ever stamps an
+/// identity the kernel will actually resolve; the two must agree or the
+/// stamped sender id changes the peer-memory namespace and audit attribution
+/// for a user the gate then refuses to honour (#8431).
+fn registered_user_ids(
+    kernel: &dyn KernelApi,
+) -> std::collections::HashSet<librefang_types::agent::UserId> {
+    kernel
+        .auth_snapshot()
+        .config_users
+        .iter()
+        .map(|u| librefang_types::agent::UserId::from_name(&u.name))
+        .collect()
+}
+
 /// The sender identity the dashboard chat stamps into a turn's `SenderContext`.
 ///
-/// A caller whose credential names a real `[[users]]` entry — a dashboard
-/// session or a per-user api key, anything whose principal resolves — is
+/// A caller whose credential names a real `[[users]]` entry — a per-user api
+/// key, or a dashboard session whose `dashboard_user` also names one — is
 /// attributed by their canonical [`UserId`]: the same id the RBAC tool gate
 /// resolves, so the user's own policy applies to the turn's tool calls instead
-/// of the guest gate (#8409). The unauthenticated paths — loopback without
-/// credentials, the master key, an unattributed legacy session — keep the raw
-/// client IP, which resolves to nothing and gates as a guest exactly as
-/// before; the `ROOT_API_KEY_USER_ID` sentinel names no `[[users]]` entry by
-/// contract (`AuthenticatedApiUser::owner_principal`), which is the check this
-/// helper reuses.
+/// of the guest gate (#8409). The check is membership in `[[users]]`, not
+/// merely "the credential resolved": the default `dashboard_user` /
+/// `dashboard_pass` pair is a config-level credential that names no `[[users]]`
+/// entry, and stamping `UserId::from_name(dashboard_user)` for it would move
+/// the sender off the client IP without the gate ever honouring the id
+/// (#8431).
+///
+/// Everything else — the master key and its `ROOT_API_KEY_USER_ID` sentinel,
+/// loopback without credentials, an unattributed legacy session, a dashboard
+/// credential that names no `[[users]]` entry — keeps the raw client IP, which
+/// resolves to nothing and gates as a guest exactly as before.
 ///
 /// Returns `(sender_id, display_name)`.
 fn webui_sender_identity(
+    registered_users: &std::collections::HashSet<librefang_types::agent::UserId>,
     authenticated_user: Option<&crate::middleware::AuthenticatedApiUser>,
     client_ip: IpAddr,
 ) -> (String, String) {
-    match authenticated_user.filter(|u| u.owner_principal().is_some()) {
+    match authenticated_user.filter(|u| registered_users.contains(&u.user_id)) {
         Some(user) => (user.user_id.to_string(), user.name.clone()),
         None => (client_ip.to_string(), "Web UI".to_string()),
     }
@@ -1444,6 +1468,11 @@ async fn handle_text_message(
                 }
             }
 
+            // Snapshot the configured `[[users]]` ids once for this turn, so
+            // the attachment injection and the text dispatch stamp the same
+            // identity (#8431).
+            let registered_users = registered_user_ids(state.kernel.as_ref());
+
             // Resolve file attachments into image content blocks. The
             // WebUI chat uses `use_canonical_session: true`, so the
             // kernel session resolver falls back to `entry.session_id`
@@ -1482,6 +1511,7 @@ async fn handle_text_message(
                     if !image_blocks.is_empty() {
                         has_images = true;
                         let (webui_sender_id, webui_display_name) = webui_sender_identity(
+                            &registered_users,
                             client.authenticated_user.as_ref(),
                             client.client_ip,
                         );
@@ -1569,8 +1599,11 @@ async fn handle_text_message(
             // names a `[[users]]` entry is attributed by that identity (the
             // RBAC tool gate reads it — #8409); the unauthenticated paths keep
             // the client IP, which resolves to nothing and guest-gates.
-            let (webui_sender_id, webui_display_name) =
-                webui_sender_identity(client.authenticated_user.as_ref(), client.client_ip);
+            let (webui_sender_id, webui_display_name) = webui_sender_identity(
+                &registered_users,
+                client.authenticated_user.as_ref(),
+                client.client_ip,
+            );
             let sender_ctx = SenderContext {
                 channel: librefang_kernel::SYSTEM_CHANNEL_WEBUI.to_string(),
                 // Authenticated callers: the caller's canonical `UserId`, so
@@ -2718,18 +2751,45 @@ mod tests {
 
     const LOOPBACK: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 
-    /// A per-user api key or dashboard session names a real `[[users]]`
-    /// entry, so the stamped identity is the caller's canonical id — the one
-    /// the RBAC tool gate resolves — and the display name is the person.
+    fn registered(names: &[&str]) -> std::collections::HashSet<librefang_types::agent::UserId> {
+        names
+            .iter()
+            .map(|n| librefang_types::agent::UserId::from_name(n))
+            .collect()
+    }
+
+    /// A per-user api key or a dashboard session whose `dashboard_user` names
+    /// a real `[[users]]` entry is attributed by the caller's canonical id —
+    /// the one the RBAC tool gate resolves — and the display name is the
+    /// person.
     #[test]
     fn webui_sender_identity_attributes_an_authenticated_user() {
-        let (sender_id, display_name) =
-            webui_sender_identity(Some(&api_user("alice", false)), LOOPBACK);
+        let (sender_id, display_name) = webui_sender_identity(
+            &registered(&["alice"]),
+            Some(&api_user("alice", false)),
+            LOOPBACK,
+        );
         assert_eq!(
             sender_id,
             librefang_types::agent::UserId::from_name("alice").to_string()
         );
         assert_eq!(display_name, "alice");
+    }
+
+    /// A resolved credential that names no `[[users]]` entry — the default
+    /// `dashboard_user` / `dashboard_pass` pair — must not be attributed: the
+    /// kernel gate resolves nothing for that id, so stamping it would only
+    /// move the sender off the client IP (peer-memory namespace, audit) while
+    /// the turn still guest-gated (#8431).
+    #[test]
+    fn webui_sender_identity_keeps_the_client_ip_for_an_unregistered_credential() {
+        let (sender_id, display_name) = webui_sender_identity(
+            &registered(&["someone-else"]),
+            Some(&api_user("dashboard_user", false)),
+            LOOPBACK,
+        );
+        assert_eq!(sender_id, LOOPBACK.to_string());
+        assert_eq!(display_name, "Web UI");
     }
 
     /// The root sentinel (master key, loopback no-auth) names no `[[users]]`
@@ -2738,8 +2798,11 @@ mod tests {
     /// gate must keep treating this caller as unrecognised.
     #[test]
     fn webui_sender_identity_keeps_the_client_ip_for_the_root_sentinel() {
-        let (sender_id, display_name) =
-            webui_sender_identity(Some(&api_user("root", true)), LOOPBACK);
+        let (sender_id, display_name) = webui_sender_identity(
+            &registered(&["root"]),
+            Some(&api_user("root", true)),
+            LOOPBACK,
+        );
         assert_eq!(sender_id, LOOPBACK.to_string());
         assert_eq!(display_name, "Web UI");
     }
@@ -2748,7 +2811,8 @@ mod tests {
     /// fall-through as the sentinel.
     #[test]
     fn webui_sender_identity_keeps_the_client_ip_when_unauthenticated() {
-        let (sender_id, display_name) = webui_sender_identity(None, LOOPBACK);
+        let (sender_id, display_name) =
+            webui_sender_identity(&registered(&["alice"]), None, LOOPBACK);
         assert_eq!(sender_id, LOOPBACK.to_string());
         assert_eq!(display_name, "Web UI");
     }
