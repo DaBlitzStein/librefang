@@ -567,8 +567,19 @@ pub fn purge_agent(
     // `AgentId::from_name` means the next agent of that name would find it.
     let avatars_dir = cfg.effective_avatars_dir();
     for id in avatar_purge_ids(&plan) {
-        if librefang_types::media::remove_avatars(&avatars_dir, &id.to_string()) > 0 {
+        let (removed, errors) =
+            librefang_types::media::remove_avatars_reporting(&avatars_dir, &id.to_string());
+        if removed > 0 {
             report.avatar_removed = true;
+        }
+        // Recorded like every other step above: "nothing was stored" and "the
+        // directory would not give the file up" both leave `avatar_removed`
+        // false, and only these lines tell the operator which one happened.
+        // `plan_purge` predicts from `find_avatar` alone, so a refusal here is
+        // exactly where a `--dry-run` and the run would otherwise disagree
+        // with nothing said.
+        for (path, error) in errors {
+            failures.push(format!("remove avatar {}: {error}", path.display()));
         }
     }
 
@@ -898,6 +909,39 @@ mod tests {
         assert!(outcome.report.agent_type_removed);
         assert!(!home.path().join("workspaces/agents/alpha").exists());
         assert!(!agent_type_path_in(home.path(), "alpha").exists());
+    }
+
+    /// A filesystem that refuses the unlink is reported, not swallowed.
+    ///
+    /// `plan_purge` predicts the avatar from `find_avatar` alone, so a refusal
+    /// here is exactly where a `--dry-run` and the run disagree and the operator
+    /// gets no line explaining why — the failure this pins. The avatar path is a
+    /// non-empty directory so `remove_file` refuses it portably (EISDIR)
+    /// whatever the test user's privileges, which a `chmod` would not.
+    ///
+    /// Sabotage: reverting to `remove_avatars` (which drops the error) leaves
+    /// `failures` empty and fails the assertion below.
+    #[test]
+    fn a_refused_avatar_removal_is_reported() {
+        let home = home_with(&["alpha"]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let id = AgentId::from_name("alpha");
+        seed_agent_rows(&substrate, "alpha", id);
+        delete_roster_row_only(&substrate, id);
+
+        let cfg = cfg_for(&home);
+        let avatars_dir = cfg.effective_avatars_dir();
+        std::fs::create_dir_all(&avatars_dir).unwrap();
+        let blocked = librefang_types::media::avatar_path(&avatars_dir, &id.to_string(), "png");
+        std::fs::create_dir_all(blocked.join("keep")).unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg, "alpha");
+
+        assert!(
+            outcome.failures.iter().any(|f| f.contains("remove avatar")),
+            "a refused avatar removal must be reported, got {:?}",
+            outcome.failures
+        );
     }
 
     #[test]
