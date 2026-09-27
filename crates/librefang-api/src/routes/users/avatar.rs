@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_types::agent::UserId;
@@ -388,7 +388,22 @@ pub async fn serve_my_avatar(
     // second place for the re-sniffing rule to be lost.
     // Going through the handler instead of the router also means a user named
     // `me` still gets their own picture — see the note above.
-    serve_user_avatar(State(state), Path(user.name), headers).await
+    let mut response = serve_user_avatar(State(state), Path(user.name), headers).await;
+    // This literal path is a single cache key for every credential — unlike the
+    // `{name}` sibling, whose subject is in the URL — so the shared `no-cache`
+    // it inherits is not enough behind a proxy or CDN configured to cache
+    // `/api/*`: without `private` and `Vary: Authorization`, the first caller's
+    // picture can be served to the second. `no-cache` still forces
+    // revalidation, so this narrows a cross-credential hit rather than
+    // introducing one.
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, private"),
+    );
+    response
+        .headers_mut()
+        .append(header::VARY, HeaderValue::from_static("Authorization"));
+    response
 }
 
 /// DELETE /api/users/{name}/avatar — remove the stored image.
