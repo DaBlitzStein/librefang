@@ -3584,10 +3584,12 @@ export function ChatPage() {
   useEffect(() => {
     // A session deleted from the dropdown, another browser tab, or the CLI
     // leaves a tab pointing at nothing. Only prune once the list has actually
-    // loaded — an empty `sessions` while the query is in flight would close
-    // every tab the operator has open.
+    // loaded — `sessionsQuery.data` is `undefined` while the query is in
+    // flight, and an empty list there would close every tab the operator has
+    // open. Once it has loaded, an empty list is a real "no sessions left",
+    // so it prunes the stale tabs instead of being skipped (#8326 review).
     const loaded = sessionsQuery.data;
-    if (!selectedAgentId || !loaded || loaded.length === 0) return;
+    if (!selectedAgentId || !loaded) return;
     pruneChatTabs(
       selectedAgentId,
       new Set(loaded.map((session) => session.session_id).filter((id): id is string => !!id)),
