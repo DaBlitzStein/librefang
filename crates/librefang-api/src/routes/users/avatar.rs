@@ -668,6 +668,37 @@ mod tests {
         );
     }
 
+    /// A user who never uploaded one has nothing to move, and that is not an
+    /// error: every candidate being absent is the ordinary case for a rename.
+    #[test]
+    fn moving_an_absent_avatar_is_not_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        move_user_avatar(dir.path(), "Alice", "Alicia").expect("nothing to move is not a failure");
+    }
+
+    /// A real disk failure is propagated rather than swallowed, because the
+    /// caller reports it: the picture has an owner whose route would otherwise
+    /// serve nothing.
+    #[test]
+    fn a_failed_move_is_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = UserId::from_name("Alice").to_string();
+        let new = UserId::from_name("Alicia").to_string();
+        std::fs::write(
+            librefang_types::media::avatar_path(dir.path(), &old, "png"),
+            b"png",
+        )
+        .expect("write png");
+        // A directory squatting on the target makes `fs::rename` fail with a
+        // kind that is not `NotFound` — the shape of every real failure this
+        // helper must not mistake for absence.
+        std::fs::create_dir(librefang_types::media::avatar_path(dir.path(), &new, "png"))
+            .expect("squat the target");
+
+        let error = move_user_avatar(dir.path(), "Alice", "Alicia").expect_err("must fail");
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
     #[test]
     fn the_etag_tracks_the_content() {
         let png = b"\x89PNG\r\n\x1a\n";
