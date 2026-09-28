@@ -6,8 +6,10 @@
 //
 // The fields edit a **preference** — how long a reply to ask this model for, how
 // much context to send it. They are not the model's catalog figures, which the
-// provider card reports and which nothing here moves. Conflating the two is what
-// the rule below previously did.
+// provider card reports and which nothing here moves. The one place capacity
+// matters is that an absent `context_window` override resolves *to* the catalog
+// figure, while an absent `max_tokens` override does not; `resolveLimitDraft`
+// takes `catalogValue` for exactly that case and for no other.
 
 export interface LimitDraft {
   /** What to persist: a number sets the override, `null` clears it. */
@@ -24,28 +26,43 @@ export interface LimitDraft {
  * `input` is the raw text; an empty field means "no preference here", which
  * clears the override and lets the resolution chain supply a value.
  *
- * `catalogValue` is deliberately **not** a parameter. The old rule treated a
- * typed value equal to the model's catalog figure as "same as the default, so
- * clear it", on the theory that an absent override means that figure gets
- * requested. It does not: the resolution chain in `inference_params.rs` falls
- * through to the kernel's own default — `DEFAULT_MODEL_MAX_TOKENS` (4096) for
- * `max_tokens` — so that rule silently discarded a deliberate setting and left
- * the model somewhere the operator never chose.
+ * `catalogValue` is the figure an *absent* override resolves to for this field,
+ * or `undefined` when the chain does not fall through to the catalog. The two
+ * fields this editor drives resolve differently, so only one of them passes it:
  *
- * The same argument holds for both fields this editor drives. `context_window`
- * and `max_tokens` are overrides the operator set on purpose; whether the number
- * they typed happens to match a catalog entry says nothing about whether they
- * meant it. Capacity has no say in what a preference resolves to, so it is not
- * consulted — it stays a parameter of the *display* path (`effective`), which is
- * a different question and stays where it is.
+ * - `max_tokens`: absent falls through to the kernel default,
+ *   `DEFAULT_MODEL_MAX_TOKENS` (4096) — not the catalog capacity. A typed value
+ *   equal to the catalog figure is therefore a real preference, and treating it
+ *   as "the default" silently discarded a deliberate setting and left the model
+ *   somewhere the operator never chose. `catalogValue` stays `undefined`, so no
+ *   value is ever cleared for matching it.
+ * - `context_window`: absent resolves to the catalog figure
+ *   (`resolve_context_window` ranks agent manifest → `model_overrides.json` →
+ *   `ModelCatalog`). A typed value equal to the catalog is a redundant override
+ *   that *pins* the window: a later registry or discovery correction
+ *   (131072 → 200000) would be silently shadowed. Passing `catalogValue` here
+ *   makes an equality clear the override, so the field keeps following the
+ *   catalog unless the operator deliberately picks a different number.
+ *
+ * Capacity is still not consulted for the dirty/save decision beyond that:
+ * the display path (`effective`) keeps its own `catalogValue`.
  */
-export function resolveLimitDraft(input: string, storedOverride: number | undefined): LimitDraft {
+export function resolveLimitDraft(
+  input: string,
+  storedOverride: number | undefined,
+  catalogValue?: number,
+): LimitDraft {
   const trimmed = input.trim();
   const parsed = trimmed === "" ? null : Number(trimmed);
   const invalid = parsed !== null && (!Number.isInteger(parsed) || parsed <= 0);
+  // Equal to the figure an absent override would resolve to, so there is
+  // nothing to store: clearing it is not discarding a preference, it is
+  // declining to pin a value the chain already produces.
+  const value =
+    parsed != null && catalogValue != null && parsed === catalogValue ? null : parsed;
   return {
-    value: parsed,
+    value,
     invalid,
-    dirty: parsed !== (storedOverride ?? null),
+    dirty: value !== (storedOverride ?? null),
   };
 }

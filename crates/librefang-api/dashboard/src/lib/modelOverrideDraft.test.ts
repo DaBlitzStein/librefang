@@ -22,19 +22,42 @@ describe("resolveLimitDraft", () => {
   });
 
   /**
-   * The rule this function exists to correct. Typing the model's catalog figure
-   * used to be read as "same as the default, so clear it" — but an absent
-   * override does not request that figure, it falls through to the kernel's own
-   * default. The old rule therefore discarded a deliberate setting and left the
-   * model somewhere the operator never chose.
-   *
-   * Capacity is not a parameter here, so there is no value of it that can make a
-   * typed number vanish. The call sites pass it to the display path only.
+   * `max_tokens`: an absent override does not request the catalog capacity, it
+   * falls through to the kernel's own default. The old rule read a typed value
+   * equal to the catalog figure as "same as the default, so clear it", which
+   * discarded a deliberate setting and left the model somewhere the operator
+   * never chose. `max_tokens` therefore passes no `catalogValue`, so no typed
+   * value can vanish for matching one.
    */
   it("keeps a typed value that happens to equal the model's catalog figure", () => {
     const draft = resolveLimitDraft("16384", undefined);
     expect(draft.value).toBe(16384);
     expect(draft.dirty).toBe(true);
+  });
+
+  /**
+   * `context_window`: an absent override *does* resolve to the catalog figure
+   * (`resolve_context_window` ranks agent manifest → model_overrides.json →
+   * ModelCatalog), so the caller passes that figure as `catalogValue`. Typing it
+   * is a redundant override that pins the window and shadows a later catalog
+   * correction, so it clears rather than persists.
+   */
+  it("clears a context_window value equal to the figure an absent override resolves to", () => {
+    expect(resolveLimitDraft("131072", undefined, 131072)).toEqual({
+      value: null,
+      invalid: false,
+      dirty: false,
+    });
+    // Clearing an already-stored redundant override is a real change.
+    expect(resolveLimitDraft("131072", 131072, 131072).dirty).toBe(true);
+    // A deliberate different number still stores.
+    expect(resolveLimitDraft("200000", undefined, 131072)).toEqual({
+      value: 200000,
+      invalid: false,
+      dirty: true,
+    });
+    // With nothing to compare against, the typed value stands.
+    expect(resolveLimitDraft("131072", undefined).value).toBe(131072);
   });
 
   it("rejects values that are not positive whole numbers", () => {

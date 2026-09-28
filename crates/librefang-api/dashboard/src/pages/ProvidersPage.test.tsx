@@ -1039,10 +1039,16 @@ describe("ProvidersPage", () => {
 
     const ladder = within(drawer).getByRole("group", { name: "providers.max_tokens" });
     fireEvent.click(within(ladder).getByRole("button", { name: "model_param.custom" }));
-    fireEvent.change(
-      within(drawer).getByLabelText("providers.max_tokens — model_param.custom"),
-      { target: { value: "16384" } },
+    const field = within(drawer).getByLabelText(
+      "providers.max_tokens — model_param.custom",
     );
+    // A real edit, not a re-read of the seeded value: the field already shows
+    // 16384 and React suppresses an onChange whose value did not move. Clearing
+    // and retyping is what a keystroke-by-keystroke entry produces, and it is
+    // what arms the editor's `edited` flag — the "custom" press alone no longer
+    // does, because it selected nothing (see `StepLadderInput`).
+    fireEvent.change(field, { target: { value: "" } });
+    fireEvent.change(field, { target: { value: "16384" } });
     fireEvent.click(
       within(drawer).getByRole("button", {
         name: /providers\.max_tokens/,

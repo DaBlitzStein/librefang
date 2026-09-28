@@ -238,13 +238,20 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
 
   // Blank clears the override; any positive whole number sets it. Extracted so
   // the save payload and the Save-button gate cannot drift apart — see
-  // `modelOverrideDraft.ts` for why the model's catalog figure is not consulted.
+  // `modelOverrideDraft.ts` for how the two fields resolve differently.
   //
-  // `catalogValue` above is still the revert target for *display* (`effective`),
-  // which is a different question: what to show when there is no override. It
-  // has no say in what gets saved, because an absent override falls through to
-  // the kernel default rather than to the catalog figure.
-  const { value: targetOverride, invalid, dirty: changesStored } = resolveLimitDraft(input, overrideValue);
+  // `catalogValue` is passed only for `context_window`, whose absent override
+  // resolves *to* the catalog figure: typing that figure there is a redundant
+  // override that would pin the window and shadow a later catalog correction,
+  // so it clears instead. For `max_tokens` an absent override falls through to
+  // the kernel default (4096), not the catalog capacity, so a typed value equal
+  // to the catalog is a real preference and `catalogValue` stays out of it.
+  // Either way `catalogValue` above is still the display seed (`effective`).
+  const { value: targetOverride, invalid, dirty: changesStored } = resolveLimitDraft(
+    input,
+    overrideValue,
+    field === "context_window" ? catalogValue : undefined,
+  );
   const dirty = edited && changesStored;
 
   const handleSave = async () => {
