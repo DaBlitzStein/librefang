@@ -143,7 +143,7 @@ describe("ModelPicker", () => {
     expect(screen.getByRole("button", { name: "openai" })).toBeInTheDocument();
   });
 
-  it("closes on Escape even with the search box focused", () => {
+  it("closes on Escape with the search box focused, restoring focus to the trigger", () => {
     render(
       <ModelPicker
         label="Agent model"
@@ -160,8 +160,17 @@ describe("ModelPicker", () => {
     open();
     expect(trigger).toHaveAttribute("aria-expanded", "true");
 
-    fireEvent.keyDown(document, { key: "Escape" });
+    const search = screen.getByRole("textbox");
+    search.focus();
+    expect(search).toHaveFocus();
+
+    // The handler is local and calls `preventDefault()`, so a `Modal` the
+    // picker is nested in does not also close on the same key — it bails on
+    // `defaultPrevented`. `fireEvent` returns false when default is prevented.
+    expect(fireEvent.keyDown(search, { key: "Escape" })).toBe(false);
     expect(trigger).toHaveAttribute("aria-expanded", "false");
+    // Without the restore, focus falls to `<body>` when the popover unmounts.
+    expect(trigger).toHaveFocus();
   });
 
   it("will not drill into a provider the catalog cannot serve", () => {
@@ -195,7 +204,11 @@ describe("ModelPicker", () => {
         value={{ provider: "groq", model: "llama-3" }}
         onChange={() => {}}
         models={[model("groq", "llama-3"), model("openai", "gpt-4")]}
-        providers={[provider("openai"), provider("groq", { reachable: false })]}
+        providers={[
+          provider("openai"),
+          provider("groq", { reachable: false }),
+          provider("cohere", { reachable: false }),
+        ]}
       />,
     );
 
@@ -204,7 +217,9 @@ describe("ModelPicker", () => {
     expect(groq).toBeEnabled();
     expect(groq).toHaveAttribute("aria-current", "true");
 
-    // The same provider stays blocked for a value that is not the current one.
+    // A *different* unavailable provider, not the current value, stays blocked.
+    expect(screen.getByRole("button", { name: "cohere" })).toBeDisabled();
+    // An available provider is enabled.
     expect(screen.getByRole("button", { name: "openai" })).toBeEnabled();
   });
 
