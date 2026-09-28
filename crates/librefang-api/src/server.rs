@@ -633,9 +633,13 @@ fn request_is_https(
 /// The scope is not what holds the CSRF posture, and the earlier comment here
 /// said otherwise. `SameSite=Lax` is what keeps the cookie off cross-site
 /// POSTs, and the auth middleware only reads it for shell paths
-/// (`/`, `/dashboard`, `/dashboard/*`) — all of which serve GET-only handlers.
+/// (`/`, `/dashboard`, `/dashboard/*`) — it sets `cookie_session_token` only
+/// under the `is_shell_path` test — all of which serve GET-only handlers.
 /// Every `/api/*` route still requires the Bearer token, so a cookie that now
-/// travels with API requests cannot authenticate one.
+/// travels with API requests cannot authenticate one. The one `/api/*` handler
+/// that reads `librefang_session` directly is [`dashboard_logout`], and it uses
+/// the value only to invalidate the server-side session and clear the cookie:
+/// it grants no privilege, so it is not an authentication path (#8416 review).
 fn session_cookie_attrs(
     peer: std::net::IpAddr,
     headers: &axum::http::HeaderMap,
@@ -670,6 +674,59 @@ fn session_cookie_attrs(
 /// the login worked against.
 fn session_cookie_clear_attrs() -> &'static str {
     "Path=/; HttpOnly; SameSite=Lax; Secure"
+}
+
+/// Clearing `Set-Cookie` values for the legacy pre-#8416 `librefang_session`
+/// cookie, which was scoped to `/dashboard`.
+///
+/// A cookie is identified by name, domain *and* path (RFC 6265 §5.3), so the
+/// `Path=/` clear cannot evict the old scope. On `/dashboard*` the browser sends
+/// the stale `/dashboard` cookie first, and both parsers (`middleware.rs` and
+/// [`dashboard_logout`]) take the first match, so a 30-day stale session
+/// shadows the valid one — the PWA `start_url` is `/dashboard/#/overview`, so
+/// this reappears on every cold start until the old cookie expires (#8416
+/// review). Emit these alongside the login and logout clears for the new scope.
+///
+/// Two variants because the legacy cookie was issued with `Secure` on HTTPS and
+/// without it on plain HTTP, and a response can only overwrite a cookie whose
+/// `Secure` state it matches: the browser ignores a `Secure` `Set-Cookie` on an
+/// insecure connection, and refuses to overwrite a `Secure` cookie from one.
+/// The `Secure` variant covers sessions established through TLS; the `Secure`-
+/// less variant covers a LAN HTTP bind. Both are sent, so either is evicted
+/// regardless of where the clear is delivered.
+fn legacy_session_cookie_clears() -> [&'static str; 2] {
+    [
+        "librefang_session=; Path=/dashboard; HttpOnly; SameSite=Lax; Max-Age=0",
+        "librefang_session=; Path=/dashboard; HttpOnly; SameSite=Lax; Secure; Max-Age=0",
+    ]
+}
+
+/// The three `Set-Cookie` headers shared by login, session mint and logout:
+/// `primary` (the new session or the `Path=/` clear) plus the two legacy
+/// `/dashboard` clears.
+///
+/// [`axum::response::AppendHeaders`] is load-bearing. A bare
+/// `[(HeaderName, String); N]` response-parts impl calls `HeaderMap::insert`,
+/// which *replaces* every value already associated with the name: stacking the
+/// three pairs in a plain tuple array left only the last legacy clear on the
+/// wire, so no login response ever carried the live `librefang_session` cookie
+/// and logout never emitted its `Path=/` clear. `AppendHeaders` uses
+/// `HeaderMap::append` and keeps all three (#8416 CI).
+fn session_cookie_headers(
+    primary: String,
+) -> axum::response::AppendHeaders<[(axum::http::HeaderName, String); 3]> {
+    let [legacy_clear_plain, legacy_clear_secure] = legacy_session_cookie_clears();
+    axum::response::AppendHeaders([
+        (axum::http::header::SET_COOKIE, primary),
+        (
+            axum::http::header::SET_COOKIE,
+            legacy_clear_plain.to_string(),
+        ),
+        (
+            axum::http::header::SET_COOKIE,
+            legacy_clear_secure.to_string(),
+        ),
+    ])
 }
 
 /// Dashboard credential login — validates username/password using Argon2id
@@ -959,7 +1016,7 @@ pub(crate) async fn dashboard_login(
             );
             (
                 axum::http::StatusCode::OK,
-                [(axum::http::header::SET_COOKIE, cookie)],
+                session_cookie_headers(cookie),
                 axum::response::Json(serde_json::json!({
                     "ok": true,
                     "token": token.token,
@@ -1011,7 +1068,7 @@ pub(crate) async fn mint_dashboard_session(
     );
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::SET_COOKIE, cookie)],
+        session_cookie_headers(cookie),
         axum::response::Json(serde_json::json!({
             "ok": true,
             "token": token.token,
@@ -1141,9 +1198,11 @@ pub(crate) async fn dashboard_logout(
         "librefang_session=; {}; Max-Age=0",
         session_cookie_clear_attrs(),
     );
+    // Also evict the legacy `/dashboard`-scoped cookie, which the `Path=/`
+    // clear above cannot reach (see `legacy_session_cookie_clears`).
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::SET_COOKIE, expired_cookie)],
+        session_cookie_headers(expired_cookie),
         axum::response::Json(serde_json::json!({"ok": true})),
     )
         .into_response()
@@ -4066,7 +4125,10 @@ fn is_daemon_responding(addr: &str) -> bool {
 
 #[cfg(test)]
 mod session_cookie_attrs_tests {
-    use super::{request_is_https, session_cookie_attrs, session_cookie_clear_attrs};
+    use super::{
+        legacy_session_cookie_clears, request_is_https, session_cookie_attrs,
+        session_cookie_clear_attrs,
+    };
     use crate::client_ip::TrustedProxies;
     use axum::http::HeaderMap;
     use std::net::IpAddr;
@@ -4108,6 +4170,43 @@ mod session_cookie_attrs_tests {
         attrs.split(';').map(str::trim).collect()
     }
 
+    /// A pre-upgrade `/dashboard`-scoped cookie is not reachable by the `Path=/`
+    /// clear, so login and logout also emit a clearing `Set-Cookie` for that
+    /// exact scope. Both the `Secure` and non-`Secure` variants are emitted
+    /// because the old build issued one or the other depending on transport,
+    /// and a clear only overwrites a cookie whose `Secure` state it matches.
+    #[test]
+    fn legacy_clear_evicts_the_dashboard_scoped_cookie() {
+        let clears = legacy_session_cookie_clears();
+        assert_eq!(clears.len(), 2, "one clear per legacy `Secure` variant");
+
+        let secure_variants = clears
+            .iter()
+            .filter(|attrs| attr_tokens(attrs).contains(&"Secure"))
+            .count();
+        assert_eq!(
+            secure_variants, 1,
+            "exactly one clear carries `Secure`, matching the old HTTPS-issued \
+             cookie; the other matches the plain-HTTP one: {clears:?}"
+        );
+
+        for attrs in legacy_session_cookie_clears() {
+            let tokens = attr_tokens(attrs);
+            assert!(
+                tokens.contains(&"Path=/dashboard"),
+                "the legacy clear must name the old scope or it cannot evict it: {attrs}"
+            );
+            assert!(
+                !tokens.contains(&"Path=/"),
+                "`Path=/` would write a second cookie instead of evicting the legacy one: {attrs}"
+            );
+            assert!(
+                tokens.contains(&"Max-Age=0"),
+                "a clear must expire immediately: {attrs}"
+            );
+        }
+    }
+
     /// The login cookie has to be sent to the URL the login page navigates to.
     ///
     /// `login_page.html` ends a successful sign-in with `location.replace` on
@@ -4132,8 +4231,14 @@ mod session_cookie_attrs_tests {
         let secure = session_cookie_attrs(ip("172.19.0.5"), &https_headers, &trusted);
 
         assert!(
-            secure.contains("Secure"),
+            attr_tokens(secure).contains(&"Secure"),
             "the HTTPS branch must keep `Secure`: {secure}"
+        );
+        assert!(
+            !attr_tokens(plain).contains(&"Secure"),
+            "the plain-HTTP branch must NOT carry `Secure`: the browser drops a `Secure` \
+             cookie over http://, so emitting one here puts the login loop back on the \
+             operator's own LAN bind: {plain}"
         );
         for attrs in [plain, secure] {
             let tokens = attr_tokens(attrs);
