@@ -9,9 +9,11 @@ export const MAX_SKILL_OUTPUTS = 50;
  * Tabs kept per agent.
  *
  * A cap rather than none: every session ever visited would accumulate into a
- * strip too wide to use, and the oldest tab is the one least likely to be
- * wanted. Closing is still explicit — this only bounds the automatic opening
- * that happens on every visit.
+ * strip too wide to use, and the least recently visited tab is the one least
+ * likely to be wanted. Revisiting a session moves it to the newest position,
+ * so the eviction on the next overflow is LRU rather than first-opened.
+ * Closing is still explicit — this only bounds the automatic opening that
+ * happens on every visit.
  */
 export const MAX_CHAT_TABS = 12;
 
@@ -227,8 +229,16 @@ export const useUIStore = create<UIState>()(
       openChatTab: (agentId, sessionId) =>
         set((state) => {
           const current = state.openChatTabs[agentId] ?? [];
-          if (current.includes(sessionId)) return state;
-          const next = [...current, sessionId].slice(-MAX_CHAT_TABS);
+          // Already the newest: return the same state so the effect that opens
+          // a tab on every active-session change does not produce a new object
+          // on each render.
+          if (current[current.length - 1] === sessionId) return state;
+          // Revisiting a session moves it to the end instead of being a no-op.
+          // Otherwise the cap evicts whatever was opened first (FIFO), which
+          // can be the tab the operator has been in all day, while a tab they
+          // touched once this morning survives.
+          const without = current.filter((id) => id !== sessionId);
+          const next = [...without, sessionId].slice(-MAX_CHAT_TABS);
           return { openChatTabs: { ...state.openChatTabs, [agentId]: next } };
         }),
       closeChatTab: (agentId, sessionId) =>

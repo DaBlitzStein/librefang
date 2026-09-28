@@ -126,7 +126,7 @@ describe("chat session tabs", () => {
     expect(useUIStore.getState().openChatTabs["agent-a"]).toEqual(["s1"]);
 
     // Every session ever visited would make a strip too wide to use, and the
-    // oldest is the one least likely to be wanted back.
+    // least recently visited is the one least likely to be wanted back.
     for (let i = 0; i < MAX_CHAT_TABS + 5; i += 1) {
       useUIStore.getState().openChatTab("agent-a", `bulk-${i}`);
     }
@@ -134,6 +134,39 @@ describe("chat session tabs", () => {
     expect(tabs).toHaveLength(MAX_CHAT_TABS);
     expect(tabs).not.toContain("s1");
     expect(tabs[tabs.length - 1]).toBe(`bulk-${MAX_CHAT_TABS + 4}`);
+  });
+
+  it("moves a revisited session to the newest position so eviction is LRU", async () => {
+    const { useUIStore, MAX_CHAT_TABS } = await import("./store");
+    useUIStore.setState({ openChatTabs: {} });
+
+    for (let i = 0; i < MAX_CHAT_TABS; i += 1) {
+      useUIStore.getState().openChatTab("agent-lru", `session-${i}`);
+    }
+    // Revisiting the first-opened tab moves it to the end, so it is no longer
+    // the eviction candidate.
+    useUIStore.getState().openChatTab("agent-lru", "session-0");
+    expect(useUIStore.getState().openChatTabs["agent-lru"][MAX_CHAT_TABS - 1]).toBe("session-0");
+
+    // The next new session evicts the least recently visited (`session-1`),
+    // not the one the operator just returned to. Without the reorder the old
+    // `includes` early return left `session-0` at position 0 and evicted it.
+    useUIStore.getState().openChatTab("agent-lru", "session-new");
+    const tabs = useUIStore.getState().openChatTabs["agent-lru"];
+    expect(tabs).toHaveLength(MAX_CHAT_TABS);
+    expect(tabs).toContain("session-0");
+    expect(tabs).not.toContain("session-1");
+  });
+
+  it("returns the same state when the session is already newest", async () => {
+    const { useUIStore } = await import("./store");
+    useUIStore.setState({ openChatTabs: { "agent-idem": ["s1", "s2"] } });
+
+    const before = useUIStore.getState();
+    useUIStore.getState().openChatTab("agent-idem", "s2");
+    // Same object, or the effect that opens a tab on every active-session
+    // change would re-render on each pass.
+    expect(useUIStore.getState()).toBe(before);
   });
 
   it("forgets an agent entirely once its last tab closes", async () => {
