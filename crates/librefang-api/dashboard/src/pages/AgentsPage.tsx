@@ -1158,15 +1158,25 @@ export function AgentsPage() {
   );
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
 
-  const formModelsQueryProvider = showCreate
-    ? formState.model.provider
-    : manifestEditorFormState.model.provider;
+  const modelsQuery = useModels(
+    { provider: modelDraft.provider },
+    { enabled: !!modelDraft.provider.trim() },
+  );
+
+  // Unfiltered on purpose. The manifest editor's routing tiers and
+  // `pinned_model` hold bare names the daemon resolves against the *global*
+  // catalog (`ModelCatalog::find_model`), and each fallback holds a pair from
+  // any provider — so filtering this query to the agent's main provider would
+  // leave those pickers showing only that provider's models, or nothing at all
+  // before a main provider is chosen. The main model field narrows the same
+  // catalog to its own provider inside `AgentManifestForm`.
+  //
+  // Shared by the create dialog and the editor drawer (#7742): they are never
+  // open at the same time, so one query serves both.
   const formModelsQuery = useModels(
-    { provider: formModelsQueryProvider },
+    {},
     {
-      enabled:
-        ((showCreate && createMode === "form") || manifestEditorLive) &&
-        !!formModelsQueryProvider.trim(),
+      enabled: (showCreate && createMode === "form") || manifestEditorLive,
     },
   );
 
@@ -2019,6 +2029,11 @@ export function AgentsPage() {
             onChange={setManifestEditorFormState}
             providers={formProviderOptions}
             models={formModelOptions}
+            modelsFetching={formModelsQuery.isFetching}
+            modelsError={formModelsQuery.isError}
+            onModelsRetry={() => {
+              void formModelsQuery.refetch();
+            }}
             invalidFields={manifestEditorErrors}
             extras={manifestEditorExtras}
             skillCatalog={skillCatalogForForm}
@@ -4059,6 +4074,11 @@ export function AgentsPage() {
                 onChange={setFormState}
                 providers={formProviderOptions}
                 models={formModelOptions}
+                modelsFetching={formModelsQuery.isFetching}
+                modelsError={formModelsQuery.isError}
+                onModelsRetry={() => {
+                  void formModelsQuery.refetch();
+                }}
                 invalidFields={formErrors}
                 extras={formExtras}
                 skillCatalog={skillCatalogForForm}

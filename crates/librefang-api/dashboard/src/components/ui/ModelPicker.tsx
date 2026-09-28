@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { ArrowLeft, ArrowRight, ChevronDown, Loader2, Pencil } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, Loader2, Pencil, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 
 /**
@@ -99,6 +99,12 @@ export interface ModelPickerProps {
    * a custom rung beside their presets.
    */
   allowCustom?: boolean;
+  /**
+   * Clear the current value. Rendered as a "None" row in the flat `model`
+   * shape: those fields distinguish "absent" from a set id, so a picker that
+   * can only ever set a name cannot undo one.
+   */
+  onClear?: () => void;
   /** A write is in flight: the list is frozen and the active row spins. */
   busy?: boolean;
   /** True while the catalog is still arriving. */
@@ -130,6 +136,7 @@ export function ModelPicker({
   providers,
   disabled = false,
   allowCustom = false,
+  onClear,
   busy = false,
   isFetching = false,
   error = null,
@@ -431,15 +438,31 @@ export function ModelPicker({
               </div>
             )}
 
-            {!custom && !drilldown && !isFetching && !modelOnly && filteredProviders.length === 0 && (
+            {!custom && modelOnly && !!value?.model && onClear && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  onClear();
+                  setOpen(false);
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-text-dim transition-colors hover:bg-surface-hover"
+              >
+                <X className="h-3 w-3 shrink-0 text-text-dim/50" />
+                <span className="text-xs font-medium">
+                  {t("common.none", { defaultValue: "None" })}
+                </span>
+              </button>
+            )}
+
+            {!custom && !modelOnly && !drilldown && !isFetching && filteredProviders.length === 0 && (
               <p className="px-2.5 py-2 text-xs text-text-dim">
                 {t("chat.no_models_found", { defaultValue: "No models found" })}
               </p>
             )}
             {!custom &&
-              !drilldown &&
-              !isFetching &&
               !modelOnly &&
+              !drilldown &&
               filteredProviders.map((p) => {
                 const isCurrent = p.id === value?.provider;
                 // The provider an agent already runs on stays reachable even
@@ -489,16 +512,18 @@ export function ModelPicker({
                 );
               })}
 
-            {!custom && !isFetching && (modelOnly || drilldown) && filteredModels.length === 0 && (
+            {!custom && (modelOnly || drilldown) && !isFetching && filteredModels.length === 0 && (
               <p className="px-2.5 py-2 text-xs text-text-dim">
                 {t("chat.no_models_found", { defaultValue: "No models found" })}
               </p>
             )}
             {!custom &&
               (modelOnly || drilldown) &&
-              !isFetching &&
               filteredModels.map((m) => {
-                const isActive = m.id === value?.model && m.provider === value?.provider;
+                // In the flat `model` shape the field holds a bare name, so the
+                // provider on the value is empty by construction; matching on it
+                // would leave the configured model permanently unmarked.
+                const isActive = m.id === value?.model && (modelOnly || m.provider === value?.provider);
                 return (
                   <button
                     key={`${m.provider}/${m.id}`}
@@ -546,17 +571,16 @@ export function ModelPicker({
                   // which has no provider level at all — only the model.
                   const atProviderLevel = !drilldown && !modelOnly;
                   setCustom(atProviderLevel ? "provider" : "model");
-                  setCustomProvider(
-                    atProviderLevel ? (value?.provider ?? "") : (drilldown ?? (value?.provider ?? "")),
-                  );
+                  setCustomProvider(atProviderLevel ? (value?.provider ?? "") : (drilldown ?? ""));
                   // Only prefill the model when it belongs to the provider
-                  // being drilled into (or in the flat shape, where the value
-                  // is the model itself): `value.model` under a different
-                  // provider is not a pair that exists, and prefilling it left
-                  // Confirm enabled for `{provider: "openai", model:
-                  // "<some anthropic model>"}` after a single click.
+                  // being drilled into: `value.model` under a different provider
+                  // is not a pair that exists, and prefilling it left Confirm
+                  // enabled for `{provider: "openai", model: "<some anthropic
+                  // model>"}` after a single click.
                   setCustomModel(
-                    modelOnly || drilldown === value?.provider ? (value?.model ?? "") : "",
+                    modelOnly || atProviderLevel || drilldown === value?.provider
+                      ? (value?.model ?? "")
+                      : "",
                   );
                 }}
                 className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-text-dim transition-colors hover:bg-surface-hover"
