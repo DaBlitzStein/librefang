@@ -95,6 +95,7 @@ import {
   useAgentManifestHistory,
   useAgentManifest,
   useAgentChannels,
+  usePromptVersions,
   useTools,
 } from "../lib/queries/agents";
 import {
