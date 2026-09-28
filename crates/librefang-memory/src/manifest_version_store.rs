@@ -23,8 +23,9 @@ pub const MAX_VERSIONS_PER_AGENT: usize = 50;
 /// `persist_manifest_to_disk` call site in the kernel passes its own (see
 /// [`ManifestVersionStore::record_version`]). `persist_agent_enabled` bypasses
 /// that funnel and writes `suspend` / `resume`, or `suspend-persist-failed` /
-/// `resume-persist-failed` when its own `enabled`-line write failed. The schema
-/// default `unknown` covers rows written by a writer that does not classify its
+/// `resume-persist-failed` when its own `enabled`-line write failed;
+/// `persist_mcp_servers_to_disk` writes `mcp-servers`. The schema default
+/// `unknown` covers rows written by a writer that does not classify its
 /// persist.
 #[derive(Debug, Clone)]
 pub struct ManifestVersionRow {
@@ -297,6 +298,26 @@ mod tests {
         assert_eq!(row.agent_id, "a1");
 
         assert!(store.get_version(99999).unwrap().is_none());
+    }
+
+    /// A disk-full write records `update-persist-failed` with the
+    /// in-memory TOML; the operator retries and the identical content now
+    /// persists successfully as `update`. The dedup must not read that as
+    /// "no change" and leave the failure row as the newest entry forever.
+    #[test]
+    fn identical_content_with_a_different_change_source_is_not_deduped() {
+        let store = ManifestVersionStore::new(test_pool());
+        store
+            .record_version("a1", "agent", "same", "update-persist-failed")
+            .unwrap();
+        store
+            .record_version("a1", "agent", "same", "update")
+            .unwrap();
+
+        let versions = store.list_for_agent("a1", 10).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].change_source, "update");
+        assert_eq!(versions[1].change_source, "update-persist-failed");
     }
 
     /// A read failure on the dedup SELECT must surface as its own error, not

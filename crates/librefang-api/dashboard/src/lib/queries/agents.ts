@@ -307,7 +307,3 @@ export function useAgentAvatarUrl(
   // is what drops the URL a closed drawer would otherwise keep alive.
   return useObjectUrl(enabled && hasAvatar ? blob : undefined);
 }
-
-export function useAgentManifestHistory(agentId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(agentQueries.manifestHistory(agentId), options));
-}
