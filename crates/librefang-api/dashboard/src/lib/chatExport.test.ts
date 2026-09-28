@@ -6,14 +6,14 @@ import {
   type ExportableMessage,
 } from "./chatExport";
 
-const AT = new Date(2026, 8, 12, 17, 20);
+const AT = new Date(Date.UTC(2026, 8, 12, 17, 20));
 
 function msg(over: Partial<ExportableMessage> = {}): ExportableMessage {
   return {
     id: "m1",
     role: "assistant",
     content: "hello",
-    timestamp: new Date(2026, 8, 12, 17, 19),
+    timestamp: new Date(Date.UTC(2026, 8, 12, 17, 19)),
     ...over,
   };
 }
@@ -91,6 +91,18 @@ describe("conversationToMarkdown", () => {
     });
     expect(out).toContain("> **Error:** provider refused");
   });
+
+  it("stamps headings in UTC with the zone in the value", () => {
+    // The old stamp read the exporter's local clock and wrote no zone, so the
+    // same session exported in two places was hours apart with nothing saying
+    // which zone either file used. The trailing `Z` (and the UTC fields) are
+    // what make an exported file traceable back to one instant.
+    const out = conversationToMarkdown([msg()], { agentName: "Deanna", exportedAt: AT });
+    expect(out).toContain("Exported 2026-09-12 17:20Z.");
+    expect(out).toContain("## Assistant · 2026-09-12 17:19Z");
+    // The zoned stamp flows into the filename too, which stays filesystem-safe.
+    expect(exportFilename("Deanna", AT)).toBe("Deanna-2026-09-12-17-20Z.md");
+  });
 });
 
 describe("fenceFor", () => {
@@ -105,11 +117,11 @@ describe("exportFilename", () => {
   it("survives a name a filesystem would not accept", () => {
     // A slash in a download name either fails or writes somewhere nobody
     // expects, and an agent may legitimately be called this.
-    expect(exportFilename("Deanna/Troi 🖖", AT)).toBe("Deanna-Troi-2026-09-12-17-20.md");
+    expect(exportFilename("Deanna/Troi 🖖", AT)).toBe("Deanna-Troi-2026-09-12-17-20Z.md");
   });
 
   it("still produces a name when nothing usable survives", () => {
-    expect(exportFilename("🖖", AT)).toBe("conversation-2026-09-12-17-20.md");
+    expect(exportFilename("🖖", AT)).toBe("conversation-2026-09-12-17-20Z.md");
   });
 });
 
