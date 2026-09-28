@@ -1,0 +1,3 @@
+Fixed `channel_send` losing the bot account of the conversation it was called from, which let an unqualified send on a daemon running several instances of one channel type be captured by whichever instance was registered under the bare channel name (the legacy `telegram` bot) and delivered through the wrong agent's account.
+A send that targets the channel the turn arrived on now defaults to that turn's own `sender_account_id`; an explicit `account_id` still wins, and cross-channel or out-of-band sends stay account-less.
+Adapter resolution no longer trusts the bare channel key while two or more distinct instances share that channel type — it falls through to the existing ambiguity error instead of silently picking the instance named after the type (#8525) (@DaBlitzStein)

@@ -468,8 +468,11 @@ async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
         "post-approval reply for account 'acct1' must NOT leak to the bare 'whatsapp' adapter (the misdelivery bug)"
     );
 
-    // Case 2: a deferred exec with no account (single-tenant / bare source)
-    // routes to the bare "whatsapp" adapter, not the account-qualified one.
+    // Case 2 (#8525): two distinct instances of one channel type make an
+    // unqualified send ambiguous. It must be refused rather than routed to
+    // whichever instance the bare key happens to name — the bug where the
+    // legacy `"telegram"` instance captured sends meant for its siblings.
+    // Nothing may be delivered.
     let deferred_bare = DeferredToolExecution {
         account_id: None,
         chat_id: Some("dm-1".to_string()),
@@ -481,25 +484,23 @@ async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
         .as_deref()
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| deferred_bare.sender_id.as_deref().unwrap());
-    kernel
+    let err = kernel
         .send_channel_message(
             deferred_bare.channel.as_deref().unwrap(),
             routing_chat_id_bare,
-            "approved — bare",
+            "approved — ambiguous",
             None,
             deferred_bare.account_id.as_deref(),
         )
         .await
-        .expect("send should succeed to the bare adapter");
-    assert_eq!(
-        bare_sent.lock().unwrap().clone(),
-        vec!["dm-1:approved — bare".to_string()],
-        "post-approval reply with no account must be delivered via the bare 'whatsapp' adapter"
+        .expect_err("a bare source on a two-instance channel type must not guess");
+    assert!(
+        err.to_string().contains("ambiguous"),
+        "the refusal must say why: {err}"
     );
-    assert_eq!(
-        acct_sent.lock().unwrap().len(),
-        1,
-        "bare-account reply must NOT reach the account-qualified adapter (still only the case-1 send)"
+    assert!(
+        bare_sent.lock().unwrap().is_empty(),
+        "an ambiguous bare send must not reach the bare 'whatsapp' adapter"
     );
 
     // Case 3 (#8055 guard): an account the registry does not know must NOT fall back to the bare key.
@@ -519,10 +520,35 @@ async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
         err.to_string().contains("acct-unknown"),
         "the error must name the account that failed to resolve: {err}"
     );
-    assert_eq!(
-        bare_sent.lock().unwrap().len(),
-        1,
+    assert!(
+        bare_sent.lock().unwrap().is_empty(),
         "an unknown account_id must NOT fall back to the bare adapter (cross-tenant leak)"
+    );
+
+    // With one instance of the type left — a genuine single-tenant / bare
+    // source deployment — the same unqualified send resolves from the bare
+    // key, so the pre-#8525 routing behaviour is preserved where it is
+    // unambiguous.
+    kernel.mesh.channel_adapters.remove("whatsapp:acct1");
+    kernel
+        .send_channel_message(
+            deferred_bare.channel.as_deref().unwrap(),
+            routing_chat_id_bare,
+            "approved — bare",
+            None,
+            deferred_bare.account_id.as_deref(),
+        )
+        .await
+        .expect("send should succeed to the bare adapter");
+    assert_eq!(
+        bare_sent.lock().unwrap().clone(),
+        vec!["dm-1:approved — bare".to_string()],
+        "post-approval reply with no account must be delivered via the bare 'whatsapp' adapter"
+    );
+    assert_eq!(
+        acct_sent.lock().unwrap().len(),
+        1,
+        "bare-account reply must NOT reach the account-qualified adapter (still only the case-1 send)"
     );
 
     kernel.shutdown();
@@ -735,6 +761,103 @@ async fn test_channel_type_resolution_refuses_to_guess_between_tenants_8055() {
     assert_eq!(eng_sent.lock().unwrap().len(), 1);
 
     kernel.shutdown();
+}
+
+// ── #8525 the bare channel key vs. sibling instances ─────────────────────
+//
+// `telegram` was one bot's legacy *instance name* while other Telegram
+// instances ran as `laforge` and `mercaman`. An unqualified send to the
+// channel type matched the bare `"telegram"` key before the type scan and was
+// captured by the first bot — the wrong agent's account. The bare key is now
+// trusted only while the type scan would not call the type ambiguous, so the
+// instance that happens to share the type's name cannot shadow its siblings.
+
+/// Three Telegram instances registered the way `channel_bridge` does — each
+/// under its instance name plus `<name>:<account_id>` (the account id is the
+/// name). Returns the registry and the three concrete adapters so tests can
+/// assert resolution by pointer identity.
+#[allow(clippy::type_complexity)]
+fn telegram_instances() -> (
+    dashmap::DashMap<String, Arc<dyn ChannelAdapter>>,
+    Arc<RecordingChannelAdapter>,
+    Arc<RecordingChannelAdapter>,
+    Arc<RecordingChannelAdapter>,
+) {
+    let legacy = Arc::new(RecordingChannelAdapter::named_instance(
+        "telegram", "telegram",
+    ));
+    let laforge = Arc::new(RecordingChannelAdapter::named_instance(
+        "laforge", "telegram",
+    ));
+    let mercaman = Arc::new(RecordingChannelAdapter::named_instance(
+        "mercaman", "telegram",
+    ));
+
+    let adapters: dashmap::DashMap<String, Arc<dyn ChannelAdapter>> = dashmap::DashMap::new();
+    for adapter in [
+        legacy.clone() as Arc<dyn ChannelAdapter>,
+        laforge.clone() as Arc<dyn ChannelAdapter>,
+        mercaman.clone() as Arc<dyn ChannelAdapter>,
+    ] {
+        let name = adapter.name().to_string();
+        adapters.insert(name.clone(), adapter.clone());
+        adapters.insert(format!("{name}:{name}"), adapter);
+    }
+    (adapters, legacy, laforge, mercaman)
+}
+
+#[test]
+fn bare_channel_type_refuses_to_pick_between_sibling_instances_8525() {
+    use super::handles::channel_sender::resolve_channel_adapter;
+
+    let (adapters, _legacy, _laforge, _mercaman) = telegram_instances();
+    let err = resolve_channel_adapter(&adapters, "telegram", None)
+        .err()
+        .expect("an unqualified send must not be captured by the instance named after the type");
+    assert!(err.contains("ambiguous"), "the refusal must say why: {err}");
+}
+
+#[test]
+fn account_singles_out_its_instance_8525() {
+    use super::handles::channel_sender::resolve_channel_adapter;
+
+    let (adapters, _legacy, laforge, _mercaman) = telegram_instances();
+    let resolved = resolve_channel_adapter(&adapters, "telegram", Some("laforge"))
+        .expect("an account_id must single out its instance");
+    assert!(Arc::ptr_eq(
+        &resolved,
+        &(laforge.clone() as Arc<dyn ChannelAdapter>)
+    ));
+}
+
+#[test]
+fn instance_name_keeps_resolving_8525() {
+    use super::handles::channel_sender::resolve_channel_adapter;
+
+    let (adapters, _legacy, laforge, _mercaman) = telegram_instances();
+    let resolved = resolve_channel_adapter(&adapters, "laforge", None)
+        .expect("addressing an instance by its registered name must keep working");
+    assert!(Arc::ptr_eq(
+        &resolved,
+        &(laforge.clone() as Arc<dyn ChannelAdapter>)
+    ));
+}
+
+#[test]
+fn lone_instance_still_resolves_from_its_bare_key_8525() {
+    use super::handles::channel_sender::resolve_channel_adapter;
+
+    let legacy = Arc::new(RecordingChannelAdapter::named_instance(
+        "telegram", "telegram",
+    ));
+    let adapters: dashmap::DashMap<String, Arc<dyn ChannelAdapter>> = dashmap::DashMap::new();
+    let typed = legacy.clone() as Arc<dyn ChannelAdapter>;
+    adapters.insert("telegram".to_string(), typed.clone());
+    adapters.insert("telegram:telegram".to_string(), typed);
+
+    let resolved = resolve_channel_adapter(&adapters, "telegram", None)
+        .expect("a lone instance of a type must keep resolving from the bare key");
+    assert!(Arc::ptr_eq(&resolved, &(legacy as Arc<dyn ChannelAdapter>)));
 }
 
 #[test]
