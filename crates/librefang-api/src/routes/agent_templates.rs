@@ -343,11 +343,12 @@ pub async fn list_agent_templates(State(state): State<Arc<AppState>>) -> impl In
     // which matters once the catalog holds more than a handful of agent types (#8042 review).
     let from_registry_flags = futures::future::join_all(rows.iter().map(|(name, source, _)| {
         let name = name.clone();
+        let home_dir = home_dir.clone();
         async move {
             if !source.is_editable() {
                 return false;
             }
-            match read_registry_agent_type(&name).await {
+            match read_registry_agent_type(&home_dir, &name).await {
                 Ok(found) => found.is_some(),
                 Err(e) => {
                     // A row that cannot be answered for is not in the registry as far as the
@@ -866,7 +867,8 @@ fn parse_manifest_toml_body(
 // The `_in` spellings resolve against `state.kernel.config_ref().home_dir` rather than the
 // process-wide `LIBREFANG_HOME` env var — same reasoning as `read_agent_type_in` above (#8112):
 // the tool writes through the kernel's own `home_dir` too (`kernel::handles::agent_control`), so
-// all three writers of `agent-types/` agree on where the file lands.
+// every writer of `agent-types/` — flat create/update/delete/restore, the raw-TOML put/post, the
+// registry restore and the tool — agrees on where the file lands.
 use librefang_types::agent_type_store::{
     create_agent_type_from_manifest_in as store_create_from_manifest,
     create_agent_type_in as store_create_in, persist_agent_type_in, CreateAgentTypeError,
@@ -1083,8 +1085,11 @@ pub async fn delete_agent_type(
 /// agent type in a directory-per-type layout: `agent-types/{name}/agent.toml`
 /// (or legacy `agents/{name}/agent.toml`).
 /// Returns `Ok(None)` when the type is not in the registry.
-async fn read_registry_agent_type(name: &str) -> std::io::Result<Option<String>> {
-    let registry_cache = librefang_types::agent_type_store::registry_cache_dir();
+async fn read_registry_agent_type(
+    home_dir: &std::path::Path,
+    name: &str,
+) -> std::io::Result<Option<String>> {
+    let registry_cache = librefang_types::agent_type_store::registry_cache_dir_in(home_dir);
 
     // Resolve the two candidate directory names directly rather than through
     // `resolve_agent_types_dir`. That resolver's "log once ever" missing-checkout
@@ -1291,7 +1296,7 @@ pub async fn get_registry_diff(
     };
 
     // Read registry version.
-    let registry_content = match read_registry_agent_type(&name).await {
+    let registry_content = match read_registry_agent_type(&home_dir, &name).await {
         Ok(Some(content)) => content,
         Ok(None) => {
             return ApiErrorResponse::not_found(registry_not_found)
@@ -1401,7 +1406,7 @@ pub async fn restore_from_registry(
         };
 
     // Read the registry version.
-    let registry_content = match read_registry_agent_type(&name).await {
+    let registry_content = match read_registry_agent_type(&home_dir, &name).await {
         Ok(Some(content)) => content,
         Ok(None) => {
             return ApiErrorResponse::not_found(registry_not_found)
@@ -1982,13 +1987,12 @@ mod registry_report_sharing_tests {
     #[tokio::test]
     async fn read_registry_agent_type_does_not_consume_the_shared_missing_checkout_report() {
         let tmp = tempfile::tempdir().unwrap();
-        // Safety: env mutation, same pattern the sibling integration test file
-        // uses. Nothing else in this crate's unit-test binary reads
-        // `LIBREFANG_HOME` concurrently.
-        std::env::set_var("LIBREFANG_HOME", tmp.path());
 
-        // No registry checkout at all under this fresh home.
-        let found = read_registry_agent_type("does-not-matter").await.unwrap();
+        // No registry checkout at all under this fresh home. The home is passed
+        // explicitly (#8112), so nothing else in this binary's env matters.
+        let found = read_registry_agent_type(tmp.path(), "does-not-matter")
+            .await
+            .unwrap();
         assert!(found.is_none());
 
         let registry_cache = tmp.path().join("registry");
@@ -2009,7 +2013,5 @@ mod registry_report_sharing_tests {
              be pending — read_registry_agent_type must not have consumed it by \
              routing through the shared resolver: {logged}"
         );
-
-        std::env::remove_var("LIBREFANG_HOME");
     }
 }

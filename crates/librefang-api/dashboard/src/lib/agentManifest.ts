@@ -6,10 +6,11 @@
 // survives a round-trip back through the form.
 
 import { parse, stringify, TomlError, type TomlTable } from "smol-toml";
-// The parameter range table is the single source of truth for a model
-// parameter's ceiling (#8332); the validator reads it rather than restating
-// a number beside it, the same table the controls render from.
-import { MODEL_PARAM_RANGES } from "../components/ui/ModelParamField";
+// The parameter-range table lives next to the control that renders it (#8332),
+// and `isValidParamValue` is the one rule every editor applies. Importing it
+// here rather than restating the bounds keeps a single source of truth, the
+// same one `lib/agentModelPatch.ts` reads (#8112 review).
+import { isValidParamValue, MODEL_PARAM_NAMES } from "../components/ui/ModelParamField";
 
 let _nextUid = 1;
 export const generateUid = (): string => String(_nextUid++);
@@ -1069,18 +1070,6 @@ const isBlankOrU32TomlInteger = (raw: string): boolean =>
   isBlankOrUnsignedTomlIntegerAtMost(raw, U32_TOML_MAX);
 
 /**
- * max_tokens's ceiling comes from the range table (#8332), not a second
- * number beside this one. The table's max for the parameter IS `u32::MAX`,
- * so table and type agree today — the fallback only names what still applies
- * if the table entry ever loses its max: the Rust field is `Option<u32>`
- * (agent.rs:949), and that bound outlives any table edit.
- */
-const MODEL_MAX_TOKENS_CEILING =
-  MODEL_PARAM_RANGES.max_tokens.max !== undefined
-    ? BigInt(MODEL_PARAM_RANGES.max_tokens.max)
-    : U32_TOML_MAX;
-
-/**
  * Parse a float that may legitimately be negative.
  *
  * `parseFloatish` refuses negatives because every field it was written for is a
@@ -1102,17 +1091,6 @@ const parseFloatish = (raw: string): number | null => {
   if (!Number.isFinite(n)) return null;
   if (n < 0) return null; // all our float fields are cost/quota — never negative
   return n;
-};
-
-// The number inputs declare min/max, but min/max does not stop pasted or
-// programmatic values on a non-submitted form. `PATCH /api/agents/{id}/model`
-// rejects an out-of-range sampling value with an explicit 400 rather than
-// clamping it; `validateManifestForm` (below) mirrors those same ranges so
-// this editor reports the same conflict instead of silently rewriting the
-// number to one the operator never chose (#8112 review).
-const isInRange = (raw: string, min: number, max: number): boolean => {
-  const v = parseSignedFloat(raw);
-  return v === null || (v >= min && v <= max);
 };
 
 const writeStringScalar = (lines: string[], key: string, value: string): void => {
@@ -2053,9 +2031,6 @@ export const validateManifestForm = (
       errors.push("response_format.schema");
     }
   }
-  // Sampling preferences — same ranges `PATCH /api/agents/{id}/model` enforces
-  // (crates/librefang-api/src/routes/agents/config.rs), so an out-of-range
-  // value is reported here too instead of reaching the TOML at all (#8112).
   // The two per-agent counts. Blank inherits, anything else must be a whole
   // number the daemon can read into `Option<usize>`; without this the form let
   // `-5` through to the TOML and the operator learned about it as a 400.
@@ -2066,23 +2041,6 @@ export const validateManifestForm = (
   }
   if (!isBlankOrU32TomlInteger(form.max_concurrent_invocations)) {
     errors.push("max_concurrent_invocations");
-  }
-  // The model's three integer parameters. max_tokens is `Option<u32>` and its
-  // ceiling lives in MODEL_PARAM_RANGES (#8332) — the table's number, not a
-  // second one here. The two token counts beside it are `Option<u64>`: no
-  // typo reaches their ceiling through TOML, so what the validator owes them
-  // is the shape — a negative or a non-integer used to pass and parseInteger
-  // dropped the key from the file without a word.
-  if (
-    !isBlankOrUnsignedTomlIntegerAtMost(form.model.max_tokens, MODEL_MAX_TOKENS_CEILING)
-  ) {
-    errors.push("model.max_tokens");
-  }
-  if (!isBlankOrUnsignedTomlInteger(form.model.context_window)) {
-    errors.push("model.context_window");
-  }
-  if (!isBlankOrUnsignedTomlInteger(form.model.max_output_tokens)) {
-    errors.push("model.max_output_tokens");
   }
   // The rest of the `Option<u32>` inventory — same ceiling, same shape.
   if (!isBlankOrU32TomlInteger(form.autonomous.heartbeat_timeout_secs)) {
@@ -2103,16 +2061,17 @@ export const validateManifestForm = (
   if (!isBlankOrU32TomlInteger(form.skill_workshop.max_pending_age_days)) {
     errors.push("skill_workshop.max_pending_age_days");
   }
-  // The sampling ranges read from MODEL_PARAM_RANGES, not a second number
-  // beside it: the table is the same source the widget's own min/max and the
-  // PATCH route's ceiling come from, so a range edit lands everywhere at
-  // once instead of the validator quietly keeping yesterday's bounds.
-  for (const param of ["temperature", "top_p", "frequency_penalty", "presence_penalty"] as const) {
-    const { min, max } = MODEL_PARAM_RANGES[param];
-    // A parameter without a table max is unbound above — the table is the
-    // source, and the validator follows it rather than inventing a bound.
-    if (max === undefined) continue;
-    if (!isInRange(form.model[param], min, max)) errors.push(`model.${param}`);
+  // Sampling preferences and endpoint limits — `isValidParamValue` is the
+  // single rule the controls render from (`MODEL_PARAM_RANGES`), so this cannot
+  // drift from the ranges `PATCH /api/agents/{id}/model` enforces
+  // (crates/librefang-api/src/routes/agents/config.rs). Iterating the table
+  // also covers `max_tokens` (a real `u32` ceiling) and `context_window` /
+  // `max_output_tokens` (at least 1), which the form serializes unchecked
+  // (#8112 review). An empty field is the inherit rung, not a value.
+  for (const param of MODEL_PARAM_NAMES) {
+    const raw = form.model[param];
+    if (raw.trim() === "") continue;
+    if (!isValidParamValue(param, raw)) errors.push(`model.${param}`);
   }
   // Folder rows: duplicate names produce a duplicate TOML key (hard parse
   // failure on the daemon), and `path` mirrors the kernel's rule — relative

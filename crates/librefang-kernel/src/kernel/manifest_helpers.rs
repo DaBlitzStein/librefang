@@ -1305,7 +1305,7 @@ mod apply_resolved_inference_params_tests {
         let catalog = catalog_with_top_p_override(0.5);
         let mut model = inheriting_agent_model();
         assert!(
-            !model.extra_params.contains_key("top_p"),
+            model.top_p.is_none() && !model.extra_params.contains_key("top_p"),
             "precondition: the agent sets no top_p of its own, so the catalog \
              override is the only source that can put one on the wire"
         );

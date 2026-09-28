@@ -2748,7 +2748,6 @@ fn record_loop_guard_outcome_does_not_pace_ordinary_calls_that_mention_status() 
         "the fourth identical listing must hit the strict outcome threshold, got: {verdict:?}"
     );
 }
-
 // --- Tests for build_extra_body (#8290 typed sampling fields) ---
 #[test]
 fn test_build_extra_body_does_not_duplicate_typed_sampling_fields() {
