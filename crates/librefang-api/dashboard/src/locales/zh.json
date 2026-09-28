@@ -306,6 +306,8 @@
     "tags": "标签",
     "mode": "模式",
     "create_agent": "创建智能体",
+    "create_agent_named": "创建智能体: {{name}}",
+    "template_not_found": "智能体类型“{{name}}”已不存在 — 请选择模板或从头开始。",
     "from_form": "从表单",
     "from_template": "从模板",
     "from_toml": "从 TOML",

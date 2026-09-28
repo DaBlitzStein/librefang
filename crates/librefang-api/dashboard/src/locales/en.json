@@ -306,6 +306,8 @@
     "tags": "Tags",
     "mode": "Mode",
     "create_agent": "Create Agent",
+    "create_agent_named": "Create Agent: {{name}}",
+    "template_not_found": "Agent type '{{name}}' no longer exists — pick a template or start from scratch.",
     "from_form": "From Form",
     "from_template": "From Template",
     "from_toml": "From TOML",

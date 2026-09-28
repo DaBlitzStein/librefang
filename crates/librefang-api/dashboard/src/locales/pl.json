@@ -306,6 +306,8 @@
     "tags": "Tagi",
     "mode": "Tryb",
     "create_agent": "Utwórz agenta",
+    "create_agent_named": "Utwórz agenta: {{name}}",
+    "template_not_found": "Typ agenta '{{name}}' już nie istnieje — wybierz szablon lub zacznij od nowa.",
     "from_form": "Z formularza",
     "from_template": "Z szablonu",
     "from_toml": "Z TOML",

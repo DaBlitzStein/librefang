@@ -248,4 +248,33 @@ describe("QuickRunModal", () => {
     expect(screen.getByText("agents.quick_run_no_agents")).toBeTruthy();
     expect(screen.queryByRole("combobox", { name: "agents.quick_run_parent" })).toBeNull();
   });
+
+  // Escape and a backdrop click both reach `onClose`; the Close button is
+  // already disabled mid-run, and dismissing the dialog while the ephemeral
+  // worker is still running leaves the parent billed with no way to read the
+  // result (no agent, no session, workspace deleted).
+  it("does not close an in-flight run on Escape", () => {
+    useSpawnEphemeralMock.mockReturnValue({ mutateAsync, isPending: true });
+    const onClose = vi.fn();
+    render(<QuickRunModal initialParent="agent-a" onClose={onClose} />);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // A result describes the run it came from. Leaving the previous worker's name,
+  // iterations and cost on screen after the task (or parent, or type) changed
+  // makes them read as the outcome of what is about to be run.
+  it("clears a previous result once a parameter changes", async () => {
+    render(<QuickRunModal initialParent="agent-a" onClose={() => {}} />);
+
+    fireEvent.change(taskField(), { target: { value: "first" } });
+    fireEvent.click(submitButton());
+    expect(await screen.findByText("All done.")).toBeTruthy();
+
+    fireEvent.change(taskField(), { target: { value: "second" } });
+
+    expect(screen.queryByText("All done.")).toBeNull();
+  });
 });

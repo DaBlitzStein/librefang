@@ -306,6 +306,8 @@
     "tags": "Теги",
     "mode": "Режим",
     "create_agent": "Створити агента",
+    "create_agent_named": "Створити агента: {{name}}",
+    "template_not_found": "Тип агента '{{name}}' більше не існує — виберіть шаблон або почніть спочатку.",
     "from_form": "Через форму",
     "from_template": "З темплейту",
     "from_toml": "З TOML",

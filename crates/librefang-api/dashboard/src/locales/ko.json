@@ -306,6 +306,8 @@
     "tags": "태그",
     "mode": "모드",
     "create_agent": "에이전트 생성",
+    "create_agent_named": "에이전트 생성: {{name}}",
+    "template_not_found": "'{{name}}' 에이전트 유형이 더 이상 존재하지 않습니다 — 템플릿을 선택하거나 처음부터 시작하세요.",
     "from_form": "양식에서",
     "from_template": "템플릿에서",
     "from_toml": "TOML에서",

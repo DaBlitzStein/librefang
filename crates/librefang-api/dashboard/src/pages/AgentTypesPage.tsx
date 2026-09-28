@@ -667,17 +667,22 @@ function AgentTypeRow({
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
-
-        {/* The row's own name goes into the accessible name: every row carries
+        {/* Instantiation is offered on every row, editable or not. Spawnability
+            and writability are different questions: a workspace-sourced row is a
+            live agent's manifest this API refuses to edit, but the spawn engine
+            resolves it by name just as happily as an operator-authored type
+            (#6699). */}
+        {/* The row's own name is interpolated into the accessible name through
+            the locale rather than concatenated outside it: every row carries
             this same control, so a bare "Create Agent" repeated N times tells a
-            screen-reader user nothing about which type it would create. Its
-            neighbours name their own object the same way (#8166). */}
+            screen-reader user nothing about which type it would create, and a
+            hardcoded separator would not be translated. */}
         <button
           type="button"
           onClick={onRun}
           className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
-          aria-label={`${t("agents.create_agent")}: ${type.name}`}
-          title={`${t("agents.create_agent")}: ${type.name}`}
+          aria-label={t("agents.create_agent_named", { name: type.name })}
+          title={t("agents.create_agent_named", { name: type.name })}
         >
           <Plus className="h-3.5 w-3.5" />
         </button>
