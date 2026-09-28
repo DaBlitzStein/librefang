@@ -1634,6 +1634,13 @@ async fn workflow_run_depth_refusal_is_permission_denied_not_upstream() {
 
 // ── channel_send mirror tests ────────────────────────────────────────────
 
+/// One recorded send: `(channel, recipient, account_id)`.
+///
+/// Aliased because the recorder field and the test helper's return type would
+/// otherwise repeat the full `Arc<Mutex<Vec<…>>>` spelling and trip
+/// `clippy::type_complexity`.
+type SentLog = Arc<std::sync::Mutex<Vec<(String, String, Option<String>)>>>;
+
 /// A minimal kernel for mirror tests.
 ///
 /// - `send_channel_message`, `send_channel_media` and `send_channel_file_data`
@@ -1652,7 +1659,7 @@ struct MirrorKernel {
             )>,
         >,
     >,
-    sent: Arc<std::sync::Mutex<Vec<(String, String, Option<String>)>>>,
+    sent: SentLog,
     fail_append: bool,
 }
 
@@ -2140,10 +2147,7 @@ async fn test_channel_send_succeeds_even_when_mirror_fails() {
 // assert on the account the tool actually hands the kernel via the
 // `MirrorKernel` recorder.
 
-fn send_recording_kernel() -> (
-    Arc<dyn KernelHandle>,
-    Arc<std::sync::Mutex<Vec<(String, String, Option<String>)>>>,
-) {
+fn send_recording_kernel() -> (Arc<dyn KernelHandle>, SentLog) {
     let owner = librefang_types::agent::AgentId(
         uuid::Uuid::parse_str("85250000-0000-0000-0000-000000000000").unwrap(),
     );
