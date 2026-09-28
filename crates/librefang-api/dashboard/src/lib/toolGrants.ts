@@ -167,3 +167,31 @@ export function toggleMcpServerGrant(
     ? current.filter((s) => normalizeMcpName(s) !== target)
     : [...current, server];
 }
+
+/**
+ * Whether two `mcp_servers` lists describe the same grant set.
+ *
+ * The drafts compared against the persisted list decide whether Save has
+ * anything to write, and the kernel matches names after `normalizeMcpName` —
+ * so a revoke-then-regrant of a dash/case variant (`["Brave-Search"]` →
+ * `["brave_search"]`) is the same grant. A raw `Array.includes` read it as
+ * dirty and Save rewrote agent.toml with a normalized spelling the operator
+ * never chose (#7835 review).
+ *
+ * Multiset semantics: order does not matter, but a duplicate name is a real
+ * difference (`["a", "a"]` ≠ `["a"]`, though both are the same *set*).
+ */
+export function mcpServerListsEqual(
+  a: readonly string[],
+  b: readonly string[],
+): boolean {
+  if (a.length !== b.length) return false;
+  const remaining = [...b];
+  for (const name of a) {
+    const target = normalizeMcpName(name);
+    const index = remaining.findIndex((s) => normalizeMcpName(s) === target);
+    if (index === -1) return false;
+    remaining.splice(index, 1);
+  }
+  return true;
+}

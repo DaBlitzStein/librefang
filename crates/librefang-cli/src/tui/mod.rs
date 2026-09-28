@@ -863,6 +863,8 @@ impl App {
                     && !self.agents.ws_loaded
                     && self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id)
                 {
+                    self.agents.ws_manifest_names =
+                        entries.iter().map(|(name, _, _)| name.clone()).collect();
                     self.agents.workspaces = entries;
                     self.agents.ws_loaded = true;
                     if !self.agents.workspaces.is_empty() {

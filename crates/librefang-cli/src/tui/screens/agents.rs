@@ -137,6 +137,15 @@ pub struct AgentSelectState {
     /// message before the operator can read it. Any edit to the rows clears
     /// it, so the warning describes the save it gates.
     pub ws_drop_confirmed: bool,
+    /// Names the editor loaded from this agent's manifest when the session
+    /// opened. The save-time name check exists to refuse a name the runtime
+    /// cannot address, but a name the manifest already carries is legal to
+    /// keep even when the rule rejects it — `resolve_workspace_decl` never
+    /// inspects a name, so `[workspaces."team.docs"]` is delivered today and
+    /// only the `@team.docs/…` shorthand misses. Applying the rule to a
+    /// pre-existing row refuses the whole save, so an agent with such a name
+    /// could not have an unrelated folder added (#7835 review).
+    pub ws_manifest_names: std::collections::HashSet<String>,
     pub available_mcp: Vec<(String, bool)>,
     pub mcp_cursor: usize,
     // Channel allowlist editor. Detail-only: agent creation writes no `channels`
@@ -406,6 +415,7 @@ impl AgentSelectState {
             ws_loaded: false,
             ws_generation: 0,
             ws_drop_confirmed: false,
+            ws_manifest_names: std::collections::HashSet::new(),
         }
     }
 
@@ -767,6 +777,7 @@ impl AgentSelectState {
                     self.ws_buf.clear();
                     self.ws_loaded = false;
                     self.ws_drop_confirmed = false;
+                    self.ws_manifest_names.clear();
                     // A message from the last time this editor was open (or
                     // from any other pane on this tab) is not about the rows
                     // being opened now; the editor paints `status_msg`, so
@@ -1487,10 +1498,19 @@ impl AgentSelectState {
                     // match a name carrying punctuation — either way the PATCH
                     // would answer 200, the TUI would report the folders saved,
                     // and the agent would silently never get the folder.
+                    //
+                    // A name the manifest already carried is exempt, the same
+                    // way `rebuild_manifest_with_workspaces` exempts it: the
+                    // kernel accepts it, so refusing the whole save over a row
+                    // the operator did not type (and cannot fix without breaking
+                    // every `@team.docs/…` in use) is the bug, not the check
+                    // (#7835 review).
+                    let manifest_names = &self.ws_manifest_names;
                     if let Some((name, _, _)) = self.workspaces.iter().find(|(n, p, _)| {
                         let (n, p) = (n.trim(), p.trim());
                         !n.is_empty()
                             && !p.is_empty()
+                            && !manifest_names.contains(n)
                             && crate::tui::event::workspace_row_is_invalid(n, p)
                     }) {
                         self.status_msg = crate::i18n::t_args(
@@ -3734,6 +3754,47 @@ mod workspaces_tests {
                 "the status message must actually be painted, not just set: {rendered:?}"
             );
         }
+    }
+
+    /// A name the manifest already carries is legal to keep even though the
+    /// alias rule would refuse it — `resolve_workspace_decl` never inspects a
+    /// name, so `[workspaces."team.docs"]` is delivered today and only the
+    /// `@team.docs/…` shorthand misses. The save-time check must therefore
+    /// apply only to rows the operator typed, or an agent holding such a name
+    /// can never have an unrelated folder added (#7835 review).
+    #[test]
+    fn save_keeps_a_pre_existing_name_the_alias_rule_would_refuse() {
+        let mut state = editing_state();
+        state
+            .workspaces
+            .push(("team.docs".into(), "shared/docs".into(), "readwrite".into()));
+        state.ws_manifest_names.insert("team.docs".to_string());
+
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            AgentAction::UpdateWorkspaces { workspaces, .. } => {
+                assert_eq!(workspaces.len(), 1);
+                assert_eq!(workspaces[0].0, "team.docs");
+            }
+            other => panic!("a pre-existing legal name must not block the save, got {other:?}"),
+        }
+
+        // A name typed in this session is still checked, alongside one the
+        // manifest already carried.
+        state
+            .workspaces
+            .push(("bad/name".into(), "shared/x".into(), "readwrite".into()));
+        assert!(
+            matches!(
+                state.handle_key(key(KeyCode::Char('s'))),
+                AgentAction::Continue
+            ),
+            "a newly typed unusable name must still be refused"
+        );
+        assert!(
+            state.status_msg.contains("bad/name"),
+            "the refusal must name the offending folder: {:?}",
+            state.status_msg
+        );
     }
 
     #[test]

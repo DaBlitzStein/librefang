@@ -28,6 +28,7 @@ import {
   isToolAllowed,
   isToolBlocked,
   mcpGroupCardState,
+  mcpServerListsEqual,
   resolveMcpGrantMode,
   toggleMcpServerGrant,
   type McpGroupCardState,
@@ -1441,6 +1442,13 @@ export function AgentsPage() {
 
   const saveManifestEditor = () => {
     if (!detailAgent) return;
+    // #7835 review: a hand-derived agent's manifest belongs to the Hand
+    // definition. `update_manifest` pins the name and re-merges `hand:*`
+    // tags, so a PATCH here answers 200 and persists to agent.toml, but the
+    // next hand activation re-materializes the manifest from the Hand
+    // definition and silently reverts it. The Save control is hidden for
+    // hands; this covers a selection change while it was still mounted.
+    if (detailAgent.is_hand) return;
     // Same preserved-name list the create dialog passes: `[workspaces]` entries
     // the form can't render (mount-based declarations) are invisible here, so a
     // form row reusing one of their names validates clean and then serializes a
@@ -1969,16 +1977,25 @@ export function AgentsPage() {
               })}
             </span>
           </label>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={saveManifestEditor}
-            disabled={manifestPatchMutation.isPending}
-          >
-            {manifestPatchMutation.isPending
-              ? t("common.saving", { defaultValue: "Saving..." })
-              : t("common.save", { defaultValue: "Save" })}
-          </Button>
+          {/* Hidden for a hand-derived agent: `update_manifest` pins the name
+              and re-merges `hand:*` tags, so the PATCH would answer 200 and
+              persist to agent.toml, but the next hand activation
+              re-materializes the manifest from the Hand definition and
+              silently reverts it (#7835 review). The guard in
+              `saveManifestEditor` covers a selection change while the button
+              was mounted. */}
+          {agent.is_hand !== true && (
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={saveManifestEditor}
+              disabled={manifestPatchMutation.isPending}
+            >
+              {manifestPatchMutation.isPending
+                ? t("common.saving", { defaultValue: "Saving..." })
+                : t("common.save", { defaultValue: "Save" })}
+            </Button>
+          )}
         </div>
         <AgentTabBar
           tabs={configTabs}
@@ -2461,9 +2478,13 @@ export function AgentsPage() {
     // server-as-of-last-fetch baseline `isMcpDirty` compares against.
     const persistedMcpServers = agent.mcp_servers ?? [];
     const mcpDraftArr = mcpServersDraft ?? persistedMcpServers;
+    // `mcpServerListsEqual`, not `Array.includes`: the kernel matches server
+    // names after `normalizeMcpName`, so revoking and re-granting the same
+    // server under another spelling is not a change to save. A raw includes
+    // marked it dirty and Save rewrote agent.toml with the normalized name
+    // the operator never chose (#7835 review).
     const isMcpDirty = mcpServersDraft !== null &&
-      (mcpServersDraft.length !== persistedMcpServers.length ||
-        mcpServersDraft.some((n) => !persistedMcpServers.includes(n)));
+      !mcpServerListsEqual(mcpServersDraft, persistedMcpServers);
     // The kernel gates MCP on `!mcp_disabled && !mcp_servers.is_empty()`, and `tools_disabled` short-circuits every tool before that.
     // Both hard switches have to fold into "none", or an `mcp_disabled` agent with `mcp_servers = ["*"]` renders as a live grant.
     // Once the operator stages an edit, the mode is re-derived from the draft array alone (mirrors `usesAll`/`isBuiltinDirty` for capabilities_tools) rather than the server's last-known mode string, so a fresh single-server grant reads as "allowlist" immediately instead of staying pinned at the persisted "none".
@@ -2663,6 +2684,13 @@ export function AgentsPage() {
     const pendingMcpServers: string[] = (tabAgentMcpQuery.data?.pending ?? [])
       .slice()
       .sort();
+    // A pending server contributes no tools, so it renders no group card in
+    // either list. Before this the banner was read-only, which left a grant to
+    // a server that failed to connect — a typo in config.toml, or a server
+    // since removed — impossible to undo from the tab that owns MCP grants
+    // (#7835 review). The chips carry the same staged flow as a card: the
+    // draft update arms Save, and a click toggles between revoke and restore.
+    const mcpPendingRevocable = agent.is_hand !== true && !mcpHardDisabled;
 
     // Which list a group belongs to is not one question — see `isGroupAssigned`.
     const groupIsAssigned = ([name, tools]: [string, ToolDefinition[]]) =>
@@ -2768,15 +2796,47 @@ export function AgentsPage() {
                 })}
               </div>
               <div className="flex flex-wrap gap-1.5 mt-2">
-                {pendingMcpServers.map((name) => (
-                  <span
-                    key={name}
-                    className="font-mono text-[10.5px] rounded px-1.5 py-0.5 bg-main/60 border border-border-subtle text-text-main"
-                    data-testid="agent-pending-mcp-item"
-                  >
-                    {name}
-                  </span>
-                ))}
+                {pendingMcpServers.map((name) => {
+                  // Read off the draft, not just the (stale-until-save) query:
+                  // a struck-through chip has been staged for removal, and a
+                  // second click restores the grant.
+                  const staged = isMcpServerGranted(name, mcpDraftArr, mcpModeEffective);
+                  return (
+                    <span
+                      key={name}
+                      className={`font-mono text-[10.5px] rounded px-1.5 py-0.5 bg-main/60 border border-border-subtle text-text-main inline-flex items-center gap-1 ${
+                        staged ? "" : "opacity-50 line-through"
+                      }`}
+                      data-testid="agent-pending-mcp-item"
+                    >
+                      {name}
+                      {mcpPendingRevocable && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setMcpServersDraft((prev) =>
+                              toggleMcpServerGrant(prev ?? persistedMcpServers, name),
+                            )
+                          }
+                          className="text-text-dim hover:text-red-400 transition-colors p-0.5"
+                          title={
+                            staged
+                              ? t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })
+                              : t("agents.detail.tools_remove_group", { defaultValue: "Remove entire group" })
+                          }
+                          aria-label={
+                            staged
+                              ? `${t("common.add", { defaultValue: "Add" })} ${name}`
+                              : `${t("common.remove", { defaultValue: "Remove" })} ${name}`
+                          }
+                          data-testid="agent-pending-mcp-revoke"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
               </div>
             </div>
           </div>

@@ -6,6 +6,7 @@ import {
   isToolAllowed,
   isToolBlocked,
   mcpGroupCardState,
+  mcpServerListsEqual,
   normalizeMcpName,
   resolveMcpGrantMode,
   toggleMcpServerGrant,
@@ -142,6 +143,29 @@ describe("toggleMcpServerGrant", () => {
 
   it("does not add a duplicate case/dash variant of an already-granted server", () => {
     expect(toggleMcpServerGrant(["brave_search"], "Brave-Search")).toEqual([]);
+  });
+});
+
+// #7835 review: the Tools tab's dirty flag compared drafts with a raw
+// `Array.includes`, so a revoke-then-regrant of the same server under another
+// spelling armed Save and rewrote agent.toml with a normalized name.
+describe("mcpServerListsEqual (#7835 review)", () => {
+  it("treats a case/dash variant of the same server as the same grant", () => {
+    expect(mcpServerListsEqual(["Brave-Search"], ["brave_search"])).toBe(true);
+  });
+
+  it("still reports an added, removed or replaced server", () => {
+    expect(mcpServerListsEqual(["brave_search", "github"], ["brave_search"])).toBe(false);
+    expect(mcpServerListsEqual([], ["brave_search"])).toBe(false);
+    expect(mcpServerListsEqual(["brave_search"], ["github"])).toBe(false);
+  });
+
+  it("is order-independent", () => {
+    expect(mcpServerListsEqual(["github", "brave"], ["brave", "github"])).toBe(true);
+  });
+
+  it("treats a duplicate as a real difference", () => {
+    expect(mcpServerListsEqual(["a", "a"], ["a"])).toBe(false);
   });
 });
 
