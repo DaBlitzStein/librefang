@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 
 /**
@@ -10,23 +10,19 @@ import { ChevronDown } from "lucide-react";
  * and the chevron animates from CSS (`group-open:rotate-180`) so there is no
  * per-panel state to keep in sync.
  *
- * `invalid` forces the section open: a validation error the operator cannot see
- * is indistinguishable from no error at all.
+ * `invalid` opens the section when it *becomes* invalid: a validation error the
+ * operator cannot see is indistinguishable from no error at all. It deliberately
+ * does not close on recovery — clearing one of two errors while resubmitting must
+ * not snap shut the section the operator is still working in (#8403 review). The
+ * opening is imperative so user-driven toggling stays native and uncontrolled;
+ * React never rewrites `open` for a manual toggle, so a hand-expanded section is
+ * not force-collapsed either.
  */
 export interface CollapsibleSectionProps {
   title: string;
   children: ReactNode;
   defaultOpen?: boolean;
   invalid?: boolean;
-  /**
-   * Identity of the section as a whole, emitted as `data-section`.
-   *
-   * `title` is display text and therefore neither stable nor unique — two
-   * sections may legitimately share a title with a field inside them — so
-   * callers that need to address a section (the manifest editor's tab
-   * routing, and the tests that guard it) carry the id here instead.
-   */
-  sectionId?: string;
 }
 
 export function CollapsibleSection({
@@ -34,13 +30,22 @@ export function CollapsibleSection({
   children,
   defaultOpen,
   invalid,
-  sectionId,
 }: CollapsibleSectionProps) {
+  const ref = useRef<HTMLDetailsElement>(null);
+  const wasInvalid = useRef(false);
+
+  useEffect(() => {
+    if (invalid && !wasInvalid.current && ref.current) {
+      ref.current.open = true;
+    }
+    wasInvalid.current = Boolean(invalid);
+  }, [invalid]);
+
   return (
     <details
-      data-section={sectionId}
+      ref={ref}
       className="group overflow-hidden rounded-xl border border-border-subtle/60 bg-surface/40"
-      open={defaultOpen || invalid}
+      open={defaultOpen || undefined}
     >
       <summary
         aria-invalid={invalid || undefined}

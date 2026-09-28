@@ -22,13 +22,7 @@ import { cn } from "../../lib/cn";
  * it has none of the #5246 behaviour, so both properties hold at once.
  */
 export interface FieldProps {
-  /**
-   * The visible label. Optional only for the case where the surrounding card
-   * already names the field — a section whose title *is* the field's name,
-   * where drawing both reads as the same word twice, one line apart. Those
-   * callers pass `ariaLabel` instead, so the control keeps a name to announce.
-   */
-  label?: string;
+  label: string;
   hint?: string;
   /** Marks the label with an asterisk. Validation is the caller's job. */
   required?: boolean;
@@ -43,16 +37,6 @@ export interface FieldProps {
    * same id on the control.
    */
   htmlFor?: string;
-  /**
-   * The accessible name for a field with no visible label.
-   *
-   * Rendered as a labelled `role="group"` around the control, which is what a
-   * composite widget (the skills and MCP finders) needs: their input carries no
-   * accessible name of its own — a placeholder is a hint, not a name, and the
-   * finder's only `aria-label` sits on the listbox it opens — so the group is
-   * what tells the operator which field they are in.
-   */
-  ariaLabel?: string;
   children: ReactNode;
 }
 
@@ -64,7 +48,6 @@ export function Field({
   error,
   errorId,
   htmlFor,
-  ariaLabel,
   children,
 }: FieldProps) {
   const labelClass = cn(
@@ -74,20 +57,19 @@ export function Field({
   const labelNode = (
     <>
       {label}
-      {required && <span className="ml-0.5 text-error">*</span>}
+      {/* Decoration only: `aria-hidden` keeps it out of the control's
+          accessible name, so an `htmlFor` label is announced as "Name",
+          not "Name*" (#8403 review). */}
+      {required && (
+        <span aria-hidden="true" className="ml-0.5 text-error">
+          *
+        </span>
+      )}
     </>
   );
 
-  // The group is only needed when there is no visible label; with one, the
-  // label already names what is inside it.
-  const groupLabel = !label && ariaLabel ? ariaLabel : undefined;
-
   return (
-    <div
-      className="block"
-      role={groupLabel ? "group" : undefined}
-      aria-label={groupLabel}
-    >
+    <div className="block">
       {label &&
         (htmlFor ? (
           <label className={labelClass} htmlFor={htmlFor}>

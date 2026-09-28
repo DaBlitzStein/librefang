@@ -99,6 +99,12 @@ async fn a_reload_keeps_a_key_the_writer_never_stated() {
 /// whatever the operator wrote (`listen_addr`), so merging the two as plain maps left both keys in
 /// one object and serde rejected the result with `duplicate field api_listen`. Every reload of such
 /// a config failed, while boot still worked because it passes no base and no overlay runs.
+///
+/// `api_listen` is restart-required, so the accepted change is *planned*, not swapped: the plan
+/// carries the alias into the canonical field's diff and `should_store_config` deliberately leaves
+/// the live config as boot wired it. The evidence that the alias was read — rather than silently
+/// ignored, which the old live-config assertion also caught — is therefore the plan: a silently
+/// dropped alias would leave no change to report at all.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reload_accepts_a_documented_alias_for_a_stated_field() {
     let (kernel, tmp) = MockKernelBuilder::new()
@@ -111,14 +117,28 @@ async fn a_reload_accepts_a_documented_alias_for_a_stated_field() {
     )
     .expect("write the document that uses the alias");
 
-    kernel.reload_config().await.expect(
+    let plan = kernel.reload_config().await.expect(
         "the alias names the same field serde accepts at boot; the reload must not reject it",
     );
 
+    assert!(
+        plan.restart_required,
+        "the alias must land in the canonical field and be diffed as a change: {plan:?}"
+    );
+    assert!(
+        plan.restart_reasons
+            .iter()
+            .any(|r| r.contains("api_listen") && r.contains("0.0.0.0:9999")),
+        "the diff must name the canonical field with the value the alias supplied: {plan:?}"
+    );
+    assert!(
+        !plan.config_stored,
+        "a restart-only plan is not swapped into the live config: {plan:?}"
+    );
     assert_eq!(
         kernel.config_snapshot().api_listen,
-        "0.0.0.0:9999",
-        "the alias must land in the canonical field"
+        "127.0.0.1:4545",
+        "the live config keeps the address boot wired until the daemon restarts"
     );
 
     kernel.shutdown();

@@ -1007,7 +1007,7 @@ fn redacted_config_json(
 // ---------------------------------------------------------------------------
 // Config Reload endpoint
 // ---------------------------------------------------------------------------
-/// `has_warnings` covers everything that makes a nominally successful reload less than complete — a channel bridge that failed to restart, or a plan the kernel declined to apply because `[reload] mode` withholds runtime changes.
+/// `has_warnings` covers everything that makes a nominally successful reload less than complete — a channel bridge that failed to restart, a plan the kernel declined to apply because `[reload] mode` withholds runtime changes, or a restart-only plan deliberately left unswapped.
 fn config_reload_status(
     restart_required: bool,
     has_changes: bool,
@@ -1079,13 +1079,20 @@ pub async fn config_reload(
                 }
             }
 
-            // A plan the kernel declined to apply is a preview of what a restart would do, not a record of what happened: under `[reload] mode = "off"` / `"restart"` the config is read and validated but never swapped in, and `apply_hot_actions_inner` runs inside that same branch.
+            // A plan the kernel declined to apply is a preview of what a restart would do, not a record of what happened.
+            // Two shapes reach here: under `[reload] mode = "off"` / `"restart"` the config is read and validated but never swapped in, and a restart-only plan in `hot` / `hybrid` is deliberately not swapped so no live reader sees a value boot never wired (`should_store_config`).
             // Reporting `hot_actions_applied: ["ReloadAuth"]` there is the identical misleading-success shape this endpoint's auth refresh exists to close, one mode over — the operator sees a 200 naming the action and believes the revocation landed.
             if plan.has_changes() && !plan.config_stored {
-                warnings.push(
+                let restart_only = plan.restart_required
+                    && plan.hot_actions.is_empty()
+                    && plan.noop_changes.is_empty();
+                warnings.push(if restart_only {
+                    "Nothing was applied: the only change needs a restart, so the live config was left as the running process has it wired. Restart the daemon to pick it up."
+                        .to_string()
+                } else {
                     "Nothing was applied: the configured `[reload] mode` withholds runtime changes, so the new config was read and validated but not swapped in. Restart the daemon to pick it up."
-                        .to_string(),
-                );
+                        .to_string()
+                });
             }
 
             let status = config_reload_status(
