@@ -458,7 +458,7 @@ pub const MAX_EMOJI_CHARS: usize = 32;
 ///
 /// `None` and an empty-or-whitespace string both mean "clear the stored emoji".
 ///
-/// Nothing here checks that the value *is* an emoji, and that is deliberate: deciding "is this a glyph" needs an emoji table that would go stale against Unicode, and the two properties that actually matter for a value stored in `config.toml` and rendered into a DOM text node are length and the absence of control characters.
+/// Nothing here checks that the value *is* an emoji, and that is deliberate: deciding "is this a glyph" needs an emoji table that would go stale against Unicode, and the properties that actually matter for a value stored in `config.toml` and rendered into a DOM text node are its length and the absence of control or invisible/bidi formatting characters.
 /// A `Z` is therefore accepted as an emoji. It renders as a `Z`.
 pub fn validate_emoji(emoji: Option<&str>) -> Result<Option<String>, String> {
     let Some(raw) = emoji else {
@@ -474,10 +474,66 @@ pub fn validate_emoji(emoji: Option<&str>) -> Result<Option<String>, String> {
             "emoji must be at most {MAX_EMOJI_CHARS} characters; this one is {len}"
         ));
     }
-    if trimmed.chars().any(char::is_control) {
-        return Err("emoji must not contain control characters".to_string());
+    if trimmed.chars().any(|c| {
+        c.is_control()
+            || crate::text::INJECTION_SIGNAL_CHARS.contains(&c)
+            || ('\u{E0000}'..='\u{E007F}').contains(&c)
+    }) {
+        return Err(
+            "emoji must not contain control or invisible/bidi formatting characters".to_string(),
+        );
     }
     Ok(Some(trimmed.to_string()))
+}
+
+#[cfg(test)]
+mod validate_emoji_tests {
+    use super::validate_emoji;
+
+    #[test]
+    fn refuses_invisible_and_bidi_formatting_characters() {
+        // U+202E (right-to-left override) reverses everything rendered after it
+        // in the row; U+200B is an invisible padding character; U+2066 opens a
+        // bidi isolate. None is `char::is_control`, so the old check let them
+        // through.
+        for bad in ["\u{202E}\u{200B}", "\u{200B}\u{200B}", "a\u{2066}b"] {
+            assert!(
+                validate_emoji(Some(bad)).is_err(),
+                "{bad:?} must be refused as an invisible/bidi format character"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_the_tag_block() {
+        // U+E0000-U+E007F is a coordinated smuggling channel; the filename
+        // guard already refuses it, and the emoji is written into config.toml
+        // and rendered into the DOM.
+        assert!(validate_emoji(Some("\u{E0041}\u{E0042}")).is_err());
+    }
+
+    #[test]
+    fn accepts_the_emoji_sequence_chars_the_set_excludes() {
+        // A family emoji joins four people with U+200D, and U+FE0F requests
+        // emoji presentation; both are legitimate in an emoji and must not be
+        // caught by the invisible-character check.
+        assert_eq!(
+            validate_emoji(Some("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"))
+                .expect("a ZWJ family emoji is a valid emoji"),
+            Some("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".to_string())
+        );
+        assert!(validate_emoji(Some("\u{2764}\u{FE0F}")).is_ok());
+    }
+
+    #[test]
+    fn clears_empty_and_keeps_ordinary_glyphs() {
+        assert_eq!(validate_emoji(None).expect("none is not an error"), None);
+        assert_eq!(validate_emoji(Some("   ")).expect("blank clears"), None);
+        assert_eq!(
+            validate_emoji(Some(" Z ")).expect("an ordinary glyph is accepted"),
+            Some("Z".to_string())
+        );
+    }
 }
 
 fn default_role() -> String {
