@@ -988,6 +988,39 @@ mod tests {
         assert!(!saved.exists());
     }
 
+    /// A filesystem that refuses the unlink is reported, not swallowed.
+    ///
+    /// `plan_purge` predicts the avatar from `find_avatar` alone, so a refusal
+    /// here is exactly where a `--dry-run` and the run disagree and the operator
+    /// gets no line explaining why — the failure this pins. The avatar path is a
+    /// non-empty directory so `remove_file` refuses it portably (EISDIR)
+    /// whatever the test user's privileges, which a `chmod` would not.
+    ///
+    /// Sabotage: reverting to `remove_avatars` (which drops the error) leaves
+    /// `failures` empty and fails the assertion below.
+    #[test]
+    fn a_refused_avatar_removal_is_reported() {
+        let home = home_with(&["alpha"]);
+        let substrate = MemorySubstrate::open_in_memory(0.01).unwrap();
+        let id = AgentId::from_name("alpha");
+        seed_agent_rows(&substrate, "alpha", id);
+        delete_roster_row_only(&substrate, id);
+
+        let cfg = cfg_for(&home);
+        let avatars_dir = cfg.effective_avatars_dir();
+        std::fs::create_dir_all(&avatars_dir).unwrap();
+        let blocked = librefang_types::media::avatar_path(&avatars_dir, &id.to_string(), "png");
+        std::fs::create_dir_all(blocked.join("keep")).unwrap();
+
+        let outcome = purge_agent(&substrate, &cfg, "alpha");
+
+        assert!(
+            outcome.failures.iter().any(|f| f.contains("remove avatar")),
+            "a refused avatar removal must be reported, got {:?}",
+            outcome.failures
+        );
+    }
+
     #[test]
     fn it_leaves_every_other_agent_alone() {
         let home = home_with(&["alpha", "beta"]);
