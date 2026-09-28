@@ -322,6 +322,16 @@ async fn save_agent_as_agent_type_round_trip() {
         saved.workspace.is_none(),
         "workspace must be cleared on save: {content}"
     );
+    // `agent_purge` reads this to leave a same-named type alone; without it the
+    // purge would delete the operator's copy when the source agent is removed.
+    assert_eq!(
+        saved
+            .metadata
+            .get(librefang_types::agent_type_store::SAVED_FROM_AGENT_METADATA_KEY)
+            .and_then(|value| value.as_str()),
+        Some("researcher-live"),
+        "the snapshot must record its source agent for agent_purge: {content}"
+    );
 
     // It shows up on the Agent Types list, editable/deletable like any
     // other template (point 1: only real templates are listed).
@@ -369,6 +379,82 @@ async fn save_agent_as_agent_type_round_trip() {
     assert_ne!(
         new_entry.manifest.workspace, source_entry.manifest.workspace,
         "cloned-via-template agent must get its own workspace, not the source's"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn save_agent_as_agent_type_strips_kernel_hand_tags() {
+    let _guard = home_lock().lock().await;
+    let h = boot().await;
+
+    let agent_id = h
+        .state
+        .kernel
+        .spawn_agent_typed(AgentManifest {
+            name: "hand-worker".to_string(),
+            tags: vec![
+                "hand:researcher".to_string(),
+                "hand_role:lead".to_string(),
+                "hand_instance:abc".to_string(),
+                "operator-tag".to_string(),
+            ],
+            ..AgentManifest::default()
+        })
+        .expect("spawn_agent");
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{agent_id}/save-as-agent-type"),
+            serde_json::json!({"template_name": "snapshotted-hand"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // Kernel-owned tags must not travel into the saved type: a copied `hand:*`
+    // tag makes `spawn` recompute `is_hand`, and the approval gate then
+    // auto-approves every tool call for agents spawned from it.
+    let templates_dir = h.state.kernel.config_ref().home_dir.join("agent-types");
+    let content = std::fs::read_to_string(templates_dir.join("snapshotted-hand.toml"))
+        .expect("template file must exist on disk");
+    let saved: AgentManifest = toml::from_str(&content).unwrap();
+    assert_eq!(
+        saved.tags,
+        vec!["operator-tag".to_string()],
+        "only operator tags may be snapshotted: {content}"
+    );
+
+    // The decisive check: an agent spawned from the snapshot is not a hand.
+    let (spawn_status, spawn_body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({"template": "snapshotted-hand", "name": "plain-copy"}),
+        ),
+    )
+    .await;
+    assert_eq!(spawn_status, StatusCode::CREATED, "{spawn_body}");
+    let new_id: AgentId = spawn_body["agent_id"]
+        .as_str()
+        .expect("agent_id")
+        .parse()
+        .unwrap();
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(new_id)
+        .expect("spawned entry");
+    assert!(
+        !entry.is_hand,
+        "a snapshot must not spawn hands: {:?}",
+        entry.manifest.tags
+    );
+    assert!(
+        !entry.tags.iter().any(|t| t.starts_with("hand:")),
+        "no hand tag may reach the spawned agent: {:?}",
+        entry.tags
     );
 }
 

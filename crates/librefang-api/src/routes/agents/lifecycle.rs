@@ -1702,6 +1702,23 @@ pub async fn save_agent_as_agent_type(
     // side: a template spawned from later must get a fresh workspace, not
     // point new agents at the SOURCE agent's own workspace directory.
     manifest.workspace = None;
+    // Kernel-owned tags must not travel into the saved type. `spawn` recomputes
+    // `is_hand` from `manifest.tags`, and the approval gate auto-approves every
+    // tool call for a hand — so a copied `hand:*` tag would silently turn every
+    // agent spawned from this type into a hand with no approval gate, and hide
+    // it from `GET /api/agents` as well. They are not the operator's to manage
+    // anyway (`merge_agent_tags` keeps them out of operator reach).
+    manifest
+        .tags
+        .retain(|tag| !librefang_types::agent::is_system_tag(tag));
+    // Provenance for `agent_purge`: a snapshot deliberately shares its source's
+    // name, so the purge reads this to leave the operator's reusable copy alone
+    // instead of deleting `agent-types/<name>.toml` as if it were a trace of the
+    // agent.
+    manifest.metadata.insert(
+        agent_type_store::SAVED_FROM_AGENT_METADATA_KEY.to_string(),
+        serde_json::Value::String(entry.manifest.name.clone()),
+    );
 
     let home = &state.kernel.config_ref().home_dir;
     // The source agent's own name is the one this save is allowed to collide
@@ -1712,13 +1729,24 @@ pub async fn save_agent_as_agent_type(
         &manifest,
         Some(&entry.manifest.name),
     ) {
-        Ok(_rendered) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({
-                "name": template_name,
-                "description": manifest.description,
-            })),
-        ),
+        Ok(rendered) => {
+            // Every other agent-type write path records a history baseline; this
+            // one landed none, so the first dashboard edit had nothing to
+            // restore to.
+            let _ = crate::routes::agent_templates::record_template_version(
+                &state,
+                &template_name,
+                &rendered,
+                "create",
+            );
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "name": template_name,
+                    "description": manifest.description,
+                })),
+            )
+        }
         Err(librefang_types::agent_type_store::CreateAgentTypeError::InvalidName) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": t.t("api-error-template-invalid-name")})),
