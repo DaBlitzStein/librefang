@@ -189,9 +189,9 @@ function mockQuery<T>(data: T) {
 type MutationStub = { mutateAsync: ReturnType<typeof vi.fn>; isPending: boolean };
 
 /**
- * Promotion is the mutation every test varies; restore and the history payload
- * are opt-in so the tests that do not open the history modal keep reading as
- * one argument.
+ * Promotion is the mutation every test varies; the type list, the restore stub
+ * and the history payload are opt-in so the tests that do not need them keep
+ * reading as one argument.
  *
  * A caller may also replace the template list, and that override landed on the
  * same positional argument as `extras` — one from each side of this rebase —
@@ -212,7 +212,7 @@ function renderPage(
   const templates = Array.isArray(arg) ? arg : (arg.types ?? [TYPE]);
   const extras = Array.isArray(arg) ? {} : arg;
   vi.mocked(useAgentTypes).mockReturnValue(
-    mockQuery(templates) as unknown as ReturnType<typeof useAgentTypes>,
+    mockQuery(extras.types ?? templates) as unknown as ReturnType<typeof useAgentTypes>,
   );
   vi.mocked(useAgentType).mockReturnValue(
     mockQuery(DETAIL) as unknown as ReturnType<typeof useAgentType>,

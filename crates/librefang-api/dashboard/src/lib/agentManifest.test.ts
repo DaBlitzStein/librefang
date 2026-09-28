@@ -257,6 +257,15 @@ describe("agentManifest serializer", () => {
 });
 
 describe("agentManifest validator", () => {
+  // An agent type authored without a pinned provider persists `provider = ""`
+  // verbatim — `AgentTypeSpec::apply_to` and `into_new_manifest` both treat
+  // `Some("")` as "the caller cleared it", and `ModelConfig::provider` is a
+  // plain `String` with no skip-if-empty, so the blank reaches the agent's
+  // `agent.toml` on disk and back into this form.
+  // Requiring it here turned Save into a silent no-op for those agents:
+  // `saveManifestEditor` returns before issuing the PATCH, with no toast and no
+  // request — the only signal is a red border on a Model section that sits
+  // below the fold of the configuration drawer.
   it("does not block Save on a manifest that inherits the daemon's default model (#7749)", () => {
     const parsed = parseManifestToml(
       ['name = "inherits-default"', 'module = "builtin:chat"', "", "[model]", 'provider = ""', 'model = ""'].join("\n"),

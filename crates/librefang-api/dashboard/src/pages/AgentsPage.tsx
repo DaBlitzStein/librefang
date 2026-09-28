@@ -1158,11 +1158,6 @@ export function AgentsPage() {
   );
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
 
-  const modelsQuery = useModels(
-    { provider: modelDraft.provider },
-    { enabled: !!modelDraft.provider.trim() },
-  );
-
   // Unfiltered on purpose. The manifest editor's routing tiers and
   // `pinned_model` hold bare names the daemon resolves against the *global*
   // catalog (`ModelCatalog::find_model`), and each fallback holds a pair from
@@ -2041,13 +2036,16 @@ export function AgentsPage() {
             mcpCatalog={mcpCatalogForForm}
             routerProfileCatalog={routerProfileCatalog}
             routerProfilesEnabled={routerProfilesQuery.data?.enabled}
+            // An existing agent carries the kernel's answer on its detail
+            // payload (#8479), so the Routing section warns from that rather
+            // than from a second config fetch.
+            routingInertReason={agent.routing_inert_reason ?? null}
             // Identity is decided by the panel header's rename control; a
             // second editable Name field here would be a second answer to the
             // same question.
             nameField="readonly"
             sections={CONFIG_GROUPS[configGroup] as ManifestSectionId[]}
             advanced={advancedMode}
-            routingInertReason={agent.routing_inert_reason ?? null}
           />
         </div>
       </div>

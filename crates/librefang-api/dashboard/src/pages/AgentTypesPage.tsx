@@ -2,7 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Edit2, ExternalLink, History, LayoutTemplate, Lock, Plus, RotateCcw, Share2, ShieldCheck, Trash2 } from "lucide-react";
-import type { AgentTemplate, TemplateVersionEntry } from "../api";
+import type {
+  AgentTemplate,
+  TemplateVersionEntry,
+} from "../api";
 import { useAgentType, useAgentTypeRegistryDiff, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
@@ -251,8 +254,8 @@ function AgentTypeEditor({
             mcpCatalog={mcpCatalog}
             routerProfileCatalog={routerProfileCatalog}
             routerProfilesEnabled={routerProfilesQuery.data?.enabled}
-            nameField={isCreate ? "hidden" : "readonly"}
             routingInertReason={routingInertReasonQuery.data}
+            nameField={isCreate ? "hidden" : "readonly"}
           />
 
           <div className="flex justify-end gap-2 pt-1">

@@ -50,8 +50,8 @@ function Harness({
   providers = [{ name: "openai" }],
   nameField,
   sections,
-  onState,
   routingInertReason,
+  onState,
   modelsFetching,
   modelsError,
   onModelsRetry,
@@ -67,9 +67,9 @@ function Harness({
   providers?: { name: string }[];
   nameField?: "editable" | "readonly" | "hidden";
   sections?: ManifestSectionId[];
+  routingInertReason?: "stable_mode" | null;
   /** Receives every state the form produces, so a test can read what would be saved. */
   onState?: (next: ManifestFormState) => void;
-  routingInertReason?: "stable_mode" | null;
   modelsFetching?: boolean;
   modelsError?: boolean;
   onModelsRetry?: () => void;

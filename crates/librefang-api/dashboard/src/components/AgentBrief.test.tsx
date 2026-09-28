@@ -126,6 +126,17 @@ describe("AgentBrief", () => {
     expect(screen.getByText("m7")).toBeInTheDocument();
   });
 
+  // #8424 review: the Tools tile used to interpolate `String(null)` when the
+  // caller passed no count (the declared default), painting the literal word
+  // "null" into the KPI. An absent count is "unknown" and reads as an em dash.
+  it("renders an unknown Tools count as an em dash, never the string 'null'", () => {
+    render(<AgentBrief agent={agent} />);
+    const tile = screen.getByText("Tools").parentElement;
+    expect(tile).not.toBeNull();
+    expect(tile?.textContent).not.toContain("null");
+    expect(tile?.querySelector(".font-mono")?.textContent).toBe("—");
+  });
+
   it("reports the state, the model and the last activity", () => {
     render(
       <AgentBrief
