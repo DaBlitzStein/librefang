@@ -20261,7 +20261,7 @@ fn changing_the_mcp_allowlist_records_a_manifest_version_snapshot() {
     // `persist_mcp_servers_to_disk` patches `agent.toml` only when it already
     // exists; the file-missing branch falls back to `persist_full_manifest_at`,
     // which records anyway and would make this test pass without the fix.
-    kernel.persist_manifest_to_disk(agent_id);
+    kernel.persist_manifest_to_disk(agent_id, "update");
     let baseline = store
         .list_for_agent(&agent_id.to_string(), 10)
         .expect("history read should succeed");

@@ -491,7 +491,7 @@ mod tests {
             dir.path(),
             "ResearchBot",
             &manifest,
-            "Research Bot",
+            Some("Research Bot"),
         );
         assert!(saved.is_ok(), "{saved:?}");
     }
@@ -508,8 +508,12 @@ mod tests {
             name: "victim".to_string(),
             ..AgentManifest::default()
         };
-        let refused =
-            create_agent_type_from_manifest_in(dir.path(), "victim", &manifest, "Research Bot");
+        let refused = create_agent_type_from_manifest_in(
+            dir.path(),
+            "victim",
+            &manifest,
+            Some("Research Bot"),
+        );
         assert_eq!(refused, Err(CreateAgentTypeError::ShadowsLiveAgent));
     }
 }
