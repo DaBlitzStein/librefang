@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { readFileSync } from "node:fs";
@@ -883,6 +883,33 @@ describe("AgentManifestForm — a re-render must not remount the fields", () => 
 
     expect(screen.getAllByRole("combobox")[0]).toBe(before);
   });
+
+  // Reordering a caller's list is a re-render too. The section ids double as
+  // React keys, so a moved section must be the same DOM node in a new place —
+  // a remount would close the fold and wipe what was typed inside it.
+  it("moves a section without remounting it when the caller reorders the list", async () => {
+    const user = userEvent.setup();
+    const { container, rerender } = render(
+      <Harness sections={["proactive_memory", "shared_folders"]} />,
+    );
+
+    await user.click(screen.getByText("config.sec_proactive_memory"));
+    await user.type(screen.getByRole("textbox"), "abc");
+
+    const details = document.querySelector('[data-section="proactive_memory"]');
+    expect(details, "the section renders").toBeTruthy();
+    expect(details).toHaveAttribute("open");
+
+    rerender(<Harness sections={["shared_folders", "proactive_memory"]} />);
+
+    const order = Array.from(container.querySelectorAll("[data-section]")).map(
+      (el) => el.getAttribute("data-section"),
+    );
+    expect(order).toEqual(["shared_folders", "proactive_memory"]);
+    expect(document.querySelector('[data-section="proactive_memory"]')).toBe(details);
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByRole("textbox")).toHaveValue("abc");
+  });
 });
 
 describe("AgentManifestForm — the counters report before the server does", () => {
@@ -989,16 +1016,81 @@ describe("AgentManifestForm — folded section field count", () => {
     return summary as HTMLElement;
   };
 
+  // The badge's digit, not a substring match on the whole summary: the check
+  // has to fail when the number is 18 and the expectation is 8.
+  const badgeCount = (id: string): number => {
+    const badge = sectionSummary(id).querySelector('span[aria-hidden="true"]');
+    return badge ? Number(badge.textContent) : 0;
+  };
+
   it("counts the fields behind the fold, the Advanced ones included", () => {
     render(<Harness sections={["proactive_memory"]} />);
 
     // Three tri-state selects on the open half; the Advanced fold adds two
-    // more selects and the extraction-model text box: six. The fold is closed,
-    // so a count that only saw rendered state would read three.
-    expect(sectionSummary("proactive_memory")).toHaveTextContent("6");
+    // more selects, the extraction-model text box and the similarity ladder
+    // (a button set, counted as the one field it is): seven. The fold is
+    // closed, so a count that only saw rendered state would read three.
+    expect(badgeCount("proactive_memory")).toBe(7);
     expect(
       document.querySelector('[data-section="proactive_memory"] [data-advanced]'),
     ).not.toHaveAttribute("open");
+  });
+
+  it("counts a button-set control as one field, so the routing badge moves when the router is switched on", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["routing"]} />);
+
+    // Off: the enable switch and the two Advanced selects. The tier pickers
+    // and the threshold ladders the switch reveals do not exist yet.
+    expect(badgeCount("routing")).toBe(3);
+
+    await user.click(screen.getByText("agents.form.routing"));
+    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+
+    // On: three pickers and two ladders join them. Every one of the five is a
+    // button set, so before they opted in with `data-field` the badge read the
+    // same 3 on both sides of the switch.
+    await waitFor(() => expect(badgeCount("routing")).toBe(8));
+  });
+
+  it("leaves the count alone when a picker is opened, because its search box is not a manifest field", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["routing"]} />);
+    await user.click(screen.getByText("agents.form.routing"));
+    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+    await waitFor(() => expect(badgeCount("routing")).toBe(8));
+
+    await user.click(screen.getByRole("button", { name: "agents.form.simple_model: None" }));
+
+    // The popover's search box is an <input>; browsing the catalog is not
+    // configuring another field, so the badge must stay where it was. The
+    // hand-entry panel is the same kind of not-a-field.
+    expect(screen.getByPlaceholderText("Search models...")).toBeInTheDocument();
+    expect(badgeCount("routing")).toBe(8);
+
+    await user.click(screen.getByRole("button", { name: "Custom" }));
+    expect(screen.getByLabelText("Model")).toBeInTheDocument();
+    expect(badgeCount("routing")).toBe(8);
+  });
+
+  it("leaves the count alone when a ladder's custom rung opens, because the box edits the ladder and is not another field", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["routing"]} />);
+    await user.click(screen.getByText("agents.form.routing"));
+    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+    await waitFor(() => expect(badgeCount("routing")).toBe(8));
+
+    const ladder = screen.getByRole("group", { name: "agents.form.simple_threshold" });
+    await user.click(within(ladder).getByRole("button", { name: "model_param.custom" }));
+
+    // The box that takes the off-ladder number belongs to the ladder counted
+    // above; without the opt-out it would read as a ninth field.
+    expect(
+      screen.getByRole("spinbutton", {
+        name: "agents.form.simple_threshold — model_param.custom",
+      }),
+    ).toBeInTheDocument();
+    expect(badgeCount("routing")).toBe(8);
   });
 
   it("shows no count at all for a section with no fields", () => {

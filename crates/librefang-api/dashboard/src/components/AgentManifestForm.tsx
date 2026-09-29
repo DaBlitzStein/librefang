@@ -2884,12 +2884,27 @@ export function AdvancedFields({
  * The controls a folded section's badge tallies: what an operator can type
  * into, choose from or toggle, and nothing else.
  *
- * Buttons are excluded — "add folder" is an affordance, not a field — and
- * hidden inputs are excluded because they carry plumbing rather than anything
- * the section reveals when it opens.
+ * Bulk buttons are excluded — "add folder" is an affordance, not a field —
+ * and hidden inputs are excluded because they carry plumbing rather than
+ * anything the section reveals when it opens. But a field is not always an
+ * input: the model picker and the quantity ladders are button sets, so they
+ * opt in with `data-field` and each counts as the one field it is.
+ * `data-no-field` is the opposite opt-out, for the controls a picker renders
+ * inside its own popover (search, hand-entry): opening a picker is the
+ * operator editing a field, not the section revealing another one.
+ *
+ * `querySelectorAll` returns an element once even when it matches several
+ * arms of this list, so a marked control that were also an input could not be
+ * counted twice. None is: `data-field` sits on a button or a `role="group"`,
+ * and any input inside them carries `data-no-field`.
  */
-const SECTION_FIELD_SELECTOR =
-  'input:not([type="hidden"]), select, textarea, [role="switch"]';
+const SECTION_FIELD_SELECTOR = [
+  'input:not([type="hidden"]):not([data-no-field])',
+  'select:not([data-no-field])',
+  'textarea:not([data-no-field])',
+  '[role="switch"]:not([data-no-field])',
+  "[data-field]",
+].join(", ");
 
 /**
  * How many fields the section rooted at `ref` currently holds.
