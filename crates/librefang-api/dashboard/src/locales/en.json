@@ -558,6 +558,8 @@
       "remove_context_injection": "remove context injection",
       "name_required": "Enter a name.",
       "advanced": "Advanced",
+      "field_count_one": "{{count}} field",
+      "field_count_other": "{{count}} fields",
       "param_range_error": "Enter a number between {{min}} and {{max}}.",
       "show_progress": "Show progress",
       "show_progress_hint": "Stream the agent's steps to the session instead of only the final reply.",

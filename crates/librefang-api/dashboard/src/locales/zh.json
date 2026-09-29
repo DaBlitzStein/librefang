@@ -558,6 +558,8 @@
       "remove_context_injection": "移除上下文注入",
       "name_required": "Enter a name.",
       "advanced": "Advanced",
+      "field_count_one": "{{count}} 个字段",
+      "field_count_other": "{{count}} 个字段",
       "param_range_error": "Enter a number between {{min}} and {{max}}.",
       "show_progress": "Show progress",
       "show_progress_hint": "Stream the agent's steps to the session instead of only the final reply.",

@@ -652,6 +652,36 @@ describe("AgentManifestForm — section addressing", () => {
     expect(renderedSections(container)).toEqual(routingTab);
   });
 
+  it("renders in the order asked, not the editor's canonical one", () => {
+    // The General group lists Lifecycle before Response format, while the JSX
+    // (and MANIFEST_SECTION_IDS) lists response_format first. The list is a
+    // statement about order as much as about membership, so this must come
+    // out in the group's sequence, not the canonical one.
+    const { container } = render(
+      <Harness sections={["response_format", "lifecycle"]} />,
+    );
+    expect(renderedSections(container)).toEqual(["response_format", "lifecycle"]);
+  });
+
+  it("drops an id the editor does not implement and collapses a duplicate", () => {
+    const { container } = render(
+      <Harness
+        sections={
+          [
+            "lifecycle",
+            "not_a_section",
+            "lifecycle",
+            "identity",
+          ] as ManifestSectionId[]
+        }
+      />,
+    );
+    // An out-of-repo caller can name a section this editor never implemented
+    // and repeat one it did; the result is one section per known id, in first
+    // mention order, and no hole where the unknown id was.
+    expect(renderedSections(container)).toEqual(["lifecycle", "identity"]);
+  });
+
   it("renders nothing, not everything, for an empty list", () => {
     // The failure mode worth guarding: an empty array is falsy-ish in the
     // places a caller might spread it, and falling back to "all sections"
@@ -943,6 +973,51 @@ describe("AgentManifestForm — basic and advanced per section", () => {
     render(<Harness sections={["identity"]} />);
     expect(advancedGroup("identity")).toBeTruthy();
     expect(advancedGroup("model")).toBeNull();
+  });
+});
+
+// A folded section says how much is behind the fold. The count has to include
+// the fields inside the section's own "Advanced" disclosure — they are in the
+// DOM whether or not it is open, and they are exactly what opening the section
+// reveals — and it has to follow the fields as they appear and disappear.
+describe("AgentManifestForm — folded section field count", () => {
+  const sectionSummary = (id: string): HTMLElement => {
+    const summary = document
+      .querySelector(`[data-section="${id}"]`)
+      ?.querySelector("summary");
+    if (!summary) throw new Error(`no summary for section ${id}`);
+    return summary as HTMLElement;
+  };
+
+  it("counts the fields behind the fold, the Advanced ones included", () => {
+    render(<Harness sections={["proactive_memory"]} />);
+
+    // Three tri-state selects on the open half; the Advanced fold adds two
+    // more selects and the extraction-model text box: six. The fold is closed,
+    // so a count that only saw rendered state would read three.
+    expect(sectionSummary("proactive_memory")).toHaveTextContent("6");
+    expect(
+      document.querySelector('[data-section="proactive_memory"] [data-advanced]'),
+    ).not.toHaveAttribute("open");
+  });
+
+  it("shows no count at all for a section with no fields", () => {
+    render(<Harness sections={["shared_folders"]} />);
+
+    // No workspace rows yet: only the "add folder" button, which is an
+    // affordance and not a field. A "0" badge would read as a section that
+    // failed to load rather than one with nothing to configure.
+    expect(sectionSummary("shared_folders")).not.toHaveTextContent(/\d/);
+  });
+
+  it("refreshes the count as fields appear", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["shared_folders"]} />);
+
+    await user.click(screen.getByRole("button", { name: /add_folder/ }));
+
+    // One workspace row: name, path and mode.
+    expect(await within(sectionSummary("shared_folders")).findByText("3")).toBeInTheDocument();
   });
 });
 

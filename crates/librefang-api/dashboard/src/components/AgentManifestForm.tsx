@@ -1,4 +1,16 @@
-import { createContext, useContext, useMemo, useState } from "react";
+import {
+  Children,
+  Fragment,
+  createContext,
+  isValidElement,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, Plus, RotateCcw, Trash2, X } from "lucide-react";
 import {
@@ -360,6 +372,26 @@ export function AgentManifestForm({
   const shows = (id: ManifestSectionId): boolean =>
     sections === undefined || sections.includes(id);
 
+  // The caller's list is an instruction about order as well as membership: a
+  // config group lists its sections in the sequence the operator should read
+  // them, and the canonical order below is only the default. Unknown ids are
+  // dropped — the page-side guard is a test, not a runtime check, and a caller
+  // outside the repo should get a missing section rather than a crash — while
+  // a repeated id keeps its first position, since it has one DOM node and one
+  // React key.
+  const orderedSections = useMemo<ManifestSectionId[]>(() => {
+    if (sections === undefined) return [...MANIFEST_SECTION_IDS];
+    const known = new Set<string>(MANIFEST_SECTION_IDS);
+    const seen = new Set<string>();
+    const ordered: ManifestSectionId[] = [];
+    for (const id of sections) {
+      if (!known.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      ordered.push(id);
+    }
+    return ordered;
+  }, [sections]);
+
   // The provider the agent already runs on stays selectable even when the
   // caller filtered it out of `providers` (rejected key, local service down).
   const providerOptions = useMemo(() => {
@@ -455,7 +487,10 @@ export function AgentManifestForm({
 
   return (
     <AdvancedModeContext.Provider value={advanced}>
-    <div className="space-y-4">
+    {/* The blocks stay written in canonical order — the diff that added the
+        caller's order should be the ordering mechanism, not a moved wall of
+        JSX — and `ManifestSections` emits them in `orderedSections` order. */}
+    <ManifestSections order={orderedSections} className="space-y-4">
       <Section when={shows("identity")} id="identity" title={t("agents.form.basics")}>
         {nameField !== "hidden" && (
           <Field
@@ -2679,7 +2714,7 @@ export function AgentManifestForm({
           {t("agents.form.add_folder")}
         </button>
       </FormSection>
-    </div>
+    </ManifestSections>
     </AdvancedModeContext.Provider>
   );
 }
@@ -2723,6 +2758,44 @@ function mergeCatalog(
   }
   const options = Array.from(seen).sort((a, b) => a.localeCompare(b));
   return { options, meta };
+}
+
+/**
+ * The form's section host, which is also where the caller's order wins.
+ *
+ * The children come in canonical order (the order `MANIFEST_SECTION_IDS`
+ * declares, which is the order the JSX is written in); `order` is the caller's
+ * list, already deduplicated and filtered by `AgentManifestForm`. Emitting the
+ * elements in `order` is what turns `sections` from a filter into a layout
+ * instruction. Each element carries its own id (`Section.id` /
+ * `FormSection.id`), and that id is also its React key, so reordering moves
+ * the existing DOM instead of remounting it — an open fold stays open, and the
+ * inputs keep their state, when a group's list says the sections belong in a
+ * different sequence.
+ */
+function ManifestSections({
+  order,
+  className,
+  children,
+}: {
+  order: ManifestSectionId[];
+  className?: string;
+  children: ReactNode;
+}) {
+  const byId = new Map<string, ReactNode>();
+  Children.forEach(children, (child) => {
+    if (!isValidElement(child)) return;
+    const id = (child.props as { id?: unknown }).id;
+    if (typeof id === "string" && !byId.has(id)) byId.set(id, child);
+  });
+
+  return (
+    <div className={className}>
+      {order.map((id) => (
+        <Fragment key={id}>{byId.get(id) ?? null}</Fragment>
+      ))}
+    </div>
+  );
 }
 
 /**
@@ -2808,6 +2881,70 @@ export function AdvancedFields({
 }
 
 /**
+ * The controls a folded section's badge tallies: what an operator can type
+ * into, choose from or toggle, and nothing else.
+ *
+ * Buttons are excluded — "add folder" is an affordance, not a field — and
+ * hidden inputs are excluded because they carry plumbing rather than anything
+ * the section reveals when it opens.
+ */
+const SECTION_FIELD_SELECTOR =
+  'input:not([type="hidden"]), select, textarea, [role="switch"]';
+
+/**
+ * How many fields the section rooted at `ref` currently holds.
+ *
+ * Measured from the DOM rather than counted from the form state: which fields
+ * a section shows is decided by the same conditionals that render it
+ * (`enabled && …`, a `.map` over rows), and a state-side count would have to
+ * restate every one of them and would drift the moment one changed. A closed
+ * `<details>` keeps its children in the DOM, so the inner "Advanced" fold is
+ * counted exactly like the fields around it — which is the point, since the
+ * badge advertises what opening the section reveals.
+ *
+ * The observer keeps the badge honest as fields appear and disappear under it
+ * (a toggle enabling a block, a workspace row being added), and the initial
+ * measurement runs before it is attached. Both are torn down with the section.
+ */
+function useSectionFieldCount(
+  ref: RefObject<HTMLElement | null>,
+  enabled: boolean,
+): number {
+  const [count, setCount] = useState(0);
+  // The figure already reported. MutationObserver callbacks are delivered
+  // after the commit that caused them, and a callback that finds the same
+  // number must not schedule a render for it — that render is invisible, and
+  // in a test it is an update outside `act`.
+  const reported = useRef(0);
+
+  useEffect(() => {
+    const node = ref.current;
+    const report = (next: number): void => {
+      if (reported.current === next) return;
+      reported.current = next;
+      setCount(next);
+    };
+    if (!enabled || !node) {
+      report(0);
+      return;
+    }
+    const measure = (): void =>
+      report(node.querySelectorAll(SECTION_FIELD_SELECTOR).length);
+    measure();
+    const observer = new MutationObserver(measure);
+    observer.observe(node, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["type", "role"],
+    });
+    return () => observer.disconnect();
+  }, [enabled, ref]);
+
+  return count;
+}
+
+/**
  * Folding a section is this caller's choice, so the guard lives here rather than being repeated at every call site.
  * An unshown section renders nothing at all rather than a collapsed shell: a heading the operator cannot open is still a heading they will look for.
  * `shows` stays a prop so the caller keeps one definition of what "shown" means.
@@ -2829,10 +2966,16 @@ function FormSection({
   // "advanced shows everything" has to mean the fold the operator would
   // otherwise click, or the switch leaves most of the group still closed.
   const advanced = useContext(AdvancedModeContext);
+  // The badge is this section's own count of the fields behind its fold — the
+  // inner Advanced fold included, since those fields are in the DOM too.
+  const rootRef = useRef<HTMLDetailsElement>(null);
+  const count = useSectionFieldCount(rootRef, shows(id));
   return shows(id) ? (
     <CollapsibleSection
       sectionId={id}
       {...props}
+      rootRef={rootRef}
+      count={count}
       defaultOpen={props.defaultOpen || advanced}
     />
   ) : null;
