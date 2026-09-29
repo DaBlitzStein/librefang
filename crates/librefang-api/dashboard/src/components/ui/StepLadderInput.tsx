@@ -148,7 +148,16 @@ export function StepLadderInput({
       <span id={`${id}-label`} className="block text-xs font-bold text-text-dim">
         {label}
       </span>
-      <div role="group" aria-labelledby={`${id}-label`} className="flex flex-wrap gap-1.5">
+      <div
+        role="group"
+        aria-labelledby={`${id}-label`}
+        // The rungs are buttons, so the manifest editor's field selector
+        // (inputs, selects, textareas, switches) cannot see this control.
+        // `data-field` is that selector's explicit opt-in: the whole ladder is
+        // one field, however many rungs it offers.
+        data-field
+        className="flex flex-wrap gap-1.5"
+      >
         <button
           type="button"
           aria-pressed={!isCustom && value.trim() === ""}
@@ -193,6 +202,10 @@ export function StepLadderInput({
           max={max}
           step={step}
           value={shownValue}
+          // The ladder itself already carries `data-field`; this box only
+          // opens while the custom rung is selected, and it edits that same
+          // field rather than adding one.
+          data-no-field
           aria-label={`${label} — ${customLabel}`}
           aria-invalid={warning ? true : undefined}
           aria-describedby={warning ? `${id}-warning` : undefined}
