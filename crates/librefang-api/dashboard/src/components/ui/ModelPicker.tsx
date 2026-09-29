@@ -282,6 +282,11 @@ export function ModelPicker({
       <button
         ref={triggerRef}
         type="button"
+        // This control is a button, so the manifest editor's field selector
+        // (inputs, selects, textareas, switches) cannot see it. `data-field`
+        // is that selector's explicit opt-in: one picker is one field, and a
+        // folded section's count has to move when the picker appears.
+        data-field
         disabled={disabled}
         // Composed, not replaced: naming the control "Agent model" alone would
         // hide the current selection from anyone not looking at the screen.
@@ -345,6 +350,9 @@ export function ModelPicker({
             <input
               autoFocus
               type="text"
+              // The popover's own navigation, not a manifest field: the badge
+              // on a folded section must not move when a picker is opened.
+              data-no-field
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               // The literal here has to match the one the key already carries
@@ -395,6 +403,9 @@ export function ModelPicker({
                   <input
                     autoFocus
                     type="text"
+                    // Same reason as the search box: hand-entry is the opened
+                    // picker editing itself, not another field in the form.
+                    data-no-field
                     value={customProvider}
                     onChange={(e) => setCustomProvider(e.target.value)}
                     aria-label={t("agents.form.provider", { defaultValue: "Provider" })}
@@ -405,6 +416,7 @@ export function ModelPicker({
                 <input
                   autoFocus={custom === "model"}
                   type="text"
+                  data-no-field
                   value={customModel}
                   onChange={(e) => setCustomModel(e.target.value)}
                   onKeyDown={(e) => {
