@@ -564,6 +564,8 @@
       "advanced": "Advanced",
       "field_count_one": "{{count}} 个字段",
       "field_count_other": "{{count}} 个字段",
+      "fields_total_one": "共 {{count}} 个字段",
+      "fields_total_other": "共 {{count}} 个字段",
       "param_range_error": "Enter a number between {{min}} and {{max}}.",
       "show_progress": "Show progress",
       "show_progress_hint": "Stream the agent's steps to the session instead of only the final reply.",

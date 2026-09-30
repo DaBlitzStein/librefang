@@ -70,7 +70,7 @@ function MemoryScopeNote({
 }
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
 import { ModelParamField } from "./ui/ModelParamField";
-import { CollapsibleSection } from "./ui/CollapsibleSection";
+import { CollapsibleSection, FieldCountBadge } from "./ui/CollapsibleSection";
 import type { CollapsibleSectionProps } from "./ui/CollapsibleSection";
 import { Field } from "./ui/Field";
 import { ModelPicker } from "./ui/ModelPicker";
@@ -392,6 +392,32 @@ export function AgentManifestForm({
     return ordered;
   }, [sections]);
 
+  // The form-level total: every mounted section reports the count it already
+  // measures for its own badge (see `useSectionCount`) and withdraws it when it
+  // goes away, so the sum covers exactly what is on screen — the active config
+  // group in the agent view, the whole manifest in the create modal. The values
+  // live in a ref and only the sum is state: a section re-reporting the same
+  // number must not schedule a render for it.
+  const sectionCounts = useRef(new Map<string, number>());
+  const [totalFieldCount, setTotalFieldCount] = useState(0);
+  const sectionCountRegistry = useMemo<SectionCountRegistry>(() => {
+    const sync = (): void => {
+      let total = 0;
+      for (const count of sectionCounts.current.values()) total += count;
+      setTotalFieldCount((prev) => (prev === total ? prev : total));
+    };
+    return {
+      report: (sectionId, count) => {
+        sectionCounts.current.set(sectionId, count);
+        sync();
+      },
+      withdraw: (sectionId) => {
+        sectionCounts.current.delete(sectionId);
+        sync();
+      },
+    };
+  }, []);
+
   // The provider the agent already runs on stays selectable even when the
   // caller filtered it out of `providers` (rejected key, local service down).
   const providerOptions = useMemo(() => {
@@ -487,6 +513,21 @@ export function AgentManifestForm({
 
   return (
     <AdvancedModeContext.Provider value={advanced}>
+    <SectionCountsContext.Provider value={sectionCountRegistry}>
+    {/* One element, not the header and the list side by side: the create
+        modal places the form as a grid cell, and two returned nodes would
+        push its preview panel into the next row. */}
+    <div>
+    {/* One total per view, right-aligned above the sections it sums: the sum
+        of every mounted section's badge, in the same pill. The agent view
+        mounts one config group at a time, so the total is that group; the
+        create modal mounts every section, so it is the whole manifest. Hidden
+        at zero, like the badges themselves. */}
+    {totalFieldCount > 0 ? (
+      <div className="mb-4 flex justify-end" data-testid="manifest-fields-total">
+        <FieldCountBadge count={totalFieldCount} labelKey="agents.form.fields_total" />
+      </div>
+    ) : null}
     {/* The blocks stay written in canonical order — the diff that added the
         caller's order should be the ordering mechanism, not a moved wall of
         JSX — and `ManifestSections` emits them in `orderedSections` order. */}
@@ -2711,6 +2752,8 @@ export function AgentManifestForm({
         </button>
       </FormSection>
     </ManifestSections>
+    </div>
+    </SectionCountsContext.Provider>
     </AdvancedModeContext.Provider>
   );
 }
@@ -2802,6 +2845,10 @@ function ManifestSections({
  *
  * `when` is the same render guard `FormSection` applies — a section this
  * caller did not ask for renders nothing, not an empty frame.
+ *
+ * An always-open section carries the same field-count badge as the folded
+ * ones, measured from its own subtree: a section that happens not to fold
+ * should not be the only one the operator cannot size up.
  */
 function Section({
   title,
@@ -2815,13 +2862,24 @@ function Section({
   id?: string;
   children: React.ReactNode;
 }) {
+  // Hooks before the `when` return, as React requires. A not-rendered section
+  // measures nothing, and `useSectionCount` withdraws it from the total.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const count = useSectionFieldCount(rootRef, when);
+  useSectionCount(id, count, when);
   if (!when) return null;
   return (
     <div
+      ref={rootRef}
       data-section={id}
       className="space-y-2.5 rounded-xl border border-border-subtle/60 bg-surface/40 p-3"
     >
-      <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">{title}</p>
+      <p className="flex items-center gap-2">
+        <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim">
+          {title}
+        </span>
+        <FieldCountBadge count={count} />
+      </p>
       {children}
     </div>
   );
@@ -2849,6 +2907,39 @@ function Section({
  * advanced mode where the operator expects everything open.
  */
 const AdvancedModeContext = createContext(false);
+
+/**
+ * Where a mounted section publishes how many fields it holds, so the form can
+ * show the sum once above the section list. By context rather than by prop for
+ * the same reason as `AdvancedModeContext`: the sections are written at
+ * nineteen call sites, and a prop is nineteen chances to forget one — here the
+ * failure is a total that silently undercounts.
+ *
+ * `report` carries the count, `withdraw` takes it back when the section
+ * unmounts (a config-group switch unmounts the sections of the group being
+ * left, and their fields must leave the total with them).
+ */
+interface SectionCountRegistry {
+  report: (sectionId: string, count: number) => void;
+  withdraw: (sectionId: string) => void;
+}
+
+const SectionCountsContext = createContext<SectionCountRegistry | null>(null);
+
+/**
+ * Publishes `count` under `sectionId` while `mounted`, and withdraws it
+ * otherwise. The count is the section's own badge measurement
+ * (`useSectionFieldCount`); this only carries it one level up, so the badge
+ * and the total can never disagree.
+ */
+function useSectionCount(sectionId: string | undefined, count: number, mounted: boolean): void {
+  const registry = useContext(SectionCountsContext);
+  useEffect(() => {
+    if (!registry || !sectionId || !mounted) return;
+    registry.report(sectionId, count);
+    return () => registry.withdraw(sectionId);
+  }, [registry, sectionId, mounted, count]);
+}
 
 export function AdvancedFields({
   children,
@@ -2980,8 +3071,11 @@ function FormSection({
   // The badge is this section's own count of the fields behind its fold — the
   // inner Advanced fold included, since those fields are in the DOM too.
   const rootRef = useRef<HTMLDetailsElement>(null);
-  const count = useSectionFieldCount(rootRef, shows(id));
-  return shows(id) ? (
+  const shown = shows(id);
+  const count = useSectionFieldCount(rootRef, shown);
+  // The same number feeds the form-level total, so the two cannot drift.
+  useSectionCount(id, count, shown);
+  return shown ? (
     <CollapsibleSection
       sectionId={id}
       {...props}

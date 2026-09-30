@@ -1113,6 +1113,91 @@ describe("AgentManifestForm — folded section field count", () => {
   });
 });
 
+// The operator's feedback on the first cut: "Algunas secciones tienen un
+// número, otras secciones no, y desde luego no hay un contador global en
+// configuración." Two answers: the always-open sections carry the badge too,
+// and the form sums every mounted section once per view.
+describe("AgentManifestForm — the field tally covers every section", () => {
+  // The always-open `Section` has no summary to scope to; its badge lives in
+  // the title row, the root's own `<p>`.
+  const openSectionCount = (id: string): number => {
+    const digit = document.querySelector(
+      `[data-section="${id}"] > p span[aria-hidden="true"]`,
+    );
+    return digit ? Number(digit.textContent) : 0;
+  };
+
+  // Folded sections keep their badge in the summary, the same place the
+  // suite above reads it from.
+  const foldedSectionCount = (id: string): number => {
+    const digit = document
+      .querySelector(`[data-section="${id}"] summary`)
+      ?.querySelector('span[aria-hidden="true"]');
+    return digit ? Number(digit.textContent) : 0;
+  };
+
+  const totalCount = (): number | null => {
+    const total = screen.queryByTestId("manifest-fields-total");
+    if (!total) return null;
+    const digit = total.querySelector('span[aria-hidden="true"]');
+    return digit ? Number(digit.textContent) : 0;
+  };
+
+  // Every badge the form rendered, whatever the section folds. The Advanced
+  // disclosure's summary carries no badge, so a match is a section badge.
+  const countOfEveryBadge = (): number =>
+    Array.from(
+      document.querySelectorAll(
+        '[data-section] summary span[aria-hidden="true"], [data-section] > p span[aria-hidden="true"]',
+      ),
+    ).reduce((sum, digit) => sum + Number(digit.textContent), 0);
+
+  it("badges an always-open section too", () => {
+    render(<Harness sections={["identity"]} />);
+
+    // Name, description, version, author, module, priority and the tag box.
+    // Identity never folds, and before this it was a section the operator
+    // could not size up at all.
+    expect(openSectionCount("identity")).toBe(7);
+    expect(totalCount()).toBe(7);
+  });
+
+  it("keeps the total equal to the sum of the badges as a count changes", async () => {
+    const user = userEvent.setup();
+    render(<Harness sections={["routing"]} />);
+
+    expect(foldedSectionCount("routing")).toBe(3);
+    expect(totalCount()).toBe(3);
+
+    await user.click(screen.getByText("agents.form.routing"));
+    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+
+    // The router brings five more fields with it, and the total has to follow
+    // the badge rather than lag behind it.
+    await waitFor(() => expect(foldedSectionCount("routing")).toBe(8));
+    await waitFor(() => expect(totalCount()).toBe(8));
+  });
+
+  it("hides the total when no section has a field to count", () => {
+    render(<Harness sections={[]} />);
+
+    // A "0" would read as a form that failed to load, the same reason the
+    // section badges hide at zero.
+    expect(screen.queryByTestId("manifest-fields-total")).toBeNull();
+  });
+
+  it("sums every section in the create modal, where they all render", () => {
+    render(<Harness />);
+
+    const total = totalCount();
+    expect(total).not.toBeNull();
+    expect(total).toBeGreaterThan(0);
+    // The modal is the whole manifest: what it says must be the sum of the
+    // numbers down the page, no more and no less.
+    expect(total).toBe(countOfEveryBadge());
+  });
+});
+
 
 // ALTO 1, remedied: the routing panel was the only surface with the
 // server-backed profile catalog, and the unified editor's allowed_profiles
