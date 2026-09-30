@@ -564,6 +564,8 @@
       "advanced": "Advanced",
       "field_count_one": "{{count}} field",
       "field_count_other": "{{count}} fields",
+      "fields_total_one": "{{count}} field total",
+      "fields_total_other": "{{count}} fields total",
       "param_range_error": "Enter a number between {{min}} and {{max}}.",
       "show_progress": "Show progress",
       "show_progress_hint": "Stream the agent's steps to the session instead of only the final reply.",

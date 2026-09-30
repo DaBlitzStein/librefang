@@ -61,7 +61,6 @@ export function CollapsibleSection({
   count,
   rootRef,
 }: CollapsibleSectionProps) {
-  const { t } = useTranslation();
   const ref = useRef<HTMLDetailsElement>(null);
   const wasInvalid = useRef(false);
 
@@ -108,21 +107,44 @@ export function CollapsibleSection({
           >
             {title}
           </span>
-          {count !== undefined && count > 0 ? (
-            <span className="inline-flex shrink-0 items-center rounded-full bg-main/60 px-1.5 py-0.5 text-[10px] font-medium text-text-dim">
-              {/* The digit is what the eye reads; the unit is what a screen
-                  reader needs, so the visible half is hidden from the
-                  accessible name and the label replaces it. */}
-              <span aria-hidden="true">{count}</span>
-              <span className="sr-only">
-                {t("agents.form.field_count", { count })}
-              </span>
-            </span>
-          ) : null}
+          <FieldCountBadge count={count ?? 0} />
         </span>
         <ChevronDown className="h-4 w-4 text-text-dim transition-transform group-open:rotate-180" />
       </summary>
       <div className="space-y-2.5 px-3 pb-3">{children}</div>
     </details>
+  );
+}
+
+/**
+ * The badge that advertises how many fields a section holds: the digit the eye
+ * reads, the plural unit a screen reader needs.
+ *
+ * Exported because three surfaces show it — the folded sections, the
+ * always-open `Section` and the form-level total — and one markup is one place
+ * for the accessible label to be right. `labelKey` lets the total say
+ * "fields total" while a section says "fields".
+ *
+ * Absent and zero are the same answer — no badge at all, because "0 fields" is
+ * noise that reads as a section which failed to load — so the guard lives
+ * here rather than at each call site.
+ */
+export function FieldCountBadge({
+  count,
+  labelKey = "agents.form.field_count",
+}: {
+  count: number;
+  labelKey?: string;
+}) {
+  const { t } = useTranslation();
+  if (count <= 0) return null;
+  return (
+    <span className="inline-flex shrink-0 items-center rounded-full bg-main/60 px-1.5 py-0.5 text-[10px] font-medium text-text-dim">
+      {/* The digit is what the eye reads; the unit is what a screen reader
+          needs, so the visible half is hidden from the accessible name and
+          the label replaces it. */}
+      <span aria-hidden="true">{count}</span>
+      <span className="sr-only">{t(labelKey, { count })}</span>
+    </span>
   );
 }
