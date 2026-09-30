@@ -1162,6 +1162,26 @@ describe("AgentManifestForm — the field tally covers every section", () => {
     expect(totalCount()).toBe(7);
   });
 
+  it("withdraws a group's total when a switch unmounts its sections", () => {
+    // The agent view mounts one config group at a time. Leaving identity for
+    // routing unmounts identity's sections, and their counts have to leave the
+    // total with them: 7 + 3 would be a total for a form that is not on
+    // screen, and it would grow with every group the operator visits.
+    const { rerender } = render(<Harness sections={["identity"]} />);
+    expect(openSectionCount("identity")).toBe(7);
+    expect(totalCount()).toBe(7);
+
+    rerender(<Harness sections={["routing"]} />);
+
+    expect(foldedSectionCount("routing")).toBe(3);
+    expect(totalCount()).toBe(3);
+
+    // And back: identity's sections report again on the way in.
+    rerender(<Harness sections={["identity"]} />);
+    expect(openSectionCount("identity")).toBe(7);
+    expect(totalCount()).toBe(7);
+  });
+
   it("keeps the total equal to the sum of the badges as a count changes", async () => {
     const user = userEvent.setup();
     render(<Harness sections={["routing"]} />);
