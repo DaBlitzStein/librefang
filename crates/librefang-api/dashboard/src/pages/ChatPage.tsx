@@ -3427,9 +3427,6 @@ export function ChatPage() {
     prevMsgCountForAria.current = curr;
   }, [messages.length, agents, selectedAgentId]);
 
-  // Export current conversation as a markdown file. Keeps the local
-  // timestamp, role, content, and (when present) tool call summaries
-  // so operators can archive or share transcripts.
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
@@ -3471,6 +3468,14 @@ export function ChatPage() {
   // this becomes non-null and the highlight is correct.
   const activeSessionId = deriveDropdownActiveSessionId(urlSessionId);
 
+  // Switching away abandons the export: the ids belong to the previous
+  // agent/session, and keeping them would leave the bar saying "N selected"
+  // with no boxes ticked while `runExport` filters against messages that are
+  // no longer on screen.
+  useEffect(() => {
+    setExportSelection(null);
+  }, [selectedAgentId, activeSessionId]);
+
   const runExport = useCallback(
     (mode: "download" | "print") => {
       const chosen =
@@ -3500,7 +3505,12 @@ export function ChatPage() {
         // Printing the live page would carry the sidebar, the composer and
         // whatever is scrolled out of view. A plain document of exactly the
         // chosen messages is what someone means by "print the conversation".
-        const w = window.open("", "_blank", "noopener,noreferrer");
+        // No `"noopener,noreferrer"` in the features string: by spec that
+        // makes `window.open` return null (the link is severed before the
+        // call returns), so the window could never be filled or printed even
+        // with pop-ups allowed. Open it same-origin and cut the opener before
+        // writing to it instead.
+        const w = window.open("", "_blank");
         if (!w) {
           addToast(
             t("chat.export_popup_blocked", {
@@ -3510,6 +3520,7 @@ export function ChatPage() {
           );
           return;
         }
+        w.opener = null;
         w.document.title = exportFilename(selectedAgent?.name ?? "conversation", exportedAt);
         // `textContent`, not innerHTML: the transcript is model output, and
         // this window is being built by hand rather than by React.
