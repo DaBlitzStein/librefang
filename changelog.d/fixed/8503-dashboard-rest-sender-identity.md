@@ -1,2 +1,3 @@
-Dashboard chat turns that fall back to the REST path were stamped with the caller's IP and, with no channel-binding sender id, dropped into the guest gate — `memory_store` and other tools were refused for an authenticated owner. The REST path now attributes such a turn to the authenticated caller (the synthetic root credential stays excluded), matching the WebSocket path, while an unresolvable sender still fails closed into the guest gate.
-(#8503) (@DaBlitzStein)
+A sender-less dashboard REST turn from an authenticated caller produced no `SenderContext` at all, so the RBAC tool gate fell to the guest gate and queued `memory_store` for approval even for a user whose own policy allowed it.
+The REST path now attributes that turn to the caller's canonical `UserId` on the `webui` channel, the same tuple the WebSocket path stamps, so the gate resolves the registered user without an `api` channel binding.
+The synthetic root credential stays sender-less, and a sender pair the registry cannot resolve still fails closed into the guest gate (#8503) (@DaBlitzStein)

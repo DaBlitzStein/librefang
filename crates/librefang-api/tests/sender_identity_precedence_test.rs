@@ -558,21 +558,21 @@ fn queued_approvals(h: &Harness, agent_id: &str, tool_name: &str) -> Vec<String>
 /// WebSocket handler covers for its own path — and `request_sender_context` used to return `None`
 /// for it, so `resolve_user_tool_decision(.., None, None)` landed on `guest_gate` and every tool
 /// outside its seven read-only names queued a human approval.
-/// `chatuser` is a registered `owner` carrying the documented `[[users]] channel_bindings.api`
-/// recipe, so the `memory_store` call the model asks for must EXECUTE and leave the queue empty.
+/// The caller is a registered `owner` with NO `channel_bindings` at all: the old `api:<name>`
+/// stamp had nothing to resolve against and guest-gated the turn anyway, which is the #8503
+/// review's blocking case.
+/// The turn is now stamped on `webui` with the caller's canonical `UserId`, so the `memory_store`
+/// call the model asks for must EXECUTE and leave the queue empty.
 #[tokio::test(flavor = "multi_thread")]
 async fn senderless_rest_caller_with_authenticated_credential_does_not_guest_gate_a_tool() {
     let h = start_harness_with(
-        vec![(
-            "chatuser",
-            "owner",
-            "chatuser-key",
-            vec![("api", "chatuser")],
-        )],
+        vec![("chatuser", "owner", "chatuser-key", vec![])],
         ProviderScript::ToolThenAnswer,
     )
     .await;
     let agent_id = spawn_agent_with_manifest(&h, &rbac_turn_manifest("chatuser")).await;
+
+    let chatuser_id = librefang_types::agent::UserId::from_name("chatuser").to_string();
 
     let result = reqwest::Client::new()
         .post(format!("{}/api/agents/{}/message", h.base_url, agent_id))
@@ -601,8 +601,12 @@ async fn senderless_rest_caller_with_authenticated_credential_does_not_guest_gat
 
     let prompts = captured_prompts(&h).await;
     assert!(
-        prompts.contains("platform ID: chatuser"),
-        "the turn must be attributed to the authenticated caller: {prompts}"
+        prompts.contains(&format!("platform ID: {chatuser_id}")),
+        "the turn must be attributed to the authenticated caller's canonical UserId: {prompts}"
+    );
+    assert!(
+        prompts.contains("responding via webui"),
+        "REST must stamp the same channel the WebSocket path stamps, not `api`: {prompts}"
     );
     assert!(
         prompts.contains("Stored value under key 'note'"),
@@ -631,5 +635,57 @@ async fn senderless_rest_caller_with_authenticated_credential_does_not_guest_gat
     assert!(
         matches!(guest, UserToolGate::NeedsApproval { .. }),
         "an unresolvable REST sender must keep the guest gate, got {guest:?}"
+    );
+    let uuid_guest = h.state.kernel.auth_manager().resolve_user_tool_decision(
+        "memory_store",
+        Some("00000000-0000-0000-0000-000000000000"),
+        Some("webui"),
+        false,
+    );
+    assert!(
+        matches!(uuid_guest, UserToolGate::NeedsApproval { .. }),
+        "a webui sender naming no registered user must keep the guest gate, got {uuid_guest:?}"
+    );
+}
+
+/// A sender-less caller below `Admin` is attributed to their own canonical `UserId` too.
+///
+/// The pin exists so a caller cannot assert a sender identity they cannot prove; a caller that
+/// asserts none is stating their own identity, and before the fix the `api:<name>` pin sent a
+/// non-Admin without an `api` binding to the guest gate even when the owner test above passed.
+#[tokio::test(flavor = "multi_thread")]
+async fn senderless_rest_caller_below_admin_is_not_pinned_to_the_api_namespace() {
+    // `worker` is a registered `User` with no `channel_bindings` at all.
+    let h = start_harness_with(
+        vec![("worker", "user", "worker-key", vec![])],
+        ProviderScript::Ack,
+    )
+    .await;
+    let agent_id = spawn_agent_for(&h, "worker").await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/agents/{}/message", h.base_url, agent_id))
+        .bearer_auth("worker-key")
+        .timeout(std::time::Duration::from_secs(30))
+        .json(&serde_json::json!({ "message": "who am I?" }))
+        .send()
+        .await
+        .expect("message request");
+    assert_eq!(resp.status().as_u16(), 200, "the turn must succeed");
+    resp.text().await.expect("drain response body");
+
+    let worker_id = librefang_types::agent::UserId::from_name("worker").to_string();
+    let prompts = captured_prompts(&h).await;
+    assert!(
+        prompts.contains(&format!("platform ID: {worker_id}")),
+        "a non-Admin sender-less caller must resolve to their own canonical UserId: {prompts}"
+    );
+    assert!(
+        prompts.contains("responding via webui"),
+        "the REST and WebSocket paths must stamp the same channel: {prompts}"
+    );
+    assert!(
+        !prompts.contains("responding via api"),
+        "a sender-less caller must not be pinned into the `api` namespace: {prompts}"
     );
 }

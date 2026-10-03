@@ -601,7 +601,9 @@ const API_SENDER_CHANNEL: &str = "api";
 ///
 /// The precedence rule:
 ///
-/// - No sender asserted, but an authenticated caller that names a real `[[users]]` entry — the caller is the sender.
+/// - No sender asserted, but an authenticated caller with a real principal — the caller is the sender, stamped on the reserved `webui` channel with their canonical `UserId`.
+///   This is the same tuple the dashboard WebSocket handler stamps (#8431), and the kernel resolves `webui` + `UserId` through the registered-user path for the tool gate, billing and the memory ACL alike (#8409), so no `channel_bindings` entry is required.
+///   A credential whose `UserId` names no registered `[[users]]` entry still resolves to nothing and keeps the guest gate, unchanged.
 ///   The dashboard's own chat posts `{ message, … }` with no `sender_id`, so every turn it started arrived with no `SenderContext` at all; `resolve_user_tool_decision(.., None, None)` then falls to `guest_gate`, which admits only the seven read-only tools and routes everything else — `shell_exec` included — to human approval, whatever the global `require_approval` list says.
 ///   Issue #3243 records that exact failure for the autonomous tick and repaired it with a synthetic channel sentinel; this is the same hole on the surface that has a real caller to name instead.
 ///   The synthetic root credential (loopback, `allow_no_auth`, the master key) is excluded on purpose: it names no `[[users]]` entry, so inventing a sender for it would move its session without giving the gate anything to resolve.
@@ -612,6 +614,7 @@ const API_SENDER_CHANNEL: &str = "api";
 /// - Anything else — the authenticated identity wins, silently and without erroring.
 ///   A rejection would leak the role check back to the caller and break clients that assert a harmless id.
 ///
+/// The pin below applies only to a sender asserted in the body, never to the caller-attributed case: a sender-less caller resolves to their own canonical identity, not to the `api` namespace.
 /// The channel and the user id are pinned together, never one without the other.
 /// `identify` keys on the pair, so pinning only the id still lets the caller choose the namespace their own name is looked up in: with `[[users]] name = "alice", channel_bindings = { slack = "bob" }` alongside a separate `[[users]] name = "bob"`, a `User`-role bob asserting `channel_type = "slack"` would resolve through `slack:bob` to alice.
 fn request_sender_context(
@@ -619,30 +622,32 @@ fn request_sender_context(
     api_user: Option<&crate::middleware::AuthenticatedApiUser>,
     auth: &librefang_kernel::auth::AuthManager,
 ) -> Option<SenderContext> {
-    // An authenticated caller that asserts no sender identity is still that
-    // caller, and saying nothing must not cost it the identity the rest of the
-    // request already carries (`api_user`, resolved from the bearer token by
-    // the auth middleware, is the same credential the route authorized on).
+    // A turn that asserts no sender is attributed to the authenticated caller.
+    // The tuple is the same one the dashboard WebSocket handler stamps (#8431): the reserved `webui` channel plus the caller's canonical `UserId`.
+    // The kernel resolves `webui` + `UserId` through the registered-user path for the tool gate, billing and the memory ACL (#8409), so this needs no channel binding.
+    // Stamping the old `api:<name>` pair instead missed every user without an `api` binding and fell to the guest gate — the #8503 review's blocking point.
     //
-    // Without this the turn reaches the kernel with no `SenderContext`, so the
-    // tool gate calls `resolve_user_tool_decision(.., None, None)` and lands on
-    // `guest_gate` — seven read-only tools, everything else to human approval,
-    // `require_approval` never consulted. The dashboard chat posts exactly this
-    // shape. Issue #3243 records the identical failure for the autonomous tick
-    // and repaired it with a synthetic channel sentinel; this surface has a
-    // real caller to name instead.
-    //
-    // `owner_principal()` is `None` for the synthetic root credential, which
-    // names no `[[users]]` entry: those callers keep the sender-less behaviour
-    // they have today rather than being handed a "root" identity `identify`
-    // cannot resolve.
-    let attributed_to_caller = req.sender_id.is_none();
-    let sender_id: &str = match req.sender_id.as_deref() {
-        Some(asserted) => asserted,
-        None => api_user
-            .filter(|caller| caller.owner_principal().is_some())?
-            .name
-            .as_str(),
+    // `owner_principal()` is `None` for the synthetic root credential, which names no `[[users]]` entry: those callers keep the sender-less behaviour they have today rather than being handed a "root" identity `identify` cannot resolve.
+    let Some(asserted) = req.sender_id.as_deref() else {
+        let caller = api_user.filter(|caller| caller.owner_principal().is_some())?;
+        return Some(SenderContext {
+            channel: librefang_kernel::SYSTEM_CHANNEL_WEBUI.to_string(),
+            user_id: caller.user_id.to_string(),
+            display_name: caller.name.clone(),
+            is_group: req.is_group,
+            was_mentioned: req.was_mentioned,
+            thread_id: None,
+            account_id: None,
+            // Phase 2 §C — forward the optional group participant roster from the
+            // gateway POST body so the addressee guard can fire downstream. Empty
+            // when the caller (Telegram, direct API) doesn't populate it; the
+            // guard then becomes a no-op and cannot produce false positives.
+            group_participants: req.group_participants.clone().unwrap_or_default(),
+            // A sender-less POST previously produced no `SenderContext` and landed on the `_` arm of the session resolver (`entry.session_id`), which is the same session `use_canonical_session = true` selects.
+            // Adding the identity must not move the conversation.
+            use_canonical_session: true,
+            ..Default::default()
+        });
     };
 
     // Audit: cron-channel-name-not-reserved. An HTTP caller supplying
@@ -658,9 +663,10 @@ fn request_sender_context(
     let asserted_channel = librefang_channels::types::sanitize_channel_name(&raw_channel);
 
     // `Some` exactly when an authenticated caller may not speak as the identity they asserted.
+    // Only an asserted sender reaches this check; the sender-less caller returned above.
     let pinned_to = api_user.filter(|caller| {
         caller.role < crate::middleware::UserRole::Admin
-            && auth.identify(&asserted_channel, sender_id) != Some(caller.user_id)
+            && auth.identify(&asserted_channel, asserted) != Some(caller.user_id)
     });
 
     let (channel, user_id, display_name) = match pinned_to {
@@ -671,10 +677,10 @@ fn request_sender_context(
         ),
         None => (
             asserted_channel,
-            sender_id.to_string(),
+            asserted.to_string(),
             req.sender_name
                 .clone()
-                .unwrap_or_else(|| sender_id.to_string()),
+                .unwrap_or_else(|| asserted.to_string()),
         ),
     };
 
@@ -691,15 +697,7 @@ fn request_sender_context(
         // when the caller (Telegram, direct API) doesn't populate it; the
         // guard then becomes a no-op and cannot produce false positives.
         group_participants: req.group_participants.clone().unwrap_or_default(),
-        // The caller-attributed case is the only one that gains a
-        // `SenderContext` where the request previously produced none, and it
-        // must not move the session: a sender-less POST lands on the `_` arm of
-        // the session resolver (`entry.session_id`), which is the same session
-        // `use_canonical_session = true` selects. Without this the new context
-        // would take the channel-derived branch and start a second history for
-        // the same conversation. The dashboard's WebSocket handler sets the
-        // same flag for the same reason.
-        use_canonical_session: attributed_to_caller,
+        use_canonical_session: false,
         ..Default::default()
     })
 }
@@ -1401,15 +1399,47 @@ mod tests {
         let sender = request_sender_context(&req, Some(&bob), &no_users()).expect("sender context");
 
         assert_eq!(
-            sender.user_id, "bob",
-            "the authenticated caller is the only identity the request carries"
+            sender.user_id,
+            bob.user_id.to_string(),
+            "the canonical `UserId` is the identity the kernel's webui resolution keys on"
         );
         assert_eq!(sender.display_name, "bob");
-        assert_eq!(sender.channel, "api");
+        assert_eq!(
+            sender.channel,
+            librefang_kernel::SYSTEM_CHANNEL_WEBUI,
+            "REST must stamp the same channel the WebSocket path stamps"
+        );
         assert!(
             sender.use_canonical_session,
             "the turn must not move: a sender-less POST resolves to `entry.session_id`, \
              which is the session `use_canonical_session = true` selects"
+        );
+    }
+
+    /// The caller-attributed stamp must not depend on any channel binding: a sender-less caller is attributed to themselves even when an `identify` lookup on the body's channel would resolve their name to somebody else.
+    /// The pin is for asserted senders only.
+    #[test]
+    fn request_sender_context_does_not_pin_a_senderless_caller_to_a_channel_binding() {
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert("whatsapp".to_string(), "bob".to_string());
+        let auth =
+            librefang_kernel::auth::AuthManager::new(&[librefang_types::config::UserConfig {
+                name: "alice".to_string(),
+                role: "owner".to_string(),
+                channel_bindings: bindings,
+                ..Default::default()
+            }]);
+
+        let req = senderless_request();
+        let bob = caller("bob", crate::middleware::UserRole::User);
+
+        let sender = request_sender_context(&req, Some(&bob), &auth).expect("sender context");
+
+        assert_eq!(sender.channel, librefang_kernel::SYSTEM_CHANNEL_WEBUI);
+        assert_eq!(
+            sender.user_id,
+            bob.user_id.to_string(),
+            "a sender-less caller resolves to their own canonical identity, not the binding"
         );
     }
 
@@ -1599,7 +1629,8 @@ mod tests {
         let sender = request_sender_context(&req, Some(&bob), &no_users())
             .expect("an authenticated caller is a sender even when the body asserts none");
 
-        assert_eq!(sender.user_id, "bob");
+        assert_eq!(sender.user_id, bob.user_id.to_string());
+        assert_eq!(sender.channel, librefang_kernel::SYSTEM_CHANNEL_WEBUI);
         assert!(
             sender.use_canonical_session,
             "without this the session resolver takes its channel-derived branch and the \
