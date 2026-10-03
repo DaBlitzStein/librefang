@@ -85,9 +85,9 @@ describe("the user's side of a message bubble", () => {
   it("keeps the generic person icon when there is nobody to name", () => {
     renderBubble({});
 
-    // No name means no `UserAvatar` at all — that is the no-auth case and the
-    // window before `whoami` resolves. Drawing an avatar from an empty name
-    // would render a `?` where the icon belongs.
+    // No name means no `UserAvatar` at all — that is the window before
+    // `whoami` resolves or the case where it failed. Drawing an avatar from an
+    // empty name would render a `?` where the icon belongs.
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
     // The bubble itself is still there, so the assertion above is about the
     // avatar and not about a component that failed to render.

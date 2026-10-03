@@ -41,8 +41,13 @@ export const authzQueries = {
   // mount to inherit — so the previous user's name cannot end up on the current
   // user's messages.
   //
-  // Retrying is wrong in no-auth mode, where the route answers 401 and the
-  // caller is legitimate.
+  // `retry: false`: a failure here is a failure of the credential, not of the
+  // request — a second attempt would carry the same bearer to the same answer.
+  // `App.tsx` swaps the login dialog in on a 401 (`setOnUnauthorized`), and
+  // retries would only postpone that. No-auth mode is not a failure in the
+  // first place: `middleware::auth` admits the caller without an
+  // `AuthenticatedApiUser` and `routes/authz.rs` answers 200 with the same
+  // synthetic `root` Owner the rest of the surface uses.
   whoami: () =>
     queryOptions({
       queryKey: authzKeys.whoami(),

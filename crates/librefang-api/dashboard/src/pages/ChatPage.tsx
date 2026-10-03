@@ -1412,8 +1412,8 @@ interface MessageBubbleProps {
   agentAvatarSrc?: string;
   agentEmoji?: string;
   /** The signed-in user, for the other side of the same bubble. Undefined while
-   *  `whoami` is in flight, or in no-auth mode, where the bubble keeps the
-   *  generic person icon it used to show.
+   *  `whoami` is in flight or if it failed, where the bubble keeps the generic
+   *  person icon it used to show.
    *
    *  Primitives for the reason the agent's are: this component is memoised. */
   userName?: string;
@@ -1479,11 +1479,11 @@ export const MessageBubble = memo(function MessageBubble({ message, usageFooter,
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
           {/* Both sides are real. The user's keeps the generic person icon only
-              when there is nobody to name — no-auth mode, or `whoami` still in
-              flight; otherwise `UserAvatar` draws their image, then their
-              emoji, then their initials. The agent's draws its own, from the
-              same three-step chain, with the object URL resolved once by
-              `ChatPage` and handed to every bubble. */}
+              when there is nobody to name — `whoami` still in flight or failed;
+              otherwise `UserAvatar` draws their image, then their emoji, then
+              their initials. The agent's draws its own, from the same
+              three-step chain, with the object URL resolved once by `ChatPage`
+              and handed to every bubble. */}
           {isUser ? (
             userName ? (
               <UserAvatar

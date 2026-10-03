@@ -883,8 +883,9 @@ export function UserAppearanceSection({
   }, [name]);
 
   /** PATCH the emoji. There is no second identity field on a user — unlike an
-   *  agent there is no colour — so the body carries the emoji and nothing else,
-   *  and the daemon's partial-PATCH rule has nothing to preserve. */
+   *  agent there is no colour — so the body carries only the emoji. The route
+   *  is partial: an omitted key preserves the stored glyph, so clearing one is
+   *  spelled out as the empty string. */
   function saveEmoji() {
     if (updateIdentityMutation.isPending) return;
     const next = emojiDraft.trim();

@@ -237,9 +237,9 @@ export function useDeleteUserAvatar() {
 /**
  * PATCH /api/users/{name}/identity — the user's emoji.
  *
- * Not partial, unlike the agent twin: the daemon documents `emoji` as "absent is
- * treated as `null`" and assigns the validated value straight onto the row, so
- * a body that omits the key clears the glyph rather than leaving it alone.
+ * Partial, like the agent twin: the daemon tells an omitted key from an
+ * explicit `null`, so a body without `emoji` keeps the stored glyph and
+ * clearing one is spelled out — as `null` or as the empty string.
  *
  * This is the one avatar write that goes through the config file. The daemon
  * rewrites the `[[users]]` table with `toml_edit` — comments and unrelated
