@@ -142,6 +142,14 @@ const uiState = {
   hiddenModelKeys: [] as string[],
   chatScale: 1,
   setChatScale: vi.fn(),
+  // Session tabs (the branch this test lives on). Empty list: the strip stays
+  // out of the way and only `pruneChatTabs` runs on mount.
+  openChatTabs: {} as Record<string, string[]>,
+  chatTabRecency: {} as Record<string, string[]>,
+  openChatTab: vi.fn(),
+  closeChatTab: vi.fn(),
+  pruneChatTabs: vi.fn(),
+  pruneChatTabAgents: vi.fn(),
 };
 vi.mock("../lib/store", () => ({
   useUIStore: (selector: (state: Record<string, unknown>) => unknown) => selector(uiState),

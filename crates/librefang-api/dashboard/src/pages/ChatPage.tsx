@@ -24,6 +24,7 @@ import { applyForeignTerminalFrame, isTerminalFrameType, normalizeToolOutput, te
 import {
   deriveDropdownActiveSessionId,
   pickSessionDropdownLabel,
+  sessionAfterClose,
   shouldAutoPinResolvedSession,
 } from "../lib/sessionSelector";
 import {
@@ -3583,6 +3584,7 @@ export function ChatPage() {
   const openChatTab = useUIStore((s) => s.openChatTab);
   const closeChatTab = useUIStore((s) => s.closeChatTab);
   const pruneChatTabs = useUIStore((s) => s.pruneChatTabs);
+  const pruneChatTabAgents = useUIStore((s) => s.pruneChatTabAgents);
   const agentTabs = useMemo(
     () => (selectedAgentId ? (openChatTabs[selectedAgentId] ?? []) : []),
     [openChatTabs, selectedAgentId],
@@ -3607,18 +3609,29 @@ export function ChatPage() {
     );
   }, [selectedAgentId, sessionsQuery.data, pruneChatTabs]);
 
+  useEffect(() => {
+    // Tabs are keyed by agent, so a deleted agent would otherwise leave its
+    // entry in the persisted store forever. The list is authoritative only
+    // when it includes hand agents (`includeHands`): with them hidden the
+    // query returns a subset, and a hidden agent must not lose its tabs.
+    if (agentsQuery.data === undefined || !showHandAgents) return;
+    pruneChatTabAgents(new Set(agentsQuery.data.map((agent) => agent.id)));
+  }, [agentsQuery.data, showHandAgents, pruneChatTabAgents]);
+
   const handleCloseTab = useCallback(
     (sessionId: string) => {
       if (!selectedAgentId) return;
-      const remaining = agentTabs.filter((id) => id !== sessionId);
+      // Resolve the landing spot before the store drops the tab: the neighbour
+      // at the closed tab's index, not the most recently visited tab.
+      const nextSessionId = sessionAfterClose(agentTabs, sessionId);
       closeChatTab(selectedAgentId, sessionId);
       // Closing the one you are looking at has to land somewhere. The
       // neighbour, not "no session" — dropping the param would re-derive the
       // server-active session and could reopen the tab just closed.
-      if (sessionId === activeSessionId && remaining.length > 0) {
+      if (sessionId === activeSessionId && nextSessionId) {
         navigate({
           to: "/chat",
-          search: { agentId: selectedAgentId, sessionId: remaining[remaining.length - 1] },
+          search: { agentId: selectedAgentId, sessionId: nextSessionId },
           replace: true,
         });
       }
@@ -4014,7 +4027,10 @@ export function ChatPage() {
                       title={t("chat.session_tab_close_hint", {
                         defaultValue: "Closes the tab. The conversation is kept.",
                       })}
-                      className="rounded p-0.5 opacity-0 transition-opacity hover:text-error focus-visible:opacity-100 group-hover:opacity-100"
+                      // Hidden on hover-capable devices to keep the strip
+                      // quiet, always visible on touch screens where there is
+                      // no hover to reveal it.
+                      className="rounded p-0.5 opacity-0 transition-opacity hover:text-error focus-visible:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100"
                     >
                       <X className="h-2.5 w-2.5" />
                     </button>
