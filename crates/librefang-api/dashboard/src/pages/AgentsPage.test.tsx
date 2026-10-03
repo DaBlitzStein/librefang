@@ -456,4 +456,13 @@ describe("grant panels reconcile with the manifest form (#8424)", () => {
     expect(source).toContain("expected_version: manifestEditorVersion");
     expect(source).toContain("setManifestEditorVersion(snapshot.version)");
   });
+
+  // The auto-evolve switch writes the manifest directly and the form re-emits
+  // the key from its top-level extras, so the toggle's success handler has to
+  // adopt the new value; without it the next form Save reverts the switch.
+  // Behavioural coverage of the adoption lives in agentManifest.test.ts
+  // ("auto_evolve toggle adoption"); this pins the page actually calling it.
+  it("adopts the auto-evolve toggle into the form's top-level extras", () => {
+    expect(source).toContain("adoptTopLevelExtras(prev, { auto_evolve: !autoEvolve })");
+  });
 });

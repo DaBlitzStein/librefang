@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   FORM_TOP_LEVEL_KEYS,
+  adoptTopLevelExtras,
   emptyManifestExtras,
   emptyManifestForm,
   parseManifestToml,
@@ -3907,5 +3908,52 @@ describe("context_engine", () => {
     const toml = serializeManifestForm(form);
     expect(toml).not.toContain("plugin_stack_weights");
     expect(validateManifestForm(form)).toContain("context_engine.plugin_stack_weights");
+  });
+});
+
+// The skills panel's auto-evolve switch writes `auto_evolve` straight to the
+// manifest (`PATCH /agents/{id}`), but the manifest form has no field for it:
+// the key is not in `FORM_TOP_LEVEL_KEYS`, so it is carried in `topLevel`
+// extras and re-emitted verbatim on every Save. Without mirroring the toggle
+// into the extras, the next form Save reverts the switch — silently, since
+// the ETag refresh added for #8424 means that save no longer 409s.
+describe("auto_evolve toggle adoption (#8424)", () => {
+  // The page reads the live detail as `auto_evolve !== false`: an absent key
+  // means the feature is on.
+  const seed = (toml: string) => {
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error(parsed.message);
+    return { form: parsed.form, extras: parsed.extras, enabled: parsed.extras.topLevel.auto_evolve !== false };
+  };
+
+  it.each([
+    ["the seed omits auto_evolve (the default is on)", `name = "a"\n`, true],
+    ["the seed pins auto_evolve = true", `name = "a"\nauto_evolve = true\n`, true],
+    ["the seed pins auto_evolve = false", `name = "a"\nauto_evolve = false\n`, false],
+  ])("adopts the toggled value when %s", (_label, toml, enabled) => {
+    const seeded = seed(toml as string);
+    const next = !enabled;
+
+    // Exactly what `handleToggleAutoEvolve`'s onSuccess does to the form
+    // extras before the ETag refresh.
+    const adopted = adoptTopLevelExtras(seeded.extras, { auto_evolve: next });
+    const out = serializeManifestForm(seeded.form, adopted);
+
+    // The value the daemon will read back is the toggled one…
+    expect(out).toContain(`auto_evolve = ${next}`);
+    // …including on the round trip that produces the next seed.
+    const round = parseManifestToml(out);
+    expect(round.ok).toBe(true);
+    if (!round.ok) return;
+    expect(round.extras.topLevel.auto_evolve).toBe(next);
+  });
+
+  it("without the adoption the save re-emits the seed value, which is the revert this guards against", () => {
+    const seeded = seed(`name = "a"\nauto_evolve = true\n`);
+    // The pre-adoption path: serializing the untouched seed extras after the
+    // switch was turned off still writes `auto_evolve = true`.
+    const unadopted = serializeManifestForm(seeded.form, seeded.extras);
+    expect(unadopted).toContain("auto_evolve = true");
   });
 });

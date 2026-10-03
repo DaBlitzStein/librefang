@@ -669,6 +669,26 @@ export const emptyManifestExtras = (): ManifestExtras => ({
 });
 
 /**
+ * Adopt a top-level manifest write the form did not make into the extras slot
+ * the form re-emits (#8424).
+ *
+ * `auto_evolve` is deliberately not a form field — FORM_TOP_LEVEL_KEYS does
+ * not claim it, so it is carried in `topLevel` and re-emitted verbatim on
+ * every Save. A writer that changes it out from under the form, like the
+ * skills panel's auto-evolve switch, must mirror the new value here, or the
+ * next form Save silently re-emits the pre-write value. The ETag refresh
+ * added for #8424 removed the 409 that used to make that revert audible, so
+ * the mirror is what keeps the write from being undone.
+ */
+export const adoptTopLevelExtras = (
+  extras: ManifestExtras,
+  patch: TomlTable,
+): ManifestExtras => ({
+  ...extras,
+  topLevel: { ...extras.topLevel, ...patch },
+});
+
+/**
  * The form's starting state, and the one place where a default can be got
  * wrong in a way nothing else catches.
  *

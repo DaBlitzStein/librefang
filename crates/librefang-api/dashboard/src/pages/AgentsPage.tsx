@@ -63,6 +63,7 @@ import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
 import { useModelRouterProfiles } from "../lib/queries/modelRouter";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
+  adoptTopLevelExtras,
   emptyManifestExtras,
   emptyManifestForm,
   parseManifestToml,
@@ -1924,9 +1925,15 @@ export function AgentsPage() {
         { agentId: agent.id, body: { auto_evolve: !autoEvolve } },
         {
           onSuccess: () => {
-            // `auto_evolve` is a manifest field: this write moves the ETag the
-            // form would echo, even though the form has no widget for it
-            // (#8424).
+            // `auto_evolve` is a manifest field the form has no widget for:
+            // it lives in the form's top-level extras and is re-emitted on
+            // every Save. Adopt the value this write just stored, or the next
+            // form Save silently reverts the toggle now that the ETag refresh
+            // no longer turns that into a 409 (#8424).
+            setManifestEditorExtras((prev) =>
+              adoptTopLevelExtras(prev, { auto_evolve: !autoEvolve }),
+            );
+            // The same write moves the ETag the form echoes.
             void refreshManifestVersion(agent.id);
             addToast(
               !autoEvolve
