@@ -333,21 +333,29 @@ pub async fn bulk_create_agents(
                         // Same code/error split as the single-spawn path
                         // (`spawn_agent_inner`) so a bulk caller can branch on
                         // `code` identically to a single `POST /api/agents`.
-                        let code = match &e {
+                        let (error, code) = match &e {
                             crate::error::KernelError::LibreFang(
                                 librefang_types::error::LibreFangError::AgentAlreadyExists(_),
-                            ) => "agent_already_exists",
-                            _ => "spawn_failed",
+                            ) => (
+                                t.t_args(
+                                    "api-error-agent-clone-spawn-failed",
+                                    &[("error", &e.to_string())],
+                                ),
+                                "agent_already_exists",
+                            ),
+                            // 500s are scrubbed like the single path
+                            // (audit: rusqlite-errors-leak): a spawn failure
+                            // rooted in the memory substrate would otherwise
+                            // leak SQL detail. Full error already logged by the
+                            // kernel.
+                            _ => (t.t("api-error-internal"), "spawn_failed"),
                         };
                         results.push(BulkCreateResult {
                             index,
                             success: false,
                             agent_id: None,
                             name: None,
-                            error: Some(t.t_args(
-                                "api-error-agent-clone-spawn-failed",
-                                &[("error", &e.to_string())],
-                            )),
+                            error: Some(error),
                             code: Some(code),
                         });
                     }
