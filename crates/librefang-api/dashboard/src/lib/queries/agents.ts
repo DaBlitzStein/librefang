@@ -21,7 +21,7 @@ import {
   getAgentSkills,
   getAgentMcpServers,
 } from "../http/client";
-import { agentKeys, toolKeys } from "./keys";
+import { agentAvatarKeys, agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 import { AVATAR_STALE_MS } from "./avatar";
 
@@ -182,7 +182,10 @@ export const agentQueries = {
   // invalidating this key rather than by polling for it.
   avatar: (agentId: string, enabled: boolean) =>
     queryOptions({
-      queryKey: agentKeys.avatar(agentId),
+      // Sibling root, not `agentKeys.avatar`: a broad `agentKeys.all`
+      // invalidation (a hand toggle, a knowledge write) must not re-download
+      // every cached image. See `agentAvatarKeys` in `./keys`.
+      queryKey: agentAvatarKeys.avatar(agentId),
       // React Query's signal is forwarded: switching agents quickly otherwise
       // leaves the superseded image GET holding a connection slot until it
       // finishes on its own.
@@ -289,7 +292,11 @@ export function useAgentAvatarUrl(
   enabled = true,
 ): string | undefined {
   const { data: blob } = useQuery(agentQueries.avatar(agentId, hasAvatar && enabled));
-  // Handing `useObjectUrl` nothing while the consumer is unmounted is what
-  // revokes the handle on close: the blob stays cached, the URL does not.
-  return useObjectUrl(enabled ? blob : undefined);
+  // Handing `useObjectUrl` nothing while the consumer is unmounted — or while
+  // the caller says there is no image — is what revokes the handle: the blob
+  // stays cached, the URL does not. `!hasAvatar` is part of the condition
+  // because a disabled query still returns cached data, so a caller that only
+  // wants to know "is there an image" would otherwise mint an object URL for a
+  // cached Blob it is not rendering (#8339 review).
+  return useObjectUrl(hasAvatar && enabled ? blob : undefined);
 }

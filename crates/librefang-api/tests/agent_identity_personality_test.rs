@@ -422,3 +422,62 @@ async fn config_rename_conflict_with_personality_changes_nothing() {
     );
     assert_name_and_description_unchanged(&get_agent(&server, &id).await, name);
 }
+
+/// #8371: an identity write drops the dashboard snapshot memo, so the
+/// frontend's own invalidation refetch — issued milliseconds after the PATCH,
+/// well inside the memo's 900 ms TTL — reads the write instead of the payload
+/// the previous poll cached. Without the eviction the second read below serves
+/// the memoized `first` payload and the row keeps the old emoji until the next
+/// 5 s tick.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_write_evicts_the_dashboard_snapshot_memo() {
+    let server = start_full_router().await;
+    let id = spawn(&server, "snapshot-evicts-on-identity").await;
+    let client = reqwest::Client::new();
+
+    let agent_emoji = |snapshot: &serde_json::Value| -> Option<String> {
+        snapshot["agents"]
+            .as_array()
+            .expect("snapshot carries an agents array")
+            .iter()
+            .find(|a| a["id"].as_str() == Some(id.as_str()))
+            .and_then(|a| a["identity"]["emoji"].as_str())
+            .map(str::to_owned)
+    };
+
+    // Prime the memo with the pre-write payload.
+    let first: serde_json::Value = client
+        .get(format!("{}/api/dashboard/snapshot", server.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(agent_emoji(&first), None, "{first}");
+
+    // Drive the real route, not the cache helper.
+    let (status, body) = patch_json(
+        &server,
+        &format!("/api/agents/{id}/identity"),
+        serde_json::json!({"emoji": "🦊"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    // Immediately after, inside the old TTL: the memo must be gone.
+    let second: serde_json::Value = client
+        .get(format!("{}/api/dashboard/snapshot", server.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        agent_emoji(&second).as_deref(),
+        Some("🦊"),
+        "the identity write must evict the snapshot memo; a memoized payload would still \
+         carry the pre-write emoji: {second}"
+    );
+}

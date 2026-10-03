@@ -13,7 +13,7 @@ import { useFullConfig } from "../lib/queries/config";
 import { useMediaProviders } from "../lib/queries/media";
 import { useModels } from "../lib/queries/models";
 import { usePendingApprovals } from "../lib/queries/approvals";
-import { agentQueries, useAgents, useAgentSessions } from "../lib/queries/agents";
+import { agentQueries, useAgentAvatarUrl, useAgents, useAgentSessions } from "../lib/queries/agents";
 import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { useChatCommands, type ChatCommand } from "../lib/queries/commands";
@@ -1401,10 +1401,15 @@ interface MessageBubbleProps {
    *  The identity arrives as two primitives rather than as one `AgentIdentity`
    *  object: this component is memoised against the streaming re-renders, and
    *  the agent list it is read from is rebuilt every poll, so an object prop
-   *  would be a new reference every 30 s and drop the memo each time. */
+   *  would be a new reference every 30 s and drop the memo each time.
+   *
+   *  `agentAvatarSrc` is already the object URL, resolved once by `ChatPage`
+   *  for the agent the whole transcript belongs to. Each bubble used to mount
+   *  its own `AgentAvatar` and mint its own URL over the same cached Blob —
+   *  hundreds of live handles for one image on a long conversation. */
   agentId?: string;
   agentName?: string;
-  agentAvatarUrl?: string;
+  agentAvatarSrc?: string;
   agentEmoji?: string;
   /** The signed-in user, for the other side of the same bubble. Undefined while
    *  `whoami` is in flight, or in no-auth mode, where the bubble keeps the
@@ -1424,10 +1429,12 @@ interface MessageBubbleProps {
   ttsAvailable?: boolean;
 }
 
-/** Exported for its test, like `AgentAppearanceSection` on the users page:
- *  mounting `ChatPage` to reach it would mean standing up a session, a selected
- *  agent and a streaming transcript to assert two lines of avatar selection. */
-export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarUrl, agentEmoji, userName, userEmoji, userHasAvatar, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
+/**
+ * Exported for its tests, like `AgentAppearanceSection` on the users page:
+ * mounting `ChatPage` to reach it would mean standing up a session, a selected
+ * agent and a streaming transcript to assert two lines of avatar selection.
+ */
+export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarSrc, agentEmoji, userName, userEmoji, userHasAvatar, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
@@ -1475,7 +1482,8 @@ export const MessageBubble = memo(function MessageBubble({ message, usageFooter,
               when there is nobody to name — no-auth mode, or `whoami` still in
               flight; otherwise `UserAvatar` draws their image, then their
               emoji, then their initials. The agent's draws its own, from the
-              same three-step chain. */}
+              same three-step chain, with the object URL resolved once by
+              `ChatPage` and handed to every bubble. */}
           {isUser ? (
             userName ? (
               <UserAvatar
@@ -1492,7 +1500,7 @@ export const MessageBubble = memo(function MessageBubble({ message, usageFooter,
           ) : agentId ? (
             <AgentAvatar
               agentId={agentId}
-              avatarUrl={agentAvatarUrl}
+              resolvedSrc={agentAvatarSrc}
               emoji={agentEmoji}
               fallback={agentName ?? t("chat.bot")}
               size="sm"
@@ -3467,6 +3475,16 @@ export function ChatPage() {
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
+  // The transcript's avatar, resolved once here rather than per message. Every
+  // assistant bubble used to mount its own `AgentAvatar`, and each one minted
+  // an object URL over the same cached Blob — a 300-message conversation held
+  // 300 live handles for one image, and any avatar refetch re-minted and
+  // re-revoked all of them at once, changing every `<img src>` in the thread.
+  const selectedAgentAvatarSrc = useAgentAvatarUrl(
+    selectedAgent?.id ?? "",
+    !!selectedAgent?.identity?.avatar_url,
+  );
+
   // Per-agent session list. `activeSessionId` is derived from the URL first
   // (multi-tab safety, issue #2959); if absent, fall back to the server's
   // canonical active session so initial navigation still highlights correctly.
@@ -3945,7 +3963,7 @@ export function ChatPage() {
                     usageFooter={usageFooter}
                     agentId={selectedAgent?.id}
                     agentName={selectedAgent?.name}
-                    agentAvatarUrl={selectedAgent?.identity?.avatar_url}
+                    agentAvatarSrc={selectedAgentAvatarSrc}
                     agentEmoji={selectedAgent?.identity?.emoji}
                     userName={whoami.data?.name}
                     userEmoji={whoami.data?.emoji}
