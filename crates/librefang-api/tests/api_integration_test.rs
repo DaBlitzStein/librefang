@@ -6875,6 +6875,11 @@ async fn task_priority_is_stored_and_orders_the_claim_queue() {
 /// A per-task `timeout_secs` overrides the global `[task_board]
 /// claim_ttl_secs` at the one place that enforces a claim deadline — the
 /// stuck-task sweeper.
+///
+/// The edges of that override carry the same weight as the override itself:
+/// a global `0` still sweeps a row that carries its own timeout, a row that
+/// carries none inherits the global clock, and an explicit per-task `0` opts
+/// the row out of every clock.
 #[tokio::test(flavor = "multi_thread")]
 async fn task_timeout_secs_overrides_the_global_claim_ttl() {
     let harness = start_full_router("").await;
@@ -6910,19 +6915,19 @@ async fn task_timeout_secs_overrides_the_global_claim_ttl() {
     // immediate assert right after the claim, with nothing to fall back on
     // if the process stalls even briefly, is exactly the kind of margin-free
     // timing check that turns into a false red under load.
-    let set_claimed_at = |age: chrono::Duration| {
+    let set_claimed_at = |id: &str, age: chrono::Duration| {
         let conn = substrate.pool().get().unwrap();
         let claimed_at = (chrono::Utc::now() - age).to_rfc3339();
         conn.execute(
             "UPDATE task_queue SET claimed_at = ?1 WHERE id = ?2",
-            rusqlite::params![claimed_at, task_id],
+            rusqlite::params![claimed_at, id],
         )
         .unwrap();
     };
 
     // Before the deadline the sweeper must leave it alone, so the reset below
     // is attributable to the elapsed timeout and not to an always-reset bug.
-    set_claimed_at(chrono::Duration::milliseconds(200));
+    set_claimed_at(&task_id, chrono::Duration::milliseconds(200));
     let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
     assert!(
         reset.is_empty(),
@@ -6930,7 +6935,7 @@ async fn task_timeout_secs_overrides_the_global_claim_ttl() {
     );
 
     // A one-hour global TTL would leave this claimed; the row's own 1s wins.
-    set_claimed_at(chrono::Duration::seconds(5));
+    set_claimed_at(&task_id, chrono::Duration::seconds(5));
     let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
     assert_eq!(
         reset,
@@ -6942,6 +6947,96 @@ async fn task_timeout_secs_overrides_the_global_claim_ttl() {
     assert_eq!(
         task["status"], "pending",
         "the reclaimed task returns to the queue"
+    );
+
+    // Case (b): an explicit per-task `timeout_secs = 0` opts that row out of
+    // every clock. It is posted at a higher priority so the claim lands on it
+    // rather than on the probe the sweep just requeued.
+    let (status, created) = post_task(
+        &harness,
+        serde_json::json!({
+            "title": "Explicitly never reclaimed",
+            "description": "timeout_secs = 0",
+            "timeout_secs": 0,
+            "priority": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let never_id = created["id"].as_str().unwrap().to_string();
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{never_id}")).await;
+    assert_eq!(
+        task["timeout_secs"], 0,
+        "an explicit zero must round-trip, not collapse into NULL"
+    );
+
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the zero-timeout task is claimable");
+    assert_eq!(
+        claimed["id"], never_id,
+        "priority must put the zero-timeout row at the queue head"
+    );
+
+    // Aged well past any global TTL the sweeper is handed, it must still be
+    // left alone: `timeout_secs = 0` means "never reclaim", not "inherit".
+    set_claimed_at(&never_id, chrono::Duration::seconds(5));
+    let reset = substrate.task_reset_stuck(1, 0).await.unwrap();
+    assert!(
+        reset.is_empty(),
+        "an explicit timeout_secs = 0 must never be reclaimed, got {reset:?}"
+    );
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{never_id}")).await;
+    assert_eq!(
+        task["status"], "in_progress",
+        "the opted-out row keeps its claim"
+    );
+
+    // Case (a): with the global clock off (`claim_ttl_secs = 0`), a row that
+    // carries its own timeout is still swept, while a row that carries none
+    // has no clock at all. The probe was requeued by the sweep above and is
+    // older, so it is claimed first; the second claim lands on the inheriting
+    // row.
+    let (status, created) = post_task(
+        &harness,
+        serde_json::json!({
+            "title": "Inherits the global clock",
+            "description": "no per-task timeout",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let inherit_id = created["id"].as_str().unwrap().to_string();
+
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the requeued probe is claimable");
+    assert_eq!(claimed["id"], task_id);
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the inheriting row is claimable");
+    assert_eq!(claimed["id"], inherit_id);
+
+    set_claimed_at(&task_id, chrono::Duration::seconds(5));
+    set_claimed_at(&inherit_id, chrono::Duration::seconds(5));
+
+    let reset = substrate.task_reset_stuck(0, 0).await.unwrap();
+    assert_eq!(
+        reset,
+        vec![task_id.clone()],
+        "with the global clock off, the per-task timeout must still sweep, \
+         and a row that inherits the global clock must not"
+    );
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{inherit_id}")).await;
+    assert_eq!(
+        task["status"], "in_progress",
+        "no per-task timeout and no global clock means no deadline to trip"
     );
 }
 
