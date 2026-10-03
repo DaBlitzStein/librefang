@@ -281,24 +281,6 @@
   "agents": {
     "title": "Agents",
     "subtitle": "Active autonomous units managed by the LibreFang kernel.",
-    "identity": {
-      "title": "Appearance",
-      "emoji": "Emoji",
-      "emoji_placeholder": "None",
-      "emoji_saved": "Emoji updated",
-      "emoji_cleared": "Emoji cleared",
-      "emoji_failed": "Failed to update the emoji",
-      "avatar": "Avatar image",
-      "avatar_upload": "Upload",
-      "avatar_replace": "Replace",
-      "avatar_hint": "PNG, JPEG, GIF or WebP, up to 2 MB. SVG is not accepted. The image is stored by the daemon and served only to signed-in callers.",
-      "avatar_saved": "Avatar updated",
-      "avatar_failed": "Failed to upload the avatar",
-      "avatar_removed": "Avatar removed",
-      "avatar_remove_failed": "Failed to remove the avatar",
-      "avatar_type_rejected": "An avatar must be a PNG, JPEG, GIF or WebP image. SVG is not accepted.",
-      "avatar_too_large": "That image is {{size}} MB; the limit is {{limit}} MB."
-    },
     "identity_file": {
       "title": "Personality ({{name}})",
       "hint": "This agent's personality. Injected into its prompt under “## Identity”, cut off at 500 characters. The rest of the file is written back untouched.",
@@ -611,7 +593,6 @@
       "heartbeat_channel": "Heartbeat Channel",
       "quiet_hours": "Quiet Hours (cron)",
       "routing": "Model Routing",
-      "routing_enabled": "Enable complexity-based routing",
       "routing_stable_inert": "The kernel runs in Stable mode, which freezes model choice: this routing is saved with the agent but has no effect, and the agent uses its pinned model (or its own model) until the kernel leaves Stable mode.",
       "routing_engine": "Routing engine",
       "routing_engine_hint": "Which router picks this agent's model. Choosing an engine also sets the mode and the router override the kernel reads, so the engine named here is the one that runs.",
