@@ -736,7 +736,8 @@ struct DeclaredModelFigures {
 /// The context window is read through [`crate::model_metadata::parse_openai_model`], which owns the key priority (`max_model_len` → `context_length` → `context_window` → `max_input_tokens` → `max_tokens`) and rejects a `0` at each key; `max_input_tokens` is still preferred over `max_tokens`, the ambiguous key a gateway uses for whichever of the two it conflates.
 ///
 /// A `model_name` may repeat: LiteLLM answers with one row per deployment, and several deployments can share an alias.
-/// Duplicate rows are merged field by field rather than overwritten — a later row fills in only what the entry does not have yet, so every figure any row declared survives, a duplicate that is silent about a field cannot erase what an earlier row said, and the first declaration wins when two rows disagree about the same field.
+/// Duplicate rows are merged field by field for capacity — a later row fills in only what the entry does not have yet, so a duplicate that is silent about a field cannot erase what an earlier row said, and the first declaration wins when two rows disagree about the same field.
+/// Price is the exception: it is recorded as the pair one row declares, or not at all, so the first row that declares *both* figures wins and a row that declares only one side is skipped rather than completed from a different deployment.
 fn parse_litellm_model_info(
     body: &serde_json::Value,
 ) -> std::collections::HashMap<String, DeclaredModelFigures> {
@@ -768,12 +769,18 @@ fn parse_litellm_model_info(
         let entry = out.entry(name.to_lowercase()).or_default();
         entry.context_window = entry.context_window.or(context_window);
         entry.max_output_tokens = entry.max_output_tokens.or(max_output_tokens);
-        entry.input_cost_per_m = entry
-            .input_cost_per_m
-            .or_else(|| per_token_to_per_million("input_cost_per_token"));
-        entry.output_cost_per_m = entry
-            .output_cost_per_m
-            .or_else(|| per_token_to_per_million("output_cost_per_token"));
+        // Price arrives as a pair from one deployment row or not at all: combining
+        // row A's input with row B's output would state a price no gateway ever
+        // declared, and the catalog's own pair invariant is built on this fold.
+        // A row that declares only one side is skipped, not half-recorded.
+        if entry.input_cost_per_m.is_none() && entry.output_cost_per_m.is_none() {
+            let input = per_token_to_per_million("input_cost_per_token");
+            let output = per_token_to_per_million("output_cost_per_token");
+            if let (Some(input), Some(output)) = (input, output) {
+                entry.input_cost_per_m = Some(input);
+                entry.output_cost_per_m = Some(output);
+            }
+        }
     }
     out
 }
@@ -781,7 +788,9 @@ fn parse_litellm_model_info(
 /// Whether the id belongs to the built-in driver registry rather than to an operator-defined gateway.
 ///
 /// [`librefang_llm_drivers::drivers::provider_api_format`] returns `None` exactly for the ids nobody curated — the convention its own doc comment states, and the same one the provider-test handler leans on when it picks `/models` + `Authorization: Bearer` for an unrecognized name.
-fn is_operator_defined_gateway(provider: &str) -> bool {
+///
+/// Two decisions hang on the same distinction: whether the `/model/info` extension below is worth a request (only an operator-defined gateway can serve it), and whether a discovered model's silence about price means *free* or *unknown* — see [`crate::model_catalog::ModelCatalog::merge_discovered_models`], where a built-in local provider records `0/0` as free and an operator-defined gateway records the absence of a price.
+pub(crate) fn is_operator_defined_gateway(provider: &str) -> bool {
     librefang_llm_drivers::drivers::provider_api_format(provider).is_none()
 }
 
@@ -1607,10 +1616,10 @@ mod tests {
     }
 
     /// LiteLLM answers with one row per deployment, and several deployments
-    /// can share a `model_name`. The fold must keep every figure any row
-    /// declared — a duplicate row that is silent about a field cannot wipe it
-    /// (it used to overwrite the whole entry), and a row that declares a field
-    /// the others left out fills it in.
+    /// can share a `model_name`. The fold must keep every capacity figure any
+    /// row declared — a duplicate row that is silent about a field cannot wipe
+    /// it (it used to overwrite the whole entry), and a row that declares a
+    /// field the others left out fills it in.
     #[test]
     fn test_parse_litellm_model_info_merges_duplicate_rows_for_one_alias() {
         let body = serde_json::json!({"data": [
@@ -1624,7 +1633,7 @@ mod tests {
                 "max_tokens": null, "max_input_tokens": null,
                 "max_output_tokens": null, "input_cost_per_token": null
             }},
-            // Third deployment, declares the half the first one was missing.
+            // Third deployment, declares the other half of the capacity.
             {"model_name": "team-default", "model_info": {
                 "output_cost_per_token": 0.000015
             }},
@@ -1633,6 +1642,31 @@ mod tests {
         let figures = declared.get("team-default").expect("row present");
         assert_eq!(figures.context_window, Some(128_000));
         assert_eq!(figures.max_output_tokens, Some(8_192));
+        // No single row declared both cost sides, so there is no price to
+        // record: combining row 1's input with row 3's output would state a
+        // pair the gateway never declared.
+        assert_eq!(figures.input_cost_per_m, None);
+        assert_eq!(figures.output_cost_per_m, None);
+    }
+
+    /// Price is a pair owned by one deployment row: the first row that declares
+    /// both sides wins, a row that declared only one side does not contribute,
+    /// and a later row that declares both does not replace the recorded pair.
+    #[test]
+    fn test_parse_litellm_model_info_takes_both_costs_from_one_row() {
+        let body = serde_json::json!({"data": [
+            {"model_name": "team-default", "model_info": {
+                "input_cost_per_token": 0.000001
+            }},
+            {"model_name": "team-default", "model_info": {
+                "input_cost_per_token": 0.000003, "output_cost_per_token": 0.000015
+            }},
+            {"model_name": "team-default", "model_info": {
+                "input_cost_per_token": 0.000009, "output_cost_per_token": 0.000045
+            }},
+        ]});
+        let declared = parse_litellm_model_info(&body);
+        let figures = declared.get("team-default").expect("row present");
         assert!((figures.input_cost_per_m.unwrap() - 3.0).abs() < 1e-9);
         assert!((figures.output_cost_per_m.unwrap() - 15.0).abs() < 1e-9);
     }
