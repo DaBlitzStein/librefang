@@ -2599,7 +2599,7 @@ fn materialize_hand_agent_manifest(label: &str, hand_id: &str, hand_toml: &str) 
     manifest
 }
 
-/// `ScheduleMode` has no `PartialEq`, so the schedule assertions destructure.
+/// The schedule assertions destructure so they can also pin the continuous interval, not just the variant.
 fn assert_continuous_schedule(manifest: &AgentManifest, expected_interval_secs: u64, why: &str) {
     match manifest.schedule {
         ScheduleMode::Continuous {
@@ -15846,6 +15846,102 @@ fn a_suspend_snapshot_is_normalized_to_the_serializer_layout() {
         newest.manifest_toml.contains("enabled = false"),
         "the normalized snapshot must still carry the toggled value:\n{}",
         newest.manifest_toml
+    );
+
+    kernel.shutdown();
+}
+
+/// Restoring a `suspend` snapshot must not write its `enabled = false` onto a live agent.
+///
+/// `update_manifest` pins `name`, `tags`, `workspace` and `exec_policy` but not `enabled`, so before `restore_manifest_snapshot` the registry, the DB and `agent.toml` all flipped to disabled while the agent kept running — the dashboard reported Running, and `boot.rs` read the persisted flag on the next start and refused to spawn it.
+#[test]
+fn restoring_a_suspend_snapshot_keeps_the_agent_enabled() {
+    use librefang_types::agent::AgentState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-restore-suspend-8504");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let name = "restore-suspend-agent";
+    let kernel =
+        Arc::new(LibreFangKernel::boot_with_config(config.clone()).expect("Kernel should boot"));
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: name.to_string(),
+                source_template: None,
+                description: "exercises restore of a suspend row".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    // Suspend records the snapshot with `enabled = false`; resume returns the live agent to enabled, so the restore below runs against a Running agent.
+    // The baseline persist materializes `agent.toml`, which is what `persist_agent_enabled` patches before recording its row.
+    kernel.persist_manifest_to_disk(agent_id, "test");
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed");
+    kernel
+        .resume_agent(agent_id)
+        .expect("resume should succeed");
+
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    let versions = store
+        .list_for_agent(&agent_id.to_string(), 10)
+        .expect("history read should succeed");
+    let suspend_row = versions
+        .iter()
+        .find(|row| row.change_source == "suspend")
+        .expect("a suspend row must be recorded");
+    let snapshot: AgentManifest =
+        toml::from_str(&suspend_row.manifest_toml).expect("suspend snapshot must parse");
+    assert!(
+        !snapshot.enabled,
+        "the suspend snapshot must carry enabled = false:\n{}",
+        suspend_row.manifest_toml
+    );
+
+    // The History tab's restore button reaches `restore_manifest_snapshot`, not `update_manifest` directly.
+    kernel
+        .restore_manifest_snapshot(agent_id, snapshot, "restore")
+        .expect("restore should succeed");
+
+    let after = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent still registered");
+    assert!(
+        after.manifest.enabled,
+        "restoring a suspend row must not disable the live agent"
+    );
+    assert_eq!(
+        after.state,
+        AgentState::Running,
+        "the restore must not change the agent's runtime state either"
+    );
+
+    // The disk copy is what `boot.rs` reads on the next start, so it must not carry the snapshot's `enabled = false` either.
+    let toml_path = config
+        .effective_agent_workspaces_dir()
+        .join(name)
+        .join("agent.toml");
+    let disk = std::fs::read_to_string(&toml_path).expect("agent.toml on disk");
+    let disk_manifest: AgentManifest = toml::from_str(&disk).expect("disk manifest must parse");
+    assert!(
+        disk_manifest.enabled,
+        "the persisted agent.toml must stay enabled:\n{disk}"
     );
 
     kernel.shutdown();

@@ -16,7 +16,7 @@ use librefang_api::routes::{self, AppState};
 use librefang_kernel::auth::UserRole;
 use librefang_kernel::provisioning::{AGENTS_SUBDIR, PROVISIONING_PATH_ENV};
 use librefang_testing::{MockKernelBuilder, TestAppState};
-use librefang_types::agent::{AgentId, AgentManifest, UserId};
+use librefang_types::agent::{AgentId, AgentManifest, ScheduleMode, UserId};
 use std::path::Path;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -478,5 +478,82 @@ async fn restore_refuses_a_deployment_provisioned_agent() {
             .as_str()
             .is_some_and(|source| source.ends_with("history-provisioned.toml")),
         "the refusal must name the declaring file: {body}"
+    );
+}
+
+/// Restoring a snapshot that changes the schedule must reconcile the running background loop the same way the schedule field of a `PATCH` does (#4984).
+/// A Continuous snapshot restored onto a Reactive agent starts the ticker, and a Reactive snapshot restored onto a Continuous agent stops it — without either, the change would only take effect on the next daemon restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_reconciles_the_background_loop_on_a_schedule_change() {
+    let h = boot();
+    let id = spawn_owned_by(&h.state, "history-schedule", "alice");
+
+    // The spawned agent is Reactive: no background loop.
+    assert_eq!(
+        h.state.kernel.background_active_count(),
+        0,
+        "a Reactive agent must have no background loop"
+    );
+
+    // Record the two snapshots through the schedule setter, which applies its
+    // own runtime effect — Continuous starts the ticker, Reactive stops it.
+    h.state
+        .kernel
+        .clone()
+        .set_agent_schedule(
+            id,
+            ScheduleMode::Continuous {
+                check_interval_secs: 3600,
+            },
+        )
+        .expect("continuous schedule");
+    assert_eq!(
+        h.state.kernel.background_active_count(),
+        1,
+        "set_agent_schedule must start the loop"
+    );
+    h.state
+        .kernel
+        .clone()
+        .set_agent_schedule(id, ScheduleMode::Reactive)
+        .expect("reactive schedule");
+    assert_eq!(
+        h.state.kernel.background_active_count(),
+        0,
+        "set_agent_schedule must stop the loop again"
+    );
+
+    let (_, body) = get_history(&h, &id, None).await;
+    let versions = body["versions"].as_array().expect("versions array");
+    let reactive_id = versions[0]["id"].as_i64().expect("reactive id");
+    let continuous_id = versions[1]["id"].as_i64().expect("continuous id");
+
+    // The live agent is Reactive; the restore of a Continuous snapshot must start the loop immediately instead of waiting for the next restart.
+    let (status, body) = send(
+        &h,
+        Method::POST,
+        &format!("/api/agents/{id}/manifest-history/{continuous_id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        h.state.kernel.background_active_count(),
+        1,
+        "restoring a Continuous snapshot must start the background loop immediately"
+    );
+
+    let (status, body) = send(
+        &h,
+        Method::POST,
+        &format!("/api/agents/{id}/manifest-history/{reactive_id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        h.state.kernel.background_active_count(),
+        0,
+        "restoring a Reactive snapshot must stop the background loop immediately"
     );
 }

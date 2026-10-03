@@ -792,11 +792,8 @@ pub async fn list_agent_manifest_history(
 
 /// POST /api/agents/{id}/manifest-history/{version_id}/restore — roll an agent's manifest back to a stored snapshot.
 ///
-/// Mirrors `restore_template_version`: the stored TOML is parsed and applied
-/// through `update_manifest`, which re-runs the module-path security check,
-/// preserves the runtime-only fields (name, tags, workspace, resolved
-/// `exec_policy`) and persists the result — the restore itself is recorded in
-/// the history as a fresh `restore` snapshot.
+/// Mirrors `restore_template_version`: the stored TOML is parsed and applied through `restore_manifest_snapshot`, which re-runs the module-path security check, preserves the runtime-only fields (name, tags, workspace, resolved `exec_policy`, current `enabled`) and persists the result — the restore itself is recorded in the history as a fresh `restore` snapshot.
+/// Unlike a plain `update_manifest`, the restore also reconciles the runtime side effects a changed snapshot implies: the background loop is stopped and restarted on a schedule change, named workspaces are created on a workspaces change, and the canonical session is dropped on a model or endpoint change.
 #[utoipa::path(
     post,
     path = "/api/agents/{id}/manifest-history/{version_id}/restore",
@@ -872,7 +869,8 @@ pub async fn restore_agent_manifest_version(
 
     match state
         .kernel
-        .update_manifest(agent_uuid, manifest, "restore")
+        .clone()
+        .restore_manifest_snapshot(agent_uuid, manifest, "restore")
     {
         Ok(()) => (
             StatusCode::OK,

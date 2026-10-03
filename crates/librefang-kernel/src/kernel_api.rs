@@ -422,6 +422,16 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         new_manifest: AgentManifest,
         change_source: &str,
     ) -> KernelResult<()>;
+    /// Apply a stored manifest snapshot and reconcile the runtime side effects the per-field setters run but `update_manifest` skips: background-loop stop/start on a schedule change, named-workspace creation on a workspaces change, and canonical-session invalidation on a model or endpoint change.
+    /// See [`LibreFangKernel::restore_manifest_snapshot`] for the full contract.
+    fn restore_manifest_snapshot(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        new_manifest: AgentManifest,
+        change_source: &str,
+    ) -> KernelResult<()> {
+        self.update_manifest(agent_id, new_manifest, change_source)
+    }
     /// Rename an agent and carry the new name into its IDENTITY.md front matter.
     /// See [`LibreFangKernel::rename_agent`] for the full contract.
     fn rename_agent(&self, agent_id: AgentId, new_name: String) -> KernelResult<()>;
@@ -1340,6 +1350,14 @@ impl KernelApi for LibreFangKernel {
         change_source: &str,
     ) -> KernelResult<()> {
         Self::update_manifest(self, agent_id, new_manifest, change_source)
+    }
+    fn restore_manifest_snapshot(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        new_manifest: AgentManifest,
+        change_source: &str,
+    ) -> KernelResult<()> {
+        LibreFangKernel::restore_manifest_snapshot(&self, agent_id, new_manifest, change_source)
     }
     fn rename_agent(&self, agent_id: AgentId, new_name: String) -> KernelResult<()> {
         Self::rename_agent(self, agent_id, new_name)

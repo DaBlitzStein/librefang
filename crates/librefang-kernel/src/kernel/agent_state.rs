@@ -575,6 +575,84 @@ impl LibreFangKernel {
         Ok(())
     }
 
+    /// Apply a stored manifest snapshot and reconcile the runtime side effects `update_manifest` does not run.
+    ///
+    /// A full-manifest replacement swaps the registry entry, refreshes capabilities / quota / memory, invalidates the tool cache and persists; it does not touch the runtime objects the per-field setters own.
+    /// Restoring a snapshot that moves one of those fields must run the same reconciliation they do, or the change only takes effect on the next daemon restart: a Reactive snapshot restored onto a Continuous agent keeps ticking, and the reverse starts no loop.
+    ///
+    /// - Schedule change: stop the running background loop and start the new one ([`Self::set_agent_schedule`]).
+    /// - Workspaces change: create the named workspaces and rewrite the identity files that advertise them ([`Self::set_agent_workspaces`]).
+    /// - Model or endpoint change: drop the canonical session so the previous model's responses cannot poison the new one ([`Self::set_agent_model`]).
+    ///
+    /// `enabled` is live suspend/resume state, not snapshot content.
+    /// A `suspend` row records `enabled = false`, and writing that onto a running agent would leave the dashboard reporting Running while `boot.rs` reads the flag on the next start and refuses to spawn it.
+    /// The current value is pinned the same way `name`, `tags`, `workspace` and `exec_policy` are.
+    pub fn restore_manifest_snapshot(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        mut new_manifest: librefang_types::agent::AgentManifest,
+        change_source: &str,
+    ) -> KernelResult<()> {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        let previous = entry.manifest.clone();
+        drop(entry);
+
+        new_manifest.enabled = previous.enabled;
+        self.update_manifest(agent_id, new_manifest, change_source)?;
+
+        let Some(refreshed) = self
+            .agents
+            .registry
+            .get(agent_id)
+            .map(|entry| entry.manifest.clone())
+        else {
+            return Ok(());
+        };
+
+        if refreshed.schedule != previous.schedule {
+            self.workflows.background.stop_agent(agent_id);
+            if !matches!(
+                refreshed.schedule,
+                librefang_types::agent::ScheduleMode::Reactive
+            ) {
+                Arc::clone(self).start_background_for_agent(
+                    agent_id,
+                    &refreshed.name,
+                    &refreshed.schedule,
+                );
+            }
+        }
+
+        if refreshed.workspaces != previous.workspaces {
+            let cfg = self.config_snapshot();
+            let resolved = super::workspace_setup::ensure_named_workspaces(
+                &cfg.effective_workspaces_dir(),
+                &refreshed.workspaces,
+                &cfg.allowed_mount_roots,
+            );
+            if refreshed.generate_identity_files {
+                if let Some(workspace) = refreshed.workspace.as_ref() {
+                    super::workspace_setup::generate_identity_files(
+                        workspace, &refreshed, &resolved,
+                    );
+                }
+            }
+        }
+
+        let model_identity_changed = refreshed.model.provider != previous.model.provider
+            || refreshed.model.model != previous.model.model
+            || refreshed.model.base_url != previous.model.base_url
+            || refreshed.model.api_key_env != previous.model.api_key_env;
+        if model_identity_changed {
+            let _ = self.memory.substrate.delete_canonical_session(agent_id);
+            debug!(agent_id = %agent_id, "Cleared canonical session after manifest restore changed the model");
+        }
+
+        Ok(())
+    }
+
     /// Rename a running agent.
     ///
     /// The registry rename alone left `{workspace}/.identity/IDENTITY.md` holding the old `name:`, and that file is injected verbatim into the system prompt, so the agent kept presenting itself by its previous name (#8469).
