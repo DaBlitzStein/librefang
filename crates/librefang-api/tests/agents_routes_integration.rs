@@ -3237,115 +3237,6 @@ model = "default"
     );
 }
 
-/// #8112 — a template name can also resolve from the flat `agent-types/`
-/// store that `POST /api/templates` and the agent-type editor write to, not
-/// only from a live agent's `workspaces/agents/{name}/agent.toml`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_spawn_from_agent_type_store_template() {
-    let h = boot(TEST_TOKEN).await;
-
-    let store_dir = h.state.kernel.config_ref().home_dir.join("agent-types");
-    std::fs::create_dir_all(&store_dir).expect("create agent-types dir");
-    std::fs::write(
-        store_dir.join("store-only-tmpl.toml"),
-        r#"name = "store-only-tmpl"
-version = "0.1.0"
-description = "manifest from the agent-type store"
-module = "builtin:chat"
-
-[model]
-provider = "default"
-model = "default"
-"#,
-    )
-    .expect("write agent type");
-
-    let (status, body) = send(
-        h.app.clone(),
-        post_json(
-            "/api/agents",
-            serde_json::json!({ "template": "store-only-tmpl", "name": "store-only-instance" }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    let id = body["agent_id"].as_str().expect("agent_id present");
-
-    let (status, detail) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(detail["source_template"], "store-only-tmpl");
-    assert_eq!(
-        detail["description"], "manifest from the agent-type store",
-        "the spawned manifest must be the agent-types/ copy: {detail}"
-    );
-}
-
-/// #8112 — on a name collision the spawn path must agree with the editor
-/// catalog: `agent-types/` wins, because it is the source the write verbs
-/// act on. Spawning the workspace copy while the editor shows the store
-/// copy is the "edit one document, act on another" failure #7731 closed.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_spawn_from_template_collision_prefers_agent_type_store() {
-    let h = boot(TEST_TOKEN).await;
-
-    let store_dir = h.state.kernel.config_ref().home_dir.join("agent-types");
-    std::fs::create_dir_all(&store_dir).expect("create agent-types dir");
-    std::fs::write(
-        store_dir.join("collide-tmpl.toml"),
-        r#"name = "collide-tmpl"
-version = "0.1.0"
-description = "agent-type store copy"
-module = "builtin:chat"
-
-[model]
-provider = "default"
-model = "default"
-"#,
-    )
-    .expect("write agent type");
-
-    let tmpl_dir = h
-        .state
-        .kernel
-        .config_ref()
-        .home_dir
-        .join("workspaces")
-        .join("agents")
-        .join("collide-tmpl");
-    std::fs::create_dir_all(&tmpl_dir).expect("create template dir");
-    std::fs::write(
-        tmpl_dir.join("agent.toml"),
-        r#"name = "collide-tmpl"
-version = "0.1.0"
-description = "live workspace copy"
-module = "builtin:chat"
-
-[model]
-provider = "default"
-model = "default"
-"#,
-    )
-    .expect("write agent.toml");
-
-    let (status, body) = send(
-        h.app.clone(),
-        post_json(
-            "/api/agents",
-            serde_json::json!({ "template": "collide-tmpl", "name": "collide-instance" }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    let id = body["agent_id"].as_str().expect("agent_id present");
-
-    let (status, detail) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        detail["description"], "agent-type store copy",
-        "on collision the spawned manifest must be the agent-types/ copy, not the live workspace manifest: {detail}"
-    );
-}
-
 /// A directly-supplied `manifest_toml` (no `template`) must leave
 /// `source_template` unset — provenance is only recorded when the manifest
 /// actually came from a named template.
@@ -3374,14 +3265,6 @@ async fn test_spawn_without_template_leaves_source_template_unset() {
     );
 }
 
-/// An unreadable template is a server-side fault, not a malformed request, and it
-/// must report that in every locale.
-///
-/// The status used to be decided by `contains()` on `ManifestError::message`, which
-/// is already translated — so the arm only ever matched English and every other
-/// locale fell through to `400 invalid_manifest`, telling the operator their request
-/// was wrong. This test sends `Accept-Language: es` precisely because that is the
-/// case the substring match could not see.
 /// Every manifest-resolution failure must report the same status regardless of the
 /// caller's language.
 ///
@@ -3440,6 +3323,14 @@ async fn test_manifest_errors_keep_their_status_in_a_non_english_locale() {
     assert_eq!(body["code"].as_str(), Some("signature_invalid"), "{body}");
 }
 
+/// An unreadable template is a server-side fault, not a malformed request, and it
+/// must report that in every locale.
+///
+/// The status used to be decided by `contains()` on `ManifestError::message`, which
+/// is already translated — so the arm only ever matched English and every other
+/// locale fell through to `400 invalid_manifest`, telling the operator their request
+/// was wrong. This test sends `Accept-Language: es` precisely because that is the
+/// case the substring match could not see.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_spawn_with_unreadable_template_reports_a_server_fault_in_any_locale() {
@@ -3447,10 +3338,17 @@ async fn test_spawn_with_unreadable_template_reports_a_server_fault_in_any_local
 
     let h = boot(TEST_TOKEN).await;
 
-    let store_dir = h.state.kernel.config_ref().home_dir.join("agent-types");
-    std::fs::create_dir_all(&store_dir).expect("create agent-types dir");
-    let path = store_dir.join("unreadable-tmpl.toml");
-    std::fs::write(&path, "name = \"unreadable-tmpl\"\n").expect("write agent type");
+    let tmpl_dir = h
+        .state
+        .kernel
+        .config_ref()
+        .home_dir
+        .join("workspaces")
+        .join("agents")
+        .join("unreadable-tmpl");
+    std::fs::create_dir_all(&tmpl_dir).expect("create template dir");
+    let path = tmpl_dir.join("agent.toml");
+    std::fs::write(&path, "name = \"unreadable-tmpl\"\n").expect("write agent.toml");
     // Chmod 000: the file exists, so this is not a not-found.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
         .expect("drop read permission");

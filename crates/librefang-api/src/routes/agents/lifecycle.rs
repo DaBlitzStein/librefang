@@ -49,17 +49,25 @@ async fn resolve_manifest(
                     code: Some("invalid_template_name"),
                 });
             }
-            // Same precedence as the template catalog (`read_agent_type`):
-            // `agent-types/` wins a collision because it is the source the
-            // write verbs act on, so the editor and the spawn path can never
-            // disagree about which document an operator is acting on.
-            let home_dir = state.kernel.config_ref().home_dir.clone();
-            match crate::routes::agent_templates::read_agent_type_in(&home_dir, &safe_name).await {
-                Ok(Some((_, content))) => {
+            // The template candidate order (`agent-types/` →
+            // `registry/agents/<name>/` → workspace instance) belongs to #8467,
+            // which routes this path through the kernel loader. This reads the
+            // workspace instance directly, as main does.
+            let tmpl_path = state
+                .kernel
+                .config_ref()
+                .home_dir
+                .join("workspaces")
+                .join("agents")
+                .join(&safe_name)
+                .join("agent.toml");
+            // Use tokio::fs to avoid blocking in an async context
+            match tokio::fs::read_to_string(&tmpl_path).await {
+                Ok(content) => {
                     used_template = Some(safe_name.clone());
                     content
                 }
-                Ok(None) => {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
                         message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
@@ -69,9 +77,10 @@ async fn resolve_manifest(
                 Err(e) => {
                     tracing::warn!(name = %safe_name, error = %e, "failed to read template manifest");
                     let t = ErrorTranslator::new(lang);
-                    // Not "not found": the template may well exist and be unreadable
-                    // (permissions, I/O), and reporting that as a 404 sends the operator
-                    // looking for a missing file instead of at the error in the log.
+                    // Not "not found": the file exists and could not be read
+                    // (permissions, I/O), and reporting that as a 404 sends the
+                    // operator looking for a missing file instead of at the
+                    // error in the log.
                     return Err(ManifestError {
                         message: t.t("api-error-template-read-failed"),
                         code: Some("template_read_failed"),

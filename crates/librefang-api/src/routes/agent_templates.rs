@@ -219,7 +219,7 @@ fn promote_error_messages(lang: &str) -> (String, String) {
 /// Only the first is a file this API owns.
 /// The second belongs to a running agent and is edited through `/api/agents/{id}`, so a write verb aimed at it is refused rather than silently creating a shadowing copy — and the row carries `editable: false` so a client can render it as managed elsewhere instead of offering a control that cannot work (#7731).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TemplateSource {
+enum TemplateSource {
     /// `~/.librefang/agent-types/{name}.toml` — created and edited through this API.
     AgentType,
     /// `~/.librefang/workspaces/agents/{name}/agent.toml` — a live agent's manifest.
@@ -263,13 +263,13 @@ fn as_optional(result: std::io::Result<String>) -> std::io::Result<Option<String
 /// The two sources are read independently, and a hard failure on one (not a
 /// mere absence — permissions, a restored backup with the wrong owner, or
 /// `agent-types` existing as a plain file) does not veto a value the other
-/// source can still supply: `POST /api/agents {"template": name}` must not
-/// hard-fail on an unreadable `agent-types/` entry when the same name is a
-/// perfectly readable live agent under `workspaces/agents/` (#8112). Only
-/// when *both* sources fail for a reason other than absence is an `Err`
-/// the honest verdict, and it is the agent-type read's error that surfaces —
-/// that is the source this API's write verbs actually own.
-pub(crate) async fn read_agent_type_in(
+/// source can still supply: a detail request must not hard-fail on an
+/// unreadable `agent-types/` entry when the same name is a perfectly readable
+/// live agent under `workspaces/agents/` (#8112). Only when *both* sources
+/// fail for a reason other than absence is an `Err` the honest verdict, and it
+/// is the agent-type read's error that surfaces — that is the source this
+/// API's write verbs actually own.
+async fn read_agent_type_in(
     home_dir: &std::path::Path,
     name: &str,
 ) -> std::io::Result<Option<(TemplateSource, String)>> {
