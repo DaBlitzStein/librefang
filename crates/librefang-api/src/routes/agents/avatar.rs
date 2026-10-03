@@ -349,6 +349,8 @@ pub async fn upload_agent_avatar(
 /// GET /api/agents/{id}/avatar — the stored image.
 ///
 /// Authenticated like every other `/api/` route, which is the point: the alternative placement under `~/.librefang/dashboard/` would have been an unauthenticated GET.
+/// Scoped to the caller as well: `user_role_allows_request` admits every GET for any role, so the role gate above this handler is not an access check, and [`can_access_agent`](crate::routes::can_access_agent) is the one the sibling agent-scoped reads use.
+/// A non-owner therefore gets the same agent-not-found 404 a nonexistent id gets, which is also what keeps the route from being an id oracle.
 #[utoipa::path(
     get,
     path = "/api/agents/{id}/avatar",
@@ -371,6 +373,7 @@ pub async fn upload_agent_avatar(
 )]
 pub async fn serve_agent_avatar(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     headers: axum::http::HeaderMap,
@@ -380,6 +383,15 @@ pub async fn serve_agent_avatar(
         Ok(agent_id) => agent_id,
         Err(response) => return *response,
     };
+    // Existence is not access. The RBAC layer lets every GET through for any
+    // role, so without this the route served any agent's image to any
+    // authenticated key and answered differently for an existing id than for
+    // an unknown one — an id oracle. The not-found 404 is deliberate and is
+    // the contract documented on `can_access_agent`: a refusal and an absent
+    // agent are indistinguishable from here.
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return json_error(StatusCode::NOT_FOUND, t.t("api-error-agent-not-found"));
+    }
     drop(t);
 
     let avatars_dir = state.kernel.config_snapshot().effective_avatars_dir();

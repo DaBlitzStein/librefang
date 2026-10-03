@@ -69,6 +69,19 @@ async fn boot_with_mcp_servers(
     api_key: &str,
     mcp_servers: Vec<librefang_types::config::McpServerConfigEntry>,
 ) -> Harness {
+    boot_with_users(api_key, mcp_servers, Vec::new()).await
+}
+
+/// Boot with `[[users]]` entries so the production middleware authenticates
+/// per-user bearers, not just the master key. The avatar ownership test needs
+/// a real `User`-role caller: `can_access_agent` can only be exercised through
+/// the full stack when the role gate lets the request reach the handler, which
+/// for a GET it does.
+async fn boot_with_users(
+    api_key: &str,
+    mcp_servers: Vec<librefang_types::config::McpServerConfigEntry>,
+    users: Vec<librefang_types::config::UserConfig>,
+) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Seed the pinned registry fixture so the kernel boots with content, offline.
@@ -78,6 +91,7 @@ async fn boot_with_mcp_servers(
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
         api_key: api_key.to_string(),
+        users,
         default_model: DefaultModelConfig {
             provider: "ollama".to_string(),
             model: "test-model".to_string(),
@@ -3837,6 +3851,140 @@ async fn test_avatars_are_stored_outside_workspaces_and_the_dashboard_tree() {
         StatusCode::UNAUTHORIZED,
         "the avatar route must require a token"
     );
+}
+
+/// Another user's avatar is not readable, and a denial is indistinguishable
+/// from a missing agent (#8349).
+///
+/// RBAC admits every GET for any role — `user_role_allows_request` returns
+/// true for `Method::GET` whatever the role — so before this check the only
+/// gate was `resolve_agent`, which proves the id exists and nothing else. A
+/// non-owner `User` key could read any agent's image, and could also
+/// enumerate ids because an existing one answered with bytes while an unknown
+/// one answered `api-error-agent-not-found`. The sibling agent-scoped reads
+/// (`config.rs`, `files.rs`, `lifecycle.rs`, `cloning.rs`) all use
+/// `can_access_agent` and answer the same 404 for both cases; this route now
+/// does too.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_avatar_get_is_scoped_to_the_agent_owner() {
+    const BOB_KEY: &str = "bob-avatar-user-key";
+    const CAROL_KEY: &str = "carol-avatar-viewer-key";
+    let bob_hash =
+        librefang_api::password_hash::hash_password(BOB_KEY).expect("hash Bob's test key");
+    let carol_hash =
+        librefang_api::password_hash::hash_password(CAROL_KEY).expect("hash Carol's test key");
+    let h = boot_with_users(
+        TEST_TOKEN,
+        Vec::new(),
+        vec![
+            librefang_types::config::UserConfig {
+                name: "Bob".to_string(),
+                role: "user".to_string(),
+                api_key_hash: Some(bob_hash),
+                ..Default::default()
+            },
+            librefang_types::config::UserConfig {
+                name: "Carol".to_string(),
+                role: "viewer".to_string(),
+                api_key_hash: Some(carol_hash),
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+
+    let spawn_authored = |name: &str, author: &str| {
+        h.state
+            .kernel
+            .spawn_agent_typed(AgentManifest {
+                name: name.to_string(),
+                author: author.to_string(),
+                source_template: None,
+                ..AgentManifest::default()
+            })
+            .expect("spawn agent")
+    };
+    let alice = spawn_authored("avatar-scope-alice", "Alice");
+    let bob = spawn_authored("avatar-scope-bob", "Bob");
+
+    // Both agents get an avatar, uploaded with the master key (Admin+).
+    for id in [alice, bob] {
+        let (status, body) = send(
+            h.app.clone(),
+            post_bytes(
+                &format!("/api/agents/{id}/avatar"),
+                TINY_PNG.to_vec(),
+                "application/octet-stream",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "seeding {id}: {body:?}");
+    }
+
+    // Bob's own avatar is readable with Bob's key — the check must scope, not
+    // deny every non-admin.
+    let (status, _, bytes) = send_raw(
+        h.app.clone(),
+        get_with(&format!("/api/agents/{bob}/avatar"), Some(BOB_KEY)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the owner must still read his own avatar"
+    );
+    assert_eq!(bytes, TINY_PNG);
+
+    // Alice's is not: 404, and the same body an unknown id gets.
+    let (denied, _, denied_bytes) = send_raw(
+        h.app.clone(),
+        get_with(&format!("/api/agents/{alice}/avatar"), Some(BOB_KEY)),
+    )
+    .await;
+    assert_eq!(
+        denied,
+        StatusCode::NOT_FOUND,
+        "a non-owner must not read another user's avatar"
+    );
+    let unknown = uuid::Uuid::new_v4();
+    let (unknown_status, _, unknown_bytes) = send_raw(
+        h.app.clone(),
+        get_with(&format!("/api/agents/{unknown}/avatar"), Some(BOB_KEY)),
+    )
+    .await;
+    assert_eq!(unknown_status, StatusCode::NOT_FOUND);
+    let denied_json: serde_json::Value =
+        serde_json::from_slice(&denied_bytes).expect("denied response is JSON");
+    let unknown_json: serde_json::Value =
+        serde_json::from_slice(&unknown_bytes).expect("unknown-id response is JSON");
+    assert_eq!(
+        denied_json["error"], unknown_json["error"],
+        "the refusal must carry the same message as the unknown-id 404"
+    );
+    assert_eq!(
+        denied_json["code"], unknown_json["code"],
+        "the refusal must carry the same error code as the unknown-id 404, or the route enumerates ids"
+    );
+
+    // A Viewer is waved through every GET by the same RBAC rule, so the check
+    // has to catch that role too.
+    let (status, _, _) = send_raw(
+        h.app.clone(),
+        get_with(&format!("/api/agents/{alice}/avatar"), Some(CAROL_KEY)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a Viewer must not read another user's avatar"
+    );
+
+    // The admin master key still sees every agent's image.
+    let (status, _, bytes) =
+        send_raw(h.app.clone(), get(&format!("/api/agents/{alice}/avatar"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, TINY_PNG);
 }
 
 /// Two uploads for the same agent, in two formats, must not erase each other (#8349).
