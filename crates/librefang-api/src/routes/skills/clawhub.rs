@@ -74,15 +74,6 @@ fn patch_skill_provenance(
         .map_err(|e| format!("write {}: {e}", manifest_path.display()))
 }
 
-async fn patch_skill_provenance_off_thread(
-    manifest_path: std::path::PathBuf,
-    source: librefang_skills::SkillSource,
-) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || patch_skill_provenance(&manifest_path, source))
-        .await
-        .map_err(|e| format!("provenance patch task failed: {e}"))?
-}
-
 /// A per-call staging directory beside the final skill directory.
 ///
 /// The `.installing-` prefix is the one `SkillRegistry::load_all` already sweeps on every load, so
@@ -93,12 +84,14 @@ fn install_staging_dir(skills_dir: &std::path::Path, slug: &str) -> std::path::P
     skills_dir.join(format!(".installing-{slug}-{}-{seq}", std::process::id()))
 }
 
-/// Removes a staging directory when the install task that owns it ends — on success, on error, or
-/// on unwind.
+/// Removes a staging directory when the install step that owns it ends — on success, on error,
+/// or on unwind.
 ///
 /// The final `<slug>` directory is only ever created by [`promote_staged_install`], so this guard
 /// cannot delete an installed skill: whatever it removes is either a discarded candidate or, after
-/// a successful promotion, an empty directory.
+/// a successful promotion, an empty directory. Its drop walks and deletes an extracted tree, so
+/// every owner runs it on a blocking thread (`spawn_blocking` or the install's promotion closure),
+/// never on an async worker.
 struct StagingDir(std::path::PathBuf);
 
 impl Drop for StagingDir {
@@ -112,6 +105,19 @@ impl Drop for StagingDir {
                 "Could not remove skill install staging directory"
             ),
         }
+    }
+}
+
+/// Remove a staging tree on a blocking thread.
+///
+/// Used when the install ends without a promotion to hang the cleanup on: either the route
+/// stopped waiting for a finished candidate, or the install failed before one existed. The
+/// removal is `remove_dir_all` over the extracted tree, so it must not run on the async worker.
+async fn discard_staging(staging_dir: std::path::PathBuf) {
+    if let Err(join_error) =
+        tokio::task::spawn_blocking(move || drop(StagingDir(staging_dir))).await
+    {
+        tracing::warn!("skill staging cleanup task failed: {join_error}");
     }
 }
 
@@ -209,34 +215,48 @@ async fn install_under_budget(
     tokio::spawn({
         let staging_dir = staging_dir.clone();
         async move {
-            let _staging = StagingDir(staging_dir.clone());
             let result = client.install(&slug, &staging_dir).await;
 
             match result {
                 // The route stopped waiting (budget expired, or the caller hung up): drop the
                 // finished candidate instead of promoting a skill whose caller was already told
                 // the install failed.
-                Ok(_) if result_tx.is_closed() => {}
+                Ok(_) if result_tx.is_closed() => {
+                    discard_staging(staging_dir).await;
+                }
                 Ok(result) => {
-                    // Stamp provenance while the skill is still staged, so the directory that
-                    // lands in `skills_dir` is complete at rename time. A patch failure stays
+                    let promote_dir = staging_dir.clone();
+                    let target_dir = skills_dir.clone();
+                    let promote_slug = slug.clone();
+                    // Provenance patch and promotion are blocking filesystem work, and the
+                    // closure's `StagingDir` guard also removes the (then empty) staging tree,
+                    // so the whole tail runs on one blocking thread rather than an async worker.
+                    // Stamping the manifest while it is still staged keeps the directory that
+                    // lands in `skills_dir` complete at rename time; a patch failure stays
                     // non-fatal, exactly as it was when this ran after installation.
-                    let manifest = staging_dir.join(&slug).join("skill.toml");
                     let source = hub.provenance(&slug, &result.version);
-                    if let Err(error) = patch_skill_provenance_off_thread(manifest, source).await {
-                        tracing::warn!(
-                            slug = %slug,
-                            "Failed to patch provenance in skill.toml: {error}"
-                        );
-                    }
-
-                    if let Err(error) = promote_staged_install(&staging_dir, &skills_dir, &slug) {
-                        let _ = result_tx.send(Err(error));
-                    } else {
-                        let _ = result_tx.send(Ok(result));
-                    }
+                    let promotion = tokio::task::spawn_blocking(move || {
+                        let _staging = StagingDir(promote_dir.clone());
+                        let manifest = promote_dir.join(&promote_slug).join("skill.toml");
+                        if let Err(error) = patch_skill_provenance(&manifest, source) {
+                            tracing::warn!(
+                                slug = %promote_slug,
+                                "Failed to patch provenance in skill.toml: {error}"
+                            );
+                        }
+                        promote_staged_install(&promote_dir, &target_dir, &promote_slug)
+                    })
+                    .await;
+                    let outcome = match promotion {
+                        Ok(outcome) => outcome,
+                        Err(join_error) => Err(SkillError::Io(std::io::Error::other(format!(
+                            "install promotion task failed: {join_error}"
+                        )))),
+                    };
+                    let _ = result_tx.send(outcome.map(|()| result));
                 }
                 Err(error) => {
+                    discard_staging(staging_dir).await;
                     let _ = result_tx.send(Err(error));
                 }
             }
