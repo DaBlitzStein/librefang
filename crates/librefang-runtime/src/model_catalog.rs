@@ -1759,9 +1759,17 @@ impl ModelCatalog {
                 input_cost_per_m: reported_price.map_or(0.0, |(input, _)| input),
                 output_cost_per_m: reported_price.map_or(0.0, |(_, output)| output),
                 // `Default` says `true` for registry entries that predate the field and carry real
-                // numbers; a probe result is not a declaration, so a freshly discovered model that
-                // declared no price must record the absence instead of defaulting to free.
-                pricing_known: reported_price.is_some(),
+                // numbers; a probe result is not a declaration, so a gateway's silence about price
+                // must record the absence instead of defaulting to free.
+                // That rule is for operator-defined gateways only: one can be a paid proxy, which
+                // is exactly what its silence leaves unknown and what metering's fallback to the
+                // $1/$3 default rate is for. A *built-in local* provider serves its own weights,
+                // so the same silence means free — `0.0/0.0` with `pricing_known: true`. Without
+                // this split, pulling an untracked Ollama tag billed local inference at the
+                // default rate and could exhaust a spend cap (#8369). The gate is the same one
+                // `provider_health` uses to decide whether `/model/info` is even worth a request.
+                pricing_known: reported_price.is_some()
+                    || !crate::provider_health::is_operator_defined_gateway(provider),
                 supports_tools,
                 supports_vision,
                 // The whole point of #7957: a freshly discovered gateway model records *whether*

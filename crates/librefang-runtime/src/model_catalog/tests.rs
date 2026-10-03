@@ -1489,6 +1489,56 @@ fn test_merge_ignores_half_a_declared_price() {
     assert_eq!(entry.output_cost_per_m, 0.0);
 }
 
+/// A bare discovery from a built-in local provider is free, not an unknown price (#8369).
+///
+/// Every local-provider probe reaches this method through
+/// `DiscoveredModelInfo::bare` or Ollama metadata, neither of which carries a
+/// price field at all. Recording that silence as `pricing_known: false` made
+/// metering charge the $1/$3 conservative default rate on the operator's own
+/// hardware — pulling an untracked Ollama tag could burn a spend cap during
+/// free local inference — and the dashboard showed "pricing unavailable"
+/// instead of free.
+#[test]
+fn test_merge_keeps_a_bare_local_provider_model_free() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "ollama",
+        &[DiscoveredModelInfo::bare("locally-pulled:latest")],
+    );
+
+    let entry = catalog
+        .find_model("locally-pulled:latest")
+        .expect("discovered model must be added");
+    assert!(
+        entry.pricing_known,
+        "a local provider serves its own weights; its silence about price means free, not unknown"
+    );
+    assert_eq!(entry.input_cost_per_m, 0.0);
+    assert_eq!(entry.output_cost_per_m, 0.0);
+    assert_eq!(
+        catalog.pricing("locally-pulled:latest"),
+        Some((0.0, 0.0)),
+        "metering must read the local model as free rather than fall back to the default rate"
+    );
+}
+
+/// The other half of the rule: an operator-defined gateway can proxy a paid
+/// provider, so its silence about price stays unknown and metering falls back
+/// to the conservative default rate instead of recording the model as free.
+#[test]
+fn test_merge_keeps_a_bare_operator_gateway_model_price_unknown() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models("litellm", &[DiscoveredModelInfo::bare("gateway-model")]);
+
+    let entry = catalog.find_model("gateway-model").unwrap();
+    assert!(
+        !entry.pricing_known,
+        "only a declared pair may turn an operator gateway's model into a priced or free one"
+    );
+    assert_eq!(entry.input_cost_per_m, 0.0);
+    assert_eq!(entry.output_cost_per_m, 0.0);
+}
+
 /// Capacity upgrades follow the same never-downgrade rule as the capability flags: a later probe may fill in an unknown limit, and a probe that stops reporting one must not erase what an earlier probe learned.
 #[test]
 fn test_merge_upgrades_unknown_capacity_but_never_erases_a_known_one() {
