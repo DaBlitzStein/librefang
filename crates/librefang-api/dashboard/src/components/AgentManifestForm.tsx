@@ -325,6 +325,7 @@ const FIELD_PREFIX_TO_SECTION: ReadonlyArray<readonly [RegExp, ManifestSectionId
   [/^autonomous\./, "autonomous"],
   [/^compaction\./, "compaction"],
   [/^skill_workshop\./, "skill_workshop"],
+  [/^channel_overrides\./, "channel_overrides"],
   // The two per-agent counts render inside the "Lifecycle" section, not the
   // resource "Limits" one, so they are matched exactly rather than by prefix: a
   // loose prefix would claim any future field that starts the same way, and the
@@ -1719,6 +1720,10 @@ export function AgentManifestForm({
       <FormSection id="channel_overrides" shows={shows}
         title={t("agents.form.channel_overrides")}
         defaultOpen={false}
+        // Every error this section can carry is the count shape, so the
+        // prefix is the whole condition — a list of paths would drift as
+        // fields are added.
+        invalid={[...invalidFields].some((f) => f.startsWith("channel_overrides."))}
       >
         <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim mt-3">{t("agents.form.channel_overrides_group_reply")}</p>
         <div className="grid grid-cols-2 gap-3">
@@ -1771,12 +1776,16 @@ export function AgentManifestForm({
                 <StepLadderInput label={t("agents.form.channel_overrides_rate_limit_per_minute")} value={value.channel_overrides.rate_limit_per_minute}
                   onChange={(next) => updateChannelOverrides({ rate_limit_per_minute: next })} ladder={CHANNEL_RATE_LIMIT_LADDER}
                   formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")} min={0} />
+                  customLabel={t("model_param.custom")} min={0}
+                  invalid={invalidFields.has("channel_overrides.rate_limit_per_minute")}
+                  error={invalidFields.has("channel_overrides.rate_limit_per_minute") ? t("agents.form.u32_overflow") : undefined} />
               <div className="col-span-2"></div>
                 <StepLadderInput label={t("agents.form.channel_overrides_rate_limit_per_user")} value={value.channel_overrides.rate_limit_per_user}
                   onChange={(next) => updateChannelOverrides({ rate_limit_per_user: next })} ladder={CHANNEL_RATE_LIMIT_LADDER}
                   formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")} min={0} />
+                  customLabel={t("model_param.custom")} min={0}
+                  invalid={invalidFields.has("channel_overrides.rate_limit_per_user")}
+                  error={invalidFields.has("channel_overrides.rate_limit_per_user") ? t("agents.form.u32_overflow") : undefined} />
               <div className="col-span-2"></div>
               <div><Toggle label={t("agents.form.channel_overrides_threading")} checked={value.channel_overrides.threading}
                   onChange={(checked) => updateChannelOverrides({ threading: checked })} /></div>
@@ -1810,17 +1819,23 @@ export function AgentManifestForm({
                 <StepLadderInput label={t("agents.form.channel_overrides_message_debounce_ms")} value={value.channel_overrides.message_debounce_ms}
                   onChange={(next) => updateChannelOverrides({ message_debounce_ms: next })} ladder={CHANNEL_DEBOUNCE_MS_LADDER}
                   formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")} min={0} />
+                  customLabel={t("model_param.custom")} min={0}
+                  invalid={invalidFields.has("channel_overrides.message_debounce_ms")}
+                  error={invalidFields.has("channel_overrides.message_debounce_ms") ? t("agents.form.whole_number_required") : undefined} />
               <div className="col-span-2"></div>
                 <StepLadderInput label={t("agents.form.channel_overrides_message_debounce_max_ms")} value={value.channel_overrides.message_debounce_max_ms}
                   onChange={(next) => updateChannelOverrides({ message_debounce_max_ms: next })} ladder={CHANNEL_DEBOUNCE_MAX_LADDER}
                   formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")} min={0} />
+                  customLabel={t("model_param.custom")} min={0}
+                  invalid={invalidFields.has("channel_overrides.message_debounce_max_ms")}
+                  error={invalidFields.has("channel_overrides.message_debounce_max_ms") ? t("agents.form.whole_number_required") : undefined} />
               <div className="col-span-2"></div>
                 <StepLadderInput label={t("agents.form.channel_overrides_message_debounce_max_buffer")} value={value.channel_overrides.message_debounce_max_buffer}
                   onChange={(next) => updateChannelOverrides({ message_debounce_max_buffer: next })} ladder={CHANNEL_DEBOUNCE_BUFFER_LADDER}
                   formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")} min={0} />
+                  customLabel={t("model_param.custom")} min={0}
+                  invalid={invalidFields.has("channel_overrides.message_debounce_max_buffer")}
+                  error={invalidFields.has("channel_overrides.message_debounce_max_buffer") ? t("agents.form.whole_number_required") : undefined} />
               <div className="col-span-2"></div>
               <div><Toggle label={t("agents.form.channel_overrides_clear_done_reaction")} checked={value.channel_overrides.clear_done_reaction}
                   onChange={(checked) => updateChannelOverrides({ clear_done_reaction: checked })} /></div>
@@ -1849,22 +1864,30 @@ export function AgentManifestForm({
                 <StepLadderInput label={t("agents.form.channel_overrides_auto_route_ttl_minutes")} value={value.channel_overrides.auto_route_ttl_minutes}
                   onChange={(next) => updateChannelOverrides({ auto_route_ttl_minutes: next })} ladder={CHANNEL_ROUTE_TTL_LADDER}
                   formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")} min={0} />
+                  customLabel={t("model_param.custom")} min={0}
+                  invalid={invalidFields.has("channel_overrides.auto_route_ttl_minutes")}
+                  error={invalidFields.has("channel_overrides.auto_route_ttl_minutes") ? t("agents.form.u32_overflow") : undefined} />
               <div className="col-span-2"></div>
                 <StepLadderInput label={t("agents.form.channel_overrides_auto_route_confidence_threshold")} value={value.channel_overrides.auto_route_confidence_threshold}
                   onChange={(next) => updateChannelOverrides({ auto_route_confidence_threshold: next })} ladder={CHANNEL_ROUTE_CONFIDENCE_LADDER}
                   formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")} min={0} />
+                  customLabel={t("model_param.custom")} min={0}
+                  invalid={invalidFields.has("channel_overrides.auto_route_confidence_threshold")}
+                  error={invalidFields.has("channel_overrides.auto_route_confidence_threshold") ? t("agents.form.u32_overflow") : undefined} />
               <div className="col-span-2"></div>
                 <StepLadderInput label={t("agents.form.channel_overrides_auto_route_sticky_bonus")} value={value.channel_overrides.auto_route_sticky_bonus}
                   onChange={(next) => updateChannelOverrides({ auto_route_sticky_bonus: next })} ladder={CHANNEL_ROUTE_BONUS_LADDER}
                   formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")} min={0} />
+                  customLabel={t("model_param.custom")} min={0}
+                  invalid={invalidFields.has("channel_overrides.auto_route_sticky_bonus")}
+                  error={invalidFields.has("channel_overrides.auto_route_sticky_bonus") ? t("agents.form.u32_overflow") : undefined} />
               <div className="col-span-2"></div>
                 <StepLadderInput label={t("agents.form.channel_overrides_auto_route_divergence_count")} value={value.channel_overrides.auto_route_divergence_count}
                   onChange={(next) => updateChannelOverrides({ auto_route_divergence_count: next })} ladder={CHANNEL_ROUTE_DIVERGENCE_LADDER}
                   formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")} min={0} />
+                  customLabel={t("model_param.custom")} min={0}
+                  invalid={invalidFields.has("channel_overrides.auto_route_divergence_count")}
+                  error={invalidFields.has("channel_overrides.auto_route_divergence_count") ? t("agents.form.u32_overflow") : undefined} />
               <div className="col-span-2"></div>
         </div>
         <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim mt-3">{t("agents.form.channel_overrides_group_ownership")}</p>
@@ -1881,7 +1904,9 @@ export function AgentManifestForm({
                 <StepLadderInput label={t("agents.form.channel_overrides_conversation_ownership_ttl_seconds")} value={value.channel_overrides.conversation_ownership_ttl_seconds}
                   onChange={(next) => updateChannelOverrides({ conversation_ownership_ttl_seconds: next })} ladder={CHANNEL_THREAD_OWNERSHIP_TTL_LADDER}
                   formatRung={formatCount} inheritLabel={t("model_param.inherit")}
-                  customLabel={t("model_param.custom")} min={0} />
+                  customLabel={t("model_param.custom")} min={0}
+                  invalid={invalidFields.has("channel_overrides.conversation_ownership_ttl_seconds")}
+                  error={invalidFields.has("channel_overrides.conversation_ownership_ttl_seconds") ? t("agents.form.whole_number_required") : undefined} />
               <div className="col-span-2"></div>
               <div><Toggle label={t("agents.form.channel_overrides_conversation_ownership_include_dms")} checked={value.channel_overrides.conversation_ownership_include_dms}
                   onChange={(checked) => updateChannelOverrides({ conversation_ownership_include_dms: checked })} /></div>
@@ -1893,7 +1918,9 @@ export function AgentManifestForm({
         id="skill_workshop" shows={shows}
         title={t("agents.form.skill_workshop")}
         defaultOpen={false}
-        invalid={invalidFields.has("skill_workshop.max_pending_age_days")}
+        // Every error this section can carry is a count, so the prefix is the
+        // whole condition — a list of paths would drift as fields are added.
+        invalid={[...invalidFields].some((f) => f.startsWith("skill_workshop."))}
       >
         {/* The two switches are plain booleans, not tri-states: the Rust struct
             supplies them from its `Default`, so "absent" and "the default" are
@@ -1957,6 +1984,12 @@ export function AgentManifestForm({
             inheritLabel={t("model_param.inherit")}
             customLabel={t("model_param.custom")}
             min={1}
+            invalid={invalidFields.has("skill_workshop.max_pending")}
+            error={
+              invalidFields.has("skill_workshop.max_pending")
+                ? t("agents.form.u32_overflow")
+                : undefined
+            }
           />
           <StepLadderInput
             label={t("agents.form.skill_workshop_max_pending_age_days")}
@@ -1967,7 +2000,6 @@ export function AgentManifestForm({
             inheritLabel={t("model_param.inherit")}
             customLabel={t("model_param.custom")}
             min={1}
-          
             invalid={invalidFields.has("skill_workshop.max_pending_age_days")}
             error={
               invalidFields.has("skill_workshop.max_pending_age_days")

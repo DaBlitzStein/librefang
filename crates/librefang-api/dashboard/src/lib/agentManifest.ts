@@ -1586,9 +1586,9 @@ export const serializeManifestForm = (
     if (c.output_format !== "") writeStringScalar(body, "output_format", c.output_format);
     if (c.usage_footer !== "") writeStringScalar(body, "usage_footer", c.usage_footer);
     if (c.typing_mode !== "") writeStringScalar(body, "typing_mode", c.typing_mode);
-    writeNumberScalar(body, "message_debounce_ms", parseInteger(c.message_debounce_ms));
-    writeNumberScalar(body, "message_debounce_max_ms", parseInteger(c.message_debounce_max_ms));
-    writeNumberScalar(body, "message_debounce_max_buffer", parseInteger(c.message_debounce_max_buffer));
+    writeIntegerScalar(body, "message_debounce_ms", parseUnsignedTomlInteger(c.message_debounce_ms));
+    writeIntegerScalar(body, "message_debounce_max_ms", parseUnsignedTomlInteger(c.message_debounce_max_ms));
+    writeIntegerScalar(body, "message_debounce_max_buffer", parseUnsignedTomlInteger(c.message_debounce_max_buffer));
     if (c.clear_done_reaction) writeBoolScalar(body, "clear_done_reaction", true);
     if (c.disable_commands) writeBoolScalar(body, "disable_commands", true);
     if (c.allowed_commands.length) body.push(`allowed_commands = ${tomlArray(c.allowed_commands)}`);
@@ -1602,7 +1602,7 @@ export const serializeManifestForm = (
     // `default_thread_ownership_enabled` returns true, so `false` is the value
     // worth writing.
     if (!c.thread_ownership_enabled) writeBoolScalar(body, "thread_ownership_enabled", false);
-    writeNumberScalar(body, "conversation_ownership_ttl_seconds", parseInteger(c.conversation_ownership_ttl_seconds));
+    writeIntegerScalar(body, "conversation_ownership_ttl_seconds", parseUnsignedTomlInteger(c.conversation_ownership_ttl_seconds));
     if (c.conversation_ownership_include_dms) writeBoolScalar(body, "conversation_ownership_include_dms", true);
     // The guard covers the extras as well as the body: a table whose keys the
     // form has no widget for would otherwise be dropped whole, preserved keys
@@ -2093,6 +2093,36 @@ export const validateManifestForm = (
   }
   if (!isBlankOrU32TomlInteger(form.skill_workshop.max_pending_age_days)) {
     errors.push("skill_workshop.max_pending_age_days");
+  }
+  if (!isBlankOrU32TomlInteger(form.skill_workshop.max_pending)) {
+    errors.push("skill_workshop.max_pending");
+  }
+  // `[channel_overrides]` counts. The six u32 fields take the type ceiling;
+  // the debounce/ownership spans are u64/usize, so only the whole-number shape
+  // is theirs. Both were unvalidated: a negative or a fractional value was
+  // refused by `parseInteger` and the key vanished from the file with no error
+  // (#8424 review).
+  for (const key of [
+    "rate_limit_per_minute",
+    "rate_limit_per_user",
+    "auto_route_ttl_minutes",
+    "auto_route_confidence_threshold",
+    "auto_route_sticky_bonus",
+    "auto_route_divergence_count",
+  ] as const) {
+    if (!isBlankOrU32TomlInteger(form.channel_overrides[key])) {
+      errors.push(`channel_overrides.${key}`);
+    }
+  }
+  for (const key of [
+    "message_debounce_ms",
+    "message_debounce_max_ms",
+    "message_debounce_max_buffer",
+    "conversation_ownership_ttl_seconds",
+  ] as const) {
+    if (!isBlankOrUnsignedTomlInteger(form.channel_overrides[key])) {
+      errors.push(`channel_overrides.${key}`);
+    }
   }
   // The sampling ranges read from MODEL_PARAM_RANGES, not a second number
   // beside it: the table is the same source the widget's own min/max and the

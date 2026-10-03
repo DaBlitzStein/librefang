@@ -3055,6 +3055,34 @@ describe("every integer count validates against its Rust type", () => {
       path: "skill_workshop.max_pending_age_days",
       set: (f, v) => { f.skill_workshop.max_pending_age_days = v; },
     },
+    {
+      path: "skill_workshop.max_pending",
+      set: (f, v) => { f.skill_workshop.max_pending = v; },
+    },
+    {
+      path: "channel_overrides.rate_limit_per_minute",
+      set: (f, v) => { f.channel_overrides.rate_limit_per_minute = v; },
+    },
+    {
+      path: "channel_overrides.rate_limit_per_user",
+      set: (f, v) => { f.channel_overrides.rate_limit_per_user = v; },
+    },
+    {
+      path: "channel_overrides.auto_route_ttl_minutes",
+      set: (f, v) => { f.channel_overrides.auto_route_ttl_minutes = v; },
+    },
+    {
+      path: "channel_overrides.auto_route_confidence_threshold",
+      set: (f, v) => { f.channel_overrides.auto_route_confidence_threshold = v; },
+    },
+    {
+      path: "channel_overrides.auto_route_sticky_bonus",
+      set: (f, v) => { f.channel_overrides.auto_route_sticky_bonus = v; },
+    },
+    {
+      path: "channel_overrides.auto_route_divergence_count",
+      set: (f, v) => { f.channel_overrides.auto_route_divergence_count = v; },
+    },
   ];
 
   for (const { path, set } of U32_FIELDS) {
@@ -3115,6 +3143,65 @@ describe("every integer count validates against its Rust type", () => {
       expect(round).toContain("context_window = 9223372036854775806");
     });
   }
+
+  // The `[channel_overrides]` spans are u64/usize in Rust — past the u32
+  // ceiling — so the shape is what the validator owes them, and the serializer
+  // carries them as strings like the other quota fields.
+  const U64_CHANNEL_FIELDS: ReadonlyArray<{
+    path: string;
+    set: (form: ManifestFormState, v: string) => void;
+  }> = [
+    {
+      path: "channel_overrides.message_debounce_ms",
+      set: (f, v) => { f.channel_overrides.message_debounce_ms = v; },
+    },
+    {
+      path: "channel_overrides.message_debounce_max_ms",
+      set: (f, v) => { f.channel_overrides.message_debounce_max_ms = v; },
+    },
+    {
+      path: "channel_overrides.message_debounce_max_buffer",
+      set: (f, v) => { f.channel_overrides.message_debounce_max_buffer = v; },
+    },
+    {
+      path: "channel_overrides.conversation_ownership_ttl_seconds",
+      set: (f, v) => { f.channel_overrides.conversation_ownership_ttl_seconds = v; },
+    },
+  ];
+
+  for (const { path, set } of U64_CHANNEL_FIELDS) {
+    it(`${path} reports a negative instead of dropping it`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      set(form, "-5");
+      expect(validateManifestForm(form)).toContain(path);
+    });
+
+    it(`${path} reports a non-integer instead of dropping it`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      set(form, "1.5");
+      expect(validateManifestForm(form)).toContain(path);
+    });
+
+    it(`${path} takes the value that caps its u32 sibling`, () => {
+      const form = emptyManifestForm();
+      form.name = "x";
+      set(form, "4294967296");
+      expect(validateManifestForm(form)).not.toContain(path);
+    });
+  }
+
+  it("round-trips a channel debounce past JavaScript's safe integer range", () => {
+    const parsed = parseManifestToml(
+      `name = "a"\n\n[channel_overrides]\nmessage_debounce_ms = 9223372036854775806\n`,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const round = serializeManifestForm(parsed.form, parsed.extras);
+    expect(round).toContain("message_debounce_ms = 9223372036854775806");
+  });
 });
 
 /**

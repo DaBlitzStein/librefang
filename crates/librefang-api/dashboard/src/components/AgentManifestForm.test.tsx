@@ -1400,6 +1400,9 @@ describe("AgentManifestForm — a validation error opens its folded section", ()
     ["lifecycle", ["max_concurrent_invocations"]],
     ["auto_dream", ["auto_dream_min_sessions"]],
     ["skill_workshop", ["skill_workshop.max_pending_age_days"]],
+    ["skill_workshop", ["skill_workshop.max_pending"]],
+    ["channel_overrides", ["channel_overrides.rate_limit_per_minute"]],
+    ["channel_overrides", ["channel_overrides.message_debounce_ms"]],
   ];
 
   it.each(cases)("opens %s for %s", (section, path) => {
