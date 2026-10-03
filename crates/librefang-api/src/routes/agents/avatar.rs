@@ -91,7 +91,8 @@ static AVATAR_UPLOAD_LOCKS: LazyLock<Mutex<HashMap<AgentId, Arc<tokio::sync::Mut
 
 /// Acquire the per-agent avatar-upload lock, creating it on first use.
 ///
-/// The returned guard serialises the caller's place-then-sweep section against every other upload for the same agent.
+/// The returned guard serialises the caller's place-then-sweep section against every other upload or delete for the same agent.
+/// The confirmed-delete purge in `librefang-kernel` (`kernel/agent_runtime.rs`) unlinks avatar files without it — that code runs below this crate and cannot reach this table — but by then the agent is gone, so the worst it can race into is an orphan file, not a reference that 404s.
 /// Idle entries are dropped on each acquisition — an entry no other `Arc` holds is one no upload can be queued on — so the table tracks uploads in flight rather than every agent that ever had one.
 async fn lock_avatar_upload(agent_id: AgentId) -> tokio::sync::OwnedMutexGuard<()> {
     let lock = {
@@ -477,15 +478,29 @@ pub async fn delete_agent_avatar(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let agent_id = match resolve_agent(&state, &id, &t) {
-        Ok(agent_id) => agent_id,
-        Err(response) => return *response,
+    // `ErrorTranslator` is `!Send`, and the per-agent lock below is acquired
+    // across an `.await`, so the translator stays inside this block rather
+    // than spanning the handler; the failure path below builds its own.
+    let agent_id = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        let agent_id = match resolve_agent(&state, &id, &t) {
+            Ok(agent_id) => agent_id,
+            Err(response) => return *response,
+        };
+        if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+            return refusal.into_response();
+        }
+        agent_id
     };
-    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
-        drop(t);
-        return refusal.into_response();
-    }
+
+    // Serialise against uploads for the same agent (#8349): an upload holds
+    // this lock across its rename, its identity write and its sweep, so a
+    // DELETE that skipped it could interleave three different ways — clearing
+    // the reference while the new file is still served, or clearing the file
+    // after the upload's sweep and before its identity write, which leaves
+    // `avatar_url` naming a route that 404s. Taking the lock here puts the
+    // removal of both the file and the reference on one side of the upload.
+    let _upload_guard = lock_avatar_upload(agent_id).await;
 
     let avatars_dir = state.kernel.config_snapshot().effective_avatars_dir();
     let removed = librefang_types::media::remove_avatars(&avatars_dir, &agent_id.to_string());
@@ -494,6 +509,7 @@ pub async fn delete_agent_avatar(
     // that state is reachable by restoring a backup of the database without
     // the avatars directory.
     if !store_avatar_url(&state, agent_id, None) {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         // The files are already gone, so answering 200 would report a removal
         // that left `avatar_url` pointing at a route with nothing behind it —
         // exactly the manifest/disk disagreement the upload path's write

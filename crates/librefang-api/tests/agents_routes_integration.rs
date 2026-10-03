@@ -4061,6 +4061,67 @@ async fn test_concurrent_avatar_uploads_do_not_erase_each_other() {
     );
 }
 
+/// A `DELETE` racing an upload for the same agent must leave the reference
+/// and the file in agreement (#8349).
+///
+/// The delete handler now takes the same per-agent lock the upload takes
+/// around its rename, identity write and sweep. Without it, an upload could
+/// rename its bytes into place, a delete could then sweep the file and clear
+/// the reference, and the upload could store the reference afterwards —
+/// `avatar_url` naming a route that 404s.
+/// This is an invariant check, not a proof the window is hit: the losing
+/// interleaving is a narrow scheduling accident and the loop below did not
+/// reproduce it against the tree without the delete lock, so it documents the
+/// agreement the lock guarantees rather than pinning the absence of the lock.
+/// Every round starts the delete a jittered interval after the upload, so the
+/// sweep lands at different points across the upload's rename-then-record
+/// window instead of always before it, and then asserts: a stored reference
+/// means the route serves an image, and no reference means it does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_avatar_delete_and_upload_stay_consistent() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "avatar-delete-race");
+    let path = format!("/api/agents/{id}/avatar");
+
+    for round in 0..32u32 {
+        let upload = tokio::spawn(send_raw(
+            h.app.clone(),
+            post_bytes(&path, TINY_PNG.to_vec(), "application/octet-stream", None),
+        ));
+        // The upload's place-then-record window is short; sweeping at one
+        // fixed offset either always misses it or always lands before it.
+        tokio::time::sleep(std::time::Duration::from_micros(u64::from(round % 16) * 20)).await;
+        let delete = tokio::spawn(send_raw(h.app.clone(), delete_req(&path)));
+        let (uploaded, deleted) = tokio::join!(upload, delete);
+        assert_eq!(
+            uploaded.expect("upload task").0,
+            StatusCode::OK,
+            "round {round}: the upload must succeed"
+        );
+        assert_eq!(
+            deleted.expect("delete task").0,
+            StatusCode::OK,
+            "round {round}: the delete must succeed"
+        );
+
+        let reference = stored_identity(&h.state, id).avatar_url;
+        let (status, _, _) = send_raw(h.app.clone(), get(&path)).await;
+        if reference.is_some() {
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "round {round}: `avatar_url` names a route with no file behind it"
+            );
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "round {round}: an avatar file is served after the reference was cleared"
+            );
+        }
+    }
+}
+
 /// Cloning an agent that has an avatar duplicates the image under the clone's
 /// own id and repoints the clone at its own route (#8349).
 ///
