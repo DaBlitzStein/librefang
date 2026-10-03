@@ -369,7 +369,7 @@ pub async fn upload_agent_avatar(
         )),
         (status = 304, description = "Unchanged since the caller's `If-None-Match`"),
         (status = 400, description = "Invalid agent id", body = crate::types::JsonObject),
-        (status = 404, description = "No such agent, or no avatar set", body = crate::types::JsonObject)
+        (status = 404, description = "Agent not found or not visible to the caller, or no avatar set", body = crate::types::JsonObject)
     )
 )]
 pub async fn serve_agent_avatar(
