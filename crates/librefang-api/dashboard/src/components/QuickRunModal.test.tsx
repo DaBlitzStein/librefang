@@ -67,8 +67,11 @@ const TEMPLATES = [
   { name: "coder", description: "", provider: "", model: "", source: "user", editable: true },
 ];
 
-function setAgents(data: unknown[] = AGENTS, isLoading = false) {
-  useAgentsMock.mockReturnValue({ data, isLoading });
+function setAgents(
+  data: unknown[] = AGENTS,
+  { isLoading = false, isFetching = false, isStale = false } = {},
+) {
+  useAgentsMock.mockReturnValue({ data, isLoading, isFetching, isStale });
 }
 
 function setTemplates(data: unknown[] = TEMPLATES, isLoading = false) {
@@ -130,6 +133,33 @@ describe("QuickRunModal", () => {
 
     expect(screen.getByRole("combobox", { name: "agents.quick_run_parent" })).toHaveValue(
       "agent-a",
+    );
+  });
+
+  // `useSpawnAgent` invalidates `agentKeys.lists()` but only marks it stale
+  // without refetching, so the dialog can mount over a cached list that
+  // predates the agent it was opened from. Committing `candidates[0]` there
+  // would bill an agent the operator did not pick.
+  it("keeps the parent empty while a stale list may still lack the opening agent", () => {
+    setAgents([AGENTS[0], AGENTS[2]], { isFetching: true, isStale: true });
+    render(<QuickRunModal initialParent="agent-b" onClose={() => {}} />);
+
+    const select = screen.getByRole("combobox", { name: "agents.quick_run_parent" });
+    expect(select).toHaveValue("");
+    expect(submitButton()).toBeDisabled();
+  });
+
+  it("preselects the opening agent once the refreshed list arrives", () => {
+    setAgents([AGENTS[0]], { isFetching: true, isStale: true });
+    const { rerender } = render(<QuickRunModal initialParent="agent-b" onClose={() => {}} />);
+
+    expect(screen.getByRole("combobox", { name: "agents.quick_run_parent" })).toHaveValue("");
+
+    setAgents();
+    rerender(<QuickRunModal initialParent="agent-b" onClose={() => {}} />);
+
+    expect(screen.getByRole("combobox", { name: "agents.quick_run_parent" })).toHaveValue(
+      "agent-b",
     );
   });
 

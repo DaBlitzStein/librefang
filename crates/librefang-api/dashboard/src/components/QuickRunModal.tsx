@@ -90,14 +90,31 @@ export function QuickRunModal({
     [agents.data],
   );
 
+  // The agent list can be stale when this mounts: `useSpawnAgent` invalidates
+  // `agentKeys.lists()` but only marks it stale without refetching, and the
+  // Agents page itself reads its rows from the overview snapshot rather than
+  // from `useAgents`, so nothing else warms this cache. A list that is stale or
+  // mid-refetch may simply not contain the agent that was just created and
+  // clicked, so the fallback below waits for it rather than committing a parent
+  // the operator never chose.
+  const listMayBeStale = agents.isFetching || agents.isStale;
+
   // Preselect the agent the modal was opened from so the common case is two
   // fields, not three. Guarded on `parent` staying empty so a refetch never
   // moves a choice the operator already made.
   useEffect(() => {
     if (parent !== "" || candidates.length === 0) return;
     const preferred = candidates.find((a) => a.id === initialParent);
-    setParent(preferred ? preferred.id : candidates[0].id);
-  }, [candidates, parent, initialParent]);
+    if (preferred) {
+      setParent(preferred.id);
+      return;
+    }
+    // An absent opening agent is only a reason to fall back once the list has
+    // settled; a stale id (a hand, or one deleted since the page loaded) still
+    // gets the first candidate so the select stays usable.
+    if (initialParent !== undefined && listMayBeStale) return;
+    setParent(candidates[0].id);
+  }, [candidates, parent, initialParent, listMayBeStale]);
 
   // Clearing the result on any parameter change keeps it from being read as
   // the outcome of a run the operator is *about* to start: a stale worker name,
@@ -166,6 +183,15 @@ export function QuickRunModal({
               aria-label={t("agents.quick_run_parent")}
               className={inputClass}
             >
+              {/* React selects the first option when the controlled value
+                  matches none, so an empty `parent` needs an option of its own:
+                  without it the stale list's first agent would render as the
+                  selection while Run is disabled waiting for the refetch. */}
+              {parent === "" && (
+                <option value="" disabled>
+                  {t("common.select")}
+                </option>
+              )}
               {candidates.map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name}
