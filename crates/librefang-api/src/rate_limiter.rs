@@ -446,12 +446,6 @@ pub async fn auth_rate_limit_layer(
     let limiter = state.limiter.clone();
     let max_attempts = state.max_attempts;
     let path = request.uri().path();
-    // Asked lazily, and only for an approve path: the predicate takes the
-    // kernel's approval-policy lock, so every other route in the allowlist
-    // below must reach its answer without paying for it. The question is
-    // per-request (tool + grace window) — see the middleware docs above.
-    let approve_is_metered = approve_path_request_id(path)
-        .is_some_and(|approval_id| (state.approvals_require_totp)(approval_id.as_ref()));
 
     // Endpoints that accept credentials, recovery codes, or TOTP codes —
     // any of these is a brute-force surface and must be rate-limited
@@ -480,18 +474,6 @@ pub async fn auth_rate_limit_layer(
         // legitimate IdP redirect (which arrives once per login).
         || path == "/api/auth/callback"
         || path == "/api/v1/auth/callback"
-        // #4020 added the approve paths for the reason above — they accept
-        // 6-digit and recovery codes. They only *do* while the policy
-        // requires one for the tool being approved and the caller is outside
-        // the grace window: with `second_factor = none`/`login`, or a tool
-        // outside a narrowed `totp_tools`, `tool_requires_totp` short-circuits
-        // to false, nothing is verified, and metering the path bought no
-        // brute-force protection while spending the caller's login budget on
-        // approvals that had already succeeded. Gate on the same per-request
-        // check the handler makes; keep the confirm path unconditional, since
-        // it verifies a code whenever it is reachable and runs once per
-        // enrollment.
-        || approve_is_metered
         || path == "/api/approvals/totp/confirm"
         || path == "/api/v1/approvals/totp/confirm"
         // #5981: passkey authentication mints a session, so its two ceremony
@@ -502,7 +484,27 @@ pub async fn auth_rate_limit_layer(
         || path == "/api/auth/passkey/authentication-verify"
         || path == "/api/v1/auth/passkey/authentication-verify";
 
-    if !is_auth_path {
+    // #4020 added the approve paths for the reason above — they accept
+    // 6-digit and recovery codes. They only *do* while the policy
+    // requires one for the tool being approved and the caller is outside
+    // the grace window: with `second_factor = none`/`login`, or a tool
+    // outside a narrowed `totp_tools`, `tool_requires_totp` short-circuits
+    // to false, nothing is verified, and metering the path bought no
+    // brute-force protection while spending the caller's login budget on
+    // approvals that had already succeeded. Gate on the same per-request
+    // check the handler makes; keep the confirm path unconditional, since
+    // it verifies a code whenever it is reachable and runs once per
+    // enrollment.
+    //
+    // Asked only here, after the unconditional allowlist above has answered:
+    // the predicate takes the kernel's approval-policy lock, so a route that
+    // already matched must not pay for it. The question is per-request (tool
+    // + grace window) — see the middleware docs above.
+    let approve_is_metered = !is_auth_path
+        && approve_path_request_id(path)
+            .is_some_and(|approval_id| (state.approvals_require_totp)(approval_id.as_ref()));
+
+    if !is_auth_path && !approve_is_metered {
         return next.run(request).await;
     }
 
