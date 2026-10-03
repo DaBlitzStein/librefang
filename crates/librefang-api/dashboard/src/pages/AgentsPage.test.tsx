@@ -84,13 +84,13 @@ describe("cloneResultNotice", () => {
   });
 });
 
-function renderChannels() {
+function renderChannels(onSaved?: (channels: string[]) => void) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
   });
   render(
     <QueryClientProvider client={qc}>
-      <ChannelsSection agentId="agent-1" />
+      <ChannelsSection agentId="agent-1" onSaved={onSaved} />
     </QueryClientProvider>,
   );
 }
@@ -173,6 +173,24 @@ describe("ChannelsSection (#7742)", () => {
       agentId: "agent-1",
       channels: ["telegram", "discord"],
     });
+  });
+
+  it("hands the saved list back so the manifest form re-seeds it (#8424)", async () => {
+    // The panel writes `channels` through its own endpoint and the form writes
+    // the whole manifest. Without the callback the form's stale extras would
+    // re-emit the pre-panel list on the next Save and undo this write.
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    renderChannels(onSaved);
+
+    await user.click(screen.getByRole("combobox"));
+    const list = await screen.findByRole("listbox");
+    await user.click(within(list).getByText("discord"));
+    fireEvent.click(screen.getByRole("button", { name: /common\.save/i }));
+
+    expect(setChannelsMutate).toHaveBeenCalledTimes(1);
+    setChannelsMutate.mock.calls[0][1].onSuccess();
+    expect(onSaved).toHaveBeenCalledWith(["telegram", "discord"]);
   });
 });
 
@@ -387,5 +405,33 @@ describe("groupForFirstInvalidField", () => {
   // `if (owningGroup)` fallback is a no-op rather than a crash.
   it("returns nothing for a field path no section claims", () => {
     expect(groupForFirstInvalidField(["campo.inventado"])).toBeUndefined();
+  });
+});
+
+// AgentsPage has no render harness, so the reconciliation between the grant
+// panels and the manifest form (#8424) cannot be exercised by rendering the
+// page. Pinned at the source level: the failure this guards is a panel save
+// that the next form save silently undoes, which is invisible in any
+// render-level test of either surface alone.
+describe("grant panels reconcile with the manifest form (#8424)", () => {
+  const source = readFileSync(join(__dirname, "AgentsPage.tsx"), "utf8");
+
+  it("re-seeds the form's grant keys when a panel saves", () => {
+    expect(source).toContain("skills: assigned");
+    expect(source).toContain("tools: draft");
+    expect(source).toContain("mcp_servers: mcpDraftArr");
+    expect(source).toContain("tools: capabilitiesToolsDraft");
+  });
+
+  it("accepts the channel panel's saved list into the form's top-level extras", () => {
+    expect(source).toContain("onSaved={(channels)");
+    expect(source).toContain("topLevel: { ...prev.topLevel, channels }");
+  });
+
+  it("refreshes the panel queries when the form saves", () => {
+    expect(source).toContain("agentQueries.agentTools(detailAgent.id).queryKey");
+    expect(source).toContain("agentQueries.agentSkills(detailAgent.id).queryKey");
+    expect(source).toContain("agentQueries.agentMcpServers(detailAgent.id).queryKey");
+    expect(source).toContain("agentQueries.channels(detailAgent.id).queryKey");
   });
 });

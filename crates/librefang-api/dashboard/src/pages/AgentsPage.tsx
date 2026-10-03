@@ -193,7 +193,14 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
  * `MultiSelectCmdk`, the same picker skills/tools already use, seeded from
  * the instance's configured channel types.
  */
-export function ChannelsSection({ agentId }: { agentId: string }) {
+export function ChannelsSection({
+  agentId,
+  onSaved,
+}: {
+  agentId: string;
+  /** Reports the persisted grant list so the manifest form re-seeds it (#8424). */
+  onSaved?: (channels: string[]) => void;
+}) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
 
@@ -216,8 +223,9 @@ export function ChannelsSection({ agentId }: { agentId: string }) {
 
   const save = () => {
     if (draft === null || setChannels.isPending) return;
+    const saved = draft;
     setChannels.mutate(
-      { agentId, channels: draft },
+      { agentId, channels: saved },
       {
         onSuccess: () => {
           addToast(
@@ -225,6 +233,7 @@ export function ChannelsSection({ agentId }: { agentId: string }) {
             "success",
           );
           setDraft(null);
+          onSaved?.(saved);
         },
         onError: (e: Error) =>
           addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
@@ -1118,6 +1127,15 @@ export function AgentsPage() {
             "success",
           );
           await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
+          // The grant panels read the same keys through their own endpoints:
+          // refresh them so a panel save cannot put back a pre-form list
+          // (#8424). The form stays the writer of record on disk.
+          await Promise.all([
+            qc.invalidateQueries({ queryKey: agentQueries.agentTools(detailAgent.id).queryKey }),
+            qc.invalidateQueries({ queryKey: agentQueries.agentSkills(detailAgent.id).queryKey }),
+            qc.invalidateQueries({ queryKey: agentQueries.agentMcpServers(detailAgent.id).queryKey }),
+            qc.invalidateQueries({ queryKey: agentQueries.channels(detailAgent.id).queryKey }),
+          ]);
         },
         onError: (e: Error) =>
           addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
@@ -1583,7 +1601,20 @@ export function AgentsPage() {
           variant="pill"
         />
         <div className="flex flex-col gap-4">
-          {configGroup === "channels" && <ChannelsSection agentId={agent.id} />}
+          {configGroup === "channels" && (
+            <ChannelsSection
+              agentId={agent.id}
+              // The panel writes through `PUT /channels`, the form writes the
+              // whole manifest: without this the next form save would re-emit
+              // the pre-panel grant list and silently undo the panel (#8424).
+              onSaved={(channels) =>
+                setManifestEditorExtras((prev) => ({
+                  ...prev,
+                  topLevel: { ...prev.topLevel, channels },
+                }))
+              }
+            />
+          )}
           {configGroup === "planning" && <AgentSchedulePanel agent={agent} />}
           {configGroup === "tools" && (
             <>
@@ -1774,6 +1805,9 @@ export function AgentsPage() {
           onSuccess: async () => {
             await refreshDetailAgent(agent.id, agent.is_hand);
             setSkillsDraft(null);
+            // The form owns the same `skills` key: adopt the panel's write so
+            // the next form save cannot re-emit the pre-panel list (#8424).
+            setManifestEditorFormState((prev) => ({ ...prev, skills: assigned }));
             addToast(
               t("agents.detail.skills_saved", {
                 defaultValue: "Saved to agent.toml",
@@ -2197,6 +2231,14 @@ export function AgentsPage() {
               addToast(t("agents.detail.tools_saved", { defaultValue: "Saved to agent.toml" }), "success");
               setToolsDraft(null);
               setExpandedToolGroup(null);
+              // The form owns the same grant keys: adopt the panel's write so
+              // the next form save cannot re-emit the pre-panel lists (#8424).
+              setManifestEditorFormState((prev) => ({
+                ...prev,
+                capabilities: { ...prev.capabilities, tools: draft },
+                tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
+                tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
+              }));
             },
             onError: (e) => {
               addToast(
@@ -2219,6 +2261,8 @@ export function AgentsPage() {
               );
               setMcpServersDraft(null);
               setExpandedToolGroup(null);
+              // Same reconciliation as the builtin half (#8424).
+              setManifestEditorFormState((prev) => ({ ...prev, mcp_servers: mcpDraftArr }));
             },
             onError: (e) => {
               addToast(
@@ -3395,6 +3439,14 @@ export function AgentsPage() {
                   qc.invalidateQueries({ queryKey: agentQueries.detail(toolsEditorAgentId).queryKey });
                   if (detailAgent?.id === toolsEditorAgentId) {
                     void refreshDetailAgent(toolsEditorAgentId);
+                    // The form owns the same grant keys: adopt the modal's
+                    // write so the next form save cannot undo it (#8424).
+                    setManifestEditorFormState((prev) => ({
+                      ...prev,
+                      capabilities: { ...prev.capabilities, tools: capabilitiesToolsDraft },
+                      tool_allowlist: resolvedAllowlist,
+                      tool_blocklist: toolBlocklistDraft,
+                    }));
                   }
                   closeToolsEditor();
                 } catch (err) {
