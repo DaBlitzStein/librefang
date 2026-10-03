@@ -34,6 +34,17 @@ async fn resolve_manifest(
     // Resolve template name → manifest, or parse a client-supplied one.
     let mut used_template: Option<String> = None;
     let mut manifest: AgentManifest = if req.manifest_toml.trim().is_empty() {
+        // A signature covers the exact bytes the client signed. When the
+        // manifest comes from a server-side template there is no
+        // client-supplied text left to verify it against, so accepting the
+        // pair would silently skip verification entirely. Reject instead of
+        // ignoring the signature.
+        if req.signed_manifest.is_some() {
+            let t = ErrorTranslator::new(lang);
+            return Err(ManifestError {
+                message: t.t("api-error-manifest-signed-template-conflict"),
+            });
+        }
         if let Some(ref tmpl_name) = req.template {
             let safe_name: String = tmpl_name
                 .chars()
@@ -93,8 +104,9 @@ async fn resolve_manifest(
         }
 
         // SECURITY: Verify Ed25519 signature when provided. Only the inline
-        // manifest can be signed: a template is read server-side, and the
-        // comparison below is against the content the client supplied.
+        // manifest can be signed — `signed_manifest` + `template` is rejected
+        // above, and the comparison below is against the content the client
+        // supplied.
         if let Some(ref signed_json) = req.signed_manifest {
             match state.kernel.verify_signed_manifest(signed_json) {
                 Ok(verified_toml) => {
@@ -1574,8 +1586,10 @@ pub async fn reload_agent_manifest(
 // Save agent as agent type
 // ---------------------------------------------------------------------------
 
-#[derive(serde::Deserialize)]
+/// Request body for saving a live agent as an agent type.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct SaveAsAgentTypeRequest {
+    /// Name for the saved agent type, `[A-Za-z0-9_-]{1,64}`.
     pub template_name: String,
 }
 
@@ -1603,12 +1617,13 @@ pub struct SaveAsAgentTypeRequest {
     path = "/api/agents/{id}/save-as-agent-type",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = crate::types::JsonObject, description = "template_name to save as"),
+    request_body(content = SaveAsAgentTypeRequest, description = "Name to save the agent type under"),
     responses(
         (status = 201, description = "Agent type created from live agent"),
         (status = 400, description = "Malformed agent id, or a template_name outside [A-Za-z0-9_-]{1,64}"),
         (status = 404, description = "Agent not found"),
         (status = 409, description = "Template name already taken, or it belongs to a different live agent"),
+        (status = 422, description = "JSON body present but missing the required 'template_name' field"),
         (status = 500, description = "The agent type could not be rendered or written")
     )
 )]
@@ -1656,6 +1671,15 @@ pub async fn save_agent_as_agent_type(
     manifest
         .tags
         .retain(|tag| !librefang_types::agent::is_system_tag(tag));
+    // Kernel-owned metadata must not travel either. `hand_allowed_env` is the
+    // env-passthrough allowlist the hand lifecycle writes on its live agent
+    // (`manifest_helpers::set_hand_allowed_env`, `AgentRegistry::update_hand_rendered_prompt`).
+    // The runtime reads it for EVERY agent (`agent_loop/mod.rs`,
+    // `agent_loop/run_streaming.rs`), and only the hand lifecycle ever clears
+    // it — nothing does for an agent spawned from a type. Leaving it in the
+    // snapshot would hand a plain agent's shell and subprocess tools the
+    // source hand's frozen passthrough allowlist.
+    manifest.metadata.remove("hand_allowed_env");
     // Provenance for `agent_purge`: a snapshot deliberately shares its source's
     // name, so the purge reads this to leave the operator's reusable copy alone
     // instead of deleting `agent-types/<name>.toml` as if it were a trace of the

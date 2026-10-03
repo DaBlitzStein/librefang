@@ -17,7 +17,7 @@
 //!
 //! `LIBREFANG_HOME` and `KernelConfig::home_dir` are pinned to the SAME
 //! tempdir per test: `agent_templates.rs`'s reads/writes
-//! (`GET/POST/PUT/DELETE /api/agent-types`) resolve `agent-types/` through
+//! (`GET/POST/PUT/DELETE /api/templates`) resolve `agent-types/` through
 //! `LIBREFANG_HOME`, while the kernel's own template-dir fallback resolves
 //! it through `KernelConfig::home_dir` — the two have to agree for a file
 //! this test writes (or the save-as-agent-type handler writes) to be
@@ -32,7 +32,7 @@ use librefang_api::routes::AppState;
 use librefang_api::server;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::agent::{AgentId, AgentManifest, ModelConfig};
-use librefang_types::config::{DefaultModelConfig, KernelConfig};
+use librefang_types::config::{DefaultModelConfig, KernelConfig, UserConfig};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
@@ -62,16 +62,39 @@ impl Drop for Harness {
 /// `KernelConfig::home_dir` pinned to the same fresh tempdir. Caller must
 /// hold `home_lock()` for the duration of the harness's use.
 async fn boot() -> Harness {
+    boot_with_users(&[]).await
+}
+
+/// Like [`boot`], plus the given `(name, role, api_key)` RBAC users.
+///
+/// The per-user bearer table is derived from `KernelConfig::users` when the
+/// production router is built, so a test that needs a real role gate must
+/// declare the user before boot rather than injecting the extension later.
+async fn boot_with_users(users: &[(&str, &str, &str)]) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
     // Safety: env mutation, serialised by `home_lock()`.
     std::env::set_var("LIBREFANG_HOME", tmp.path());
 
     librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
+    let user_configs: Vec<UserConfig> = users
+        .iter()
+        .map(|(name, role, key)| UserConfig {
+            name: (*name).to_string(),
+            role: (*role).to_string(),
+            channel_bindings: std::collections::HashMap::new(),
+            api_key_hash: Some(
+                librefang_api::password_hash::hash_password(key).expect("hash user api key"),
+            ),
+            ..Default::default()
+        })
+        .collect();
+
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
         api_key: TEST_TOKEN.to_string(),
+        users: user_configs,
         default_model: DefaultModelConfig {
             provider: "ollama".to_string(),
             model: "test-model".to_string(),
@@ -213,9 +236,10 @@ async fn spawn_from_template_prefers_templates_dir_over_workspace_agent() {
     let _guard = home_lock().lock().await;
     let h = boot().await;
 
-    // Same name in both places — `templates/` must win, matching the
-    // precedence `resolve_ephemeral_manifest` (messaging.rs) and
-    // `load_agent_manifest_from_template_dirs` (spawn.rs) already use.
+    // Same name in both places — `agent-types/` must win, matching the
+    // precedence `librefang_kernel::agent_template::load_agent_template`
+    // (this route's template loader) already uses: `agent-types/` →
+    // `workspaces/agents/` → `registry/agents/`.
     let home = h.state.kernel.config_ref().home_dir.clone();
     let templates_dir = home.join("agent-types");
     std::fs::create_dir_all(&templates_dir).unwrap();
@@ -369,16 +393,18 @@ async fn save_agent_as_agent_type_round_trip() {
     assert_eq!(new_entry.manifest.description, "Deep research specialist");
     assert_eq!(new_entry.manifest.skills, vec!["web-research".to_string()]);
 
-    // The new agent must NOT share the source agent's workspace directory.
-    let source_entry = h
-        .state
-        .kernel
-        .agent_registry()
-        .get(agent_id)
-        .expect("source entry");
-    assert_ne!(
-        new_entry.manifest.workspace, source_entry.manifest.workspace,
-        "cloned-via-template agent must get its own workspace, not the source's"
+    // The decisive check is the saved TOML's own text: a `workspace` key
+    // would point every agent spawned from it at the SOURCE's directory.
+    // Comparing the two agents' assigned workspaces proves nothing — those
+    // differ by name even when the snapshot carried the key.
+    let saved_raw: toml::Value = toml::from_str(&content).unwrap();
+    assert!(
+        saved_raw.get("workspace").is_none(),
+        "the saved template must not carry a workspace key: {content}"
+    );
+    assert!(
+        new_entry.manifest.workspace.is_some(),
+        "the spawned agent must still get its own workspace from spawn"
     );
 }
 
@@ -387,19 +413,27 @@ async fn save_agent_as_agent_type_strips_kernel_hand_tags() {
     let _guard = home_lock().lock().await;
     let h = boot().await;
 
+    let mut source = AgentManifest {
+        name: "hand-worker".to_string(),
+        tags: vec![
+            "hand:researcher".to_string(),
+            "hand_role:lead".to_string(),
+            "hand_instance:abc".to_string(),
+            "operator-tag".to_string(),
+        ],
+        ..AgentManifest::default()
+    };
+    // The hand lifecycle stamps this on the live agent. The runtime reads it
+    // for EVERY agent, so a snapshot that carried it would hand a plain
+    // agent's shell/subprocess tools the hand's frozen passthrough list.
+    source.metadata.insert(
+        "hand_allowed_env".to_string(),
+        serde_json::json!(["HAND_INSTANCE_TOKEN"]),
+    );
     let agent_id = h
         .state
         .kernel
-        .spawn_agent_typed(AgentManifest {
-            name: "hand-worker".to_string(),
-            tags: vec![
-                "hand:researcher".to_string(),
-                "hand_role:lead".to_string(),
-                "hand_instance:abc".to_string(),
-                "operator-tag".to_string(),
-            ],
-            ..AgentManifest::default()
-        })
+        .spawn_agent_typed(source)
         .expect("spawn_agent");
 
     let (status, body) = send(
@@ -423,6 +457,12 @@ async fn save_agent_as_agent_type_strips_kernel_hand_tags() {
         saved.tags,
         vec!["operator-tag".to_string()],
         "only operator tags may be snapshotted: {content}"
+    );
+    // Hand-owned metadata must be stripped at least as thoroughly as the
+    // kernel-owned tags: the key must not be in the written TOML.
+    assert!(
+        !saved.metadata.contains_key("hand_allowed_env"),
+        "a hand's env passthrough allowlist must not be snapshotted: {content}"
     );
 
     // The decisive check: an agent spawned from the snapshot is not a hand.
@@ -455,6 +495,13 @@ async fn save_agent_as_agent_type_strips_kernel_hand_tags() {
         !entry.tags.iter().any(|t| t.starts_with("hand:")),
         "no hand tag may reach the spawned agent: {:?}",
         entry.tags
+    );
+    // The decisive metadata check: an agent spawned from the snapshot must
+    // not inherit the hand's env passthrough allowlist.
+    assert!(
+        !entry.manifest.metadata.contains_key("hand_allowed_env"),
+        "no hand-owned metadata may reach the spawned agent: {:?}",
+        entry.manifest.metadata
     );
 }
 
@@ -594,5 +641,89 @@ async fn save_agent_as_agent_type_refuses_to_shadow_a_different_live_agent() {
     assert!(
         !librefang_types::agent_type_store::agent_type_path_in(&home, "victim").exists(),
         "a refused save must not leave an agent-type file behind"
+    );
+}
+
+/// The handler's doc argues it needs no per-agent ownership check because
+/// `save-as-agent-type` is absent from the `User`-tier POST allowlist, so
+/// only Admin+ callers reach it at all. Pin that with a real `User` bearer
+/// through the production middleware stack.
+#[tokio::test(flavor = "multi_thread")]
+async fn save_agent_as_agent_type_forbids_user_role() {
+    let _guard = home_lock().lock().await;
+    let h = boot_with_users(&[("Alice", "user", "alice-user-key")]).await;
+
+    let agent_id = h
+        .state
+        .kernel
+        .spawn_agent_typed(AgentManifest {
+            name: "user-save-source".to_string(),
+            ..AgentManifest::default()
+        })
+        .unwrap();
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/agents/{agent_id}/save-as-agent-type"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer alice-user-key")
+        .body(Body::from(
+            serde_json::json!({"template_name": "user-save"}).to_string(),
+        ))
+        .unwrap();
+    let (status, body) = send(h.app.clone(), req).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a User bearer must not reach the handler: {body}"
+    );
+
+    let home = h.state.kernel.config_ref().home_dir.clone();
+    assert!(
+        !librefang_types::agent_type_store::agent_type_path_in(&home, "user-save").exists(),
+        "a refused save must not leave an agent-type file behind"
+    );
+}
+
+/// `signed_manifest` is verified against the exact bytes it was signed over.
+/// A `template` supplies the manifest server-side, so accepting the pair
+/// would leave nothing to verify the signature against — the request must be
+/// rejected rather than the signature silently ignored.
+#[tokio::test(flavor = "multi_thread")]
+async fn spawn_rejects_signed_manifest_combined_with_template() {
+    let _guard = home_lock().lock().await;
+    let h = boot().await;
+
+    let templates_dir = h.state.kernel.config_ref().home_dir.join("agent-types");
+    std::fs::create_dir_all(&templates_dir).unwrap();
+    std::fs::write(
+        templates_dir.join("signed-template.toml"),
+        minimal_manifest_toml("signed-template"),
+    )
+    .unwrap();
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({
+                "template": "signed-template",
+                "signed_manifest": "{\"not\":\"a signature\"}"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "signed_manifest + template must be refused: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("signed_manifest"),
+        "the refusal must name the offending field, not fall through to a \
+         different error path: {body}"
     );
 }

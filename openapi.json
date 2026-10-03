@@ -2473,11 +2473,11 @@
           }
         ],
         "requestBody": {
-          "description": "template_name to save as",
+          "description": "Name to save the agent type under",
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonObject"
+                "$ref": "#/components/schemas/SaveAsAgentTypeRequest"
               }
             }
           },
@@ -2495,6 +2495,9 @@
           },
           "409": {
             "description": "Template name already taken, or it belongs to a different live agent"
+          },
+          "422": {
+            "description": "JSON body present but missing the required 'template_name' field"
           },
           "500": {
             "description": "The agent type could not be rendered or written"
@@ -17698,6 +17701,19 @@
           },
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "SaveAsAgentTypeRequest": {
+        "type": "object",
+        "description": "Request body for saving a live agent as an agent type.",
+        "required": [
+          "template_name"
+        ],
+        "properties": {
+          "template_name": {
+            "type": "string",
+            "description": "Name for the saved agent type, `[A-Za-z0-9_-]{1,64}`."
           }
         }
       },
