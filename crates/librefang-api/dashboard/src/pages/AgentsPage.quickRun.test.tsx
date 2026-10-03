@@ -1,8 +1,9 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AgentsPage } from "./AgentsPage";
+import { useDrawerStore } from "../lib/drawerStore";
 
 /**
  * The UI half of `POST /api/agents/spawn-ephemeral`.
@@ -26,13 +27,27 @@ import { AgentsPage } from "./AgentsPage";
 // the dialog's "fall back to the first candidate" path answers the same id as
 // "preselect the agent that was clicked", so the wiring could be severed
 // (`initialParent={undefined}`) and every assertion below would still pass.
-const { AGENTS, spawnEphemeralAsync } = vi.hoisted(() => ({
-  AGENTS: [
-    { id: "agent-a", name: "Alpha", is_hand: false, state: "running" },
-    { id: "agent-b", name: "Bravo", is_hand: false, state: "running" },
-  ],
-  spawnEphemeralAsync: vi.fn(),
-}));
+const { AGENTS, spawnEphemeralAsync, navigateMock, routerSearch, templatesResult } = vi.hoisted(
+  () => ({
+    AGENTS: [
+      { id: "agent-a", name: "Alpha", is_hand: false, state: "running" },
+      { id: "agent-b", name: "Bravo", is_hand: false, state: "running" },
+    ],
+    spawnEphemeralAsync: vi.fn(),
+    navigateMock: vi.fn(),
+    // Mutable so a case can arrive with `?template=` in the URL; the render
+    // harness is the only place the seed effect runs under test.
+    routerSearch: { current: {} as { template?: string } },
+    templatesResult: {
+      current: {
+        data: undefined as unknown[] | undefined,
+        isLoading: false,
+        isPending: false,
+        isError: false,
+      },
+    },
+  }),
+);
 
 vi.mock("motion/react", () => ({
   AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -51,8 +66,8 @@ vi.mock("react-i18next", () => ({
 }));
 
 vi.mock("@tanstack/react-router", () => ({
-  useNavigate: () => vi.fn(),
-  useSearch: () => ({}),
+  useNavigate: () => navigateMock,
+  useSearch: () => routerSearch.current,
   Link: ({ children, ...rest }: { children?: React.ReactNode } & Record<string, unknown>) =>
     React.createElement("a", rest, children),
 }));
@@ -95,7 +110,7 @@ vi.mock("../lib/queries/agents", () => ({
   useAgentEvents: () => ({ data: [], isLoading: false }),
   useAgentSessions: () => ({ data: [], isLoading: false }),
   useAgentStats: () => ({ data: undefined, isLoading: false }),
-  useAgentTemplates: () => ({ data: [], isLoading: false }),
+  useAgentTemplates: () => templatesResult.current,
   useAgentTools: () => ({ data: [], isLoading: false }),
   useAgentSkills: () => ({ data: [], isLoading: false }),
   useAgentMcpServers: () => ({ data: [], isLoading: false }),
@@ -114,7 +129,7 @@ vi.mock("../lib/queries/agents", () => ({
 
 vi.mock("../lib/mutations/agents", () => ({
   useSpawnEphemeral: () => ({ mutateAsync: spawnEphemeralAsync, isPending: false }),
-  useSpawnAgent: () => ({ mutate: vi.fn(), isPending: false }),
+  useSpawnAgent: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false }),
   useCloneAgent: () => ({ mutate: vi.fn(), isPending: false }),
   useDeleteAgent: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
   usePatchAgent: () => ({ mutate: vi.fn(), isPending: false }),
@@ -154,8 +169,19 @@ function renderPage() {
   return render(
     <QueryClientProvider client={qc}>
       <AgentsPage />
+      <DrawerSlot />
     </QueryClientProvider>,
   );
+}
+
+// Renders the global drawer body once so the create drawer's content is
+// queryable alongside the page; DrawerPanel pushes its body into the store
+// rather than into the page's own tree.
+function DrawerSlot() {
+  const content = useDrawerStore((s) => s.content);
+  const isOpen = useDrawerStore((s) => s.isOpen);
+  if (!isOpen || !content) return null;
+  return <div data-testid="drawer-slot">{content.body}</div>;
 }
 
 function runControl() {
@@ -164,6 +190,9 @@ function runControl() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useDrawerStore.setState({ isOpen: false, content: null });
+  routerSearch.current = {};
+  templatesResult.current = { data: [], isLoading: false, isPending: false, isError: false };
   // The page auto-selects the first agent only on a wide viewport (the effect
   // bails under the 1000px breakpoint). jsdom has no layout, so this is the
   // switch that decides whether the detail panel — and with it the Run
@@ -214,5 +243,94 @@ describe("AgentsPage Quick Run entry point (#6699)", () => {
       message: "Say hello",
     });
     expect(await screen.findByText("All done.")).toBeTruthy();
+  });
+});
+
+/**
+ * The receiving half of the agent-types Run round trip (#8385). The pure
+ * `resolveDrawerSeed` mapping is pinned in AgentsPage.test.tsx; this is the only
+ * harness where the effect around it runs — what the drawer actually opens on,
+ * what an unknown name reports, and that closing hands the URL back.
+ */
+describe("AgentsPage create drawer seed from ?template= (#8385)", () => {
+  const RESEARCHER = {
+    name: "researcher",
+    description: "",
+    provider: "",
+    model: "",
+    source: "user",
+    editable: true,
+  };
+
+  function seedTemplates() {
+    templatesResult.current = {
+      data: [RESEARCHER],
+      isLoading: false,
+      isPending: false,
+      isError: false,
+    };
+  }
+
+  it("opens the create drawer on the template the URL names", async () => {
+    seedTemplates();
+    routerSearch.current = { template: "researcher" };
+
+    renderPage();
+
+    // The custom-name field's placeholder is the selected template's name, so
+    // it is only rendered once the drawer is on the Template tab with the type
+    // already set.
+    const drawer = await screen.findByTestId("drawer-slot");
+    expect(within(drawer).getByPlaceholderText("researcher")).toBeTruthy();
+  });
+
+  it("reports an unknown name and falls back to the blank form", async () => {
+    seedTemplates();
+    routerSearch.current = { template: "ghost" };
+
+    renderPage();
+
+    await waitFor(() =>
+      expect(addToastMock).toHaveBeenCalledWith("agents.template_not_found", "error"),
+    );
+    // Template mode never rendered: no placeholder from a selected type, and no
+    // custom-name field to carry the bogus name into a spawn.
+    const drawer = await screen.findByTestId("drawer-slot");
+    expect(within(drawer).queryByPlaceholderText("researcher")).toBeNull();
+    expect(
+      within(drawer).queryByPlaceholderText("agents.template_custom_name_placeholder"),
+    ).toBeNull();
+  });
+
+  it("does not report a name as gone when the type list itself failed to load", async () => {
+    templatesResult.current = {
+      data: undefined,
+      isLoading: false,
+      isPending: false,
+      isError: true,
+    };
+    routerSearch.current = { template: "researcher" };
+
+    renderPage();
+
+    // The drawer stays shut rather than opening on a notice that blames the
+    // type for the fetch that failed.
+    expect(await runControl()).toBeTruthy();
+    expect(addToastMock).not.toHaveBeenCalledWith("agents.template_not_found", "error");
+    expect(screen.queryByTestId("drawer-slot")).toBeNull();
+  });
+
+  it("drops the template param when the seeded drawer closes", async () => {
+    seedTemplates();
+    routerSearch.current = { template: "researcher" };
+
+    renderPage();
+
+    const drawer = await screen.findByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByRole("button", { name: "common.cancel" }));
+
+    // Without this a second Run press on the same type navigates to a URL that
+    // already matches and the seed effect never fires again.
+    expect(navigateMock).toHaveBeenCalledWith({ to: "/agents", search: {}, replace: true });
   });
 });

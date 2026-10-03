@@ -374,10 +374,11 @@ export function SystemPromptSection({
  * What the create drawer should open on when `/agents` was reached with a
  * `template` search param.
  *
- * Pure and exported on purpose: `AgentsPage` has no render harness (it holds
- * some twenty hooks), so a rule left inline in the effect below would be
- * covered by nothing, and the param name is the contract with the sender on
- * `/agent-types`.
+ * Pure and exported on purpose: the mapping is the contract with the sender on
+ * `/agent-types`, and keeping it out of the ~20-hook page pins it directly in
+ * `AgentsPage.test.tsx`. The full-page harness in `AgentsPage.quickRun.test.tsx`
+ * now renders the effect around it too, with the search param and the fetched
+ * list mocked, but the rule itself stays testable without that page.
  *
  * `knownNames` is the fetched agent-type list. It is required rather than
  * optional because `validateSearch` cannot do this check — it runs before any
@@ -1283,6 +1284,10 @@ export function AgentsPage() {
       return;
     }
     if (templatesQuery.isPending) return;
+    // A failed fetch leaves `data` undefined, and `resolveDrawerSeed` would read
+    // every name as unknown. Wait rather than announcing that a type is gone
+    // when the list that would prove it never arrived.
+    if (templatesQuery.isError) return;
     // Process each distinct param once: a refetch replaces `data` with a new
     // reference and must not re-open the drawer or re-fire the notice.
     if (handledTemplate.current === seed.templateName) return;
@@ -1304,7 +1309,7 @@ export function AgentsPage() {
     }
     setCreateMode("template");
     setTemplateName(seed.templateName);
-  }, [routeTemplate, templatesQuery.isPending, templatesQuery.data, addToast, t]);
+  }, [routeTemplate, templatesQuery.isPending, templatesQuery.isError, templatesQuery.data, addToast, t]);
 
   // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
   // serialized output into the textarea so advanced users can keep editing.

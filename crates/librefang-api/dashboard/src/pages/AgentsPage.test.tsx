@@ -1,5 +1,6 @@
-// Tests SystemPromptSection / DescriptionSection / ChannelsSection directly
-// — AgentsPage has no render harness (~20 hooks).
+// Tests AgentsPage's pure helpers and sections directly — the ~20-hook page
+// itself is exercised by the full-page harness in AgentsPage.quickRun.test.tsx,
+// which is the wrong place to pin these narrow rules.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
@@ -47,10 +48,10 @@ const usePromptVersionsMock = usePromptVersions as unknown as ReturnType<typeof 
 const useAgentChannelsMock = useAgentChannels as unknown as ReturnType<typeof vi.fn>;
 const useSetAgentChannelsMock = useSetAgentChannels as unknown as ReturnType<typeof vi.fn>;
 
-// The receiving half of the agent-types Run round trip. AgentsPage has no
-// render harness, so this is the only thing pinning the mapping from the
-// `template` search param to what the drawer opens on; the param name itself is
-// the contract with the sender on /agent-types.
+// The receiving half of the agent-types Run round trip. The full-page harness
+// (AgentsPage.quickRun.test.tsx) renders the seed effect end to end, but this is
+// the only thing pinning the mapping itself; the param name is the contract
+// with the sender on /agent-types.
 describe("resolveDrawerSeed", () => {
   it("opens the drawer on the template tab with a type the list knows", () => {
     expect(resolveDrawerSeed("researcher", ["researcher", "analyst"])).toEqual({
