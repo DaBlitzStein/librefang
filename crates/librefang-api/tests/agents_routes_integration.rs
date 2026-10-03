@@ -4195,3 +4195,62 @@ async fn test_clone_duplicates_the_source_avatar_under_the_clones_own_id() {
     assert_eq!(headers["content-type"], "image/png");
     assert_eq!(bytes, TINY_PNG);
 }
+
+/// A clone whose source has an `avatar_url` but no file behind it drops the
+/// reference and says so (#8349 review).
+///
+/// The copy-failure arm already reports `avatar_copy_failed`; the
+/// missing-file arm used to clear the reference silently, so the caller saw
+/// the clone report success with no avatar and nothing to explain it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_clone_warns_when_the_source_avatar_reference_has_no_file() {
+    let h = boot(TEST_TOKEN).await;
+    let src = spawn_named(&h.state, "clone-avatar-dangling");
+    let own_reference = librefang_types::media::agent_avatar_url(&src.to_string());
+
+    // The reference without the file: what restoring the database without the
+    // avatars directory leaves behind.
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{src}/identity"),
+            serde_json::json!({ "avatar_url": own_reference }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "seeding the dangling reference: {body:?}"
+    );
+    assert!(
+        librefang_types::media::find_avatar(&avatars_dir(&h), &src.to_string()).is_none(),
+        "the point of this test is the file being absent"
+    );
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{src}/clone"),
+            serde_json::json!({"new_name": "clone-avatar-dangling-dest"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "clone failed: {body:?}");
+    assert_eq!(
+        body["warnings"],
+        serde_json::json!(["avatar_source_missing"]),
+        "the dropped avatar must be reported, not silently discarded"
+    );
+    let new_id: AgentId = body["agent_id"]
+        .as_str()
+        .expect("agent_id in response")
+        .parse()
+        .expect("clone id is a uuid");
+    assert_eq!(
+        stored_identity(&h.state, new_id).avatar_url,
+        None,
+        "the clone must not inherit the source's reference"
+    );
+}
