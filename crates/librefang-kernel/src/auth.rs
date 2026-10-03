@@ -2089,6 +2089,136 @@ mod tests {
         assert!(acl.delete_allowed);
         assert!(!acl.export_allowed);
     }
+
+    // ----- webui memory-ACL blast radius (#8432) -----
+    //
+    // `memory_acl_for_sender` composes `resolve_user` with `memory_acl_for`
+    // (`kernel/handles/memory_access.rs`), so these pin that seam.
+    // Before the webui routing, the canonical dashboard UserId missed the
+    // `channel_index` lookup: `resolve_user` returned `None`, the handle
+    // reported `None`, and the runtime skipped the per-user ACL entirely.
+    // The tests cover the three sides of the blast radius: a declared policy
+    // now applies on the dashboard, a user with no declared policy keeps the
+    // role-default semantics `memory_acl_for` already had, and every
+    // unresolvable sender keeps the fail-open `None`.
+
+    #[test]
+    fn webui_declared_empty_memory_access_applies_instead_of_failing_open() {
+        // A `[[users]]` entry whose `memory_access` block is declared but
+        // empty is the case the issue calls out.
+        // A viewer default is narrow enough to lose features the fail-open
+        // path used to grant, so it proves the ACL now applies.
+        // `is_unconfigured` treats the all-default block as the documented
+        // "no opinion" sentinel, so the applied ACL is the viewer default.
+        let dashboard = user_with_policy(
+            "Dashboard",
+            "viewer",
+            "123456",
+            None,
+            None,
+            Some(UserMemoryAccess::default()),
+            HashMap::new(),
+        );
+        let mgr = AuthManager::with_tool_groups(&[dashboard], &[]);
+        let id = UserId::from_name("Dashboard");
+
+        assert_eq!(
+            mgr.resolve_user(Some(&webui_id("Dashboard")), Some("webui")),
+            Some(id),
+            "the canonical webui UserId must reach the registered user"
+        );
+        let acl = mgr
+            .memory_acl_for(id)
+            .expect("a declared memory_access must not fall open on the dashboard");
+        assert_eq!(
+            acl,
+            default_memory_acl(UserRole::Viewer),
+            "the declared-empty block must resolve through the role-default sentinel"
+        );
+        assert!(
+            !acl.can_write("kv:dashboard_scratch"),
+            "the applied viewer default must deny writes the fail-open path allowed"
+        );
+        assert!(
+            !acl.pii_access,
+            "the applied viewer default must redact PII"
+        );
+    }
+
+    #[test]
+    fn webui_no_memory_access_opinion_keeps_the_role_default() {
+        // No declared block: `memory_acl_for` keeps returning the same
+        // role-default ACL it already returned for bound senders, and the
+        // raw declaration the simulator surfaces stays `None`.
+        let bob = user_with_policy("Bob", "user", "111", None, None, None, HashMap::new());
+        let mgr = AuthManager::with_tool_groups(&[bob], &[]);
+        let id = UserId::from_name("Bob");
+
+        assert_eq!(
+            mgr.resolve_user(Some(&webui_id("Bob")), Some("webui")),
+            Some(id),
+            "a no-opinion user still resolves for the memory ACL"
+        );
+        assert_eq!(
+            mgr.memory_acl_for(id),
+            Some(default_memory_acl(UserRole::User)),
+            "memory_acl_for must keep its documented role-default fallback"
+        );
+        assert!(
+            mgr.effective_permissions(id)
+                .expect("registered user")
+                .memory_access
+                .is_none(),
+            "the raw no-opinion declaration must stay None"
+        );
+    }
+
+    #[test]
+    fn webui_unresolvable_senders_keep_the_fail_open_acl() {
+        // The fail-open contract documented in `memory_access.rs` stays
+        // intact: anything that does not name a registered user must keep
+        // resolving to `None`, which is what makes the handle report `None`.
+        let alice = user_with_policy("Alice", "owner", "123456", None, None, None, HashMap::new());
+        let mgr = AuthManager::with_tool_groups(&[alice], &[]);
+
+        for (sender, label) in [
+            (
+                "127.0.0.1",
+                "the raw client IP the unauthenticated path stamps",
+            ),
+            (ROOT_SENTINEL_ID, "the root sentinel"),
+        ] {
+            assert_eq!(
+                mgr.resolve_user(Some(sender), Some("webui")),
+                None,
+                "{label} must stay unresolved and fail open"
+            );
+        }
+        assert_eq!(
+            mgr.resolve_user(Some(&UserId::new().to_string()), Some("webui")),
+            None,
+            "an unknown UUID must stay unresolved and fail open"
+        );
+        assert_eq!(
+            mgr.resolve_user(None, Some("webui")),
+            None,
+            "a missing sender id must stay unresolved"
+        );
+        assert_eq!(
+            mgr.resolve_user(Some("127.0.0.1"), None),
+            None,
+            "a missing channel must stay unresolved"
+        );
+
+        // RBAC off: with no registered users nothing can resolve, so the
+        // handle's `is_enabled` guard reports `None` before this seam.
+        let off = AuthManager::new(&[]);
+        assert_eq!(
+            off.resolve_user(Some(&webui_id("Alice")), Some("webui")),
+            None,
+            "RBAC off must stay fail open"
+        );
+    }
 }
 
 #[cfg(test)]
