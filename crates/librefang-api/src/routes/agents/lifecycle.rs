@@ -153,12 +153,9 @@ async fn resolve_manifest(
         }
     }
     if let Some(template_name) = used_template {
-        // A workspace the template carried is *not* dropped here. Whether it
-        // may be honoured is a question about where the path points, and only
-        // the kernel can answer it — it is the one place every door passes
-        // through, and a caller that supplies `manifest_toml` directly (the CLI
-        // expands a template before posting it) never reaches this function at
-        // all. See the guard in `kernel/spawn.rs`.
+        // A workspace the template carried is *not* dropped here.
+        // Whether it may be honoured is a question about where the path points, and only the kernel can answer it — it is the one place every door passes through, and a caller that supplies `manifest_toml` directly (the CLI expands a template before posting it) never reaches this function at all.
+        // See the guard in `kernel/spawn.rs`.
         manifest.source_template = Some(template_name);
     }
 
