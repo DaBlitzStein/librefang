@@ -355,6 +355,10 @@ impl TemplatesState {
                 KeyCode::Esc => {
                     self.showing_history = false;
                     self.history_error = None;
+                    // Leaving the overlay retires both the loading line the
+                    // list would otherwise keep showing and any armed rollback.
+                    self.status_msg.clear();
+                    self.confirm_restore_version = false;
                 }
                 KeyCode::Up | KeyCode::Char('k') if total > 0 => {
                     let i = self.history_list.selected().unwrap_or(0);
@@ -643,11 +647,14 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
     // ── Hints / status ──
     // The armed prompt outranks a status message, as it does on Extensions: a
     // stale "promoted …" line must not hide the question the next key answers.
+    // The status stays yellow: this line carries failures and refusals too, and
+    // the shared combo widget would draw every one of them green.
     f.render_widget(
-        widgets::confirm_or_status_or_hint(
+        widgets::confirm_or_status_or_hint_styled(
             state.confirm_restore.is_some(),
             &crate::i18n::t("tui-templates-confirm-restore"),
             &state.status_msg,
+            Style::default().fg(theme::YELLOW),
             &crate::i18n::t("tui-templates-hints"),
         ),
         chunks[3],
@@ -727,11 +734,14 @@ fn draw_version_history(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
         f.render_stateful_widget(list, chunks[1], &mut state.history_list);
     }
 
+    // The overlay's own bar carries the restore status, so a failed rollback
+    // reports itself here instead of waiting for Esc.
     f.render_widget(
-        widgets::confirm_or_status_or_hint(
+        widgets::confirm_or_status_or_hint_styled(
             state.confirm_restore_version,
             &crate::i18n::t("tui-templates-confirm-restore-version"),
-            "",
+            &state.status_msg,
+            Style::default().fg(theme::YELLOW),
             &crate::i18n::t("tui-templates-history-hints"),
         ),
         chunks[2],
@@ -1242,9 +1252,85 @@ mod tests {
         let mut state = TemplatesState::new();
         state.showing_history = true;
         state.history_error = Some("boom".to_string());
+        state.status_msg = "Loading version history for payroll…".to_string();
+        state.confirm_restore_version = true;
+
+        // The first Esc belongs to the armed rollback.
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!state.confirm_restore_version);
+        assert!(state.showing_history);
+
+        // The second closes the overlay and retires everything it left behind:
+        // the loading line must not sit over the list it predates.
         state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!state.showing_history);
         assert!(state.history_error.is_none());
+        assert!(
+            state.status_msg.is_empty(),
+            "leaving history must not leave the loading line behind"
+        );
+        assert!(!state.confirm_restore_version);
+    }
+
+    /// The overlay bar used to get `""` as its status, so a failed rollback
+    /// stayed invisible until the operator pressed Esc to get back to the list.
+    #[test]
+    fn a_failed_rollback_reports_in_the_history_overlay() {
+        let mut state = TemplatesState::new();
+        state.showing_history = true;
+        state.history_name = "payroll".to_string();
+        state.version_history = vec![TemplateVersionRow {
+            id: "2".to_string(),
+            timestamp: "t2".to_string(),
+            change_source: "update".to_string(),
+        }];
+        state.history_list.select(Some(0));
+        state.status_msg = "✗ payroll: version mismatch".to_string();
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), &mut state))
+            .expect("the history overlay must render");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            rendered.contains(&state.status_msg),
+            "the overlay must report the failure without an Esc.\nlooked for: {}\nrendered:\n{rendered}",
+            state.status_msg
+        );
+    }
+
+    /// This status line carries failures and refusals, not only successes;
+    /// routing it through the shared combo widget drew every one of them in
+    /// green, which reads as a success.
+    #[test]
+    fn a_template_status_line_stays_yellow() {
+        let mut state = TemplatesState::new();
+        state.status_msg = "restore failed: version mismatch".to_string();
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), &mut state))
+            .expect("the templates screen must render");
+        let buffer = terminal.backend().buffer();
+        let rendered: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        let byte_at = rendered
+            .find(&state.status_msg)
+            .expect("the status line must render");
+        let cell_at = rendered[..byte_at].chars().count();
+        let (x, y) = ((cell_at % 100) as u16, (cell_at / 100) as u16);
+        assert_eq!(
+            buffer[(x, y)].fg,
+            theme::YELLOW,
+            "a failure repainted green reads as a success"
+        );
     }
 
     #[test]

@@ -3782,8 +3782,10 @@ pub fn spawn_restore_from_registry(backend: BackendRef, name: String, tx: mpsc::
 }
 
 /// Restore a template to one specific historical version, via
-/// `POST /api/templates/{name}/history/{version_id}/restore` — the only
-/// restore endpoint the daemon serves today (see `spawn_restore_from_registry`).
+/// `POST /api/templates/{name}/history/{version_id}/restore`.
+///
+/// Distinct from [`spawn_restore_from_registry`], which restores the registry's
+/// current definition through `/restore` rather than a chosen version.
 pub fn spawn_restore_template_version(
     backend: BackendRef,
     name: String,

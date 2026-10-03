@@ -925,6 +925,11 @@ impl App {
                 self.templates.history_name = name;
                 self.templates.version_history.clear();
                 self.templates.history_error = None;
+                // The answer retires the "loading version history …" line and
+                // any rollback armed against the previous rows: it would fire
+                // on row 0 of the rows that just replaced them.
+                self.templates.status_msg.clear();
+                self.templates.confirm_restore_version = false;
                 match result {
                     Ok(rows) => {
                         self.templates.version_history = rows;
@@ -3973,5 +3978,80 @@ mod workflow_step_editor_tab_tests {
         let mut app = app_on_the_workflows_tab();
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(app.active_tab != Tab::Workflows);
+    }
+}
+
+#[cfg(test)]
+mod template_history_event_tests {
+    use super::*;
+    use crate::tui::event::TemplateVersionRow;
+
+    fn app_on_the_templates_tab() -> App {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.phase = Phase::Main;
+        app.active_tab = Tab::Templates;
+        app
+    }
+
+    /// `v` sets a loading status before the request leaves. The answer must
+    /// retire it — otherwise "Loading version history …" hides the `[R]` / `[v]`
+    /// hints — and must disarm a rollback armed against the previous rows, or
+    /// `y` would restore row 0 of the rows this answer installed.
+    #[test]
+    fn a_loaded_history_retires_the_loading_status_and_any_armed_rollback() {
+        let mut app = app_on_the_templates_tab();
+        app.templates.status_msg =
+            crate::i18n::t_args("tui-templates-history-loading", &[("name", "payroll")]);
+        app.templates.confirm_restore_version = true;
+        app.templates.version_history = vec![TemplateVersionRow {
+            id: "1".to_string(),
+            timestamp: "t1".to_string(),
+            change_source: "create".to_string(),
+        }];
+
+        app.handle_event(AppEvent::TemplateHistoryLoaded {
+            name: "payroll".to_string(),
+            result: Ok(vec![TemplateVersionRow {
+                id: "2".to_string(),
+                timestamp: "t2".to_string(),
+                change_source: "update".to_string(),
+            }]),
+        });
+
+        assert!(
+            app.templates.status_msg.is_empty(),
+            "the loading status outlived its answer"
+        );
+        assert!(
+            !app.templates.confirm_restore_version,
+            "a rollback armed against the old rows survived the new ones"
+        );
+        assert_eq!(app.templates.version_history.len(), 1);
+    }
+
+    /// A failed version restore used to be written to a status the open overlay
+    /// never drew, and the overlay only closed on success, so the error only
+    /// appeared after an Esc. It now reaches the overlay bar as it lands.
+    #[test]
+    fn a_failed_version_restore_reports_the_failure_and_keeps_the_overlay() {
+        let mut app = app_on_the_templates_tab();
+        app.templates.showing_history = true;
+
+        app.handle_event(AppEvent::TemplateVersionRestoreResult {
+            name: "payroll".to_string(),
+            ok: false,
+            message: "version mismatch".to_string(),
+        });
+
+        assert!(
+            app.templates.showing_history,
+            "the overlay may stay open — its bar now carries the error"
+        );
+        assert!(
+            app.templates.status_msg.contains("version mismatch"),
+            "the daemon's reason must reach the bar: {}",
+            app.templates.status_msg
+        );
     }
 }
