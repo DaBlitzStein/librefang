@@ -357,9 +357,28 @@ impl AuthManager {
     ///
     /// Returns the LibreFang UserId if a matching channel binding exists,
     /// or None for unrecognized users.
+    ///
+    /// `webui` senders carry no `channel_bindings` entry — the API's
+    /// WebSocket handler stamps the caller's *authenticated* canonical
+    /// `UserId` there (#8409) — so try the same registered-`[[users]]`
+    /// membership check the tool gate uses
+    /// ([`Self::resolve_webui_sender`]) *before* the binding index, exactly
+    /// as the gate does. This is what makes spend/budget attribution
+    /// (`messaging.rs` `attribution_user_id`) see the same identity the
+    /// tool gate already resolved: a registered user's dashboard turn
+    /// bills to their per-user bucket instead of the unknown-user one.
+    /// A `webui` binding an operator did declare still resolves through the
+    /// index; raw client IPs, the root sentinel and unknown UUIDs still
+    /// resolve to `None`.
     pub fn identify(&self, channel_type: &str, platform_id: &str) -> Option<UserId> {
+        let snapshot = self.snapshot.load();
+        if channel_type == crate::SYSTEM_CHANNEL_WEBUI {
+            if let Some(user_id) = Self::resolve_webui_sender(&snapshot, platform_id) {
+                return Some(user_id);
+            }
+        }
         let key = format!("{channel_type}:{platform_id}");
-        self.snapshot.load().channel_index.get(&key).copied()
+        snapshot.channel_index.get(&key).copied()
     }
 
     /// Get a user's identity by their UserId.
@@ -558,12 +577,28 @@ impl AuthManager {
     /// third unbound channel inherited the first user's role. Callers
     /// that don't know the channel must either supply one or accept that
     /// the user is unrecognised.
+    ///
+    /// `webui` senders take the same registered-user resolution as
+    /// [`Self::identify`] and the tool gate (`resolve_webui_sender`,
+    /// #8409): the dashboard stamps the caller's authenticated canonical
+    /// `UserId`, which no `channel_bindings` entry ever names. Without
+    /// this, a restricted `memory_access` policy applied on bound
+    /// channels but not in the Web UI — the tool gate resolved the user
+    /// while this lookup returned `None` and the ACL fell open. A `webui`
+    /// binding an operator did declare still resolves through the index,
+    /// mirroring the gate's fallback order.
     pub fn resolve_user(&self, sender_id: Option<&str>, channel: Option<&str>) -> Option<UserId> {
         let (Some(ch), Some(sid)) = (channel, sender_id) else {
             return None;
         };
+        let snapshot = self.snapshot.load();
+        if ch == crate::SYSTEM_CHANNEL_WEBUI {
+            if let Some(user_id) = Self::resolve_webui_sender(&snapshot, sid) {
+                return Some(user_id);
+            }
+        }
         let key = format!("{ch}:{sid}");
-        self.snapshot.load().channel_index.get(&key).copied()
+        snapshot.channel_index.get(&key).copied()
     }
 
     /// Cheap snapshot of the kernel's tool groups (used for per-user category evaluation).
@@ -1941,6 +1976,68 @@ mod tests {
             gate,
             UserToolGate::Allow,
             "an explicit webui binding must keep resolving through channel_index"
+        );
+    }
+
+    #[test]
+    fn identify_resolves_registered_webui_sender_and_rejects_unresolvable_ones() {
+        // identify feeds spend/budget attribution; it must see the same
+        // identity the tool gate resolves, or a registered user's dashboard
+        // turn bills to the unknown-user bucket while the gate applies their
+        // policy.
+        let alice = user_with_policy("Alice", "owner", "123456", None, None, None, HashMap::new());
+        let mgr = AuthManager::with_tool_groups(&[alice], &[]);
+
+        assert_eq!(
+            mgr.identify("webui", &webui_id("Alice")),
+            Some(UserId::from_name("Alice")),
+            "the canonical webui UserId must resolve for attribution"
+        );
+        assert_eq!(
+            mgr.identify("webui", "127.0.0.1"),
+            None,
+            "a raw client IP must stay unknown"
+        );
+        assert_eq!(
+            mgr.identify("webui", ROOT_SENTINEL_ID),
+            None,
+            "the root sentinel must stay unknown"
+        );
+    }
+
+    #[test]
+    fn identify_and_resolve_user_fall_back_to_a_declared_webui_binding() {
+        // An operator who bound `webui` keeps billing and ACL resolution
+        // through the index — the canonical-identity path is additive, and
+        // both layers must mirror the gate's fallback order so attribution,
+        // ACL and the tool gate can never disagree about the same sender.
+        let alice = user_with_policy("Alice", "owner", "123456", None, None, None, HashMap::new());
+        let mut bound = alice.clone();
+        bound
+            .channel_bindings
+            .insert("webui".to_string(), "127.0.0.1".to_string());
+        let mgr = AuthManager::with_tool_groups(&[bound], &[]);
+        let alice_id = UserId::from_name("Alice");
+
+        assert_eq!(
+            mgr.identify("webui", "127.0.0.1"),
+            Some(alice_id),
+            "identify must honour a declared webui binding"
+        );
+        assert_eq!(
+            mgr.resolve_user(Some("127.0.0.1"), Some("webui")),
+            Some(alice_id),
+            "resolve_user must honour a declared webui binding"
+        );
+        assert_eq!(
+            mgr.resolve_user(Some(&webui_id("Alice")), Some("webui")),
+            Some(alice_id),
+            "resolve_user must resolve the canonical UserId too"
+        );
+        assert_eq!(
+            mgr.resolve_user(Some("10.0.0.9"), Some("webui")),
+            None,
+            "an unbound, non-canonical sender must stay unknown"
         );
     }
 

@@ -393,3 +393,185 @@ async fn unrecognised_webui_sender_still_gates_as_guest_on_the_booted_kernel() {
     );
     assert_eq!(pending_approvals(&h), 0, "no turn ran on this harness");
 }
+
+/// Insert a session row into `active_sessions` exactly the way
+/// `dashboard_login` does: keyed by `hash_device_token(plaintext)`, carrying
+/// `user_name` + `user_role`. Returns the plaintext bearer string.
+///
+/// This pins the session-token path of the auth middleware (#8431 review):
+/// only the per-user API key branch (`Bearer {USER_KEY}`) was covered before,
+/// so a regression that broke session reconstruction — `user_name` loss,
+/// hashing mismatch, role floor — would have gone unnoticed.
+async fn insert_session(h: &Harness, user_name: &str, user_role: &str) -> String {
+    let token = librefang_api::password_hash::generate_session_token();
+    let plaintext = token.token.clone();
+    let mut sessions = h.state.active_sessions.write().await;
+    sessions.insert(
+        librefang_api::password_hash::hash_device_token(&plaintext),
+        librefang_api::password_hash::SessionToken {
+            token: plaintext.clone(),
+            created_at: token.created_at,
+            user_name: Some(user_name.to_string()),
+            user_role: Some(user_role.to_string()),
+        },
+    );
+    plaintext
+}
+
+/// A dashboard *session token* whose `user_name` names a real `[[users]]`
+/// entry attributes the turn to that user — the session-token twin of the
+/// per-user-API-key test above, pinning the `registered_users` membership
+/// check from 9a958166b on the `active_sessions` path.
+///
+/// The WS upgrade must admit the session cookie as a bearer and stamp
+/// `UserId::from_name("chatuser")`, which the kernel gate resolves to their
+/// owner policy: the `memory_store` call EXECUTEs, no approval queues.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_token_for_a_registered_user_attributes_their_turn() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    let h = start_harness().await;
+    let agent_id = spawn_agent(&h).await;
+    let session = insert_session(&h, "chatuser", "owner").await;
+
+    let mut request = format!(
+        "{}/api/agents/{agent_id}/ws",
+        h.base_url.replacen("http://", "ws://", 1)
+    )
+    .into_client_request()
+    .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {session}").parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert!(socket
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .to_text()
+        .unwrap()
+        .contains("connected"));
+
+    socket
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "message",
+                "content": "remember that session auth works",
+                "message_id": "session-turn",
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    // Drain until the terminal `response` frame or a pending approval — the
+    // guest-gated path queues `memory_store`, the attributed path completes.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut frames: Vec<String> = Vec::new();
+    loop {
+        if tokio::time::Instant::now() >= deadline || pending_approvals(&h) > 0 {
+            break;
+        }
+        let frame = match tokio::time::timeout(std::time::Duration::from_millis(250), socket.next())
+            .await
+        {
+            Ok(Some(Ok(frame))) => frame,
+            Ok(_) => break,
+            Err(_) => continue,
+        };
+        let text = frame.to_text().expect("text frame").to_string();
+        let done = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|json| json["type"].as_str().map(str::to_string))
+            .is_some_and(|t| t == "response");
+        frames.push(text);
+        if done {
+            break;
+        }
+    }
+    let _ = socket.close(None).await;
+
+    let requests = h.llm.received_requests().await.expect("wiremock records");
+    assert!(
+        !requests.is_empty(),
+        "the turn never reached the LLM; frames: {frames:?}"
+    );
+    assert_eq!(
+        pending_approvals(&h),
+        0,
+        "a registered user's session-token turn must execute the tool, not queue an \
+         approval; frames: {frames:?}"
+    );
+}
+
+/// A default `dashboard_user` login names no `[[users]]` entry, so its
+/// session token must keep the client IP as sender: the kernel gate resolves
+/// nothing for that credential, and stamping its `UserId::from_name` would
+/// only move the sender off the IP without any policy applying (#8431).
+///
+/// The turn therefore guest-gates and `memory_store` queues an approval —
+/// the same observable outcome as the unauthenticated path.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_token_for_an_unregistered_dashboard_login_keeps_the_guest_gate() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    let h = start_harness().await;
+    let agent_id = spawn_agent(&h).await;
+    // "admin" names no [[users]] entry on this harness — the shape of the
+    // default `dashboard_user` / `dashboard_pass` credential.
+    let session = insert_session(&h, "admin", "owner").await;
+
+    let mut request = format!(
+        "{}/api/agents/{agent_id}/ws",
+        h.base_url.replacen("http://", "ws://", 1)
+    )
+    .into_client_request()
+    .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {session}").parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert!(socket
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .to_text()
+        .unwrap()
+        .contains("connected"));
+
+    socket
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "message",
+                "content": "remember that unregistered sessions stay guests",
+                "message_id": "guest-session-turn",
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    // Guest gate ⇒ the tool call stalls in the approval queue. Poll the
+    // queue (not just the socket) so the assertion is against kernel state,
+    // not frame ordering.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while pending_approvals(&h) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let _ = socket.close(None).await;
+
+    assert_eq!(
+        pending_approvals(&h),
+        1,
+        "an unregistered dashboard login must guest-gate and queue the memory_store \
+         approval, exactly like the unauthenticated path"
+    );
+}
