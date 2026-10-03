@@ -4479,7 +4479,6 @@
     "min_p_placeholder": "od 0 do 1",
     "penalty_placeholder": "od -2 do 2",
     "presence_penalty": "Kara za obecność",
-    "sampling_provider_hint": "Tylko dostawcy zgodni z OpenAI oraz Ollama",
     "repeat_penalty": "Kara za powtórzenia",
     "repeat_penalty_placeholder": "od 0,01 do 2, 1 = wył.",
     "temperature": "Temperatura",

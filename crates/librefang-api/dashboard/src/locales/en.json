@@ -4465,7 +4465,6 @@
     "min_p_placeholder": "0 to 1",
     "penalty_placeholder": "-2 to 2",
     "presence_penalty": "Presence Penalty",
-    "sampling_provider_hint": "OpenAI-compatible providers and Ollama only",
     "repeat_penalty": "Repetition Penalty",
     "repeat_penalty_placeholder": "0.01 to 2, 1 = off",
     "temperature": "Temperature",

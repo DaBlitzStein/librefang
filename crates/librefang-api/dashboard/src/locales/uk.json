@@ -4479,7 +4479,6 @@
     "min_p_placeholder": "від 0 до 1",
     "penalty_placeholder": "від -2 до 2",
     "presence_penalty": "Штраф за присутність",
-    "sampling_provider_hint": "Лише провайдери, сумісні з OpenAI, та Ollama",
     "repeat_penalty": "Штраф за повторення",
     "repeat_penalty_placeholder": "від 0,01 до 2, 1 = вимк.",
     "temperature": "Температура",
