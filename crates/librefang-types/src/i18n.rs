@@ -1,8 +1,7 @@
 //! Internationalization (i18n) module for API error messages.
 //!
-//! Provides a shared translation system using Project Fluent that can be used
-//! across the LibreFang codebase (API server, CLI, etc.). Supports English,
-//! Chinese, Spanish, Japanese, German, and French.
+//! Provides a shared translation system using Project Fluent that can be used across the LibreFang codebase (API server, CLI, etc.).
+//! Supports English, Chinese, Spanish, Japanese, German, French, Ukrainian, Korean, and Polish.
 //!
 //! # Usage
 //!
@@ -111,11 +110,10 @@ pub fn parse_accept_language(header: &str) -> &'static str {
     DEFAULT_LANGUAGE
 }
 
-// The English pack, parsed once per thread.
+// The English pack, used for the per-key fallback.
 //
-// `FluentBundle` is not `Sync` — it holds a `RefCell` — so this cannot be a process-wide `OnceLock`, and a `Mutex` would put a lock on the path of every error message.
-// Per thread is the granularity that pays: `ErrorTranslator::new` runs on every request that can fail (`set_agent_file` builds two), and the daemon has a handful of worker threads, so this turns one English parse per call into one per thread.
-// Measured per parse with `rustc 1.95 -O`: the English pack costs ~450 µs and the German one ~117 µs, so the fallback was re-paying the larger of the two on every construction.
+// `FluentBundle` is not `Sync` — it holds a `RefCell` — so it cannot be shared from a process-wide `OnceLock`.
+// A `thread_local!` is how each thread gets its own bundle.
 thread_local! {
     static EN_FALLBACK: FluentBundle<FluentResource> = {
         let en_id: LanguageIdentifier = DEFAULT_LANGUAGE.parse().expect("en must parse");
@@ -240,7 +238,7 @@ mod tests {
 
     /// A key the language's pack does not define resolves to English rather than to the identifier.
     ///
-    /// `de`, `es`, `fr` and `zh-CN` define around 57 of the 245 keys between them, and the pack-level fallback in `new` only fires when a pack fails to *load* — an incomplete pack is a valid one.
+    /// `de`, `es`, `fr` and `zh-CN` each define only 55-59 of the 245 keys, and the pack-level fallback in `new` only fires when a pack fails to *load* — an incomplete pack is a valid one.
     /// So every key those four languages do not carry reached the operator as `api-error-agent-clone-spawn-failed`, with nothing to read.
     ///
     /// The first assertion is the half that must not change: where German has its own sentence, that sentence is what is returned.
