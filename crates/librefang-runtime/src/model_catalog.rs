@@ -1150,20 +1150,6 @@ impl ModelCatalog {
             .collect()
     }
 
-    /// Turn live model discovery on or off for a provider (#6702).
-    ///
-    /// Returns `false` when the provider is unknown, so the caller can answer
-    /// 404 instead of silently persisting a flag nothing reads.
-    pub fn set_provider_discover_models(&mut self, provider: &str, discover: bool) -> bool {
-        match self.providers.iter_mut().find(|p| p.id == provider) {
-            Some(p) => {
-                p.discover_models = discover;
-                true
-            }
-            None => false,
-        }
-    }
-
     /// Record the operator's discovery preference for a provider and apply it (#8407).
     ///
     /// The write half of [`Self::load_discover_prefs`]: the preference is operator state, so it is stored beside the other operator-owned files under `data/` rather than in the provider TOML the registry sync rewrites.
@@ -1176,6 +1162,36 @@ impl ModelCatalog {
                 true
             }
             None => false,
+        }
+    }
+
+    /// The operator's recorded discovery preference for a provider, if the store has an entry (#8411).
+    ///
+    /// The caller needs the previous entry to undo [`Self::set_provider_discover_preference`] when its persistence fails.
+    pub fn provider_discover_preference(&self, provider: &str) -> Option<bool> {
+        self.discover_prefs.get(provider).copied()
+    }
+
+    /// Undo [`Self::set_provider_discover_preference`] after the preference failed to reach disk (#8411).
+    ///
+    /// Restores both halves of the previous state: the provider's `discover_models` value, and the store entry — the one that was there before, or no entry when there was none.
+    /// The caller holds the same write serialization across the failed save and this restore, so no other writer can observe or build on the intermediate state.
+    pub fn restore_provider_discover_preference(
+        &mut self,
+        provider: &str,
+        previous_flag: bool,
+        previous_pref: Option<bool>,
+    ) {
+        if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider) {
+            p.discover_models = previous_flag;
+        }
+        match previous_pref {
+            Some(previous) => {
+                self.discover_prefs.insert(provider.to_string(), previous);
+            }
+            None => {
+                self.discover_prefs.remove(provider);
+            }
         }
     }
 
@@ -1225,6 +1241,8 @@ impl ModelCatalog {
     /// Persist the discovery preferences to a JSON file, creating its directory if needed.
     /// Removes the file when nothing is recorded.
     ///
+    /// The write is staged in a temp file beside the target and renamed into place, so a crash cannot leave a torn file behind.
+    /// That matters twice over: a torn write would be discarded as "parse failed" on the next boot, and the next adoption or PUT would then replace it with a single entry, losing every other preference — explicit `false`s included (#8411).
     /// Returns the error instead of swallowing it: a preference that fails to reach disk comes back as "discovery off" on the next boot, which is the failure this store exists to prevent.
     pub fn save_discover_prefs(&self, path: &std::path::Path) -> std::io::Result<()> {
         if self.discover_prefs.is_empty() {
@@ -1239,7 +1257,7 @@ impl ModelCatalog {
         }
         let json =
             serde_json::to_string_pretty(&self.discover_prefs).map_err(std::io::Error::other)?;
-        std::fs::write(path, json)
+        crate::mcp_migrate::durable_atomic_write(path, json.as_bytes())
     }
 
     /// Adopt `discover_models = true` out of the provider files, once per provider (#8407).

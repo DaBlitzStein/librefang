@@ -676,7 +676,7 @@ fn local_provider_probe_targets_includes_opted_in_custom_providers() {
         "a custom provider stays out of the probe loop until it opts in"
     );
 
-    assert!(catalog.set_provider_discover_models("acme-vllm", true));
+    assert!(catalog.set_provider_discover_preference("acme-vllm", true));
     let targets = catalog.local_provider_probe_targets();
     assert!(
         targets
@@ -702,7 +702,7 @@ fn local_provider_probe_targets_includes_opted_in_custom_providers() {
     );
     catalog.unsuppress_provider("acme-vllm");
 
-    assert!(catalog.set_provider_discover_models("acme-vllm", false));
+    assert!(catalog.set_provider_discover_preference("acme-vllm", false));
     assert!(
         !catalog
             .local_provider_probe_targets()
@@ -712,7 +712,7 @@ fn local_provider_probe_targets_includes_opted_in_custom_providers() {
     );
 
     assert!(
-        !catalog.set_provider_discover_models("__no_such_provider__", true),
+        !catalog.set_provider_discover_preference("__no_such_provider__", true),
         "an unknown id reports failure so the API can answer 404"
     );
 }
