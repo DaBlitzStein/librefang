@@ -755,6 +755,77 @@ async fn config_set_writes_allowlisted_path_to_tempdir_toml() {
     assert_eq!(audit.outcome, response_status);
 }
 
+/// `POST /api/config/set` with `value: null` on a single-segment path must
+/// state the field's compiled default, not drop the key.
+///
+/// The reload overlay (#8459/#8460) reads an absent top-level key as "keep the
+/// live value", so `doc.remove(parts[0])` left the plan empty and the handler
+/// still answered "applied" while the live value never moved and the default
+/// silently waited for the next restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_null_on_a_single_segment_path_restates_the_default() {
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    // `language` is a writable top-level scalar classified as a read-live
+    // noop, so setting it swaps the live config and `es` is observably live.
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "language", "value": "es"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "language is allowlisted; got {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(response["status"], "applied", "body: {response}");
+    assert_eq!(h.state.kernel.config_ref().language, "es");
+
+    // `null` removes the key. The handler must state `language = "en"` on disk
+    // instead of dropping it, or the overlay keeps the live `es`.
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "language", "value": null}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "got {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let written = std::fs::read_to_string(h.home.join("config.toml")).expect("toml exists");
+    let parsed: toml::Value = toml::from_str(&written).expect("valid toml");
+    assert_eq!(
+        parsed.get("language").and_then(|v| v.as_str()),
+        Some("en"),
+        "the field's default must be stated explicitly, not the key dropped: {written}"
+    );
+
+    // The default is live again and the read payload shows it.
+    assert_eq!(
+        h.state.kernel.config_ref().language,
+        "en",
+        "the removal must swap the default back into the live config"
+    );
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    assert_eq!(
+        json["language"], "en",
+        "GET /api/config must show the restored default: {json}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn config_set_rejects_non_allowlisted_path() {
     let h = boot_router_with_api_key(API_KEY).await;
