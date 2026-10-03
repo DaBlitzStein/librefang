@@ -1417,7 +1417,13 @@ interface MessageBubbleProps {
   ttsAvailable?: boolean;
 }
 
-const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarSrc, agentEmoji, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
+/**
+ * Exported for a render test of the `agentAvatarSrc` passthrough (#8371
+ * review). The picker and the transcript are both inline in this file, and
+ * `ChatPage` itself is not mountable in a unit test — this component is the
+ * reachable call site that hands the once-resolved object URL to every bubble.
+ */
+export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarSrc, agentEmoji, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";

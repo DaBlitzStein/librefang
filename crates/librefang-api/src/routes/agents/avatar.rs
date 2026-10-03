@@ -91,7 +91,8 @@ static AVATAR_UPLOAD_LOCKS: LazyLock<Mutex<HashMap<AgentId, Arc<tokio::sync::Mut
 
 /// Acquire the per-agent avatar-upload lock, creating it on first use.
 ///
-/// The returned guard serialises the caller's place-then-sweep section against every other upload for the same agent.
+/// The returned guard serialises the caller's place-then-sweep section against every other upload or delete for the same agent.
+/// The confirmed-delete purge in `librefang-kernel` (`kernel/agent_runtime.rs`) unlinks avatar files without it — that code runs below this crate and cannot reach this table — but by then the agent is gone, so the worst it can race into is an orphan file, not a reference that 404s.
 /// Idle entries are dropped on each acquisition — an entry no other `Arc` holds is one no upload can be queued on — so the table tracks uploads in flight rather than every agent that ever had one.
 async fn lock_avatar_upload(agent_id: AgentId) -> tokio::sync::OwnedMutexGuard<()> {
     let lock = {
@@ -158,6 +159,11 @@ fn store_avatar_url(state: &AppState, agent_id: AgentId, avatar_url: Option<Stri
             tracing::warn!("Failed to persist agent state: {e}");
         }
     }
+    // The dashboard snapshot memoizes for 900 ms, and the frontend's avatar
+    // mutation invalidates that snapshot as soon as this answers; without the
+    // eviction the refetch can land on the pre-write payload and the row keeps
+    // the old image until the next 5 s poll (#8371 review).
+    crate::routes::config::invalidate_dashboard_snapshot(state);
     true
 }
 
@@ -349,6 +355,8 @@ pub async fn upload_agent_avatar(
 /// GET /api/agents/{id}/avatar — the stored image.
 ///
 /// Authenticated like every other `/api/` route, which is the point: the alternative placement under `~/.librefang/dashboard/` would have been an unauthenticated GET.
+/// Scoped to the caller as well: `user_role_allows_request` admits every GET for any role, so the role gate above this handler is not an access check, and [`can_access_agent`](crate::routes::can_access_agent) is the one the sibling agent-scoped reads use.
+/// A non-owner therefore gets the same agent-not-found 404 a nonexistent id gets, which is also what keeps the route from being an id oracle.
 #[utoipa::path(
     get,
     path = "/api/agents/{id}/avatar",
@@ -366,11 +374,12 @@ pub async fn upload_agent_avatar(
         )),
         (status = 304, description = "Unchanged since the caller's `If-None-Match`"),
         (status = 400, description = "Invalid agent id", body = crate::types::JsonObject),
-        (status = 404, description = "No such agent, or no avatar set", body = crate::types::JsonObject)
+        (status = 404, description = "Agent not found or not visible to the caller, or no avatar set", body = crate::types::JsonObject)
     )
 )]
 pub async fn serve_agent_avatar(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     headers: axum::http::HeaderMap,
@@ -380,6 +389,15 @@ pub async fn serve_agent_avatar(
         Ok(agent_id) => agent_id,
         Err(response) => return *response,
     };
+    // Existence is not access. The RBAC layer lets every GET through for any
+    // role, so without this the route served any agent's image to any
+    // authenticated key and answered differently for an existing id than for
+    // an unknown one — an id oracle. The not-found 404 is deliberate and is
+    // the contract documented on `can_access_agent`: a refusal and an absent
+    // agent are indistinguishable from here.
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return json_error(StatusCode::NOT_FOUND, t.t("api-error-agent-not-found"));
+    }
     drop(t);
 
     let avatars_dir = state.kernel.config_snapshot().effective_avatars_dir();
@@ -465,15 +483,30 @@ pub async fn delete_agent_avatar(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let agent_id = match resolve_agent(&state, &id, &t) {
-        Ok(agent_id) => agent_id,
-        Err(response) => return *response,
+    // `ErrorTranslator` is `!Send`, and the per-agent lock below is acquired
+    // across an `.await`, so the translator stays inside this block rather
+    // than spanning the handler; the failure path below builds its own.
+    let agent_id = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        let agent_id = match resolve_agent(&state, &id, &t) {
+            Ok(agent_id) => agent_id,
+            Err(response) => return *response,
+        };
+        if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+            return refusal.into_response();
+        }
+        agent_id
     };
-    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
-        drop(t);
-        return refusal.into_response();
-    }
+
+    // Serialise against uploads for the same agent (#8349): an upload holds
+    // this lock across its rename, its identity write and its sweep, so a
+    // DELETE that skipped it could interleave three different ways — clearing
+    // the reference while the new file is still served, or clearing the file
+    // after the upload's sweep and before its identity write, which leaves
+    // `avatar_url` naming a route that 404s. Taking the lock here puts the
+    // removal of both the file and the reference on one side of the upload.
+    let _upload_guard = lock_avatar_upload(agent_id).await;
+
     let avatars_dir = state.kernel.config_snapshot().effective_avatars_dir();
     let removed = librefang_types::media::remove_avatars(&avatars_dir, &agent_id.to_string());
     // Clearing the reference is not conditional on a file having been there.
@@ -481,6 +514,7 @@ pub async fn delete_agent_avatar(
     // that state is reachable by restoring a backup of the database without
     // the avatars directory.
     if !store_avatar_url(&state, agent_id, None) {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         // The files are already gone, so answering 200 would report a removal
         // that left `avatar_url` pointing at a route with nothing behind it —
         // exactly the manifest/disk disagreement the upload path's write
