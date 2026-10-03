@@ -2640,21 +2640,11 @@ fn an_unknown_model_with_no_override_resolves_to_nothing() {
     assert_eq!(lim.max_output_tokens, None);
 }
 
-/// The catalog rung of the `max_tokens` chain: when neither the agent nor the
-/// per-model preference names a budget, the *effective* ceiling decides it, so
-/// an operator's `max_output_tokens` correction of a registry figure is what
-/// the turn asks for — not the figure it corrects.
-///
-/// Walks the rung exactly as `agent_execution.rs` does: effective limits →
-/// [`librefang_types::inference_params::KnownLimit::from_effective_limits`] →
-/// `resolve_inference_params`. Reading the raw entry instead would ignore the
-/// override that exists to correct it.
+/// The catalog rung of the `max_tokens` chain, driven through the same method `agent_execution.rs` calls: when neither the agent nor the per-model preference names a budget, the *effective* ceiling decides it, so an operator's `max_output_tokens` correction of a registry figure is what the turn asks for — not the figure it corrects.
+/// Reading the raw entry instead would ignore the override that exists to correct it, and assembling the rung by hand would keep passing even if the execution path stopped asking the catalog at all.
 #[test]
 fn an_operator_override_beats_the_catalog_ceiling_for_an_unset_budget() {
     use librefang_types::agent::ModelConfig;
-    use librefang_types::inference_params::{
-        resolve_inference_params, KnownLimit, LimitSource as KnownSource,
-    };
 
     let mut catalog = test_catalog();
     catalog.add_custom_model(ModelCatalogEntry {
@@ -2679,22 +2669,43 @@ fn an_operator_override_beats_the_catalog_ceiling_for_an_unset_budget() {
         Some(8_192),
         "the override is the effective ceiling"
     );
-    let known = KnownLimit::from_effective_limits(&limits);
-    assert_eq!(
-        known,
-        KnownLimit::new(8_192, KnownSource::Operator),
-        "the corrected ceiling must be attributed to the operator, not the registry"
-    );
 
     let agent = ModelConfig {
         provider: "litellm".to_string(),
         model: "capped".to_string(),
         ..Default::default()
     };
-    let resolved = resolve_inference_params(&agent, None, known);
+    let resolved = catalog.resolve_turn_inference_params(&agent);
     assert_eq!(
         resolved.max_tokens, 8_192,
         "an unset budget takes the correction, not the registry's 16_384"
+    );
+}
+
+/// A model with no override anywhere still answers an unset budget from its own catalog ceiling — 4096 is only the fallback for a model nothing knows.
+#[test]
+fn a_catalog_ceiling_answers_an_unset_budget_through_the_execution_method() {
+    use librefang_types::agent::ModelConfig;
+
+    let mut catalog = test_catalog();
+    catalog.add_custom_model(ModelCatalogEntry {
+        id: "capped".to_string(),
+        provider: "litellm".to_string(),
+        context_window: 200_000,
+        max_output_tokens: 65_536,
+        limits_known: true,
+        ..Default::default()
+    });
+
+    let agent = ModelConfig {
+        provider: "litellm".to_string(),
+        model: "capped".to_string(),
+        ..Default::default()
+    };
+    let resolved = catalog.resolve_turn_inference_params(&agent);
+    assert_eq!(
+        resolved.max_tokens, 65_536,
+        "the turn must ask the endpoint for its registered ceiling"
     );
 }
 
