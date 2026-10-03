@@ -1284,10 +1284,13 @@ export function AgentsPage() {
       return;
     }
     if (templatesQuery.isPending) return;
-    // A failed fetch leaves `data` undefined, and `resolveDrawerSeed` would read
-    // every name as unknown. Wait rather than announcing that a type is gone
-    // when the list that would prove it never arrived.
-    if (templatesQuery.isError) return;
+    // A failed *initial* fetch leaves `data` undefined, and `resolveDrawerSeed`
+    // would read every name as unknown. A failed background refetch keeps the
+    // last successful `data` and only flips the status to error, and that cached
+    // list still resolves names; only the no-data case cannot be judged. Wait
+    // rather than announcing that a type is gone when the list that would prove
+    // it never arrived.
+    if (templatesQuery.isError && templatesQuery.data === undefined) return;
     // Process each distinct param once: a refetch replaces `data` with a new
     // reference and must not re-open the drawer or re-fire the notice.
     if (handledTemplate.current === seed.templateName) return;

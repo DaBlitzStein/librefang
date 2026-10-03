@@ -320,6 +320,25 @@ describe("AgentsPage create drawer seed from ?template= (#8385)", () => {
     expect(screen.queryByTestId("drawer-slot")).toBeNull();
   });
 
+  it("still seeds from cached types when a background refetch fails", async () => {
+    // TanStack Query keeps the last successful `data` when a refetch fails and
+    // only flips `status` to error; the cached list can still resolve the name,
+    // so a failed refetch must not suppress the seed.
+    templatesResult.current = {
+      data: [RESEARCHER],
+      isLoading: false,
+      isPending: false,
+      isError: true,
+    };
+    routerSearch.current = { template: "researcher" };
+
+    renderPage();
+
+    const drawer = await screen.findByTestId("drawer-slot");
+    expect(within(drawer).getByPlaceholderText("researcher")).toBeTruthy();
+    expect(addToastMock).not.toHaveBeenCalledWith("agents.template_not_found", "error");
+  });
+
   it("drops the template param when the seeded drawer closes", async () => {
     seedTemplates();
     routerSearch.current = { template: "researcher" };
