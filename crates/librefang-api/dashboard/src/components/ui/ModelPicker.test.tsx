@@ -536,6 +536,33 @@ describe("ModelPicker", () => {
       ).not.toBeInTheDocument();
     });
 
+    it("collapses an id served by several providers into one row", () => {
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          // The form adapts a bare name into a pair with an empty provider.
+          value={{ provider: "", model: "gpt-4" }}
+          onChange={() => {}}
+          models={[
+            model("openai", "gpt-4"),
+            model("azure", "gpt-4"),
+            model("anthropic", "claude-sonnet-5"),
+          ]}
+        />,
+      );
+
+      open("Simple model");
+      // The flat shape stores the name alone and `find_model` takes the first
+      // match, so the provider is not part of the choice: one row per id rather
+      // than one per provider, all of them marked active.
+      expect(screen.getByRole("button", { name: "openai/gpt-4" })).toHaveAttribute(
+        "aria-current",
+        "true",
+      );
+      expect(screen.queryByRole("button", { name: "azure/gpt-4" })).not.toBeInTheDocument();
+    });
+
     it("reports the provider of the row that was picked", () => {
       const onChange = vi.fn();
       render(

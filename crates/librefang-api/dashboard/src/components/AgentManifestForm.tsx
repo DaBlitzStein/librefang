@@ -58,11 +58,14 @@ import { Field } from "./ui/Field";
 import { ModelPicker } from "./ui/ModelPicker";
 
 /**
- * The routing tiers and `pinned_model` hold a bare model name — the daemon
- * resolves it against the global catalog, so `provider/model` would not
- * resolve — while the picker speaks in pairs. Adapting at the call site keeps
- * the picker from having to know that some of its callers discard the
- * provider.
+ * The routing tiers and `pinned_model` hold a bare model name while the picker
+ * speaks in pairs. Adapting at the call site keeps the picker from having to
+ * know that some of its callers discard the provider — and it is also where the
+ * two fields' catalogs part ways: a tier is resolved against the global catalog
+ * by the tier router, which may land on another provider, while Stable mode
+ * applies `pinned_model` to the agent's own provider (the kernel replaces
+ * `manifest.model.model` alone), so that picker gets the provider-narrowed
+ * list.
  */
 const asModelName = (name: string) => (name ? { provider: "", model: name } : null);
 
@@ -199,8 +202,10 @@ export function AgentManifestForm({
 
   // The main model field holds an id without a provider, so it only offers a
   // list once a provider is chosen; before that the free-text fallback below
-  // takes over. `models` may be the unfiltered catalog (the routing tiers and
-  // fallbacks need it whole), so this narrows it back for this field.
+  // takes over. `pinned_model` lands on the same provider in Stable mode — the
+  // kernel overwrites the model id alone — so its picker shares this list.
+  // `models` may be the unfiltered catalog (the routing tiers and fallbacks
+  // need it whole), so this narrows it back for both fields.
   const filteredModels = useMemo(
     () => (value.model.provider ? models.filter((m) => m.provider === value.model.provider) : []),
     [models, value.model.provider],
@@ -1401,7 +1406,7 @@ export function AgentManifestForm({
               value={asModelName(value.pinned_model)}
               onChange={(next) => update({ pinned_model: next.model })}
               onClear={() => update({ pinned_model: "" })}
-              models={models}
+              models={filteredModels}
               {...pickerCatalog}
             />
           </Field>

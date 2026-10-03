@@ -1033,13 +1033,13 @@ export function AgentsPage() {
     { enabled: !!modelDraft.provider.trim() },
   );
 
-  // Unfiltered on purpose. The manifest editor's routing tiers and
-  // `pinned_model` hold bare names the daemon resolves against the *global*
-  // catalog (`ModelCatalog::find_model`), and each fallback holds a pair from
-  // any provider — so filtering this query to the agent's main provider would
-  // leave those pickers showing only that provider's models, or nothing at all
-  // before a main provider is chosen. The main model field narrows the same
-  // catalog to its own provider inside `AgentManifestForm`.
+  // Unfiltered on purpose. The manifest editor's routing tiers hold bare names
+  // the tier router resolves against the *global* catalog, and each fallback
+  // holds a pair from any provider — so filtering this query to the agent's
+  // main provider would leave those pickers showing only that provider's
+  // models, or nothing at all before a main provider is chosen. The main model
+  // field and `pinned_model` narrow the same catalog to the agent's own
+  // provider inside `AgentManifestForm`.
   //
   // Shared by the create dialog and the editor drawer (#7742): they are never
   // open at the same time, so one query serves both.

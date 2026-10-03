@@ -192,6 +192,24 @@ describe("AgentManifestForm — catalog state and clearing", () => {
     ).toBeInTheDocument();
   });
 
+  it("lists only the agent's own provider for pinned_model", async () => {
+    const user = userEvent.setup();
+    const state = emptyManifestForm();
+    state.model = { ...state.model, provider: "openai", model: "gpt-4o" };
+    render(<Harness initialState={state} models={MODELS} />);
+
+    await user.click(screen.getByText("agents.form.lifecycle"));
+    await user.click(screen.getByRole("button", { name: "agents.form.pinned_model: None" }));
+
+    // Stable mode applies `pinned_model` by overwriting `manifest.model.model`
+    // and leaving the provider alone, so a foreign id would be sent to this
+    // agent's provider on every turn. Only its own provider's rows are offered.
+    expect(screen.getByRole("button", { name: "openai/gpt-4o" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "anthropic/claude-sonnet-5" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows the loading state instead of an empty catalog while it is arriving", async () => {
     const user = userEvent.setup();
     render(<Harness modelsFetching models={[]} providers={[]} />);
