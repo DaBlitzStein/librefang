@@ -281,28 +281,6 @@
   "agents": {
     "title": "Agenci",
     "subtitle": "Aktywne autonomiczne jednostki zarządzane przez jądro LibreFang.",
-    "model": "Model",
-    "provider": "Dostawca",
-    "max_tokens": "Maks. tokenów",
-    "temperature": "Temperatura",
-    "identity": {
-      "title": "Wygląd",
-      "emoji": "Emoji",
-      "emoji_placeholder": "Brak",
-      "emoji_saved": "Zaktualizowano emoji",
-      "emoji_cleared": "Usunięto emoji",
-      "emoji_failed": "Nie udało się zaktualizować emoji",
-      "avatar": "Obraz awatara",
-      "avatar_upload": "Prześlij",
-      "avatar_replace": "Zamień",
-      "avatar_hint": "PNG, JPEG, GIF lub WebP, do 2 MB. SVG nie jest akceptowany. Obraz przechowuje demon i udostępnia go wyłącznie zalogowanym.",
-      "avatar_saved": "Zaktualizowano awatar",
-      "avatar_failed": "Nie udało się przesłać awatara",
-      "avatar_removed": "Usunięto awatar",
-      "avatar_remove_failed": "Nie udało się usunąć awatara",
-      "avatar_type_rejected": "Awatar musi być obrazem PNG, JPEG, GIF lub WebP. SVG nie jest akceptowany.",
-      "avatar_too_large": "Ten obraz ma {{size}} MB, a limit to {{limit}} MB."
-    },
     "no_matching": "Brak agentów pasujących do wyszukiwania.",
     "capabilities": "Możliwości",
     "skills": "Umiejętności",
@@ -970,11 +948,6 @@
       "events_tail": "zdarzenia · tail",
       "no_logs": "Nie zarejestrowano jeszcze żadnych tur dla tego agenta.",
       "crashed_title": "{{name}} jest w stanie błędu",
-"edit_full_manifest": "Edytuj pełną konfigurację",
-      "edit_full_manifest_hint": "Wszystkie pola manifestu — zasoby, uprawnienia, autonomia, format odpowiedzi i więcej.",
-      "manifest_history": "Historia manifestu",
-      "manifest_history_load_err": "Nie udało się wczytać historii manifestu.",
-      "no_history": "Nie zarejestrowano jeszcze żadnych zmian konfiguracji.",
       "channels": "Kanały",
       "channels_hint": "Puste oznacza dostępność ze wszystkich skonfigurowanych kanałów.",
       "channels_search_placeholder": "Szukaj kanałów…",
@@ -986,13 +959,8 @@
       "mcp_pending_desc": "Przyznane w agent.toml, ale brak aktywnego połączenia — nie dostarczają narzędzi. Sprawdź serwer na stronie MCP; uprawnienie aktywuje się po połączeniu."
     },
     "tab": {
-      "conversation": "Rozmowa",
-      "memory": "Pamięć",
-      "skills": "Umiejętności",
-      "tools": "Narzędzia",
-      "schedule": "Harmonogram",
-      "logs": "Logi",
-      "routing": "Routing"
+      "logs_info": "logi i informacje",
+      "config": "konfiguracja"
     },
     "brief": {
       "last_activity": "Ostatnia aktywność",
@@ -1012,8 +980,7 @@
     "info": {
       "logs": "Logi",
       "memory": "Pamięć",
-      "prompts": "Prompty i eksperymenty",
-      "history": "Historia"
+      "prompts": "Prompty i eksperymenty"
     },
     "config": {
       "advanced_mode": "Tryb zaawansowany",
@@ -1023,10 +990,6 @@
       "main": "Widok agenta",
       "info": "Informacje o agencie",
       "config_groups": "Grupy konfiguracji"
-    },
-    "tab": {
-      "logs_info": "logi i informacje",
-      "config": "konfiguracja"
     },
     "select_an_agent": "Wybierz agenta",
     "select_an_agent_hint": "Wybierz agenta po lewej stronie, aby sprawdzić jego sesje, pamięć, umiejętności i logi na żywo.",
@@ -4507,19 +4470,6 @@
     "promote_toml": "Oczyszczony manifest",
     "promote_toml_unavailable": "Nie udało się wyrenderować oczyszczonego manifestu jako TOML.",
     "promote_unavailable": "Dla tego typu nie ma dostępnego podglądu promocji.",
-    "quick_run": "Szybkie uruchomienie",
-    "quick_run_cost": "${{cost}}",
-    "quick_run_ephemeral_note": "Pracownik i jego przestrzeń robocza już nie istnieją; został tylko ten wynik.",
-    "quick_run_failed": "Nie udało się uruchomić efemerycznego pracownika",
-    "quick_run_meta": "{{iterations}} iteracji · {{tools}} narzędzi",
-    "quick_run_no_agents": "Szybkie uruchomienie wymaga istniejącego agenta, w którego imieniu zadanie zostanie wykonane. Utwórz najpierw agenta.",
-    "quick_run_parent": "Uruchom jako",
-    "quick_run_parent_hint": "Pracownik działa w imieniu tego agenta: to jego budżet jest obciążany, jego limit zasobów jest egzekwowany, a jego zestaw narzędzi wyznacza górną granicę narzędzi pracownika.",
-    "quick_run_result": "Wynik",
-    "quick_run_submit": "Uruchom",
-    "quick_run_task": "Zadanie",
-    "quick_run_task_placeholder": "Streść informacje o wydaniu z tego tygodnia…",
-    "quick_run_title": "Szybkie uruchomienie — {{name}}",
     "restore": "Restore this version",
     "restore_btn": "Restore",
     "restore_failed": "Restore failed",

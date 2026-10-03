@@ -281,28 +281,6 @@
   "agents": {
     "title": "에이전트",
     "subtitle": "LibreFang 커널에 의해 관리되는 활성 자율 단위.",
-    "model": "모델",
-    "provider": "공급자",
-    "max_tokens": "최대 토큰",
-    "temperature": "온도",
-    "identity": {
-      "title": "외형",
-      "emoji": "이모지",
-      "emoji_placeholder": "없음",
-      "emoji_saved": "이모지를 변경했습니다",
-      "emoji_cleared": "이모지를 지웠습니다",
-      "emoji_failed": "이모지를 변경하지 못했습니다",
-      "avatar": "아바타 이미지",
-      "avatar_upload": "업로드",
-      "avatar_replace": "교체",
-      "avatar_hint": "PNG, JPEG, GIF 또는 WebP, 최대 2MB. SVG는 허용되지 않습니다. 이미지는 데몬에 저장되며 로그인한 요청에만 제공됩니다.",
-      "avatar_saved": "아바타를 변경했습니다",
-      "avatar_failed": "아바타를 업로드하지 못했습니다",
-      "avatar_removed": "아바타를 삭제했습니다",
-      "avatar_remove_failed": "아바타를 삭제하지 못했습니다",
-      "avatar_type_rejected": "아바타는 PNG, JPEG, GIF 또는 WebP 이미지여야 합니다. SVG는 허용되지 않습니다.",
-      "avatar_too_large": "이 이미지는 {{size}}MB이며, 한도는 {{limit}}MB입니다."
-    },
     "no_matching": "검색어와 일치하는 에이전트가 없습니다.",
     "capabilities": "기능",
     "skills": "기술",
@@ -961,11 +939,6 @@
       "events_tail": "이벤트 · 꼬리",
       "no_logs": "이 에이전트에 대해서는 아직 기록된 회전이 없습니다.",
       "crashed_title": "{{name}}이(가) 오류 상태입니다.",
-"edit_full_manifest": "전체 설정 편집",
-      "edit_full_manifest_hint": "모든 매니페스트 필드 — 리소스, 기능, 자율성, 응답 형식 등.",
-      "manifest_history": "매니페스트 기록",
-      "manifest_history_load_err": "매니페스트 기록을 불러오지 못했습니다.",
-      "no_history": "아직 기록된 구성 변경 사항이 없습니다.",
       "channels": "채널",
       "channels_hint": "비어 있으면 설정된 모든 채널에서 접근 가능합니다.",
       "channels_search_placeholder": "채널 검색…",
@@ -977,13 +950,8 @@
       "mcp_pending_desc": "agent.toml에 부여되었지만 라이브 연결이 없어 도구를 제공하지 않습니다. MCP 페이지에서 서버를 확인하세요. 연결되면 부여가 활성화됩니다."
     },
     "tab": {
-      "conversation": "대화",
-      "memory": "메모리",
-      "skills": "기술",
-      "tools": "도구",
-      "schedule": "일정",
-      "logs": "로그",
-      "routing": "라우팅"
+      "logs_info": "로그 및 정보",
+      "config": "설정"
     },
     "brief": {
       "last_activity": "최근 활동",
@@ -1003,8 +971,7 @@
     "info": {
       "logs": "로그",
       "memory": "메모리",
-      "prompts": "프롬프트 및 실험",
-      "history": "기록"
+      "prompts": "프롬프트 및 실험"
     },
     "config": {
       "advanced_mode": "고급 모드",
@@ -1014,10 +981,6 @@
       "main": "에이전트 보기",
       "info": "에이전트 정보",
       "config_groups": "구성 그룹"
-    },
-    "tab": {
-      "logs_info": "로그 및 정보",
-      "config": "설정"
     },
     "select_an_agent": "에이전트를 선택하세요",
     "select_an_agent_hint": "세션, 메모리, 스킬, 라이브 로그를 검사하려면 왼쪽에서 에이전트를 선택하세요.",
@@ -4485,19 +4448,6 @@
     "promote_toml": "정제된 매니페스트",
     "promote_toml_unavailable": "정제된 매니페스트를 TOML로 렌더링하지 못했습니다.",
     "promote_unavailable": "이 타입에는 승격 미리보기를 사용할 수 없습니다.",
-    "quick_run": "빠른 실행",
-    "quick_run_cost": "${{cost}}",
-    "quick_run_ephemeral_note": "워커와 미션 워크스페이스는 이미 사라졌습니다. 남은 것은 이 결과뿐입니다.",
-    "quick_run_failed": "임시 워커를 실행하지 못했습니다",
-    "quick_run_meta": "반복 {{iterations}}회 · 도구 {{tools}}개",
-    "quick_run_no_agents": "빠른 실행에는 대신 실행할 기존 에이전트가 하나 필요합니다. 먼저 에이전트를 만들어 주세요.",
-    "quick_run_parent": "실행 주체",
-    "quick_run_parent_hint": "워커는 이 에이전트를 대신해 실행됩니다. 비용은 이 에이전트에 청구되고, 적용되는 리소스 할당량도 이 에이전트의 것이며, 워커가 쓸 수 있는 도구의 상한도 이 에이전트의 도구 집합입니다.",
-    "quick_run_result": "결과",
-    "quick_run_submit": "실행",
-    "quick_run_task": "작업",
-    "quick_run_task_placeholder": "이번 주 릴리스 노트를 요약해 주세요…",
-    "quick_run_title": "빠른 실행 — {{name}}",
     "restore": "Restore this version",
     "restore_btn": "Restore",
     "restore_failed": "Restore failed",
