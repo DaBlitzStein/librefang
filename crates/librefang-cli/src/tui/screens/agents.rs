@@ -2789,6 +2789,41 @@ mod tests {
         );
     }
 
+    /// The kernel's longest `change_source` tags (`suspend-persist-failed` and
+    /// `resume-persist-failed`, 22 and 21 bytes) are wider than the column's 18
+    /// cells. They must truncate with the ellipsis rather than overflow or
+    /// vanish, and short tags such as `model` must pass through untouched.
+    #[test]
+    fn long_change_source_tags_render_truncated_within_the_column() {
+        let with_source = |source: &str| ManifestVersion {
+            timestamp: "2026-09-07 10:00:00".to_string(),
+            change_source: source.to_string(),
+            manifest_toml: "name = \"a\"\n".to_string(),
+        };
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        state.set_manifest_history(vec![
+            with_source("suspend-persist-failed"),
+            with_source("model"),
+            with_source("restore"),
+        ]);
+
+        let rendered = render(&mut state);
+
+        assert!(
+            rendered.contains("suspend-persist-f\u{2026}"),
+            "the longest tag must still name itself inside 18 cells:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("model"),
+            "a short tag must render in full:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("restore"),
+            "the restore tag must render in full:\n{rendered}"
+        );
+    }
+
     /// `manifest_versions.timestamp` is stored in SQLite's `datetime('now')`
     /// shape — UTC with no offset — which is the interpretation the dashboard's
     /// `formatSqliteDateTime` also applies.
