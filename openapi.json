@@ -861,7 +861,7 @@
           "agents"
         ],
         "summary": "GET /api/agents/{id}/avatar — the stored image.",
-        "description": "Authenticated like every other `/api/` route, which is the point: the alternative placement under `~/.librefang/dashboard/` would have been an unauthenticated GET.",
+        "description": "Authenticated like every other `/api/` route, which is the point: the alternative placement under `~/.librefang/dashboard/` would have been an unauthenticated GET.\nScoped to the caller as well: `user_role_allows_request` admits every GET for any role, so the role gate above this handler is not an access check, and [`can_access_agent`](crate::routes::can_access_agent) is the one the sibling agent-scoped reads use.\nA non-owner therefore gets the same agent-not-found 404 a nonexistent id gets, which is also what keeps the route from being an id oracle.",
         "operationId": "serve_agent_avatar",
         "parameters": [
           {
@@ -898,7 +898,7 @@
             }
           },
           "404": {
-            "description": "No such agent, or no avatar set",
+            "description": "Agent not found or not visible to the caller, or no avatar set",
             "content": {
               "application/json": {
                 "schema": {
