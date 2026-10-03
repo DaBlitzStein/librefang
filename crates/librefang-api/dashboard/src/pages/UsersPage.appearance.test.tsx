@@ -289,7 +289,20 @@ describe("avatar upload", () => {
     });
 
     expect(uploadAvatar).not.toHaveBeenCalled();
-    expect(addToast).toHaveBeenCalledWith("That image is 2.0 MB; the limit is 2 MB.", "error");
+    expect(addToast).toHaveBeenCalledWith("That image is 2.1 MB; the limit is 2 MB.", "error");
+  });
+
+  it("lets a file with no MIME type through for the daemon to sniff", () => {
+    renderSection();
+    // What a browser reports for an extension-less file picked through "All
+    // files". The list is a courtesy; the daemon decides by sniffing the
+    // bytes, so an empty `type` must not be refused here.
+    const file = fileOfSize("picture", "", 1024);
+
+    fireEvent.change(fileInput(), { target: { files: [file] } });
+
+    expect(uploadAvatar).toHaveBeenCalledTimes(1);
+    expect(uploadAvatar.mock.calls[0][0]).toEqual({ name: NAME, file });
   });
 
   it("accepts a file exactly at the cap", () => {

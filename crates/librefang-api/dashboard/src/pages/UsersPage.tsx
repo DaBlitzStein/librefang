@@ -36,7 +36,7 @@ import {
 } from "lucide-react";
 
 import type { UserItem, UserUpsertPayload } from "../lib/http/client";
-import { ALLOWED_AVATAR_TYPES, MAX_AVATAR_BYTES } from "../api";
+import { ALLOWED_USER_AVATAR_TYPES, MAX_USER_AVATAR_BYTES } from "../api";
 import { useUserAvatarUrl, useUsers } from "../lib/queries/users";
 import { useWhoami } from "../lib/queries/authz";
 import {
@@ -927,7 +927,11 @@ export function UserAppearanceSection({
     input.value = "";
     if (!file) return;
 
-    if (!(ALLOWED_AVATAR_TYPES as readonly string[]).includes(file.type)) {
+    // An empty `file.type` is passed through rather than refused: a browser
+    // reports that for an extension-less file picked via "All files", and the
+    // type list is a courtesy — the daemon's sniffing is what accepts or
+    // rejects the bytes.
+    if (file.type && !(ALLOWED_USER_AVATAR_TYPES as readonly string[]).includes(file.type)) {
       addToast(
         t("users.identity.avatar_type_rejected", {
           defaultValue:
@@ -937,12 +941,16 @@ export function UserAppearanceSection({
       );
       return;
     }
-    if (file.size > MAX_AVATAR_BYTES) {
+    if (file.size > MAX_USER_AVATAR_BYTES) {
       addToast(
         t("users.identity.avatar_too_large", {
           defaultValue: "That image is {{size}} MB; the limit is {{limit}} MB.",
-          size: (file.size / (1024 * 1024)).toFixed(1),
-          limit: (MAX_AVATAR_BYTES / (1024 * 1024)).toFixed(0),
+          // Rounded up, so a rejection can never render as "2.0 MB; the limit
+          // is 2 MB": to-one-decimal rounding let 2 MiB + 1 byte do exactly
+          // that. Ceiling at the first decimal keeps the named size strictly
+          // above the cap for every file this branch rejects.
+          size: (Math.ceil(file.size / (100 * 1024)) / 10).toFixed(1),
+          limit: (MAX_USER_AVATAR_BYTES / (1024 * 1024)).toFixed(0),
         }),
         "error",
       );
@@ -1042,7 +1050,7 @@ export function UserAppearanceSection({
             <input
               type="file"
               ref={fileInputRef}
-              accept={ALLOWED_AVATAR_TYPES.join(",")}
+              accept={ALLOWED_USER_AVATAR_TYPES.join(",")}
               onChange={handleFileChange}
               className="hidden"
               data-testid="user-avatar-file-input"

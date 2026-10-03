@@ -1768,34 +1768,40 @@ export async function patchAgent(agentId: string, body: { name?: string; descrip
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
 }
 
-// --- Visual identity: emoji, colour and avatar image, agents and users (#8339) --
+// --- Agent visual identity: emoji, colour, avatar image (#8339) ------------
 
 /** Largest avatar the daemon stores, mirroring `MAX_AVATAR_BYTES` in
  *  `crates/librefang-api/src/routes/agents/avatar.rs`.
  *
- *  Not named after agents although that route is where the number lives: the
- *  daemon has one cap for both, and this is the single client mirror of it.
- *
  *  Duplicated here to fail before spending the upload, not to decide: a stale
  *  copy of this number can only be wrong in the direction of sending bytes the
  *  server then rejects with a 413 that names the real cap. */
-export const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
+export const MAX_AGENT_AVATAR_BYTES = 2 * 1024 * 1024;
 
 /** Image types the daemon accepts as an avatar, mirroring
- *  `librefang_types::media::ALLOWED_IMAGE_TYPES`. Shared by both surfaces, for
- *  the same reason the cap above is.
+ *  `librefang_types::media::ALLOWED_IMAGE_TYPES`.
  *
  *  SVG is absent on purpose and its absence is load-bearing: an SVG is XML that
  *  can carry script, and the daemon serves avatars back to a browser. Note the
  *  server decides by sniffing the bytes and ignores both the `Content-Type` we
  *  send and the name of the file, so this list is a courtesy to the person
  *  picking the file — never the check that matters. */
-export const ALLOWED_AVATAR_TYPES = [
+export const ALLOWED_AGENT_AVATAR_TYPES = [
   "image/png",
   "image/jpeg",
   "image/gif",
   "image/webp",
 ] as const;
+
+/** The same two limits for the signed-in user's avatar (#8339).
+ *
+ *  Aliases rather than copies: the daemon serves both avatars with one cap
+ *  and one type list, and a second literal here could drift out of step with
+ *  the first. Named for the user surface so neither editor reads a constant
+ *  that belongs to the other. */
+export const MAX_USER_AVATAR_BYTES = MAX_AGENT_AVATAR_BYTES;
+export const ALLOWED_USER_AVATAR_TYPES = ALLOWED_AGENT_AVATAR_TYPES;
+
 
 /** The one path an agent's avatar can live at, mirroring
  *  `librefang_types::media::agent_avatar_url`.
@@ -1825,9 +1831,9 @@ export interface AgentAvatarUploadResult {
  *  what lands on disk is `{agent_id}.{ext}` where the id is a UUID the daemon
  *  minted and the extension comes from sniffing the bytes.
  *
- *  Rejects with 403 for an agent the deployment provisions, because setting an
- *  avatar writes `avatar_url` into the manifest identity and the next reconcile
- *  would overwrite it (#6695). */
+ *  Rejects with `423 Locked` for an agent the deployment provisions, because
+ *  setting an avatar writes `avatar_url` into the manifest identity and the
+ *  next reconcile would overwrite it (#6695). */
 export async function uploadAgentAvatar(agentId: string, file: Blob): Promise<AgentAvatarUploadResult> {
   const response = await fetchWithTimeout(`/api/agents/${encodeURIComponent(agentId)}/avatar`, {
     method: "POST",
@@ -1869,6 +1875,7 @@ export async function updateAgentIdentity(
 ): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/identity`, identity);
 }
+
 
 // --- User visual identity (#8339) -------------------------------------------
 
