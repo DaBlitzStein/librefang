@@ -1982,6 +1982,16 @@ impl BridgeManager {
                                     // listener has no such fallback
                                     // semantics — each adapter must
                                     // match on its own configured key.
+                                    //
+                                    // `reported_account_id()` is passed
+                                    // alongside for the same reason
+                                    // `resolve_channel_adapter` matches
+                                    // it: adapters that stamp their own
+                                    // `metadata["account_id"]` on inbound
+                                    // (dingtalk / email / google_chat)
+                                    // are bound by that id, and the
+                                    // listener has no inbound metadata to
+                                    // fall back on.
                                     let adapter_routing = |adapter: &Arc<dyn ChannelAdapter>| {
                                         let channel_type = adapter.channel_type();
                                         let ct_str = channel_type_str(&channel_type);
@@ -1995,6 +2005,7 @@ impl BridgeManager {
                                             requesting_agent,
                                             ct_str,
                                             adapter.account_id(),
+                                            adapter.reported_account_id(),
                                         );
                                         (bound_agent, binding_peers)
                                     };

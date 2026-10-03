@@ -1039,7 +1039,10 @@ pub trait ChannelAdapter: Send + Sync {
     /// outbound send auto-filled from that metadata (`channel_send` /
     /// `channel_dm`) still has to find the instance. The send resolver
     /// (`resolve_channel_adapter`) therefore matches this value in addition
-    /// to `account_id()` and `name()`.
+    /// to `account_id()` and `name()`, and the approval listener matches
+    /// `AgentBinding::match_rule.account_id` bindings through it as well, so
+    /// a binding the inbound resolver matched under this id keeps receiving
+    /// approvals for the same agent.
     ///
     /// Default `None`: adapters with no second identity answer to their
     /// configured identity alone.

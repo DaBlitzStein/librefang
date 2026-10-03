@@ -2035,6 +2035,10 @@ struct NotifyingAdapter {
     recipients: Vec<ChannelUser>,
     sent: Arc<Mutex<Vec<(String, String)>>>,
     account_id: Option<String>,
+    /// The transport-reported alias (`ready` account id) of a sidecar whose
+    /// config name is `account_id` — the value it may stamp into inbound
+    /// `metadata["account_id"]` (#8418).
+    reported_account_id: Option<String>,
     channel_type: ChannelType,
     /// Every `send` fails, the way a Telegram bot that is not a member of the
     /// target chat fails. The attempt is still recorded, so a test can assert
@@ -2050,6 +2054,7 @@ impl NotifyingAdapter {
             recipients,
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: None,
+            reported_account_id: None,
             channel_type: ChannelType::Telegram,
             fail_sends: false,
         })
@@ -2061,6 +2066,28 @@ impl NotifyingAdapter {
             recipients,
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: Some(account_id.to_string()),
+            reported_account_id: None,
+            channel_type: ChannelType::Telegram,
+            fail_sends: false,
+        })
+    }
+
+    /// Like `with_account`, but the transport reports a different account id
+    /// in its `ready` event — the dingtalk / email / google_chat shape where
+    /// the config name and the inbound-stamped `metadata["account_id"]`
+    /// diverge (#8418).
+    fn with_reported_account(
+        name: &str,
+        account_id: &str,
+        reported_account_id: &str,
+        recipients: Vec<ChannelUser>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            recipients,
+            sent: Arc::new(Mutex::new(Vec::new())),
+            account_id: Some(account_id.to_string()),
+            reported_account_id: Some(reported_account_id.to_string()),
             channel_type: ChannelType::Telegram,
             fail_sends: false,
         })
@@ -2073,6 +2100,7 @@ impl NotifyingAdapter {
             recipients: Vec::new(),
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: Some(account_id.to_string()),
+            reported_account_id: None,
             channel_type: ChannelType::Telegram,
             fail_sends: true,
         })
@@ -2092,6 +2120,7 @@ impl NotifyingAdapter {
             recipients,
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: Some(account_id.to_string()),
+            reported_account_id: None,
             channel_type,
             fail_sends: false,
         })
@@ -2153,6 +2182,10 @@ impl ChannelAdapter for NotifyingAdapter {
 
     fn account_id(&self) -> Option<&str> {
         self.account_id.as_deref()
+    }
+
+    fn reported_account_id(&self) -> Option<&str> {
+        self.reported_account_id.as_deref()
     }
 }
 
@@ -2889,6 +2922,88 @@ async fn test_approval_listener_falls_back_to_agent_binding_when_default_unset()
     );
     assert!(
         sent[0].1.contains("5002aaaa"),
+        "notification body should include the approval id prefix, got: {}",
+        sent[0].1
+    );
+
+    manager.stop().await;
+}
+
+/// #8418: a sidecar whose config `name` differs from the account id its
+/// subprocess reports in `ready`. Inbound messages from such adapters
+/// (dingtalk / email / google_chat) carry the reported id in
+/// `metadata["account_id"]`, so a per-account binding keyed to that id matches
+/// inbound routing. The approval listener only has the adapter — config name
+/// in `account_id()`, reported id in `reported_account_id()` — so it must
+/// match the binding through either identity, or the same binding that routes
+/// inbound messages silently drops every approval for its agent.
+#[tokio::test]
+async fn test_approval_listener_matches_a_binding_keyed_by_the_reported_account_id() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+
+    let router = AgentRouter::new();
+    router.register_agent("binder-mail".to_string(), agent_x);
+    router.load_bindings(&[librefang_types::config::AgentBinding {
+        agent: "binder-mail".to_string(),
+        match_rule: librefang_types::config::BindingMatchRule {
+            channel: Some("telegram".to_string()),
+            // The id the adapter reports in `ready`, not the config name.
+            account_id: Some("acct-1".to_string()),
+            peer_id: Some("chat-mail".to_string()),
+            ..Default::default()
+        },
+    }]);
+    let router = Arc::new(router);
+
+    let adapter = NotifyingAdapter::with_reported_account("mail", "mail", "acct-1", Vec::new());
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter).await.unwrap();
+    manager.start_approval_listener().await;
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_x,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "8418aaaa11112222".to_string(),
+                agent_id: agent_x.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "rm -rf /tmp/foo".to_string(),
+                risk_level: "high".to_string(),
+                ..Default::default()
+            }),
+        )))
+        .expect("broadcast send");
+
+    wait_until(
+        "approval delivered to the reported-id binding's chat",
+        || !adapter_ref.get_sent().is_empty(),
+    )
+    .await;
+
+    let sent = adapter_ref.get_sent();
+    assert_eq!(
+        sent.len(),
+        1,
+        "expected one notification to the bound chat, got: {sent:?}"
+    );
+    assert_eq!(
+        sent[0].0, "chat-mail",
+        "the binding keyed by the adapter-reported account id must receive the approval"
+    );
+    assert!(
+        sent[0].1.contains("8418aaaa"),
         "notification body should include the approval id prefix, got: {}",
         sent[0].1
     );
