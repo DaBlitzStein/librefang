@@ -2212,22 +2212,24 @@ pub fn spawn_fetch_agent_manifest_history(
                 // A bad agent id is answered by the endpoint (400 for a non-UUID,
                 // 404 for one it does not know), so the reason it gives is reported
                 // instead of a generic failure.
-                let outcome = daemon_response(
+                let body = match fetch_json(
                     client
                         .get(format!(
                             "{base_url}/api/agents/{agent_id}/manifest-history?limit={limit}"
                         ))
                         .send(),
                     || crate::i18n::t("tui-event-manifest-history-fetch-failed"),
-                );
-                let resp = match outcome {
-                    Ok(resp) => resp,
+                ) {
+                    Ok(body) => body,
                     Err(message) => {
                         fail(&tx, FetchFailure::Error(message));
                         return;
                     }
                 };
-                let Ok(body) = resp.json::<serde_json::Value>() else {
+                // A 200 whose body carries no `versions` array is a broken answer,
+                // not an agent with no history: reporting an empty pane would hide
+                // the malformed response behind "nothing recorded".
+                let Some(versions) = body["versions"].as_array() else {
                     fail(
                         &tx,
                         FetchFailure::Error(crate::i18n::t(
@@ -2236,24 +2238,14 @@ pub fn spawn_fetch_agent_manifest_history(
                     );
                     return;
                 };
-                body["versions"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .map(|v| ManifestVersion {
-                                timestamp: v["timestamp"].as_str().unwrap_or_default().to_string(),
-                                change_source: v["change_source"]
-                                    .as_str()
-                                    .unwrap_or_default()
-                                    .to_string(),
-                                manifest_toml: v["manifest_toml"]
-                                    .as_str()
-                                    .unwrap_or_default()
-                                    .to_string(),
-                            })
-                            .collect()
+                versions
+                    .iter()
+                    .map(|v| ManifestVersion {
+                        timestamp: v["timestamp"].as_str().unwrap_or_default().to_string(),
+                        change_source: v["change_source"].as_str().unwrap_or_default().to_string(),
+                        manifest_toml: v["manifest_toml"].as_str().unwrap_or_default().to_string(),
                     })
-                    .unwrap_or_default()
+                    .collect()
             }
             // Snapshots are written into the substrate by the same kernel this arm
             // holds, so an in-process TUI can read them directly — including rows a
