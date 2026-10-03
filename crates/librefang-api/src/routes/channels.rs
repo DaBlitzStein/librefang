@@ -1050,10 +1050,32 @@ fn remove_sidecar_block_anywhere(
     // states it any more — see the function docs for why it goes in a file
     // this walk modified and why it must not run while an include still
     // declares entries.
-    if removed && !document_states_sidecar_section(config_path)? {
-        if let Some(path) = modified.first() {
-            super::sidecar_toml::state_empty_sidecar_channels(path)?;
+    //
+    // Both steps run after the walk has rewritten files, and the in-loop
+    // error path restores every snapshot on failure; this one must too, or an
+    // I/O error here leaves the blocks stripped with no explicit `[]` and no
+    // way to retry out of it.
+    let finalize = (|| -> Result<(), String> {
+        if removed && !document_states_sidecar_section(config_path)? {
+            if let Some(path) = modified.first() {
+                super::sidecar_toml::state_empty_sidecar_channels(path)?;
+            }
         }
+        Ok(())
+    })();
+    if let Err(error) = finalize {
+        for (snapshot_path, contents) in &snapshots {
+            if let Err(restore_error) =
+                super::sidecar_toml::restore_sidecar_file(snapshot_path, contents.as_deref())
+            {
+                tracing::error!(
+                    path = %snapshot_path.display(),
+                    error = %restore_error,
+                    "sidecar delete: failed to restore snapshot after a partial-write failure"
+                );
+            }
+        }
+        return Err(error);
     }
 
     Ok(removed)

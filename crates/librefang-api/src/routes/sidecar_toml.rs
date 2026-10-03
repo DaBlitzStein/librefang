@@ -313,10 +313,11 @@ pub fn remove_sidecar_block(path: &Path, name: &str) -> Result<bool, String> {
     // Drop a now-empty array rather than leaving a bare `sidecar_channels = []`
     // behind in this file. The caller (`remove_sidecar_block_anywhere`) owns the
     // cross-file decision: when no reachable file states the section any more
-    // it writes the explicit empty array once, in the root, so the reload
-    // overlay (#8459/#8460) can express the deletion — a root-level `[]` from
-    // this single file would instead shadow the entries an included file still
-    // declares, because the root wins the include merge.
+    // it writes the explicit empty array once, in the first file the walk
+    // modified — which can be an include file, not necessarily the root — so
+    // the reload overlay (#8459/#8460) can express the deletion. A `[]` written
+    // while a reachable file still declares entries would instead shadow them,
+    // because the root wins the include merge.
     if now_empty {
         doc.remove("sidecar_channels");
     }
