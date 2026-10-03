@@ -801,9 +801,11 @@ impl AgentSelectState {
             // The TOML is taller than the pane; page through it rather than
             // cutting the trailing tables off with no way to reach them (#8231).
             KeyCode::PageDown => {
+                let max = self.manifest_history_scroll_max();
                 self.manifest_history_scroll = self
                     .manifest_history_scroll
-                    .saturating_add(MANIFEST_HISTORY_PAGE);
+                    .saturating_add(MANIFEST_HISTORY_PAGE)
+                    .min(max);
             }
             KeyCode::PageUp => {
                 self.manifest_history_scroll = self
@@ -813,6 +815,22 @@ impl AgentSelectState {
             _ => {}
         }
         AgentAction::Continue
+    }
+
+    /// Highest scroll offset that still shows a line of the selected snapshot.
+    ///
+    /// `Paragraph::scroll` past the end renders blank, so an unbounded PageDown
+    /// hides the snapshot behind empty rows and takes the same number of PageUps
+    /// to get back. Keeping the last line visible caps the offset at
+    /// `lines - 1`.
+    fn manifest_history_scroll_max(&self) -> u16 {
+        let lines = self
+            .manifest_history_list
+            .selected()
+            .and_then(|i| self.manifest_history.get(i))
+            .map(|v| v.manifest_toml.lines().count())
+            .unwrap_or(0);
+        lines.saturating_sub(1).min(u16::MAX as usize) as u16
     }
 
     /// Record the snapshots a fetch returned and put the cursor on the newest.
@@ -2630,8 +2648,18 @@ mod tests {
     fn changing_the_selected_snapshot_resets_the_scroll_offset() {
         let mut state = AgentSelectState::new();
         state.sub = AgentSubScreen::ManifestHistory;
+        // Taller than one page, or the PageDown below would be clamped to the
+        // snapshot's last line and the reset assertion would pass vacuously.
+        let tall = (0..40)
+            .map(|i| format!("key_{i:02} = {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         state.set_manifest_history(vec![
-            version("2026-09-07 10:00:00"),
+            ManifestVersion {
+                timestamp: "2026-09-07 10:00:00".to_string(),
+                change_source: "api".to_string(),
+                manifest_toml: tall,
+            },
             version("2026-09-06 09:00:00"),
         ]);
 
@@ -2642,6 +2670,32 @@ mod tests {
         assert_eq!(
             state.manifest_history_scroll, 0,
             "a new snapshot must start at the top"
+        );
+    }
+
+    /// A snapshot shorter than one page has nothing below the fold: PageDown
+    /// must stop with its last line still visible instead of blanking the pane,
+    /// and one PageUp must be enough to get back to the top.
+    #[test]
+    fn page_down_stops_at_the_last_line_of_a_short_snapshot() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        // `version` builds two lines, so the last reachable offset is 1.
+        state.set_manifest_history(vec![version("2026-09-07 10:00:00")]);
+
+        for _ in 0..3 {
+            state.handle_key(press(KeyCode::PageDown));
+        }
+
+        assert_eq!(
+            state.manifest_history_scroll, 1,
+            "the offset must stop at lines - 1 instead of scrolling past the end"
+        );
+
+        state.handle_key(press(KeyCode::PageUp));
+        assert_eq!(
+            state.manifest_history_scroll, 0,
+            "one PageUp must undo the last reachable page"
         );
     }
 
