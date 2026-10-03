@@ -267,6 +267,31 @@ pub struct CompletionRequest {
     pub max_tokens: u32,
     /// Sampling temperature.
     pub temperature: f32,
+    /// Nucleus sampling (`top_p`). `None` = not set, so the provider's default applies.
+    ///
+    /// Typed rather than carried in [`Self::extra_body`] (#8290) because the drivers that do not merge `extra_body` dropped it silently, and the one that does forwarded it to endpoints that reject it.
+    /// Each driver places it where its wire expects it, or drops it with a `debug!` when the target model has no such parameter.
+    pub top_p: Option<f32>,
+    /// OpenAI-family frequency penalty. `None` = not set.
+    ///
+    /// Sent only by the drivers whose wire has the field; see [`Self::top_p`].
+    pub frequency_penalty: Option<f32>,
+    /// OpenAI-family presence penalty. `None` = not set.
+    ///
+    /// Sent only by the drivers whose wire has the field; see [`Self::top_p`].
+    pub presence_penalty: Option<f32>,
+    /// Top-k sampling. `None` = not set.
+    ///
+    /// Anthropic, Gemini / Vertex AI and Ollama have it; the OpenAI-format driver sends it only to the local servers and gateways known to read it (see `LocalSamplerDialect`). See [`Self::top_p`].
+    pub top_k: Option<u32>,
+    /// Minimum-probability (min-p) sampling. `None` = not set.
+    ///
+    /// A llama.cpp / Ollama / vLLM parameter; see [`Self::top_k`] for where it is sent.
+    pub min_p: Option<f32>,
+    /// llama.cpp-style repetition penalty (`1.0` = off). `None` = not set.
+    ///
+    /// Not the same parameter as [`Self::frequency_penalty`]. A driver whose runtime spells it differently (vLLM's `repetition_penalty`) renames it on the wire.
+    pub repeat_penalty: Option<f32>,
     /// System prompt (extracted from messages for APIs that need it separately).
     pub system: Option<String>,
     /// Extended thinking configuration (if supported by the model).

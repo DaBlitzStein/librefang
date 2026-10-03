@@ -11086,12 +11086,16 @@ fn goal_run_start_reports_unset_self_handle() {
     let goal_id = librefang_types::goal::GoalId::new();
     let agent_id = AgentId::new();
 
-    assert!(!kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None));
+    assert_eq!(
+        kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None),
+        crate::goal_runner::GoalRunStart::Unavailable,
+        "an unset self-handle is a fault on this host, not a missing goal"
+    );
     assert!(kernel.goal_run_status(goal_id).is_none());
 }
 
 /// #7785 review: `goal_run_start` used to end with `self.workflows.goal_runner.start(...); true`,
-/// discarding the runner's own refusal — `GoalRunner::start` returns `false`
+/// discarding the runner's own refusal — `GoalRunner::start` answers `GoalNotFound`
 /// when the goal is missing from the shared store (the race a deletion wins
 /// against a caller's stale read). The goal here is simply never seeded, the
 /// same "not found when the runner loads it" condition, and self_handle is
@@ -11105,8 +11109,9 @@ fn goal_run_start_propagates_the_runners_refusal_of_a_missing_goal() {
     let goal_id = librefang_types::goal::GoalId::new();
     let agent_id = AgentId::new();
 
-    assert!(
-        !kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None),
+    assert_eq!(
+        kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None),
+        crate::goal_runner::GoalRunStart::GoalNotFound,
         "a goal absent from the store must not be reported as started"
     );
     assert!(kernel.goal_run_status(goal_id).is_none());
@@ -14976,6 +14981,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
     let stale_session = librefang_memory::session::Session {
         id: stale_session_id,
         agent_id,
+        parent_session_id: None,
         messages: vec![],
         context_window_tokens: 0,
         label: None,
@@ -14999,6 +15005,7 @@ fn boot_canonical_recovery_advances_pointer_to_most_recently_active_session_5198
     let active_session = librefang_memory::session::Session {
         id: active_session_id,
         agent_id,
+        parent_session_id: None,
         messages: vec![
             librefang_types::message::Message::user("hello"),
             librefang_types::message::Message::assistant("world"),
@@ -15258,6 +15265,7 @@ async fn streaming_turn_on_non_canonical_session_survives_in_turn_auto_compactio
         .save_session(&MemSession {
             id: pinned_session_id,
             agent_id,
+            parent_session_id: None,
             messages: (0..SEEDED_MESSAGES)
                 .map(|i| Message::user(format!("seeded message {i}")))
                 .collect(),
@@ -15307,6 +15315,152 @@ async fn streaming_turn_on_non_canonical_session_survives_in_turn_auto_compactio
     assert!(
         compacted.messages.len() < SEEDED_MESSAGES,
         "the in-turn auto-compaction must have run on the pinned session, but it still holds {} of the {SEEDED_MESSAGES} seeded messages",
+        compacted.messages.len()
+    );
+
+    kernel.shutdown();
+}
+
+/// Boot a driverless kernel with its self-handle installed, spawn one agent, and seed `session_id` with `messages` user messages owned by it.
+/// Shared by the #8507 non-streaming auto-compaction tests below.
+async fn kernel_with_seeded_session(
+    name: &str,
+    session_id: Option<SessionId>,
+    messages: usize,
+) -> (Arc<LibreFangKernel>, AgentId, SessionId) {
+    use librefang_memory::session::Session as MemSession;
+    use librefang_types::message::Message;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    // Same discipline as `reentrant_test_kernel`: keep the tempdir alive until process exit so a background write that outlives `shutdown()` cannot race its teardown.
+    std::mem::forget(dir);
+    let kernel = Arc::new(
+        LibreFangKernel::boot_with_config(KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            default_model: DefaultModelConfig::driverless(),
+            ..KernelConfig::default()
+        })
+        .expect("kernel should boot"),
+    );
+    kernel.set_self_handle();
+    let agent_id = kernel
+        .spawn_agent(test_manifest(
+            name,
+            "non-streaming auto-compaction regression",
+            vec![],
+        ))
+        .expect("spawn should succeed");
+    let session_id = session_id.unwrap_or_else(|| {
+        kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("agent entry")
+            .session_id
+    });
+    kernel
+        .memory
+        .substrate
+        .save_session(&MemSession {
+            id: session_id,
+            agent_id,
+            parent_session_id: None,
+            messages: (0..messages)
+                .map(|i| Message::user(format!("seeded message {i}")))
+                .collect(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        })
+        .expect("seeding the over-threshold session should succeed");
+    (kernel, agent_id, session_id)
+}
+
+/// A non-streaming turn on an over-threshold session must auto-compact it before the loop runs (#8507).
+/// Before the fix both automatic compaction sites lived only in the streaming sender, so a session driven through `send_message_full` (channel bridges, cron, `agent_send`, the REST message route) was only ever trimmed and its `compaction_cursor` stayed 0.
+/// This drives the per-session-lock shape: a non-canonical `session_id_override` makes `send_message_full_inner` take `session_msg_locks[sid]`, so the compactor has to recognise that lock as held by this task instead of parking on it, the same hazard `streaming_turn_on_non_canonical_session_survives_in_turn_auto_compaction` pins for the streaming path.
+/// The kernel is driverless (#7743), so the turn itself fails at the LLM call; what is asserted is that it returns and that the compaction ran first.
+#[tokio::test(flavor = "multi_thread")]
+async fn non_streaming_turn_on_non_canonical_session_auto_compacts_without_self_deadlock() {
+    // Past the default `threshold_messages` (30) so the pre-loop check fires, and past `keep_recent` (10) so the compactor trims.
+    const SEEDED_MESSAGES: usize = 40;
+    let pinned = SessionId::new();
+    let (kernel, agent_id, session_id) =
+        kernel_with_seeded_session("nonstream-session-lock", Some(pinned), SEEDED_MESSAGES).await;
+    let canonical = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry")
+        .session_id;
+    assert_ne!(
+        session_id, canonical,
+        "test invariant: the override must not collapse onto the canonical session, or the turn takes the per-agent lock instead"
+    );
+
+    let turn = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        kernel.send_message_with_session_override(
+            agent_id,
+            "ping",
+            None,
+            None,
+            None,
+            Some(session_id),
+        ),
+    )
+    .await;
+    // The turn's own result is not asserted: a driverless kernel fails it at the LLM call. Returning at all is part of the contract.
+    let _ = turn.expect(
+        "the non-streaming turn must finish; if the compactor re-acquires session_msg_locks[sid] on the task that holds it, this timeout fires",
+    );
+
+    let compacted = kernel
+        .memory
+        .substrate
+        .get_session(session_id)
+        .expect("get_session must not error")
+        .expect("the pinned session must still exist");
+    assert!(
+        compacted.messages.len() < SEEDED_MESSAGES,
+        "the non-streaming pre-loop auto-compaction must have run on the pinned session, but it still holds {} of the {SEEDED_MESSAGES} seeded messages",
+        compacted.messages.len()
+    );
+
+    kernel.shutdown();
+}
+
+/// The per-agent-lock sibling of the test above (#8507): a plain `send_message` on the agent's canonical session takes `agent_msg_locks[agent]`, and the pre-loop auto-compaction must both run and recognise that lock as held.
+#[tokio::test(flavor = "multi_thread")]
+async fn non_streaming_turn_on_canonical_session_auto_compacts_without_self_deadlock() {
+    const SEEDED_MESSAGES: usize = 40;
+    let (kernel, agent_id, session_id) =
+        kernel_with_seeded_session("nonstream-agent-lock", None, SEEDED_MESSAGES).await;
+
+    let turn = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        kernel.send_message(agent_id, "ping"),
+    )
+    .await;
+    let _ = turn.expect(
+        "the non-streaming turn must finish; if the compactor re-acquires agent_msg_locks[agent] on the task that holds it, this timeout fires",
+    );
+
+    let compacted = kernel
+        .memory
+        .substrate
+        .get_session(session_id)
+        .expect("get_session must not error")
+        .expect("the canonical session must still exist");
+    assert!(
+        compacted.messages.len() < SEEDED_MESSAGES,
+        "the non-streaming pre-loop auto-compaction must have run on the canonical session, but it still holds {} of the {SEEDED_MESSAGES} seeded messages",
         compacted.messages.len()
     );
 
@@ -15419,6 +15573,7 @@ async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below
     let session = MemSession {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages,
         context_window_tokens: 0,
         label: None,
@@ -19188,6 +19343,201 @@ fn spawn_warns_that_a_per_agent_tool_exec_backend_does_not_route_tool_calls_8221
         !quiet.text().contains("#8221"),
         "an explicit local override must not warn; captured: {:?}",
         quiet.text()
+    );
+
+    kernel.shutdown();
+}
+
+/// Regression for #7991 review: `reset_session` (and `reboot_session`, which
+/// shares the same `reset_one_session` implementation) used to delete the
+/// target session through the cascading `delete_session`, so resetting a
+/// session that had spawned sub-agent children silently deleted the whole
+/// descendant subtree with it — a "reset this one chat" call that took
+/// unrelated delegated audit trail down too, with nothing in the return
+/// value to say so.
+///
+/// Uses `reboot_session` (not `reset_session`) so the test doesn't need a
+/// working aux LLM client — `save_session_summary` only runs on the
+/// `reset_session` path, and its `>= 2 messages` gate is irrelevant here;
+/// the fix under test is about the delete primitive, not the summary.
+#[tokio::test(flavor = "multi_thread")]
+async fn resetting_a_session_does_not_cascade_delete_its_children() {
+    let kernel = cascade_test_kernel();
+    let agent_id = register_test_agent(&kernel, "reset-lineage-parent");
+
+    let parent = kernel.memory.substrate.create_session(agent_id).unwrap();
+    let child = librefang_memory::session::Session {
+        id: SessionId::new(),
+        agent_id,
+        parent_session_id: Some(parent.id),
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    kernel.memory.substrate.save_session(&child).unwrap();
+
+    kernel
+        .reboot_session(agent_id, ResetScope::Session(parent.id))
+        .await
+        .expect("reboot must succeed");
+
+    assert!(
+        kernel
+            .memory
+            .substrate
+            .get_session(child.id)
+            .unwrap()
+            .is_some(),
+        "resetting the parent must not cascade-delete a child session — \
+         that is what the cascading `delete_session` is for, and \
+         `reset_session`/`reboot_session` must use the non-cascading \
+         `delete_session_only` instead"
+    );
+    let recreated_parent = kernel
+        .memory
+        .substrate
+        .get_session(parent.id)
+        .unwrap()
+        .expect("the parent sid must be recreated empty at the same id");
+    assert!(recreated_parent.messages.is_empty());
+}
+
+/// A rename must reach the next turn's prompt, not only the file on disk (#8469).
+///
+/// The workspace identity files are cached for `PROMPT_CACHE_TTL`, so a rename that rewrote IDENTITY.md without dropping the cache entry would keep serving the old `name:` for up to 30 s after `PATCH` reported success.
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_agent_drops_cached_identity_so_the_next_turn_sees_the_new_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-rename-identity-cache");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "cache-a".to_string(),
+        description: "rename identity cache test agent".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let workspace = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must be registered")
+        .manifest
+        .workspace
+        .expect("spawned agent has a workspace");
+
+    let warmed = kernel.cached_workspace_metadata(&workspace, false);
+    assert!(
+        warmed
+            .identity_md
+            .as_deref()
+            .is_some_and(|md| md.contains("\nname: cache-a\n")),
+        "the warmed cache must hold the spawn-time IDENTITY.md, got: {:?}",
+        warmed.identity_md
+    );
+
+    kernel
+        .rename_agent(agent_id, "cache-b".to_string())
+        .expect("rename should succeed");
+
+    let identity = kernel
+        .cached_workspace_metadata(&workspace, false)
+        .identity_md
+        .expect("IDENTITY.md must still be readable after the rename");
+    assert!(
+        identity.contains("\nname: cache-b\n") && !identity.contains("\nname: cache-a\n"),
+        "the next prompt build must see the renamed IDENTITY.md, not the cached one: {identity}"
+    );
+
+    kernel.shutdown();
+}
+
+/// A personality edit must reach the next turn's prompt, not only the file on disk (#8447).
+///
+/// The workspace identity files are cached for `PROMPT_CACHE_TTL`, so a write that did not drop the cache entry would keep serving the old front matter after `PATCH` reported success.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_agent_personality_drops_cached_identity_so_the_next_turn_sees_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-personality-cache");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "personality-cache".to_string(),
+        description: "personality identity cache test agent".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let workspace = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must be registered")
+        .manifest
+        .workspace
+        .expect("spawned agent has a workspace");
+
+    let warmed = kernel.cached_workspace_metadata(&workspace, false);
+    assert!(
+        warmed
+            .identity_md
+            .as_deref()
+            .is_some_and(|md| md.contains("\nvibe: helpful\n")),
+        "the warmed cache must hold the spawn-time IDENTITY.md, got: {:?}",
+        warmed.identity_md
+    );
+
+    kernel
+        .set_agent_personality(
+            agent_id,
+            &librefang_types::agent::AgentPersonality {
+                vibe: Some("technical".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("personality write should succeed");
+
+    let identity = kernel
+        .cached_workspace_metadata(&workspace, false)
+        .identity_md
+        .expect("IDENTITY.md must still be readable after the write");
+    assert!(
+        identity.contains("\nvibe: technical\n") && !identity.contains("\nvibe: helpful\n"),
+        "the next prompt build must see the new front matter, not the cached one: {identity}"
+    );
+
+    let unknown = kernel.set_agent_personality(
+        AgentId::new(),
+        &librefang_types::agent::AgentPersonality {
+            vibe: Some("x".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(
+            unknown,
+            Err(KernelError::LibreFang(LibreFangError::AgentNotFound(_)))
+        ),
+        "{unknown:?}"
     );
 
     kernel.shutdown();
