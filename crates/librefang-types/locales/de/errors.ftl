@@ -85,3 +85,4 @@ api-error-rate-limited = Anfragelimit ueberschritten. Bitte versuchen Sie es spa
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = Fehler: { $error }
+api-error-agent-manifest-conflict = Veraltetes Manifest: Dieser Agent wurde nach dem Laden von jemand anderem gespeichert. Neu laden und die Änderung erneut anwenden.

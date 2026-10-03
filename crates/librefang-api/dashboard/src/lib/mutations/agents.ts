@@ -206,6 +206,8 @@ export function usePatchAgent() {
         schedule?: AgentSchedulePatch;
         auto_evolve?: boolean;
         manifest_toml?: string;
+        /** ETag from `GET .../manifest`; the server answers 409 on a mismatch (#8424). */
+        expected_version?: string;
       };
     }) => patchAgent(agentId, body),
     onSuccess: (_data, variables) => {

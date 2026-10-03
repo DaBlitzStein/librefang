@@ -1746,8 +1746,18 @@ export type AgentSchedulePatch =
  * as an `AgentManifest` and every other field on this request is ignored.
  * Powers the dashboard's full manifest editor (#7742), seeded from
  * `getAgentManifest` and serialized via `serializeManifestForm`. */
-export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch; manifest_toml?: string; auto_evolve?: boolean }): Promise<ApiActionResponse> {
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch; manifest_toml?: string; auto_evolve?: boolean; expected_version?: string }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
+}
+
+/** A manifest read with its optimistic-concurrency token (#8424).
+ *
+ * `version` is the `ETag` of the GET; `PATCH /api/agents/{id}` answers 409
+ * when the `expected_version` it is sent no longer matches the manifest, so a
+ * save built on a stale read cannot silently undo a concurrent write. */
+export interface AgentManifestSnapshot {
+  manifest_toml: string;
+  version: string | null;
 }
 
 /** GET /api/agents/{id}/manifest — the agent's full manifest as raw TOML.
@@ -1759,8 +1769,19 @@ export async function patchAgent(agentId: string, body: { name?: string; descrip
  * writes back. Reflects the live in-memory manifest, not necessarily the
  * on-disk `agent.toml` (they can differ for a moment after a partial PATCH
  * that hasn't flushed to disk yet). */
-export async function getAgentManifest(agentId: string): Promise<string> {
-  return getText(`/api/agents/${encodeURIComponent(agentId)}/manifest`);
+export async function getAgentManifest(agentId: string): Promise<AgentManifestSnapshot> {
+  const response = await fetchWithTimeout(
+    `/api/agents/${encodeURIComponent(agentId)}/manifest`,
+    { headers: buildHeaders() },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return {
+    manifest_toml: await response.text(),
+    // The ETag is quoted per RFC 9110; the PATCH body carries the bare token.
+    version: response.headers.get("ETag")?.replace(/^"|"$/g, "") ?? null,
+  };
 }
 
 /** Response shape for `GET /api/agents/{id}/channels`. */

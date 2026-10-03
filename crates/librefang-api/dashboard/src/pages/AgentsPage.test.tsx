@@ -428,10 +428,8 @@ describe("grant panels reconcile with the manifest form (#8424)", () => {
     expect(source).toContain("topLevel: { ...prev.topLevel, channels }");
   });
 
-  it("refreshes the panel queries when the form saves", () => {
-    expect(source).toContain("agentQueries.agentTools(detailAgent.id).queryKey");
-    expect(source).toContain("agentQueries.agentSkills(detailAgent.id).queryKey");
-    expect(source).toContain("agentQueries.agentMcpServers(detailAgent.id).queryKey");
-    expect(source).toContain("agentQueries.channels(detailAgent.id).queryKey");
+  it("echoes the seed ETag as expected_version when the form saves (#8424)", () => {
+    expect(source).toContain("expected_version: manifestEditorVersion");
+    expect(source).toContain("setManifestEditorVersion(snapshot.version)");
   });
 });

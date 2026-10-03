@@ -85,3 +85,4 @@ api-error-rate-limited = Límite de solicitudes excedido. Inténtelo de nuevo m�
 # typed MemoryRouteError-style helper. Without this key, every `t_args("api-error-generic", …)`
 # call returns the literal key as the response body and `$error` interpolation never runs.
 api-error-generic = Error: { $error }
+api-error-agent-manifest-conflict = Manifiesto obsoleto: alguien guardó este agente después de que lo cargara. Recargue y vuelva a aplicar el cambio.

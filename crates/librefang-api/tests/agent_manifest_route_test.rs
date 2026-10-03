@@ -254,3 +254,85 @@ async fn get_manifest_unknown_agent_returns_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// #8424: the GET carries the optimistic-concurrency token the editor echoes
+/// back on save, and a PATCH built on a stale read is refused with 409 rather
+/// than silently overwriting whatever changed in between.
+#[tokio::test(flavor = "multi_thread")]
+async fn manifest_patch_rejects_a_stale_expected_version() {
+    let h = boot().await;
+    let id = spawn_with(
+        &h.state,
+        AgentManifest {
+            name: "manifest-version".to_string(),
+            ..AgentManifest::default()
+        },
+    );
+
+    // The token from the read the editor would have seeded from.
+    let read = h
+        .app
+        .clone()
+        .oneshot(get(&format!("/api/agents/{id}/manifest")))
+        .await
+        .expect("oneshot");
+    assert_eq!(read.status(), StatusCode::OK);
+    let etag = read
+        .headers()
+        .get(axum::http::header::ETAG)
+        .expect("GET must carry an ETag")
+        .to_str()
+        .expect("ascii etag")
+        .trim_matches('"')
+        .to_string();
+
+    let edited = AgentManifest {
+        name: "manifest-version".to_string(),
+        description: "from the editor".to_string(),
+        ..AgentManifest::default()
+    };
+    let edited_toml = toml::to_string_pretty(&edited).expect("serialize");
+
+    // A token that no longer matches what is on the server must not be applied.
+    let (status, body) = send_text(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({
+                "manifest_toml": edited_toml.clone(),
+                "expected_version": "stale",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+
+    // The token from the seed read still applies.
+    let (status, body) = send_text(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({ "manifest_toml": edited_toml, "expected_version": etag }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    // And the save rotated the token, so a second save built on the first
+    // read is refused too.
+    let read = h
+        .app
+        .clone()
+        .oneshot(get(&format!("/api/agents/{id}/manifest")))
+        .await
+        .expect("oneshot");
+    let rotated = read
+        .headers()
+        .get(axum::http::header::ETAG)
+        .expect("ETag after save")
+        .to_str()
+        .expect("ascii etag")
+        .trim_matches('"')
+        .to_string();
+    assert_ne!(rotated, etag);
+}

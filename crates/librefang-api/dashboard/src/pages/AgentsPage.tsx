@@ -508,6 +508,10 @@ export function AgentsPage() {
     useState<ManifestExtras>(emptyManifestExtras);
   const [manifestEditorErrors, setManifestEditorErrors] = useState<Set<string>>(new Set());
   const [manifestEditorParseError, setManifestEditorParseError] = useState<string | null>(null);
+  // The ETag the form was seeded from (#8424). Sent as `expected_version` on
+  // save so a manifest that changed in the meantime is refused with 409
+  // instead of silently overwritten.
+  const [manifestEditorVersion, setManifestEditorVersion] = useState<string | null>(null);
   // The config tab is the manifest editor's only surface, so editing is live
   // exactly while that tab is selected. Every query the form needs hangs off
   // this one condition.
@@ -687,6 +691,22 @@ export function AgentsPage() {
       setDetailAgent(mergeOriginFields(mergeHandFlag(d, fallback), (detailAgent as AgentView) ?? undefined));
     } catch {
       // keep current state when refresh fails
+    }
+  }
+
+  /** Re-read the manifest's ETag after a write the form did not make (#8424).
+   *
+   * The grant panels and their modals write through their own endpoints, so
+   * the token the form was seeded with no longer describes the server's
+   * manifest. Refreshing it keeps the next form save from failing with 409 on
+   * a write the user did make. */
+  async function refreshManifestVersion(agentId: string) {
+    if (!manifestEditorLive || manifestEditorAgentId !== agentId) return;
+    try {
+      const fresh = await qc.fetchQuery(agentQueries.manifest(agentId));
+      setManifestEditorVersion(fresh.version);
+    } catch {
+      // Keep the old token; the next save surfaces the conflict.
     }
   }
 
@@ -1076,7 +1096,9 @@ export function AgentsPage() {
     if (!manifestEditorLive || !manifestEditorAgentId) return;
     if (manifestEditorSeededFor === manifestEditorAgentId) return;
     if (!agentManifestQuery.data) return;
-    const parsed = parseManifestToml(agentManifestQuery.data);
+    const snapshot = agentManifestQuery.data;
+    const parsed = parseManifestToml(snapshot.manifest_toml);
+    setManifestEditorVersion(snapshot.version);
     if (parsed.ok) {
       setManifestEditorFormState(parsed.form);
       setManifestEditorExtras(parsed.extras);
@@ -1119,7 +1141,13 @@ export function AgentsPage() {
     }
     const toml = serializeManifestForm(manifestEditorFormState, manifestEditorExtras);
     manifestPatchMutation.mutate(
-      { agentId: detailAgent.id, body: { manifest_toml: toml } },
+      {
+        agentId: detailAgent.id,
+        body: {
+          manifest_toml: toml,
+          ...(manifestEditorVersion ? { expected_version: manifestEditorVersion } : {}),
+        },
+      },
       {
         onSuccess: async () => {
           addToast(
@@ -1127,15 +1155,7 @@ export function AgentsPage() {
             "success",
           );
           await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
-          // The grant panels read the same keys through their own endpoints:
-          // refresh them so a panel save cannot put back a pre-form list
-          // (#8424). The form stays the writer of record on disk.
-          await Promise.all([
-            qc.invalidateQueries({ queryKey: agentQueries.agentTools(detailAgent.id).queryKey }),
-            qc.invalidateQueries({ queryKey: agentQueries.agentSkills(detailAgent.id).queryKey }),
-            qc.invalidateQueries({ queryKey: agentQueries.agentMcpServers(detailAgent.id).queryKey }),
-            qc.invalidateQueries({ queryKey: agentQueries.channels(detailAgent.id).queryKey }),
-          ]);
+          await refreshManifestVersion(detailAgent.id);
         },
         onError: (e: Error) =>
           addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
@@ -1607,12 +1627,13 @@ export function AgentsPage() {
               // The panel writes through `PUT /channels`, the form writes the
               // whole manifest: without this the next form save would re-emit
               // the pre-panel grant list and silently undo the panel (#8424).
-              onSaved={(channels) =>
+              onSaved={(channels) => {
                 setManifestEditorExtras((prev) => ({
                   ...prev,
                   topLevel: { ...prev.topLevel, channels },
-                }))
-              }
+                }));
+                void refreshManifestVersion(agent.id);
+              }}
             />
           )}
           {configGroup === "planning" && <AgentSchedulePanel agent={agent} />}
@@ -1808,6 +1829,7 @@ export function AgentsPage() {
             // The form owns the same `skills` key: adopt the panel's write so
             // the next form save cannot re-emit the pre-panel list (#8424).
             setManifestEditorFormState((prev) => ({ ...prev, skills: assigned }));
+            void refreshManifestVersion(agent.id);
             addToast(
               t("agents.detail.skills_saved", {
                 defaultValue: "Saved to agent.toml",
@@ -2239,6 +2261,7 @@ export function AgentsPage() {
                 tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
                 tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
               }));
+              void refreshManifestVersion(agentId);
             },
             onError: (e) => {
               addToast(
@@ -2263,6 +2286,7 @@ export function AgentsPage() {
               setExpandedToolGroup(null);
               // Same reconciliation as the builtin half (#8424).
               setManifestEditorFormState((prev) => ({ ...prev, mcp_servers: mcpDraftArr }));
+              void refreshManifestVersion(agentId);
             },
             onError: (e) => {
               addToast(
@@ -3447,6 +3471,7 @@ export function AgentsPage() {
                       tool_allowlist: resolvedAllowlist,
                       tool_blocklist: toolBlocklistDraft,
                     }));
+                    void refreshManifestVersion(toolsEditorAgentId);
                   }
                   closeToolsEditor();
                 } catch (err) {

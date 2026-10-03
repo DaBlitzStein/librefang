@@ -1,5 +1,18 @@
 use super::*;
 
+/// Optimistic-concurrency token for the manifest editor (#8424): the SHA-256
+/// of the same pretty-printed TOML `get_agent_manifest_toml` hands the client,
+/// so a `PATCH` carrying `expected_version` fails with `409` when another
+/// writer changed the manifest after the editor was seeded.
+fn manifest_version(manifest: &librefang_types::agent::AgentManifest) -> String {
+    use sha2::{Digest, Sha256};
+
+    let text = toml::to_string_pretty(manifest).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 // ---------------------------------------------------------------------------
 // Shared manifest resolution helper
 // ---------------------------------------------------------------------------
@@ -1270,9 +1283,10 @@ pub async fn list_agent_runtime(
     path = "/api/agents/{id}",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = crate::types::JsonObject, description = "Partial agent fields to update"),
+    request_body(content = crate::types::JsonObject, description = "Partial agent fields to update. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424)."),
     responses(
         (status = 200, description = "Partially update an agent (name, description, model, system prompt)", body = crate::types::JsonObject),
+        (status = 409, description = "The manifest changed after this editor read it; reload before saving (#8424)", body = crate::types::JsonObject),
         (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
@@ -1303,6 +1317,24 @@ pub async fn patch_agent(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
+    }
+
+    // #8424: the manifest editor echoes the ETag its seed read carried in
+    // `expected_version`; a mismatch means another writer saved after that
+    // read, and applying this PATCH would silently undo their change.
+    if let Some(expected) = body.get("expected_version").and_then(|v| v.as_str()) {
+        let current = state
+            .kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|entry| manifest_version(&entry.manifest))
+            .unwrap_or_default();
+        if !expected.is_empty() && current != expected {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": t.t("api-error-agent-manifest-conflict")})),
+            );
+        }
     }
 
     let mcp_only_patch = patch_agent_only_updates_mcp_servers(&body);
@@ -1617,12 +1649,23 @@ pub async fn get_agent_manifest_toml(
     let internal_error_msg = t.t("api-error-internal");
     drop(t);
     match toml::to_string_pretty(&entry.manifest) {
-        Ok(text) => (
-            StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "application/toml")],
-            Body::from(text),
-        )
-            .into_response(),
+        Ok(text) => {
+            // #8424: the ETag is the optimistic-concurrency token the editor
+            // echoes back as `expected_version` when it saves, so a save built
+            // on a stale read is refused instead of silently overwriting the
+            // intervening write. Quoted per RFC 9110.
+            let version = manifest_version(&entry.manifest);
+            let etag = format!("\"{version}\"");
+            (
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/toml"),
+                    (axum::http::header::ETAG, etag.as_str()),
+                ],
+                Body::from(text),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!(error = %e, "failed to serialize agent manifest to TOML");
             (

@@ -821,7 +821,7 @@
           }
         ],
         "requestBody": {
-          "description": "Partial agent fields to update",
+          "description": "Partial agent fields to update. `expected_version` (optional) is the `ETag` from `GET /api/agents/{id}/manifest`; a mismatch answers 409 (#8424).",
           "content": {
             "application/json": {
               "schema": {
@@ -834,6 +834,16 @@
         "responses": {
           "200": {
             "description": "Partially update an agent (name, description, model, system prompt)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The manifest changed after this editor read it; reload before saving (#8424)",
             "content": {
               "application/json": {
                 "schema": {
