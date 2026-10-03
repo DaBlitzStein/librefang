@@ -73,6 +73,8 @@ import {
   type ManifestFormState,
 } from "../lib/agentManifest";
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
+import { fetchManifestVersion } from "../lib/manifestVersion";
+import { agentKeys } from "../lib/queries/keys";
 import {
   agentQueries,
   useAgentEvents,
@@ -195,11 +197,17 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
  */
 export function ChannelsSection({
   agentId,
+  expectedVersion,
   onSaved,
+  onWriteFailed,
 }: {
   agentId: string;
+  /** Manifest ETag from the open editor, echoed as `expected_version` (#8424). */
+  expectedVersion?: string;
   /** Reports the persisted grant list so the manifest form re-seeds it (#8424). */
   onSaved?: (channels: string[]) => void;
+  /** A failed PUT can leave the token stale (409) — ask the host to re-read it. */
+  onWriteFailed?: () => void;
 }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -225,7 +233,7 @@ export function ChannelsSection({
     if (draft === null || setChannels.isPending) return;
     const saved = draft;
     setChannels.mutate(
-      { agentId, channels: saved },
+      { agentId, channels: saved, expectedVersion },
       {
         onSuccess: () => {
           addToast(
@@ -235,8 +243,12 @@ export function ChannelsSection({
           setDraft(null);
           onSaved?.(saved);
         },
-        onError: (e: Error) =>
-          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
+        onError: (e: Error) => {
+          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error");
+          // A 409 means this draft was built on a superseded read; re-read the
+          // token so a retry is not refused forever.
+          onWriteFailed?.();
+        },
       },
     );
   };
@@ -680,6 +692,10 @@ export function AgentsPage() {
             prev?.id === targetId ? { ...prev, name: trimmed } : prev,
           );
           setEditingName(false);
+          // The rename writes the live manifest through `PATCH /agents/{id}`
+          // but the form's copy has no name field, so there is nothing to
+          // adopt — only the ETag moved (#8424).
+          void refreshManifestVersion(targetId);
           addToast(t("agents.rename_success", { defaultValue: "Agent renamed" }), "success");
         },
         onError: (e: Error) => {
@@ -702,17 +718,26 @@ export function AgentsPage() {
     }
   }
 
+  /** The live manifest token to echo as `expected_version` on a panel write
+   * (#8424). Only the open editor for the selected agent has one; writes that
+   * happen outside it keep the old tokenless contract. */
+  function manifestVersionFor(agentId: string): string | undefined {
+    if (!manifestEditorLive || manifestEditorAgentId !== agentId) return undefined;
+    return manifestEditorVersion ?? undefined;
+  }
+
   /** Re-read the manifest's ETag after a write the form did not make (#8424).
    *
    * The grant panels and their modals write through their own endpoints, so
    * the token the form was seeded with no longer describes the server's
    * manifest. Refreshing it keeps the next form save from failing with 409 on
-   * a write the user did make. */
+   * a write the user did make. `fetchManifestVersion` forces the read past the
+   * query client's 30 s staleTime — the plain `fetchQuery` this used to be
+   * returned the cached snapshot and never moved the token. */
   async function refreshManifestVersion(agentId: string) {
     if (!manifestEditorLive || manifestEditorAgentId !== agentId) return;
     try {
-      const fresh = await qc.fetchQuery(agentQueries.manifest(agentId));
-      setManifestEditorVersion(fresh.version);
+      setManifestEditorVersion(await fetchManifestVersion(qc, agentId));
     } catch {
       // Keep the old token; the next save surfaces the conflict.
     }
@@ -1171,8 +1196,15 @@ export function AgentsPage() {
           await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
           await refreshManifestVersion(detailAgent.id);
         },
-        onError: (e: Error) =>
-          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
+        onError: (e: Error) => {
+          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error");
+          // A 409 means the token is stale (another writer saved after the
+          // seed). Refreshing it here is what makes "Save" again after the
+          // conflict actually work instead of failing forever on the same
+          // old ETag (#8424).
+          qc.invalidateQueries({ queryKey: agentKeys.manifest(detailAgent.id) });
+          void refreshManifestVersion(detailAgent.id);
+        },
       },
     );
   };
@@ -1642,6 +1674,9 @@ export function AgentsPage() {
           {configGroup === "channels" && (
             <ChannelsSection
               agentId={agent.id}
+              // The panel writes through `PUT /channels`, which accepts the
+              // same optimistic-concurrency token as the form (#8424).
+              expectedVersion={manifestVersionFor(agent.id)}
               // The panel writes through `PUT /channels`, the form writes the
               // whole manifest: without this the next form save would re-emit
               // the pre-panel grant list and silently undo the panel (#8424).
@@ -1652,6 +1687,7 @@ export function AgentsPage() {
                 }));
                 void refreshManifestVersion(agent.id);
               }}
+              onWriteFailed={() => void refreshManifestVersion(agent.id)}
             />
           )}
           {configGroup === "planning" && <AgentSchedulePanel agent={agent} />}
@@ -1843,7 +1879,11 @@ export function AgentsPage() {
     const handleSaveSkills = () => {
       if (!agent.id) return;
       setAgentSkillsMutation.mutate(
-        { agentId: agent.id, skills: assigned },
+        {
+          agentId: agent.id,
+          skills: assigned,
+          expectedVersion: manifestVersionFor(agent.id),
+        },
         {
           onSuccess: async () => {
             await refreshDetailAgent(agent.id, agent.is_hand);
@@ -1860,6 +1900,9 @@ export function AgentsPage() {
             );
           },
           onError: (e) => {
+            // A 409 leaves the form holding a token the server already
+            // superseded; re-read it so the retry is not refused too (#8424).
+            void refreshManifestVersion(agent.id);
             addToast(
               toastErr(
                 e,
@@ -1881,6 +1924,10 @@ export function AgentsPage() {
         { agentId: agent.id, body: { auto_evolve: !autoEvolve } },
         {
           onSuccess: () => {
+            // `auto_evolve` is a manifest field: this write moves the ETag the
+            // form would echo, even though the form has no widget for it
+            // (#8424).
+            void refreshManifestVersion(agent.id);
             addToast(
               !autoEvolve
                 ? t("agents.detail.auto_evolve_enabled", { defaultValue: "Auto-evolve enabled" })
@@ -2269,6 +2316,7 @@ export function AgentsPage() {
               tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
               tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
             },
+            expectedVersion: manifestVersionFor(agentId),
           },
           {
             onSuccess: () => {
@@ -2286,6 +2334,9 @@ export function AgentsPage() {
               void refreshManifestVersion(agentId);
             },
             onError: (e) => {
+              // See the skills panel: a 409 must not pin the form to a token
+              // the server already superseded (#8424).
+              void refreshManifestVersion(agentId);
               addToast(
                 toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })),
                 "error",
@@ -2296,7 +2347,11 @@ export function AgentsPage() {
       }
       if (isMcpDirty) {
         setAgentMcpServersMutation.mutate(
-          { agentId, mcpServers: mcpDraftArr },
+          {
+            agentId,
+            mcpServers: mcpDraftArr,
+            expectedVersion: manifestVersionFor(agentId),
+          },
           {
             onSuccess: async () => {
               await refreshDetailAgent(agentId, agent.is_hand);
@@ -2311,6 +2366,7 @@ export function AgentsPage() {
               void refreshManifestVersion(agentId);
             },
             onError: (e) => {
+              void refreshManifestVersion(agentId);
               addToast(
                 toastErr(
                   e,
@@ -3475,6 +3531,7 @@ export function AgentsPage() {
                       tool_allowlist: resolvedAllowlist,
                       tool_blocklist: toolBlocklistDraft,
                     },
+                    expectedVersion: manifestVersionFor(toolsEditorAgentId),
                   });
                   addToast(
                     conflictingToolNames.length > 0
@@ -3497,6 +3554,9 @@ export function AgentsPage() {
                   }
                   closeToolsEditor();
                 } catch (err) {
+                  // The modal may have been refused on a stale token (409);
+                  // re-read it so a retry is not refused too (#8424).
+                  void refreshManifestVersion(toolsEditorAgentId);
                   addToast(toastErr(err, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })), "error");
                 } finally {
                   setToolsEditorSaving(false);

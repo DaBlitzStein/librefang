@@ -311,8 +311,9 @@ test("the tools & skills group keeps its live grants panels", async ({ page }) =
   // either of them.
   await expect(page.getByText("Using all available skills")).toBeVisible();
   await expect(page.getByText("Using all available tools")).toBeVisible();
-  // The auto-evolve switch is the skills panel's own write, not a manifest
-  // field, so it goes with them.
+  // The auto-evolve switch writes the manifest's `auto_evolve` field through
+  // `PATCH /agents/{id}`, but it is rendered by the skills panel rather than
+  // by the manifest form, so it goes with them.
   await expect(page.getByText(/Auto-evolve/)).toBeVisible();
 });
 
