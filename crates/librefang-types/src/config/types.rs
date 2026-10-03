@@ -1036,11 +1036,17 @@ pub struct RateLimitConfig {
     /// `/api/auth/introspect`, `/api/auth/refresh`, the OAuth callback and the
     /// passkey ceremonies), plus two of the endpoints that verify a TOTP or
     /// recovery code: `/api/approvals/totp/confirm` always counts, and
-    /// `/api/approvals/{id}/approve` counts only while the approval policy
-    /// requires a code (`approval.second_factor` of `totp` or `both`) — with
-    /// the default `none` an approval verifies nothing, and metering it would
-    /// spend this login budget on approvals that already succeeded and lock a
-    /// working operator out.
+    /// `/api/approvals/{id}/approve` counts only while approving that request
+    /// would verify a code.
+    ///
+    /// An approval verifies a code only when `approval.second_factor` is `totp`
+    /// or `both`, the tool being approved is inside `approval.totp_tools` (all
+    /// tools when the list is empty), the caller is outside the TOTP grace
+    /// window a previous successful verification opened, and the id names a
+    /// pending request — an unknown or already-resolved id verifies nothing.
+    /// With the default `none`, or a tool outside a narrowed `totp_tools`, an
+    /// approval verifies nothing, and metering it would spend this login budget
+    /// on approvals that already succeeded and lock a working operator out.
     ///
     /// `/api/approvals/totp/setup` (the `current_code` a re-enrollment sends)
     /// and `/api/approvals/totp/revoke` verify codes as well and are
