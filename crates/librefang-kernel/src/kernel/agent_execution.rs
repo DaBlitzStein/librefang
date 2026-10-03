@@ -1306,11 +1306,12 @@ impl LibreFangKernel {
         // will actually be called, not the pre-routing one (e.g. routing may
         // switch sonnet → haiku).
         //
-        // Priority: agent manifest > per-model override > system defaults, for
-        // the sampling preferences. This block used to run the chain the other
-        // way round, which meant tuning the temperature of a shared model
-        // silently overwrote it for every agent using that model — two
-        // instances of one agent type could not hold different temperatures.
+        // Priority: agent manifest > per-model override > registry ceiling
+        // (for `max_tokens`) > system defaults, for the sampling preferences.
+        // This block used to run the chain the other way round, which meant
+        // tuning the temperature of a shared model silently overwrote it for
+        // every agent using that model — two instances of one agent type could
+        // not hold different temperatures.
         // The inversion was load-bearing only because `ModelConfig` had no
         // "inherit" state: every agent carried a concrete 4096 / 0.7, so
         // letting the manifest win would have made per-model overrides
@@ -1320,13 +1321,12 @@ impl LibreFangKernel {
         // `reasoning_effort` is deliberately excluded from that reordering —
         // see `librefang_types::inference_params` for why the model level has
         // to keep winning there (#7770).
+        //
+        // `ModelCatalog::resolve_turn_inference_params` owns the two lookups that need the catalog: the `provider:model` override key and the model's *effective* ceiling (the operator's `model_overrides.json` correction if one exists, otherwise the matched entry's own `max_output_tokens`, #7774).
+        // The pre-call holds in `messaging.rs` call the same method, so the estimate and the request cannot drift.
         {
-            let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
             let catalog = self.llm.model_catalog.load();
-            let resolved = librefang_types::inference_params::resolve_inference_params(
-                &manifest.model,
-                catalog.get_overrides(&override_key),
-            );
+            let resolved = catalog.resolve_turn_inference_params(&manifest.model);
             resolved.apply_to(&mut manifest.model);
         }
 
@@ -1511,6 +1511,33 @@ impl LibreFangKernel {
         self.agents
             .session_interrupts
             .insert((agent_id, effective_session_id), session_interrupt.clone());
+        // Which of the two serialization locks `send_message_full_inner` holds for this turn, the only caller of this function: `session_msg_locks[effective_session_id]` when it scoped the lock to an explicit session, `agent_msg_locks[agent_id]` otherwise.
+        // Both registrations are live here because that caller runs under `held_agent_locks::scope`, which is what lets the compactor skip re-acquiring the held lock instead of parking on it.
+        let agent_scoped =
+            !librefang_runtime::held_agent_locks::is_session_held(effective_session_id);
+
+        // Pre-turn auto-compaction (#8507). Before this the non-streaming sender never compacted, so its sessions only ever got trimmed.
+        // `execute_llm_agent` never runs a fork (see `system_call: false` below), so no fork guard is needed.
+        // The reload inside drops the in-memory `peer_id` backfill above, which is only persisted by the loop's save, so carry it across.
+        {
+            let peer_id = session.peer_id.clone();
+            let config = librefang_runtime::compactor::CompactionConfig::from_toml_with_overrides(
+                &cfg.compaction,
+                manifest.compaction.as_ref(),
+            );
+            self.auto_compact_before_turn(
+                agent_id,
+                &mut session,
+                &manifest.model.system_prompt,
+                &config,
+                agent_scoped,
+            )
+            .await;
+            if session.peer_id.is_none() {
+                session.peer_id = peer_id;
+            }
+        }
+
         // #4976: merge per-agent [compaction] overrides on top of the
         // kernel-global config so the in-loop ContextCompressor honours
         // this agent's keep_recent / max_summary_tokens /
@@ -1711,6 +1738,17 @@ impl LibreFangKernel {
         } else {
             false
         };
+
+        // Post-turn auto-compaction (#8507), mirroring the streaming sender.
+        // It needs an owned kernel handle for the background task; without one (a kernel never wrapped by `set_self_handle`) the next turn's pre-loop check still compacts.
+        if let Some(kernel) = self.self_handle.get().and_then(|weak| weak.upgrade()) {
+            kernel.spawn_compaction_after_turn(
+                agent_id,
+                &session,
+                manifest.compaction.as_ref(),
+                agent_scoped,
+            );
+        }
 
         // Append new messages to canonical session for cross-channel memory.
         // Use run_agent_loop's own start index (post-trim) instead of one
