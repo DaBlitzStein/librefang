@@ -5250,37 +5250,58 @@ async fn dispatch_message(
         }
         // The engine claimed the message and the turn already ran with nothing
         // to say (silent or empty reply): the message is spent, and silence is
-        // not a failure to report.
-        AutoReplyOutcome::Fired(None) => return,
-        // The engine claimed the message and the turn failed. The message is
-        // still spent — falling through would dispatch the identical turn a
-        // second time in the same channel session, duplicating the user message
-        // in history and paying a second LLM turn — but the failure must reach
-        // the user and the delivery metrics the same way the ordinary path's
-        // kernel-failure arm does: an error bubble unless the adapter
-        // suppresses error responses, and a failed delivery record either way.
-        AutoReplyOutcome::Failed(error) => {
-            let err_msg = format!("Agent error: {error}");
-            if !adapter.suppress_error_responses() {
-                send_response(
-                    adapter,
-                    &message.sender,
-                    err_msg.clone(),
-                    thread_id,
-                    output_format,
-                )
-                .await;
-            }
+        // not a failure to report. The ordinary fallback books the same shape
+        // as a successful delivery — it skips only the send for an empty
+        // response — so book it here too: otherwise the identical silent turn
+        // counts as delivered on one path and disappears from the metrics on
+        // the other.
+        AutoReplyOutcome::Fired(None) => {
             handle
                 .record_delivery(
                     agent_id,
                     ct_str,
                     &message.sender.platform_id,
-                    false,
-                    Some(&err_msg),
+                    true,
+                    None,
                     thread_id,
                 )
                 .await;
+            return;
+        }
+        // The engine claimed the message and the turn failed. The message is
+        // still spent — falling through would dispatch the identical turn a
+        // second time in the same channel session, duplicating the user message
+        // in history and paying a second LLM turn — but the failure must reach
+        // the user and the delivery metrics through the same handler the
+        // ordinary path's kernel-failure arm uses. `handle_send_error`
+        // re-resolves a stale channel default by name and retries once, so a
+        // channel whose agent was respawned under a new id recovers here
+        // instead of locking every inbound message onto the dead id.
+        AutoReplyOutcome::Failed(error) => {
+            let sender_ctx_retry = sender_ctx.clone();
+            handle_send_error(
+                &error,
+                agent_id,
+                &channel_key,
+                handle,
+                router,
+                adapter,
+                &message.sender,
+                &message.platform_message_id,
+                ct_str,
+                thread_id,
+                output_format,
+                overrides.as_ref(),
+                |new_id| {
+                    let h = handle.clone();
+                    let t = text.clone();
+                    async move {
+                        h.send_message_with_sender(new_id, &t, &sender_ctx_retry)
+                            .await
+                    }
+                },
+            )
+            .await;
             return;
         }
         // The engine did not claim the message — the ordinary dispatch below

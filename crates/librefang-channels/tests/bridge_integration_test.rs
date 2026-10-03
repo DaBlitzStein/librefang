@@ -513,6 +513,10 @@ async fn auto_reply_turn_carries_sender_identity() {
 /// The claim itself is observable at the handle: the mock records the auto-reply
 /// turn when `check_auto_reply` runs, and the ordinary turn when `send_message`
 /// runs. Exactly one of those records may exist.
+///
+/// The silent turn still counts as a delivery: the ordinary fallback books the
+/// same shape as successful (it skips only the send for an empty response), so
+/// the two paths must agree on the metric.
 #[tokio::test]
 async fn claimed_auto_reply_without_a_reply_is_not_re_dispatched() {
     let agent_id = AgentId::new();
@@ -563,6 +567,14 @@ async fn claimed_auto_reply_without_a_reply_is_not_re_dispatched() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
+
+    assert_eq!(
+        handle.deliveries(),
+        vec![(true, None)],
+        "a silent auto-reply must record a successful delivery — the ordinary \
+         fallback books the same shape, and the metrics must not read as if no \
+         turn ran"
+    );
 
     manager.stop().await;
 }
@@ -656,6 +668,81 @@ async fn failed_auto_reply_reports_the_error_without_re_dispatching() {
 
         manager.stop().await;
     }
+}
+
+/// Regression: a failed auto-reply whose channel default is stale must
+/// re-resolve the agent by name and retry, like the ordinary kernel-failure
+/// arm does.
+///
+/// The auto-reply failure arm used to format the error and book the failed
+/// delivery itself, so `try_reresolution` never ran. Once the channel's default
+/// agent was respawned under a new id, every inbound message got
+/// `Agent error: Agent not found: <old id>` and the router kept pointing at the
+/// dead id forever.
+#[tokio::test]
+async fn failed_auto_reply_re_resolves_a_stale_channel_default() {
+    let stale_id = AgentId::new();
+    let fresh_id = AgentId::new();
+    let error = format!("Agent not found: {stale_id}");
+    let handle = Arc::new(MockHandle::with_auto_reply_outcome(
+        vec![(fresh_id, "coder".to_string())],
+        AutoReplyOutcome::Failed(error),
+    ));
+    let router = Arc::new(AgentRouter::new());
+    // The channel default is the dead id the engine resolved; its configured
+    // name is what re-resolution looks the live agent up by.
+    router.set_channel_default_with_name("telegram".to_string(), stale_id, "coder".to_string());
+    router.set_user_default("34387719".to_string(), stale_id);
+
+    let (adapter, tx) = MockAdapter::new("test-adapter", ChannelType::Telegram);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router.clone());
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_text_msg(ChannelType::Telegram, "34387719", "status?"))
+        .await
+        .unwrap();
+
+    // The retry must run and book its outcome before the test can assert on
+    // the delivery record.
+    wait_until("stale auto-reply retry delivery", || {
+        !handle.deliveries().is_empty()
+    })
+    .await;
+
+    // The retry's reply reached the user instead of the stale-id error bubble.
+    let sent = adapter_ref.get_sent();
+    assert_eq!(
+        sent,
+        vec![("34387719".to_string(), "Echo: status?".to_string())],
+        "the re-resolved retry must deliver its reply, not an error bubble"
+    );
+
+    // Two handle calls: the auto-reply claim on the stale id, then the retry
+    // on the re-resolved one.
+    let received = handle.received.lock().unwrap().clone();
+    assert_eq!(
+        received.last().map(|(id, _)| *id),
+        Some(fresh_id),
+        "the retry must run under the re-resolved agent id; calls: {received:?}"
+    );
+
+    // The router now points at the live agent, so the next message skips the
+    // dead id entirely.
+    assert_eq!(
+        router.channel_default("telegram"),
+        Some(fresh_id),
+        "a successful re-resolution must update the router's channel default"
+    );
+
+    assert_eq!(
+        handle.deliveries(),
+        vec![(true, None)],
+        "the successful retry must book exactly one successful delivery"
+    );
+
+    manager.stop().await;
 }
 
 /// Test that /agents command returns the list of running agents.
