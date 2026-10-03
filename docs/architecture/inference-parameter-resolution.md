@@ -31,7 +31,7 @@ System defaults are `DEFAULT_MODEL_MAX_TOKENS` (32768) and `DEFAULT_MODEL_TEMPER
 The others have no default: unset means the parameter is simply not sent.
 
 `max_tokens` has one rung the others do not: when neither the agent nor the per-model override names a budget, the model's own registry ceiling answers — the catalog entry's `max_output_tokens`, or the operator's per-model `max_output_tokens` **limit** override when one corrects it — because an unspecified budget means "as much as the endpoint will give".
-The fixed `4096` is now only the last resort for a model whose ceiling nothing vouched for.
+A model whose ceiling nothing vouched for still falls back to the system default.
 
 ### How the preferences reach the wire
 
