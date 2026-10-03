@@ -126,15 +126,17 @@ pub struct AgentSelectState {
     /// message before the operator can read it. Any edit to the rows clears
     /// it, so the warning describes the save it gates.
     pub ws_drop_confirmed: bool,
-    /// Names the editor loaded from this agent's manifest when the session
-    /// opened. The save-time name check exists to refuse a name the runtime
-    /// cannot address, but a name the manifest already carries is legal to
-    /// keep even when the rule rejects it — `resolve_workspace_decl` never
+    /// The `(name, path)` rows the editor loaded from this agent's manifest
+    /// when the session opened. The save-time check exists to refuse a row the
+    /// runtime cannot address, but a row the manifest already carries is legal
+    /// to keep even when the rule rejects it — `resolve_workspace_decl` never
     /// inspects a name, so `[workspaces."team.docs"]` is delivered today and
-    /// only the `@team.docs/…` shorthand misses. Applying the rule to a
-    /// pre-existing row refuses the whole save, so an agent with such a name
-    /// could not have an unrelated folder added (#7835 review).
-    pub ws_manifest_names: std::collections::HashSet<String>,
+    /// only the `@team.docs/…` shorthand misses, and an absolute or `..` path
+    /// is inert but not the operator's to fix. The whole pair is compared, not
+    /// just the name: exempting by name alone also exempted a path the
+    /// operator *changed* on such a row, which the kernel then drops with only
+    /// a `WARN` while the PATCH answers 200 (#7835 review).
+    pub ws_manifest_rows: std::collections::HashSet<(String, String)>,
     pub available_mcp: Vec<(String, bool)>,
     pub mcp_cursor: usize,
     // Channel allowlist editor. Detail-only: agent creation writes no `channels`
@@ -366,7 +368,7 @@ impl AgentSelectState {
             ws_loaded: false,
             ws_generation: 0,
             ws_drop_confirmed: false,
-            ws_manifest_names: std::collections::HashSet::new(),
+            ws_manifest_rows: std::collections::HashSet::new(),
         }
     }
 
@@ -721,7 +723,7 @@ impl AgentSelectState {
                     self.ws_buf.clear();
                     self.ws_loaded = false;
                     self.ws_drop_confirmed = false;
-                    self.ws_manifest_names.clear();
+                    self.ws_manifest_rows.clear();
                     // A message from the last time this editor was open (or
                     // from any other pane on this tab) is not about the rows
                     // being opened now; the editor paints `status_msg`, so
@@ -1362,18 +1364,25 @@ impl AgentSelectState {
                     // would answer 200, the TUI would report the folders saved,
                     // and the agent would silently never get the folder.
                     //
-                    // A name the manifest already carried is exempt, the same
+                    // A row the manifest already carried is exempt, the same
                     // way `rebuild_manifest_with_workspaces` exempts it: the
                     // kernel accepts it, so refusing the whole save over a row
                     // the operator did not type (and cannot fix without breaking
-                    // every `@team.docs/…` in use) is the bug, not the check
-                    // (#7835 review).
-                    let manifest_names = &self.ws_manifest_names;
+                    // every `@team.docs/…` in use) is the bug, not the check.
+                    // The exemption covers the exact `(name, path)` pair only —
+                    // matching the name alone let an operator change the path
+                    // of such a row to an absolute or `..` one, which the
+                    // kernel then dropped with only a `WARN` after the PATCH
+                    // answered 200 (#7835 review).
+                    let manifest_rows = &self.ws_manifest_rows;
                     if let Some((name, _, _)) = self.workspaces.iter().find(|(n, p, _)| {
                         let (n, p) = (n.trim(), p.trim());
+                        let pre_existing = manifest_rows
+                            .iter()
+                            .any(|(loaded_name, loaded_path)| loaded_name == n && loaded_path == p);
                         !n.is_empty()
                             && !p.is_empty()
-                            && !manifest_names.contains(n)
+                            && !pre_existing
                             && crate::tui::event::workspace_row_is_invalid(n, p)
                     }) {
                         self.status_msg = crate::i18n::t_args(
@@ -3211,19 +3220,22 @@ mod workspaces_tests {
         }
     }
 
-    /// A name the manifest already carries is legal to keep even though the
-    /// alias rule would refuse it — `resolve_workspace_decl` never inspects a
-    /// name, so `[workspaces."team.docs"]` is delivered today and only the
+    /// A row the manifest already carries is legal to keep even though the
+    /// rule would refuse it — `resolve_workspace_decl` never inspects a name,
+    /// so `[workspaces."team.docs"]` is delivered today and only the
     /// `@team.docs/…` shorthand misses. The save-time check must therefore
     /// apply only to rows the operator typed, or an agent holding such a name
-    /// can never have an unrelated folder added (#7835 review).
+    /// can never have an unrelated folder added. The exemption matches the
+    /// pair, not just the name (#7835 review).
     #[test]
     fn save_keeps_a_pre_existing_name_the_alias_rule_would_refuse() {
         let mut state = editing_state();
         state
             .workspaces
             .push(("team.docs".into(), "shared/docs".into(), "readwrite".into()));
-        state.ws_manifest_names.insert("team.docs".to_string());
+        state
+            .ws_manifest_rows
+            .insert(("team.docs".to_string(), "shared/docs".to_string()));
 
         match state.handle_key(key(KeyCode::Char('s'))) {
             AgentAction::UpdateWorkspaces { workspaces, .. } => {
@@ -3250,6 +3262,45 @@ mod workspaces_tests {
             "the refusal must name the offending folder: {:?}",
             state.status_msg
         );
+    }
+
+    /// The row was exempt because the manifest carried it, but a changed path
+    /// makes it a row this session typed: matching the name alone would exempt
+    /// the new path too, the PATCH would answer 200, and
+    /// `resolve_workspace_decl` would drop the declaration with only a `WARN`
+    /// — the agent silently never gets the folder (#7835 review).
+    #[test]
+    fn save_checks_a_pre_existing_row_whose_path_was_changed() {
+        let mut state = editing_state();
+        state
+            .workspaces
+            .push(("legacy".into(), "../outside".into(), "readwrite".into()));
+        state
+            .ws_manifest_rows
+            .insert(("legacy".to_string(), "/srv/data".to_string()));
+
+        assert!(
+            matches!(
+                state.handle_key(key(KeyCode::Char('s'))),
+                AgentAction::Continue
+            ),
+            "an edited path on a pre-existing row must still be checked"
+        );
+        assert!(
+            state.status_msg.contains("legacy"),
+            "the refusal must name the offending folder: {:?}",
+            state.status_msg
+        );
+
+        // The untouched pair remains exempt: restoring the manifest path must
+        // save, even though an absolute path is what the rule refuses.
+        state.workspaces[0].1 = "/srv/data".into();
+        match state.handle_key(key(KeyCode::Char('s'))) {
+            AgentAction::UpdateWorkspaces { workspaces, .. } => {
+                assert_eq!(workspaces[0].1, "/srv/data");
+            }
+            other => panic!("the unchanged pre-existing row must save, got {other:?}"),
+        }
     }
 
     #[test]

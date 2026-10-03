@@ -2341,7 +2341,8 @@ fn rebuild_manifest_with_workspaces(
                 .collect()
         })
         .unwrap_or_default();
-    // A row the manifest already carries is exempt from both halves of the check.
+    // A row the manifest already carries is exempt from the check only while
+    // it still matches that declaration exactly: same name, same path.
     //
     // The name half is the one that bit: `resolve_workspace_decl` never inspects a name, and
     // `expand_workspace_alias` resolves `@name/rest` by exact string equality on the segment
@@ -2359,17 +2360,32 @@ fn rebuild_manifest_with_workspaces(
     // Exempting them cannot make an inert row worse — it is written back byte-identical and the
     // kernel skips it exactly as it does today.
     //
+    // The pair, not the name, is what gets exempted: exempting by name alone let an operator
+    // change the path of an exempt row — `legacy` -> `/srv/data` retyped as `../outside`, or
+    // `team.docs` -> `shared/docs` as `/etc` — while both checks still saw the pre-existing name,
+    // the PATCH answered 200, and the kernel dropped the declaration with only a `WARN`. An
+    // edited path is a row this session typed and goes through the check; a path edited to a
+    // *valid* value still passes, because the check only refuses invalid shapes (#7835 review).
+    //
     // What is typed here still has to be addressable; both halves are pinned by
     // `rebuild_refuses_a_row_the_kernel_would_only_warn_about` above and
     // `rebuild_keeps_a_pre_existing_row_the_alias_rule_would_refuse` below.
-    let already_declared: std::collections::HashSet<String> = table
+    let already_declared: std::collections::HashMap<String, String> = table
         .get("workspaces")
         .and_then(toml::Value::as_table)
-        .map(|t| t.keys().cloned().collect())
+        .map(|t| {
+            t.iter()
+                .filter(|(_, decl)| decl.get("mount").is_none())
+                .filter_map(|(name, decl)| {
+                    Some((name.clone(), decl.get("path")?.as_str()?.to_string()))
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let mut ws = toml::map::Map::new();
     for (name, path, mode) in workspaces {
-        if !already_declared.contains(name) && workspace_row_is_invalid(name, path) {
+        let pre_existing = already_declared.get(name).map(String::as_str) == Some(path.as_str());
+        if !pre_existing && workspace_row_is_invalid(name, path) {
             return Err(WorkspacesRebuildError::RejectedRow(name.clone()));
         }
         let mut entry = toml::map::Map::new();
@@ -7195,6 +7211,58 @@ path = "shared/library"
         assert!(
             ws.contains_key("added"),
             "the operator's new row is missing: {out}"
+        );
+    }
+
+    /// Exempting by name alone exempted every path on that name too: a
+    /// pre-existing row with an inert `/srv/data` path could be retyped as
+    /// `../outside`, both checks still saw the pre-existing name, the PATCH
+    /// answered 200, and the kernel dropped the declaration with only a
+    /// `WARN` — the agent silently never got the folder. Only the pair that
+    /// still matches the manifest is exempt; an edited path is checked, and
+    /// editing it to a valid value still passes (#7835 review).
+    #[test]
+    fn rebuild_checks_a_pre_existing_row_whose_path_was_changed() {
+        let manifest = r#"
+[workspaces.legacy]
+path = "/srv/data"
+"#;
+        let err = rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "legacy".to_string(),
+                "../outside".to_string(),
+                "rw".to_string(),
+            )],
+        )
+        .expect_err("an edited path on a pre-existing name must be refused");
+        assert!(matches!(err, WorkspacesRebuildError::RejectedRow(ref n) if n == "legacy"));
+
+        // The untouched pair remains exempt, inert path included.
+        rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "legacy".to_string(),
+                "/srv/data".to_string(),
+                "rw".to_string(),
+            )],
+        )
+        .expect("the untouched pair must not refuse the save");
+
+        // And an edited path that is valid is still writable, name unchanged.
+        let out = rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "legacy".to_string(),
+                "shared/legacy".to_string(),
+                "rw".to_string(),
+            )],
+        )
+        .expect("a valid edited path must still pass");
+        let value: toml::Value = toml::from_str(&out).unwrap();
+        assert_eq!(
+            value["workspaces"]["legacy"]["path"].as_str(),
+            Some("shared/legacy")
         );
     }
 
