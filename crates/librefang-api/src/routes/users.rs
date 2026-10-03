@@ -505,7 +505,12 @@ pub async fn update_user(
     // can serialize the post-merge view (incl. preserved RBAC M3 policy
     // fields). `persist_users` is generic over the closure's `Ok` type,
     // so this avoids the Arc<Mutex> capture pattern earlier drafts used.
-    match persist_identity_sections(
+    //
+    // The avatar move below runs under the same guard: an upload that resolved
+    // the old name must not be able to publish a file after the persist and
+    // then have `move_user_avatar` overwrite it with the old picture.
+    let _identity_guard = state.config_write_lock.lock().await;
+    match persist_identity_sections_locked(
         &state,
         caller_uid,
         "users updated",
@@ -641,17 +646,28 @@ pub async fn delete_user(
     // being true the moment #7746 lands. Both sections are rewritten inside a
     // single `persist_identity_sections` call so there is no window where the
     // user is gone from `[[users]]` but still listed in a group.
-    match persist_identity_sections(&state, caller_uid, "users updated", move |users, groups| {
-        let before = users.len();
-        users.retain(|u| u.name != target);
-        if users.len() == before {
-            return Err(PersistError::NotFound(format!("user '{target}' not found")));
-        }
-        for group in groups.iter_mut() {
-            group.members.retain(|m| m != &target);
-        }
-        Ok(())
-    })
+    //
+    // The sweep below runs under the same guard: an upload that resolved
+    // `alice` just before this persist must not be able to publish the file
+    // after the sweep, because the next holder of the freed name would
+    // inherit the picture.
+    let _identity_guard = state.config_write_lock.lock().await;
+    match persist_identity_sections_locked(
+        &state,
+        caller_uid,
+        "users updated",
+        move |users, groups| {
+            let before = users.len();
+            users.retain(|u| u.name != target);
+            if users.len() == before {
+                return Err(PersistError::NotFound(format!("user '{target}' not found")));
+            }
+            for group in groups.iter_mut() {
+                group.members.retain(|m| m != &target);
+            }
+            Ok(())
+        },
+    )
     .await
     {
         Ok(()) => {
@@ -1390,7 +1406,31 @@ where
 /// `audit_detail` is the text recorded against the `ConfigChange` audit action,
 /// so an operator reading the hash-chained log can tell a user edit from a
 /// group edit without diffing `config.toml`.
+///
+/// The lock is held for the whole write, and callers whose follow-up file
+/// operation must not interleave with it — `delete_user`'s avatar sweep and
+/// `update_user`'s avatar move — take [`persist_identity_sections_locked`]
+/// under the guard themselves.
 pub(crate) async fn persist_identity_sections<F, R>(
+    state: &Arc<AppState>,
+    caller: Option<UserId>,
+    audit_detail: &str,
+    mutate: F,
+) -> Result<R, PersistError>
+where
+    F: FnOnce(&mut Vec<UserConfig>, &mut Vec<GroupConfig>) -> Result<R, PersistError>,
+{
+    let _guard = state.config_write_lock.lock().await;
+    persist_identity_sections_locked(state, caller, audit_detail, mutate).await
+}
+
+/// The body of [`persist_identity_sections`], for callers that need the guard
+/// held across a follow-up file operation on the same critical section.
+///
+/// The caller must hold `state.config_write_lock`; taking it here too would
+/// deadlock, and skipping it is what would let an avatar write land between a
+/// rename's persist and its file move.
+async fn persist_identity_sections_locked<F, R>(
     state: &Arc<AppState>,
     caller: Option<UserId>,
     audit_detail: &str,
@@ -1402,7 +1442,6 @@ where
     if crate::routes::guard_config_write(state.kernel.config_path()).is_some() {
         return Err(PersistError::Managed);
     }
-    let _guard = state.config_write_lock.lock().await;
 
     let (mut users, mut groups) = {
         let cfg = state.kernel.config_ref();
