@@ -367,25 +367,30 @@ impl LibreFangKernel {
             if !totp_ready {
                 // Spell out what each surface this variant covers actually does
                 // without a secret, because the two differ and the line must be
-                // exact about both: the dashboard login skips the check and
-                // never asks for a code (`server.rs`), while tool approvals fail
-                // closed — `resolve` rejects the approval with "TOTP code
-                // required for approval" and no valid code can be supplied.
+                // exact about both: the dashboard login skips the check
+                // (`server.rs`), while tool approvals fail closed — the handler
+                // answers 400 "TOTP not configured" to a supplied code and
+                // `resolve` rejects a code-less approval with "TOTP code
+                // required for approval", so an approval that demands one
+                // cannot succeed until enrollment.
                 let mut effects = Vec::new();
                 if config.approval.second_factor.requires_login_totp() {
-                    effects.push("Dashboard login skips the check, so no code is ever asked for.");
+                    effects.push(
+                        "Dashboard login skips the TOTP check, so the login half of the second \
+                         factor is not enforced there.",
+                    );
                 }
                 if config.approval.second_factor.requires_approval_totp() {
                     effects.push(
-                        "Tool approvals fail closed: no valid code can be supplied, so an \
-                         approval that demands one is rejected with \"TOTP code required for \
-                         approval\".",
+                        "Tool approvals fail closed: a supplied code answers 400 \"TOTP not \
+                         configured\" and a code-less approval is rejected with \"TOTP code \
+                         required for approval\", so those tools cannot be approved until \
+                         enrollment.",
                     );
                 }
                 warn!(
-                    "Config: second_factor = \"{}\" but TOTP is not enrolled/confirmed in vault, \
-                     so the configured second factor is not in force. {} \
-                     Run POST /api/approvals/totp/setup to enroll.",
+                    "Config: second_factor = \"{}\" but TOTP is not enrolled/confirmed in vault. \
+                     {} Run POST /api/approvals/totp/setup to enroll.",
                     config.approval.second_factor.as_str(),
                     effects.join(" ")
                 );

@@ -19125,8 +19125,8 @@ fn boot_warns_that_a_non_local_tool_exec_backend_does_not_route_tool_calls_8221(
 /// `Both` covers that surface and the approval surface, and had the same silence.
 /// Only `Totp` ever produced the warning, because the check compared against that variant alone.
 ///
-/// The warning must also be exact about what happens after it is read, because the surfaces diverge: the login skips the check and asks for no code, while an approval that demands one is rejected with "TOTP code required for approval" and fails closed.
-/// A line claiming "no code is ever asked for" of both is false for the approval path, so each variant is asserted against what it must say and what it must not.
+/// The warning must also be exact about what happens after it is read, because the surfaces diverge: the login skips the check, while an approval that demands one is rejected with "TOTP code required for approval" and fails closed.
+/// A line that describes the login's silence as the rule would point the operator at the opposite failure mode for approvals, so each variant is asserted against what it must say and what it must not.
 #[test]
 fn boot_warns_for_every_second_factor_that_demands_a_code() {
     // Each variant, the fragments the warning has to render for it, and the
@@ -19142,24 +19142,30 @@ fn boot_warns_for_every_second_factor_that_demands_a_code() {
             vec![
                 "Tool approvals fail closed",
                 "TOTP code required for approval",
+                "TOTP not configured",
             ],
-            vec!["no code is ever asked for"],
+            vec!["Dashboard login skips the TOTP check"],
         ),
         (
             SecondFactor::Login,
             vec![
-                "Dashboard login skips the check",
-                "no code is ever asked for",
+                "Dashboard login skips the TOTP check",
+                "login half of the second factor is not enforced",
             ],
-            vec!["fail closed", "TOTP code required for approval"],
+            vec![
+                "fail closed",
+                "TOTP code required for approval",
+                "TOTP not configured",
+            ],
         ),
         (
             SecondFactor::Both,
             vec![
-                "Dashboard login skips the check",
-                "no code is ever asked for",
+                "Dashboard login skips the TOTP check",
+                "login half of the second factor is not enforced",
                 "Tool approvals fail closed",
                 "TOTP code required for approval",
+                "TOTP not configured",
             ],
             vec![],
         ),
