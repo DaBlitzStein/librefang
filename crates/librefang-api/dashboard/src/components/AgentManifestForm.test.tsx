@@ -1293,20 +1293,21 @@ describe("AgentManifestForm — folded section field count", () => {
     ).not.toHaveAttribute("open");
   });
 
-  it("counts a button-set control as one field, so the routing badge moves when the router is switched on", async () => {
+  it("counts a button-set control as one field, so the routing badge moves when the effort engine is picked", async () => {
     const user = userEvent.setup();
     render(<Harness sections={["routing"]} />);
 
-    // Off: the enable switch and the two Advanced selects. The tier pickers
-    // and the threshold ladders the switch reveals do not exist yet.
+    // Fixed: the engine selector and the two Advanced selects. The tier
+    // pickers and the threshold ladders the effort engine reveals do not
+    // exist yet.
     expect(badgeCount("routing")).toBe(3);
 
     await user.click(screen.getByText("agents.form.routing"));
-    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+    await user.selectOptions(screen.getByLabelText("agents.form.routing_engine"), "effort");
 
-    // On: three pickers and two ladders join them. Every one of the five is a
-    // button set, so before they opted in with `data-field` the badge read the
-    // same 3 on both sides of the switch.
+    // Effort: three pickers and two ladders join them. Every one of the five
+    // is a button set, so before they opted in with `data-field` the badge
+    // read the same 3 on both sides of the engine choice.
     await waitFor(() => expect(badgeCount("routing")).toBe(8));
   });
 
@@ -1314,7 +1315,7 @@ describe("AgentManifestForm — folded section field count", () => {
     const user = userEvent.setup();
     render(<Harness sections={["routing"]} />);
     await user.click(screen.getByText("agents.form.routing"));
-    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+    await user.selectOptions(screen.getByLabelText("agents.form.routing_engine"), "effort");
     await waitFor(() => expect(badgeCount("routing")).toBe(8));
 
     await user.click(screen.getByRole("button", { name: "agents.form.simple_model: None" }));
@@ -1334,7 +1335,7 @@ describe("AgentManifestForm — folded section field count", () => {
     const user = userEvent.setup();
     render(<Harness sections={["routing"]} />);
     await user.click(screen.getByText("agents.form.routing"));
-    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+    await user.selectOptions(screen.getByLabelText("agents.form.routing_engine"), "effort");
     await waitFor(() => expect(badgeCount("routing")).toBe(8));
 
     const ladder = screen.getByRole("group", { name: "agents.form.simple_threshold" });
@@ -1447,10 +1448,10 @@ describe("AgentManifestForm — the field tally covers every section", () => {
     expect(totalCount()).toBe(3);
 
     await user.click(screen.getByText("agents.form.routing"));
-    await user.click(screen.getByLabelText("agents.form.routing_enabled"));
+    await user.selectOptions(screen.getByLabelText("agents.form.routing_engine"), "effort");
 
-    // The router brings five more fields with it, and the total has to follow
-    // the badge rather than lag behind it.
+    // The effort engine brings five more fields with it, and the total has to
+    // follow the badge rather than lag behind it.
     await waitFor(() => expect(foldedSectionCount("routing")).toBe(8));
     await waitFor(() => expect(totalCount()).toBe(8));
   });
