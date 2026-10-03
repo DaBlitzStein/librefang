@@ -22,17 +22,32 @@ describe("resolveLimitDraft", () => {
   });
 
   /**
-   * `max_tokens`: an absent override does not request the catalog capacity, it
-   * falls through to the kernel's own default. The old rule read a typed value
-   * equal to the catalog figure as "same as the default, so clear it", which
-   * discarded a deliberate setting and left the model somewhere the operator
-   * never chose. `max_tokens` therefore passes no `catalogValue`, so no typed
-   * value can vanish for matching one.
+   * `max_tokens`: since #8502 an absent override resolves to the model's output
+   * ceiling (the catalog entry's `max_output_tokens`, or the operator's
+   * correction of it) before it falls back to `DEFAULT_MODEL_MAX_TOKENS`. A
+   * typed value equal to that ceiling is therefore a redundant override that
+   * would pin it and shadow a later registry or discovery correction, exactly
+   * like `context_window`, so it clears rather than persists.
+   *
+   * With no declared ceiling there is nothing to compare against — the daemon
+   * default is not passed in — so a typed value stands on its own.
    */
-  it("keeps a typed value that happens to equal the model's catalog figure", () => {
-    const draft = resolveLimitDraft("16384", undefined);
-    expect(draft.value).toBe(16384);
-    expect(draft.dirty).toBe(true);
+  it("clears a max_tokens value equal to the ceiling an absent override resolves to", () => {
+    expect(resolveLimitDraft("16384", undefined, 16384)).toEqual({
+      value: null,
+      invalid: false,
+      dirty: false,
+    });
+    // Clearing an already-stored redundant override is a real change.
+    expect(resolveLimitDraft("16384", 16384, 16384).dirty).toBe(true);
+    // A deliberate different number still stores.
+    expect(resolveLimitDraft("8192", undefined, 16384)).toEqual({
+      value: 8192,
+      invalid: false,
+      dirty: true,
+    });
+    // Nothing declares a ceiling: the typed value stands.
+    expect(resolveLimitDraft("32768", undefined).value).toBe(32768);
   });
 
   /**

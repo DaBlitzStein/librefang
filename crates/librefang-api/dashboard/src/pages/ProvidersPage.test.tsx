@@ -977,10 +977,12 @@ describe("ProvidersPage", () => {
     // override. Reverting against it instead of `limits_catalog` would make the
     // seeded field show a number the override no longer distinguishes.
     //
-    // What this guards today is the seeding and the hint, not the write: the save
-    // path no longer reads the revert target at all (see `modelOverrideDraft.ts`),
-    // so the class of defect the assertion was written for is no longer
-    // expressible here. Kept because those two halves still discriminate.
+    // What this guards today is the seeding and the hint. The save path reads
+    // the figure a typed value is compared against (`limits_catalog`, see
+    // `modelOverrideDraft.ts`), but it no longer reads the row's *effective*
+    // `context_window`, which is what made an active override look like the
+    // catalog default and delete itself on the next save. Kept because the
+    // seeding and the hint still discriminate.
     seedDiscoveredModel({ context_window: 16384, limitsCatalogWindow: 131072 });
     useModelOverridesMock.mockReturnValue({
       data: { context_window: 16384 },
@@ -1007,14 +1009,10 @@ describe("ProvidersPage", () => {
   });
 
   it("leaves Save disabled while the max_tokens field is untouched", async () => {
-    // The other half of the rule, and the one that catches an over-correction.
-    //
-    // The field seeds from a *display* value — with no override stored that is
-    // the catalog figure, 16384 here — while the state it would be compared
-    // against is "no override". Read as a difference, that makes simply opening
-    // the drawer dirty, and one click writes `max_tokens: 16384` for every agent
-    // that never set one, moving its request from the kernel default of 4096 to
-    // 16384. An untouched field has nothing to save.
+    // The box seeds from the stored override only. With none stored it opens
+    // empty, and empty is exactly what "no override" means, so there is nothing
+    // to save — one click must not write `max_tokens: 16384` for every agent
+    // that never set one.
     seedDiscoveredModel();
     const drawer = await openConfigureDrawer(LITELLM);
 
@@ -1024,16 +1022,11 @@ describe("ProvidersPage", () => {
     ).toBeDisabled();
   });
 
-  it("saves a max_tokens that equals the model's catalog output capacity", async () => {
-    // The reported defect. The catalog reports `max_output_tokens: 16384`, and
-    // the old rule read a typed 16384 as "same as the default, so clear it".
-    // It is not the default: an absent override falls through to
-    // `DEFAULT_MODEL_MAX_TOKENS` (4096), so the number meant something else.
-    //
-    // Measured against the old rule, this fails with `Number of calls: 0` —
-    // the field resolved to "not dirty", so Save never enabled and the value
-    // could not be stored at all. The operator saw a box reading 16384 that
-    // silently refused to save 16384.
+  it("treats a max_tokens equal to the catalog ceiling as no override (#8502)", async () => {
+    // Since #8502 an absent override resolves to the model's output ceiling
+    // before the kernel default, so typing that ceiling is a redundant pin.
+    // Clearing it is not discarding a preference — it is declining to shadow a
+    // later registry or discovery correction.
     seedDiscoveredModel();
     const drawer = await openConfigureDrawer(LITELLM);
 
@@ -1042,11 +1035,59 @@ describe("ProvidersPage", () => {
     const field = within(drawer).getByLabelText(
       "providers.max_tokens — model_param.custom",
     );
-    // A real edit, not a re-read of the seeded value: the field already shows
-    // 16384 and React suppresses an onChange whose value did not move. Clearing
-    // and retyping is what a keystroke-by-keystroke entry produces, and it is
-    // what arms the editor's `edited` flag — the "custom" press alone no longer
-    // does, because it selected nothing (see `StepLadderInput`).
+    fireEvent.change(field, { target: { value: "" } });
+    fireEvent.change(field, { target: { value: "16384" } });
+
+    expect(
+      within(drawer).getByRole("button", { name: /providers\.max_tokens/ }),
+    ).toBeDisabled();
+    expect(updateOverridesMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("saves a max_tokens that differs from the catalog ceiling", async () => {
+    // The deliberate side of the same rule: a number below the ceiling is a
+    // real preference and must reach `model_overrides.json`.
+    seedDiscoveredModel();
+    const drawer = await openConfigureDrawer(LITELLM);
+
+    const ladder = within(drawer).getByRole("group", { name: "providers.max_tokens" });
+    fireEvent.click(within(ladder).getByRole("button", { name: "model_param.custom" }));
+    const field = within(drawer).getByLabelText(
+      "providers.max_tokens — model_param.custom",
+    );
+    fireEvent.change(field, { target: { value: "8192" } });
+    fireEvent.click(
+      within(drawer).getByRole("button", {
+        name: /providers\.max_tokens/,
+      }),
+    );
+
+    expect(updateOverridesMutateAsync).toHaveBeenCalledWith({
+      modelKey: "litellm:sensor-model-generic-high",
+      overrides: { max_tokens: 8192 },
+    });
+  });
+
+  it("clears a stored max_tokens that duplicates the catalog ceiling", async () => {
+    // A value stored before #8502 can be redundant under the new chain, and
+    // retyping it is how the operator tells the editor to drop the pin.
+    seedDiscoveredModel();
+    useModelOverridesMock.mockReturnValue({
+      data: { max_tokens: 16384 },
+      isLoading: false,
+    });
+    const drawer = await openConfigureDrawer(LITELLM);
+
+    // Untouched: the stored override is not a change.
+    expect(
+      within(drawer).getByRole("button", { name: /providers\.max_tokens/ }),
+    ).toBeDisabled();
+
+    const ladder = within(drawer).getByRole("group", { name: "providers.max_tokens" });
+    fireEvent.click(within(ladder).getByRole("button", { name: "model_param.custom" }));
+    const field = within(drawer).getByLabelText(
+      "providers.max_tokens — model_param.custom",
+    );
     fireEvent.change(field, { target: { value: "" } });
     fireEvent.change(field, { target: { value: "16384" } });
     fireEvent.click(
@@ -1057,7 +1098,7 @@ describe("ProvidersPage", () => {
 
     expect(updateOverridesMutateAsync).toHaveBeenCalledWith({
       modelKey: "litellm:sensor-model-generic-high",
-      overrides: { max_tokens: 16384 },
+      overrides: {},
     });
   });
 

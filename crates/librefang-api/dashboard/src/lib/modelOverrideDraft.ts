@@ -7,9 +7,12 @@
 // The fields edit a **preference** — how long a reply to ask this model for, how
 // much context to send it. They are not the model's catalog figures, which the
 // provider card reports and which nothing here moves. The one place capacity
-// matters is that an absent `context_window` override resolves *to* the catalog
-// figure, while an absent `max_tokens` override does not; `resolveLimitDraft`
-// takes `catalogValue` for exactly that case and for no other.
+// matters is that an absent override resolves *to* a figure the chain already
+// produces: `context_window` to the model's catalog window, and `max_tokens` to
+// the model's output ceiling (#8502) before the kernel default. A typed value
+// equal to that figure is therefore a redundant override, and
+// `resolveLimitDraft` clears it. It takes `catalogValue` for exactly that case
+// and for no other.
 
 export interface LimitDraft {
   /** What to persist: a number sets the override, `null` clears it. */
@@ -27,25 +30,26 @@ export interface LimitDraft {
  * clears the override and lets the resolution chain supply a value.
  *
  * `catalogValue` is the figure an *absent* override resolves to for this field,
- * or `undefined` when the chain does not fall through to the catalog. The two
- * fields this editor drives resolve differently, so only one of them passes it:
+ * or `undefined` when no figure answers. Both fields this editor drives fall
+ * through to the catalog, so both pass it:
  *
- * - `max_tokens`: absent falls through to the kernel default,
- *   `DEFAULT_MODEL_MAX_TOKENS` (4096) — not the catalog capacity. A typed value
- *   equal to the catalog figure is therefore a real preference, and treating it
- *   as "the default" silently discarded a deliberate setting and left the model
- *   somewhere the operator never chose. `catalogValue` stays `undefined`, so no
- *   value is ever cleared for matching it.
  * - `context_window`: absent resolves to the catalog figure
  *   (`resolve_context_window` ranks agent manifest → `model_overrides.json` →
  *   `ModelCatalog`). A typed value equal to the catalog is a redundant override
  *   that *pins* the window: a later registry or discovery correction
- *   (131072 → 200000) would be silently shadowed. Passing `catalogValue` here
- *   makes an equality clear the override, so the field keeps following the
- *   catalog unless the operator deliberately picks a different number.
+ *   (131072 → 200000) would be silently shadowed. Passing `catalogValue` makes
+ *   an equality clear the override, so the field keeps following the catalog
+ *   unless the operator deliberately picks a different number.
+ * - `max_tokens`: since #8502 an absent override does not fall straight to
+ *   `DEFAULT_MODEL_MAX_TOKENS`; it first takes the model's output ceiling — the
+ *   catalog entry's `max_output_tokens`, or the operator's per-model correction
+ *   of it. A typed value equal to the catalog figure is therefore redundant for
+ *   the same reason, so it clears too. Only when nothing declares a ceiling
+ *   does the daemon default stand in, and then there is nothing to compare
+ *   against: `catalogValue` is `undefined` and the typed value persists.
  *
  * Capacity is still not consulted for the dirty/save decision beyond that:
- * the display path (`effective`) keeps its own `catalogValue`.
+ * the display path (`seed` in `ProvidersPage.tsx`) keeps its own `catalogValue`.
  */
 export function resolveLimitDraft(
   input: string,

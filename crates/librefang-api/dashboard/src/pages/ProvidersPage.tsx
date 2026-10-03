@@ -178,12 +178,18 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault }: {
  * One numeric limit on one model, editable at any time (#7774).
  *
  * Both limits the operator can correct share this shape: the shared
- * `ModelParamField` seeded from the value currently in force, with the catalog
- * value named in the hint below it, and an inherit rung that clears the
- * override rather than pinning a duplicate of the catalog default. The override
- * lives in `model_overrides.json`, keyed by `provider:model_id`, so it is
- * reachable after creation and survives a registry sync — which is what
- * `context_window` could not do before.
+ * `ModelParamField`, an inherit rung that clears the override rather than
+ * pinning a duplicate, and a hint naming the figure an absent override
+ * resolves to. The override lives in `model_overrides.json`, keyed by
+ * `provider:model_id`, so it is reachable after creation and survives a
+ * registry sync — which is what `context_window` could not do before.
+ *
+ * The two seed differently. `context_window` shows the value in force: its
+ * absent override resolves to the catalog window, so the box would open empty
+ * on a window the catalog knows. `max_tokens` seeds from a stored override
+ * only — its absent resolution is the model's output ceiling (#8502), which is
+ * a reference for the hint, not a per-request preference, and a box reading the
+ * ceiling while Save is disabled reads as a setting that refuses to save.
  */
 function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, catalogValue, label, savedMessage, hintDefault, hintOverride, addToast }: {
   overrideKey: string;
@@ -192,10 +198,14 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
   /** Which `ModelOverrides` field this editor writes. */
   field: "max_tokens" | "context_window";
   /**
-   * The value this field displays when there is no override, or undefined when unknown.
+   * The catalog figure an absent override resolves to for this field, or
+   * undefined when the catalog declares none.
    *
-   * For `context_window` that is also what clearing the field reverts to.
-   * For `max_tokens` it is the catalog capacity, which is **not** the revert target — clearing falls through to the daemon's own default — so the hints below say different things about the same prop.
+   * For `context_window` it is also the display seed while no override is
+   * stored. For `max_tokens` it is the output ceiling an absent override falls
+   * through to (#8502) and appears in the hint as a reference; the box itself
+   * stays empty. Either way a typed value equal to it clears the override (see
+   * `resolveLimitDraft`).
    */
   catalogValue?: number;
   label: string;
@@ -208,49 +218,54 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
   const updateOverrides = useUpdateModelOverrides();
 
   const overrideValue = overrides?.[field];
-  const effective = overrideValue ?? catalogValue;
+  // What the box shows. `context_window` seeds from the value in force: an
+  // absent override resolves to the catalog window, so the ladder can show the
+  // number every agent inherits. `max_tokens` seeds from a stored override
+  // only: an absent one resolves to the model's output ceiling (#8502), but a
+  // ceiling is not a preference, and the hint below names it as the reference
+  // instead of presenting it as something the operator chose.
+  const seed = field === "context_window" ? overrideValue ?? catalogValue : overrideValue;
 
-  // Local input state, seeded from the effective value once it resolves and
-  // re-seeded when the caller switches models (the key changes).
+  // Local input state, seeded from `seed` once it resolves and re-seeded when
+  // the caller switches models (the key changes).
   const [input, setInput] = useState("");
   const [seededFor, setSeededFor] = useState("");
   // Whether the operator has actually touched the field since it was seeded.
   //
-  // The seed is a *display* value (`effective`), which for an unset override is
-  // the catalog figure rather than the length the runtime would ask for. So
-  // "input differs from what is stored" is not the same question as "there is
-  // something to save": on an untouched field it is true purely because the two
-  // sources differ, and treating it as a change turns opening the drawer into a
-  // one-click write of the catalog capacity. This flag is what separates the
-  // two, and it has to be a flag rather than a comparison against the seed —
-  // typing the number the field already shows is a deliberate act that a
-  // seed-comparison would read as "nothing happened".
+  // "Input differs from what is stored" is not the same question as "there is
+  // something to save". For `context_window` the seed is the *resolved* value,
+  // which for an unset override is the catalog figure rather than "no
+  // override"; for `max_tokens` a stored override equal to the catalog ceiling
+  // resolves to a clear. Read as a difference, either makes simply opening the
+  // drawer dirty, and one click writes or deletes something nobody chose. This
+  // flag is what separates the two, and it has to be a flag rather than a
+  // comparison against the seed — typing the number the field already shows is
+  // a deliberate act that a seed-comparison would read as "nothing happened".
   const [edited, setEdited] = useState(false);
   useEffect(() => {
     if (overrideKey && overrideKey !== seededFor && !overridesLoading) {
-      setInput(effective != null ? String(effective) : "");
+      setInput(seed != null ? String(seed) : "");
       setEdited(false);
       setSeededFor(overrideKey);
     }
-  }, [overrideKey, seededFor, overridesLoading, effective]);
+  }, [overrideKey, seededFor, overridesLoading, seed]);
 
   const [saving, setSaving] = useState(false);
 
   // Blank clears the override; any positive whole number sets it. Extracted so
   // the save payload and the Save-button gate cannot drift apart — see
-  // `modelOverrideDraft.ts` for how the two fields resolve differently.
+  // `modelOverrideDraft.ts`.
   //
-  // `catalogValue` is passed only for `context_window`, whose absent override
-  // resolves *to* the catalog figure: typing that figure there is a redundant
-  // override that would pin the window and shadow a later catalog correction,
-  // so it clears instead. For `max_tokens` an absent override falls through to
-  // the kernel default (4096), not the catalog capacity, so a typed value equal
-  // to the catalog is a real preference and `catalogValue` stays out of it.
-  // Either way `catalogValue` above is still the display seed (`effective`).
+  // `catalogValue` is passed for both fields, because an absent override
+  // resolves *to* the catalog figure for both — for `max_tokens` since #8502
+  // ranks the model's output ceiling above the kernel default. Typing that
+  // figure would pin a value the chain already produces and shadow a later
+  // registry or discovery correction, so it clears instead. `catalogValue`
+  // above remains the display seed for `context_window` only.
   const { value: targetOverride, invalid, dirty: changesStored } = resolveLimitDraft(
     input,
     overrideValue,
-    field === "context_window" ? catalogValue : undefined,
+    catalogValue,
   );
   const dirty = edited && changesStored;
 
@@ -321,10 +336,11 @@ function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, cat
  * Per-model capacity and output limits for one provider (#6209, #7774).
  *
  * The model picker is shared by both editors so switching model re-seeds them
- * together. `limits_catalog` is the revert target rather than the row's own
- * `context_window` / `max_output_tokens`, because those now carry the
- * *effective* value — reading them would make an active override look like the
- * catalog default and silently delete itself on the next save.
+ * together. `limits_catalog` supplies the figure each field's absent override
+ * falls through to — the revert target for `context_window`, the reference and
+ * clear-on-equal figure for `max_tokens` (#8502) — rather than the row's own
+ * `context_window` / `max_output_tokens`, which carry the *effective* value and
+ * would make an active override look like the catalog default.
  */
 function ProviderModelLimitsSection({ providerId, addToast }: {
   providerId: string;
@@ -402,12 +418,14 @@ function ProviderModelLimitsSection({ providerId, addToast }: {
             catalogValue={catalogMaxOut}
             label={t("providers.max_tokens")}
             savedMessage={t("providers.max_tokens_saved")}
-            hintDefault={t("providers.max_tokens_hint_default")}
-            // No number here, unlike `context_window` above: clearing this field
-            // reverts to the daemon's own default, which is a kernel constant the
-            // dashboard is not told and must not invent. Printing the catalog
-            // figure claimed reverting lands there, which is what the old text
-            // got wrong.
+            // The catalog figure is a reference, not a seed: an absent override
+            // resolves to the model's output ceiling, or to the daemon's own
+            // default when nothing declares one (#8502). The hint says which.
+            hintDefault={
+              catalogMaxOut != null
+                ? t("providers.max_tokens_hint_default", { value: formatNumber(catalogMaxOut) })
+                : t("providers.max_tokens_hint_default_unknown")
+            }
             hintOverride={t("providers.max_tokens_hint_override")}
             addToast={addToast}
           />
