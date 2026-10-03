@@ -59,18 +59,12 @@ fn register_agent_watcher_slot(
     guard.push(handle);
 }
 
-/// Re-serialize a patched `agent.toml` into the canonical layout
-/// `persist_full_manifest_at` records, so suspend/resume history rows are
-/// directly comparable with the `update` rows they sit next to.
+/// Re-serialize a patched `agent.toml` into the canonical layout `persist_full_manifest_at` records, so suspend/resume history rows are directly comparable with the `update` rows they sit next to.
 ///
-/// `persist_agent_enabled` writes the operator's file with only the `enabled`
-/// line patched, preserving comments and key order. Snapshotting that text
-/// verbatim would make consecutive rows alternate between the operator's
-/// layout and the serializer's, so the History tab would report nearly every
-/// line as changed when only `enabled` moved.
+/// `persist_agent_enabled` writes the operator's file with only the `enabled` line patched, preserving comments and key order.
+/// Snapshotting that text verbatim would make consecutive rows alternate between the operator's layout and the serializer's, so the History tab would report nearly every line as changed when only `enabled` moved.
 ///
-/// Falls back to the raw text when the file does not parse; by then the caller
-/// has already written it, so the best available record is what is on disk.
+/// Falls back to the raw text when the file does not parse; by then the caller has already written it, so the best available record is what is on disk.
 fn normalize_manifest_toml(content: &str) -> String {
     match toml::from_str::<librefang_types::agent::AgentManifest>(content) {
         Ok(manifest) => toml::to_string_pretty(&manifest).unwrap_or_else(|_| content.to_string()),
@@ -329,14 +323,8 @@ impl LibreFangKernel {
                     // Append after [agent] section or at end
                     format!("{content}\nenabled = {enabled}\n")
                 };
-                // Suspend/resume rewrites `agent.toml` outside
-                // `persist_full_manifest_at`, so it must record its own history
-                // snapshot or the module doc's "every `agent.toml` write is
-                // recorded" is untrue for the one path an operator toggles from
-                // the dashboard. Record the serializer's canonical layout, not
-                // `new_content` (the operator's file with the `enabled` line
-                // patched), so this row is comparable with the `update` rows it
-                // sits next to instead of differing on every comment and key.
+                // Suspend/resume rewrites `agent.toml` outside `persist_full_manifest_at`, so it must record its own history snapshot or the module doc's "every `agent.toml` write is recorded" is untrue for the one path an operator toggles from the dashboard.
+                // Record the serializer's canonical layout, not `new_content` (the operator's file with the `enabled` line patched), so this row is comparable with the `update` rows it sits next to instead of differing on every comment and key.
                 let snapshot = normalize_manifest_toml(&new_content);
                 let change_source = if enabled { "resume" } else { "suspend" };
                 let store =
@@ -350,11 +338,7 @@ impl LibreFangKernel {
                 };
                 if let Err(e) = atomic_write_toml(&toml_path, &new_content) {
                     warn!("Failed to persist enabled={enabled} for {name}: {e}");
-                    // The registry has already moved (suspend/resume call
-                    // `set_state` first), so a disk-write failure leaves state
-                    // and disk disagreeing; record the attempted snapshot as
-                    // `*-persist-failed` so the History tab can show it rather
-                    // than going silent.
+                    // The registry has already moved (suspend/resume call `set_state` first), so a disk-write failure leaves state and disk disagreeing; record the attempted snapshot as `*-persist-failed` so the History tab can show it rather than going silent.
                     record(&format!("{change_source}-persist-failed"));
                     return;
                 }

@@ -1,11 +1,9 @@
 //! SQLite-backed agent manifest version history.
 //!
-//! Every time an agent's manifest is persisted to `agent.toml` the full TOML
-//! snapshot is recorded here so operators can see what changed over time and
-//! restore a prior configuration from the dashboard.
+//! Every time an agent's manifest is persisted to `agent.toml` the full TOML snapshot is recorded here so operators can see what changed over time and restore a prior configuration from the dashboard.
 //!
-//! Retention is per-agent, capped at [`MAX_VERSIONS_PER_AGENT`] most recent
-//! snapshots. Trimmed on insert inside the same transaction.
+//! Retention is per-agent, capped at [`MAX_VERSIONS_PER_AGENT`] most recent snapshots.
+//! Trimmed on insert inside the same transaction.
 
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use r2d2::Pool;
@@ -17,15 +15,10 @@ pub const MAX_VERSIONS_PER_AGENT: usize = 50;
 
 /// One recorded manifest snapshot.
 ///
-/// `agent_name` is denormalised on purpose: it is the name at snapshot time,
-/// so a rename leaves old rows carrying the historical name.
-/// `change_source` is a short tag naming what wrote the snapshot; each
-/// `persist_manifest_to_disk` call site in the kernel passes its own (see
-/// [`ManifestVersionStore::record_version`]). `persist_agent_enabled` bypasses
-/// that funnel and writes `suspend` / `resume`, or `suspend-persist-failed` /
-/// `resume-persist-failed` when its own `enabled`-line write failed. The schema
-/// default `unknown` covers rows written by a writer that does not classify its
-/// persist.
+/// `agent_name` is denormalised on purpose: it is the name at snapshot time, so a rename leaves old rows carrying the historical name.
+/// `change_source` is a short tag naming what wrote the snapshot; each `persist_manifest_to_disk` call site in the kernel passes its own (see [`ManifestVersionStore::record_version`]).
+/// `persist_agent_enabled` bypasses that funnel and writes `suspend` / `resume`, or `suspend-persist-failed` / `resume-persist-failed` when its own `enabled`-line write failed.
+/// The schema default `unknown` covers rows written by a writer that does not classify its persist.
 #[derive(Debug, Clone)]
 pub struct ManifestVersionRow {
     pub id: i64,
@@ -39,8 +32,7 @@ pub struct ManifestVersionRow {
 /// Persistent manifest-version store backed by SQLite.
 ///
 /// Shares the connection pool every other store in `MemorySubstrate` uses.
-/// The `manifest_versions` table is created by `migration::migrate_v58`, and
-/// its rows are purged on agent removal through `AGENT_SCOPED_TABLES`.
+/// The `manifest_versions` table is created by `migration::migrate_v58`, and its rows are purged on agent removal through `AGENT_SCOPED_TABLES`.
 #[derive(Clone)]
 pub struct ManifestVersionStore {
     pool: Pool<SqliteConnectionManager>,
@@ -49,20 +41,15 @@ pub struct ManifestVersionStore {
 impl ManifestVersionStore {
     /// Wrap an existing connection pool.
     ///
-    /// The caller must ensure `migration::run_migrations` has already
-    /// executed so the `manifest_versions` table exists.
+    /// The caller must ensure `migration::run_migrations` has already executed so the `manifest_versions` table exists.
     pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
         Self { pool }
     }
 
-    /// Record one manifest snapshot and trim the agent back to
-    /// [`MAX_VERSIONS_PER_AGENT`].
+    /// Record one manifest snapshot and trim the agent back to [`MAX_VERSIONS_PER_AGENT`].
     ///
-    /// Skips the insert when both the TOML and `change_source` are identical
-    /// to the most recent stored version for this agent (avoids noise from
-    /// no-op persists during boot reconciliation). Comparing `change_source`
-    /// too means a `restore` of content identical to the current version is
-    /// still recorded as its own event.
+    /// Skips the insert when both the TOML and `change_source` are identical to the most recent stored version for this agent (avoids noise from no-op persists during boot reconciliation).
+    /// Comparing `change_source` too means a `restore` of content identical to the current version is still recorded as its own event.
     pub fn record_version(
         &self,
         agent_id: &str,
@@ -72,18 +59,13 @@ impl ManifestVersionStore {
     ) -> LibreFangResult<()> {
         let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        // `Immediate` takes the write lock up front, so two concurrent
-        // `record_version` calls for the same agent cannot both observe the
-        // same latest row and double-insert — the dedupe below holds under
-        // concurrency rather than only in the happy path.
+        // `Immediate` takes the write lock up front, so two concurrent `record_version` calls for the same agent cannot both observe the same latest row and double-insert — the dedupe below holds under concurrency rather than only in the happy path.
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(LibreFangError::memory)?;
 
         // Deduplicate: skip if the latest snapshot matches on both fields.
-        // `.optional()` distinguishes "no rows" from a real read failure;
-        // `.ok()` would read a missing table or I/O error as "no previous
-        // version" and fall through to a much less useful insert error.
+        // `.optional()` distinguishes "no rows" from a real read failure; `.ok()` would read a missing table or I/O error as "no previous version" and fall through to a much less useful insert error.
         let latest: Option<(String, String)> = tx
             .query_row(
                 "SELECT manifest_toml, change_source FROM manifest_versions
@@ -199,11 +181,8 @@ mod tests {
         pool
     }
 
-    /// File-backed, multi-connection pool so threads genuinely contend for
-    /// the SQLite write lock — an in-memory `:memory:` DB pinned to
-    /// `max_size(1)` cannot exercise the race the `Immediate` transaction
-    /// exists for. Pragmas mirror production (`WAL`), or commit-time lock
-    /// promotion returns `SQLITE_BUSY` without the busy handler ever running.
+    /// File-backed, multi-connection pool so threads genuinely contend for the SQLite write lock — an in-memory `:memory:` DB pinned to `max_size(1)` cannot exercise the race the `Immediate` transaction exists for.
+    /// Pragmas mirror production (`WAL`), or commit-time lock promotion returns `SQLITE_BUSY` without the busy handler ever running.
     fn test_file_pool(path: &std::path::Path) -> Pool<SqliteConnectionManager> {
         let pool = Pool::builder()
             .max_size(8)
@@ -256,10 +235,8 @@ mod tests {
         assert_eq!(versions.len(), MAX_VERSIONS_PER_AGENT);
     }
 
-    /// Four threads record the same content for the same agent at once. The
-    /// `Immediate` transaction serialises them, so exactly one row lands: the
-    /// check-then-insert dedupe would double-insert if it ran the SELECT
-    /// outside a write lock.
+    /// Four threads record the same content for the same agent at once.
+    /// The `Immediate` transaction serialises them, so exactly one row lands: the check-then-insert dedupe would double-insert if it ran the SELECT outside a write lock.
     #[test]
     fn concurrent_identical_writes_record_one_row() {
         let tmp = tempfile::tempdir().unwrap();
@@ -299,9 +276,7 @@ mod tests {
         assert!(store.get_version(99999).unwrap().is_none());
     }
 
-    /// A read failure on the dedup SELECT must surface as its own error, not
-    /// get swallowed into "no previous version" and reappear as a misleading
-    /// insert failure against a table that in fact exists.
+    /// A read failure on the dedup SELECT must surface as its own error, not get swallowed into "no previous version" and reappear as a misleading insert failure against a table that in fact exists.
     #[test]
     fn dedup_read_failure_is_reported_as_a_read_failure() {
         let store = ManifestVersionStore::new(test_pool());
@@ -323,10 +298,8 @@ mod tests {
         );
     }
 
-    /// Removing an agent goes through `AGENT_SCOPED_TABLES`, and nothing at
-    /// that delete site names `manifest_versions`. Drop the entry and every
-    /// test here still passes while a deleted agent's manifest history
-    /// survives it, with no error and no orphan the caller can see.
+    /// Removing an agent goes through `AGENT_SCOPED_TABLES`, and nothing at that delete site names `manifest_versions`.
+    /// Drop the entry and every test here still passes while a deleted agent's manifest history survives it, with no error and no orphan the caller can see.
     #[test]
     fn remove_agent_purges_manifest_versions() {
         let pool = test_pool();
