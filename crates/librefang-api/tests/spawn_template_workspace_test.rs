@@ -1,23 +1,14 @@
 //! A template instantiation must not alias the template's own agent directory.
 //!
-//! Spawn resolves the workspace and writes the absolute result back into
-//! `agent.toml`, so the file at `workspaces/agents/<template>/agent.toml` ends up
-//! carrying `workspace = "<home>/workspaces/agents/<template>"`. Reading that
-//! file as a template and honouring the value handed the new agent the
-//! *template's* directory — its `.identity/IDENTITY.md`, its sessions and its
-//! memory — which is how an agent comes to believe it is the agent it was cloned
-//! from.
+//! Spawn resolves the workspace and writes the absolute result back into `agent.toml`, so the file at `workspaces/agents/<template>/agent.toml` ends up carrying `workspace = "<home>/workspaces/agents/<template>"`.
+//! Reading that file as a template and honouring the value handed the new agent the *template's* directory — its `.identity/IDENTITY.md`, its sessions and its memory — which is how an agent comes to believe it is the agent it was cloned from.
 //!
-//! `resolved_workspace_dir` cannot catch it downstream: an absolute path under
-//! the workspaces root is accepted there on purpose (#4991, so a recreate or a
-//! restart can reuse the same directory), and the template's directory is under
-//! that root. The guard therefore has to be at resolution time.
+//! `resolved_workspace_dir` cannot catch it downstream: an absolute path under the workspaces root is accepted there on purpose (#4991, so a recreate or a restart can reuse the same directory), and the template's directory is under that root.
+//! The guard therefore has to be at resolution time, and it drops the requested path only when another agent owns it — a live entry whose workspace it is, or a manifest inside the directory naming a different agent.
 //!
-//! The other half is which file is read at all. `agent-types/<name>.toml` is the
-//! type — the thing a deployment copies from — and carries no `workspace`;
-//! `workspaces/agents/<name>/agent.toml` is a live instance and always does.
-//! #6699 taught the ephemeral path to resolve against the type store; the
-//! regular spawn path kept reading only the instance.
+//! The other half is which file is read at all.
+//! `agent-types/<name>.toml` is the type — the thing a deployment copies from — and carries no `workspace`; `workspaces/agents/<name>/agent.toml` is a live instance and always does.
+//! #6699 taught the ephemeral path to resolve against the type store; the regular spawn path kept reading only the instance.
 //!
 //! Run: cargo test -p librefang-api --test spawn_template_workspace_test
 
@@ -472,5 +463,90 @@ async fn reusing_the_same_name_accepts_its_own_absolute_workspace() {
     assert!(
         identidad.contains("name: mismo"),
         "the existing directory's identity must be reused: {identidad}"
+    );
+}
+
+/// A renamed agent recreated from its own manifest keeps its workspace.
+///
+/// `rename_agent` changes the registry name and rewrites the identity file, but leaves the directory where it was, so the manifest saved for the renamed agent reads `name = "<new>"` with `workspace = "<root>/agents/<old>"`.
+/// Deleting the agent and posting that manifest back is the #4991 recreate: no other agent owns `agents/<old>` anymore, so the guard must reuse the directory holding the renamed agent's identity, sessions and files rather than clear the path and strand them under a fresh one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_renamed_agent_recreated_from_its_own_manifest_keeps_its_workspace() {
+    let h = boot().await;
+
+    let (status, body) = post(
+        h.app.clone(),
+        "/api/agents",
+        serde_json::json!({
+            "name": "viejo",
+            "manifest_toml": "name = \"viejo\"\nmodule = \"builtin:chat\"\ndescription = \"ANTES DEL RENAME\"\n",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "spawn failed: {body}");
+    let agent_id: AgentId = body["agent_id"]
+        .as_str()
+        .expect("agent_id in the spawn response")
+        .parse()
+        .expect("agent_id is a UUID");
+
+    let viejo = h.home_dir.join("workspaces").join("agents").join("viejo");
+    assert!(viejo.is_dir(), "the agent must start in its own directory");
+
+    h.state
+        .kernel
+        .rename_agent(agent_id, "nuevo".to_string())
+        .expect("rename");
+    // `PATCH /api/agents/{id}` persists the renamed manifest right after `rename_agent`; call the same kernel persist directly.
+    h.state.kernel.persist_manifest_to_disk(agent_id);
+
+    // Read the manifest the rename left behind rather than rebuilding it by hand, so the test posts exactly what a recreate from disk would.
+    let nuevo = h.home_dir.join("workspaces").join("agents").join("nuevo");
+    let saved_path = [viejo.join("agent.toml"), nuevo.join("agent.toml")]
+        .into_iter()
+        .find(|path| path.is_file())
+        .expect("the renamed manifest must be persisted");
+    let saved = std::fs::read_to_string(&saved_path).expect("read the saved manifest");
+    assert!(
+        saved.contains("name = \"nuevo\""),
+        "the saved manifest must carry the new name: {saved}"
+    );
+    assert!(
+        saved.contains(&viejo.display().to_string()),
+        "the saved manifest must carry the old workspace path: {saved}"
+    );
+
+    h.state.kernel.kill_agent_typed(agent_id).expect("kill");
+
+    let (status, body) = post(
+        h.app.clone(),
+        "/api/agents",
+        serde_json::json!({ "manifest_toml": saved }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "recreate failed: {body}");
+    let recreated: AgentId = body["agent_id"]
+        .as_str()
+        .expect("agent_id in the recreate response")
+        .parse()
+        .expect("agent_id is a UUID");
+    let entry = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(recreated)
+        .expect("the recreated agent is in the registry");
+    assert_eq!(
+        entry.manifest.workspace.as_deref(),
+        Some(viejo.as_path()),
+        "the recreate must reuse the directory its renamed manifest points at"
+    );
+
+    // The identity file is what the directory exists for; it must not have been abandoned with the path.
+    let identidad = std::fs::read_to_string(viejo.join(".identity").join("IDENTITY.md"))
+        .expect("the renamed agent's identity file");
+    assert!(
+        identidad.contains("name: nuevo"),
+        "the recreated agent must keep the identity reconciled on rename: {identidad}"
     );
 }
