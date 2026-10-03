@@ -3674,6 +3674,90 @@ async fn test_approval_direct_route_is_scoped_to_the_adapter_routing_the_agent()
     manager.stop().await;
 }
 
+/// #8418 activation check: `SidecarAdapter::account_id()` now returns the
+/// config name, which is the key the router is seeded with, so the
+/// `channel_default` lookup resolves on sidecar hosts for the first time and
+/// `narrow_direct_route` (#8228) actually engages.
+///
+/// Scenario the narrow check cannot see through: agent-x was reached by
+/// @-mention in `chat-c` through bot-a (whose own default is agent-y), while
+/// agent-x's configured default adapter is sibling bot-b, which is not in
+/// `chat-c`. Pre-#8408 `narrow_direct_route` was always false there, every
+/// same-channel bot attempted the direct send, and bot-a — the one actually
+/// in the chat — delivered. Once bot-b resolves as "routes agent-x", the
+/// narrow set drops bot-a, so delivery would depend on bot-b succeeding in a
+/// chat it is not a member of.
+#[tokio::test]
+async fn test_approval_for_mentioned_agent_still_reaches_the_origin_chat() {
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+    let agent_y = AgentId::new();
+
+    let router = AgentRouter::new();
+    // bot-a carried the @-mention traffic for agent-x; its own default is
+    // agent-y. Agent-x's configured default adapter is the sibling bot-b.
+    router.set_channel_default("telegram:bot-a".to_string(), agent_y);
+    router.set_channel_default("telegram:bot-b".to_string(), agent_x);
+    let router = Arc::new(router);
+
+    // bot-a is in `chat-c` (sends succeed); bot-b is not (every send fails,
+    // the way a bot absent from the target chat fails).
+    let adapter_a = NotifyingAdapter::with_account("telegram-a", "bot-a", Vec::new());
+    let adapter_b = NotifyingAdapter::failing_with_account("telegram-b", "bot-b");
+    let (ref_a, ref_b) = (adapter_a.clone(), adapter_b.clone());
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter_a).await.unwrap();
+    manager.start_adapter(adapter_b).await.unwrap();
+
+    let spy = WarnSpy::install();
+    manager.start_approval_listener().await;
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(approval_event_from_chat(
+            "8418bbbb33334444",
+            agent_x,
+            Some("chat-c"),
+            Some("telegram"),
+        )))
+        .expect("broadcast send");
+
+    wait_until("approval fan-out settled", || {
+        !ref_a.get_sent().is_empty() || !ref_b.get_sent().is_empty()
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert_eq!(
+        ref_a.get_sent().len(),
+        1,
+        "the bot that carried the @-mention is in the origin chat and must deliver, got: {:?}; \
+         sibling bot attempts: {:?}",
+        ref_a.get_sent(),
+        ref_b.get_sent()
+    );
+    assert_eq!(
+        ref_a.get_sent()[0].0,
+        "chat-c",
+        "the approval must land in the originating chat"
+    );
+    assert!(
+        !spy.seen()
+            .iter()
+            .any(|w| w.contains("Approval reached no channel")),
+        "the approval was delivered, so the aggregate warning must not fire, got: {:#?}",
+        spy.seen()
+    );
+
+    manager.stop().await;
+}
+
 /// A binding with no `peer_id` matches every peer, so it routes inbound
 /// messages to its agent while `bound_recipients_for_agent` — which requires a
 /// `peer_id` to have a delivery target — returns nothing for it. Broadcast
