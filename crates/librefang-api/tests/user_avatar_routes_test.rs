@@ -1014,6 +1014,45 @@ async fn the_emoji_can_be_cleared_and_is_validated() {
     );
 }
 
+/// An identity `PATCH` that omits the key keeps the stored glyph.
+///
+/// `PATCH /api/agents/{id}/identity` preserves any field the body leaves out,
+/// and the user route has to agree: a client that sends only the fields it
+/// changed (`{}` being the extreme) must not silently wipe the emoji.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_patch_without_the_emoji_key_keeps_it() {
+    let h = boot(vec![]).await;
+    let path = "/api/users/Alice/identity";
+
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(
+            Method::PATCH,
+            path,
+            TEST_TOKEN,
+            serde_json::json!({ "emoji": "🦀" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    // The omission, not a `null` and not an empty string: this is the body a
+    // minimal client sends to edit nothing.
+    let (status, body) = send(
+        h.app.clone(),
+        json_req(Method::PATCH, path, TEST_TOKEN, serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["emoji"], "🦀",
+        "an omitted key must preserve the glyph: {body:?}"
+    );
+
+    let (_, view) = send(h.app.clone(), get("/api/users/Alice", TEST_TOKEN)).await;
+    assert_eq!(view["emoji"], "🦀", "and it must still be on disk: {view}");
+}
+
 /// A hand-edited oversize emoji must not wedge every later write (#8339 review
 /// follow-up).
 ///
@@ -1299,4 +1338,99 @@ async fn deleting_a_user_takes_its_avatar_with_it() {
     let (status, body) = send(h.app.clone(), get("/api/users/Alice", TEST_TOKEN)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["has_avatar"], serde_json::json!(false));
+}
+
+// ---------------------------------------------------------------------------
+// Serialization with the user-row write
+// ---------------------------------------------------------------------------
+
+/// An avatar upload shares `config_write_lock` with the `[[users]]` mutations.
+///
+/// The file is keyed on the name-derived uuid, so an upload that resolved its
+/// subject before a delete persisted can publish the picture after the delete
+/// swept it, leaving it for whoever next holds the name. Holding the lock for
+/// the resolve-and-write is what closes that window; with the lock held by the
+/// test, the upload must not complete at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_avatar_upload_waits_for_the_config_write_lock() {
+    let h = boot(vec![]).await;
+    let guard = h.state.config_write_lock.lock().await;
+
+    let app = h.app.clone();
+    let mut upload = tokio::spawn(async move {
+        send(
+            app,
+            raw(
+                Method::POST,
+                "/api/users/Alice/avatar",
+                TEST_TOKEN,
+                TINY_PNG.to_vec(),
+                "application/octet-stream",
+            ),
+        )
+        .await
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut upload)
+            .await
+            .is_err(),
+        "the upload must wait for the lock instead of resolving and writing"
+    );
+    assert!(
+        file_names(&users_avatar_dir(&h)).is_empty(),
+        "and nothing may have reached the directory while it waited"
+    );
+
+    drop(guard);
+    let (status, body) = upload.await.expect("upload task");
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        file_names(&users_avatar_dir(&h)),
+        vec![format!("{}.png", expected_stem("Alice"))],
+        "once the lock is free the upload proceeds normally"
+    );
+}
+
+/// The delete half of the same guarantee: no unlink may run under a writer.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_avatar_waits_for_the_config_write_lock() {
+    let h = boot(vec![]).await;
+    upload_png_ok(&h, "Alice", TINY_PNG).await;
+    let guard = h.state.config_write_lock.lock().await;
+
+    let app = h.app.clone();
+    let mut delete = tokio::spawn(async move {
+        send(
+            app,
+            raw(
+                Method::DELETE,
+                "/api/users/Alice/avatar",
+                TEST_TOKEN,
+                Vec::new(),
+                "application/octet-stream",
+            ),
+        )
+        .await
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut delete)
+            .await
+            .is_err(),
+        "the delete must wait for the lock instead of removing the file"
+    );
+    assert_eq!(
+        file_names(&users_avatar_dir(&h)),
+        vec![format!("{}.png", expected_stem("Alice"))],
+        "the picture is still there while the delete waits"
+    );
+
+    drop(guard);
+    let (status, body) = delete.await.expect("delete task");
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert!(
+        file_names(&users_avatar_dir(&h)).is_empty(),
+        "once the lock is free the delete removes the picture"
+    );
 }

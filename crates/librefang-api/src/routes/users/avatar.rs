@@ -159,9 +159,22 @@ pub(crate) fn move_user_avatar(
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UserIdentityUpdate {
-    /// The glyph to store, or `null` to clear the one already stored. Absent is treated as `null`.
-    #[serde(default)]
-    pub emoji: Option<String>,
+    /// The glyph to store, `null` or `""` to clear the stored one; an omitted key keeps the current glyph.
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    pub emoji: Option<Option<String>>,
+}
+
+/// Distinguish an absent key from an explicit `null` on [`UserIdentityUpdate::emoji`].
+///
+/// `Option<Option<T>>` alone cannot: serde deserializes both a missing key and
+/// a present `null` to the outer `None`. Wrapping every present value in `Some`
+/// here leaves the outer `None` meaning only "the key was absent", which is the
+/// case that must preserve the stored glyph instead of clearing it.
+fn deserialize_present_option<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 /// POST /api/users/{name}/avatar — store an image as this user's avatar.
@@ -191,6 +204,12 @@ pub async fn upload_user_avatar(
     Path(name): Path<String>,
     body: Bytes,
 ) -> axum::response::Response {
+    // The same guard `persist_identity_sections` takes, held across resolve and
+    // write: an upload that resolves `alice` before a concurrent delete persists
+    // must not publish the file after that delete's sweep, or whoever next
+    // takes the freed name inherits the picture. `delete_user` holds the guard
+    // across its sweep for exactly this reason.
+    let _identity_guard = state.config_write_lock.lock().await;
     let user = match resolve_user(&state, &name) {
         Ok(user) => user,
         Err(response) => return *response,
@@ -421,6 +440,10 @@ pub async fn delete_user_avatar(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> axum::response::Response {
+    // Same critical section as `upload_user_avatar`: a delete that resolves
+    // `alice` while a rename persists must not remove the file under the old
+    // stem after the rename already moved it.
+    let _identity_guard = state.config_write_lock.lock().await;
     let user = match resolve_user(&state, &name) {
         Ok(user) => user,
         Err(response) => return *response,
@@ -456,9 +479,16 @@ pub async fn update_user_identity(
     caller: Option<Extension<AuthenticatedApiUser>>,
     Json(req): Json<UserIdentityUpdate>,
 ) -> axum::response::Response {
-    let emoji = match librefang_types::config::validate_emoji(req.emoji.as_deref()) {
-        Ok(emoji) => emoji,
-        Err(error) => return err_response(StatusCode::BAD_REQUEST, error),
+    // Tri-state: an absent key (`None`) preserves the stored glyph, an explicit
+    // `null` (`Some(None)`) clears it, and a string is validated and stored.
+    // Collapsing absent into `None` here is what made a body of `{}` wipe the
+    // value while `PATCH /api/agents/{id}/identity` kept omitted fields.
+    let emoji = match req.emoji {
+        Some(raw) => match librefang_types::config::validate_emoji(raw.as_deref()) {
+            Ok(emoji) => Some(emoji),
+            Err(error) => return err_response(StatusCode::BAD_REQUEST, error),
+        },
+        None => None,
     };
 
     let target = name.clone();
@@ -476,7 +506,9 @@ pub async fn update_user_identity(
             // carried through untouched, so a glyph edit cannot reset a
             // rename the operator did not make, a role they set, or a policy
             // the permission matrix owns.
-            users[idx].emoji = emoji.clone();
+            if let Some(emoji) = emoji {
+                users[idx].emoji = emoji;
+            }
             Ok(users[idx].clone())
         },
     )
@@ -612,23 +644,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_user_avatar_directory_is_a_subdirectory_of_the_agent_one() {
-        let config = librefang_types::config::KernelConfig {
-            home_dir: std::path::PathBuf::from("/srv/librefang"),
-            ..librefang_types::config::KernelConfig::default()
-        };
-        let avatars = config.effective_avatars_dir();
-        let users = config.effective_user_avatars_dir();
-        assert!(
-            users.starts_with(&avatars) && users != avatars,
-            "user avatars must live below the avatars root, not in it: {users:?}"
-        );
-        // And therefore outside every tree the parent was chosen to avoid.
-        assert!(!users.starts_with(config.effective_workspaces_dir()));
-        assert!(!users.starts_with(config.home_dir.join("dashboard")));
-    }
-
     /// A rename moves every candidate to the new stem and frees the old one.
     ///
     /// Both files exist here because a crash between an upload's write and its
@@ -697,6 +712,23 @@ mod tests {
 
         let error = move_user_avatar(dir.path(), "Alice", "Alicia").expect_err("must fail");
         assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn the_user_avatar_directory_is_a_subdirectory_of_the_agent_one() {
+        let config = librefang_types::config::KernelConfig {
+            home_dir: std::path::PathBuf::from("/srv/librefang"),
+            ..librefang_types::config::KernelConfig::default()
+        };
+        let avatars = config.effective_avatars_dir();
+        let users = config.effective_user_avatars_dir();
+        assert!(
+            users.starts_with(&avatars) && users != avatars,
+            "user avatars must live below the avatars root, not in it: {users:?}"
+        );
+        // And therefore outside every tree the parent was chosen to avoid.
+        assert!(!users.starts_with(config.effective_workspaces_dir()));
+        assert!(!users.starts_with(config.home_dir.join("dashboard")));
     }
 
     #[test]

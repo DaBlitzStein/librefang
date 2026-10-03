@@ -18663,7 +18663,7 @@
               "string",
               "null"
             ],
-            "description": "The glyph to store, or `null` to clear the one already stored. Absent is treated as `null`."
+            "description": "The glyph to store, `null` or `\"\"` to clear the stored one; an omitted key keeps the current glyph."
           }
         },
         "additionalProperties": false
