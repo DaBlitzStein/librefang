@@ -1446,7 +1446,7 @@ mod tests {
             registry_toml
         );
 
-        // The operator turns live discovery on. This is byte-for-byte what `PUT /api/providers/{name}/discovery` writes.
+        // The operator turns live discovery on by hand in the provider file — a hand edit, not something `PUT /api/providers/{name}/discovery` writes: that endpoint records the preference in `data/provider_discovery.json` and leaves this file alone.
         let operator_toml = "id = \"deepseek\"\nbase_url = \"https://api.deepseek.com/v1\"\ndiscover_models = true\n";
         std::fs::write(dest.join("deepseek.toml"), operator_toml).unwrap();
 
