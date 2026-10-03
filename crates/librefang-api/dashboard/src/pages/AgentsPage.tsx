@@ -1111,7 +1111,16 @@ export function AgentsPage() {
     try {
       await qc.invalidateQueries({ queryKey: agentQueries.detail(agentId).queryKey });
       const d = await qc.fetchQuery(agentQueries.detail(agentId));
-      setDetailAgent(mergeOriginFields(mergeHandFlag(d, fallback), (detailAgent as AgentView) ?? undefined));
+      // Apply the refreshed detail only while the drawer still shows the agent
+      // it was requested for, the same id gate `saveName` uses on its
+      // optimistic update. An async completion — an avatar upload or a config
+      // save started on A — must not pull the drawer back to A after the user
+      // has moved on to B.
+      setDetailAgent(prev =>
+        prev && prev.id === agentId
+          ? mergeOriginFields(mergeHandFlag(d, fallback), prev as AgentView)
+          : prev,
+      );
     } catch {
       // keep current state when refresh fails
     }
@@ -3477,6 +3486,11 @@ export function AgentsPage() {
                   render harness, so anything that has to be tested has to be
                   reachable without mounting the page. */}
               <AgentAppearanceSection
+                // Re-keyed on the agent: without it the section stays mounted
+                // across a list click, so an upload still in flight for A
+                // carries its `isPending` into B and disables B's controls
+                // until it settles.
+                key={detailAgent.id}
                 agentId={detailAgent.id}
                 identity={detailIdentity}
                 provisioned={detailAgent.provisioned}
