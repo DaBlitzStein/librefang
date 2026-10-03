@@ -1848,10 +1848,11 @@ export interface AgentChannelsResponse {
 export async function setAgentChannels(
   agentId: string,
   channels: string[],
+  expectedVersion?: string,
 ): Promise<{ status: string; channels: string[] }> {
   return put<{ status: string; channels: string[] }>(
     `/api/agents/${encodeURIComponent(agentId)}/channels`,
-    { channels },
+    { channels, ...(expectedVersion ? { expected_version: expectedVersion } : {}) },
   );
 }
 
@@ -1873,8 +1874,16 @@ export async function getAgentTools(agentId: string): Promise<AgentToolsResponse
   return get<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`);
 }
 
-export async function updateAgentTools(agentId: string, payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<AgentToolsResponse> {
-  return put<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
+export async function updateAgentTools(
+  agentId: string,
+  payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] },
+  /** Manifest ETag from the open editor; the server answers 409 on a mismatch (#8424). */
+  expectedVersion?: string,
+): Promise<AgentToolsResponse> {
+  return put<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, {
+    ...payload,
+    ...(expectedVersion ? { expected_version: expectedVersion } : {}),
+  });
 }
 
 /**
@@ -1989,10 +1998,11 @@ export async function getAgentChannels(
 export async function setAgentSkills(
   agentId: string,
   skills: string[],
+  expectedVersion?: string,
 ): Promise<{ status: string; skills: string[] }> {
   return put<{ status: string; skills: string[] }>(
     `/api/agents/${encodeURIComponent(agentId)}/skills`,
-    { skills },
+    { skills, ...(expectedVersion ? { expected_version: expectedVersion } : {}) },
   );
 }
 
@@ -2010,10 +2020,14 @@ export async function setAgentSkills(
 export async function setAgentMcpServers(
   agentId: string,
   mcpServers: string[],
+  expectedVersion?: string,
 ): Promise<{ status: string; mcp_servers: string[] }> {
   return put<{ status: string; mcp_servers: string[] }>(
     `/api/agents/${encodeURIComponent(agentId)}/mcp_servers`,
-    { mcp_servers: mcpServers },
+    {
+      mcp_servers: mcpServers,
+      ...(expectedVersion ? { expected_version: expectedVersion } : {}),
+    },
   );
 }
 

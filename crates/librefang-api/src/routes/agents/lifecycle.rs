@@ -13,6 +13,46 @@ fn manifest_version(manifest: &librefang_types::agent::AgentManifest) -> String 
     format!("{:x}", hasher.finalize())
 }
 
+/// Check the `expected_version` an agent-manifest writer carried against the
+/// live manifest (#8424).
+///
+/// Returns the `409 Conflict` response (translated into the request's language)
+/// when a non-empty token no longer matches, so the caller can return it
+/// directly. A missing token, an empty token, or an agent that no longer
+/// exists all skip the check — the write path owns those outcomes.
+///
+/// Every endpoint that mutates the manifest but is *not* the full-editor
+/// `PATCH` (`PUT /tools`, `/skills`, `/mcp_servers`, `/channels`) shares this:
+/// each one moves the same ETag the editor echoes, so without the check a
+/// panel save built on a superseded read can silently overwrite whatever the
+/// concurrent writer added.
+pub(crate) fn check_expected_manifest_version(
+    state: &Arc<AppState>,
+    agent_id: AgentId,
+    expected: Option<&str>,
+    t: &ErrorTranslator,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let expected = expected?;
+    if expected.is_empty() {
+        return None;
+    }
+    // Registry entry gone: no live manifest to compare against. The write
+    // path reports the not-found/invalid-agent outcome instead of a 409 that
+    // would misdescribe it.
+    let current = state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .map(|entry| manifest_version(&entry.manifest))?;
+    if current != expected {
+        return Some((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": t.t("api-error-agent-manifest-conflict")})),
+        ));
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Shared manifest resolution helper
 // ---------------------------------------------------------------------------
@@ -1322,19 +1362,21 @@ pub async fn patch_agent(
     // #8424: the manifest editor echoes the ETag its seed read carried in
     // `expected_version`; a mismatch means another writer saved after that
     // read, and applying this PATCH would silently undo their change.
-    if let Some(expected) = body.get("expected_version").and_then(|v| v.as_str()) {
-        let current = state
-            .kernel
-            .agent_registry()
-            .get(agent_id)
-            .map(|entry| manifest_version(&entry.manifest))
-            .unwrap_or_default();
-        if !expected.is_empty() && current != expected {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({"error": t.t("api-error-agent-manifest-conflict")})),
-            );
-        }
+    //
+    // Known limit: this is a read-then-write pair, not a compare-and-swap — a
+    // writer that slips in between the registry read here and the kernel's
+    // lock acquisition below still wins. Every writer is an in-process
+    // handler and the window is a few instructions wide, so the practical
+    // exposure is tiny; closing it fully would mean moving the version compare
+    // into the kernel next to the manifest replacement. Recorded here instead
+    // of passing the check off as atomic.
+    if let Some(conflict) = check_expected_manifest_version(
+        &state,
+        agent_id,
+        body.get("expected_version").and_then(|v| v.as_str()),
+        &t,
+    ) {
+        return conflict;
     }
 
     let mcp_only_patch = patch_agent_only_updates_mcp_servers(&body);
