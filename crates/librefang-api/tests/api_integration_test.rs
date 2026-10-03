@@ -3428,6 +3428,10 @@ async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
     }
 }
 
+/// API key the approval-policy router requires; a test that wants the approve
+/// *handler* to run (not just the rate-limit middleware) must present it.
+const APPROVAL_TEST_API_KEY: &str = "approval-test-key";
+
 /// Boot the production router with a specific approval second-factor policy.
 ///
 /// `second_factor` and `totp_tools` are the inputs to the question the auth
@@ -3437,6 +3441,10 @@ async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
 /// approval verifies no code and there is nothing on that path to brute-force,
 /// while under `totp` only the tools inside `totp_tools` (or every tool, when
 /// the list is empty) do.
+///
+/// `api_key` is set so the auth layer has something the handler tests can
+/// present; the rate-limit middleware runs outside it, so requests without the
+/// key still meet the limiter first and keep those tests meaningful.
 async fn start_full_router_with_approval_policy(
     second_factor: librefang_types::approval::SecondFactor,
     totp_tools: Vec<String>,
@@ -3448,6 +3456,7 @@ async fn start_full_router_with_approval_policy(
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
+        api_key: APPROVAL_TEST_API_KEY.to_string(),
         approval: librefang_types::approval::ApprovalPolicy {
             second_factor,
             totp_tools,
@@ -3485,11 +3494,17 @@ async fn start_full_router_with_approval_policy(
 /// its phases from different addresses, or the earlier phase's count decides
 /// the later phase's answer.
 fn public_post(uri: &str, peer: [u8; 4]) -> Request<Body> {
+    public_post_with_body(uri, peer, "{}")
+}
+
+/// [`public_post`] with a JSON body of choice — the approve path's TOTP tests
+/// send a `totp_code` to prove whether the handler verifies it.
+fn public_post_with_body(uri: &str, peer: [u8; 4], body: &str) -> Request<Body> {
     let mut request = Request::builder()
         .method("POST")
         .uri(uri)
         .header("content-type", "application/json")
-        .body(Body::from("{}"))
+        .body(Body::from(body.to_string()))
         .unwrap();
     request
         .extensions_mut()
@@ -3834,6 +3849,77 @@ async fn test_approvals_stop_being_metered_inside_the_totp_grace_window() {
             limit + 1
         );
     }
+}
+
+/// The handler half of the grace exemption: inside the window no code is
+/// verified, so a code **sent anyway** must be neither verified nor recorded
+/// as a failure.
+///
+/// The middleware asks `would_verify_totp` and skips the request, but the
+/// handler used to decide from the policy's per-tool answer alone and still
+/// checked any `totp_code` in the body, recording each wrong one through
+/// `check_and_record_totp_failure("api_admin")`. Those failures live on the
+/// shared identity lockout, not on the #4020 per-IP meter — for the next 300
+/// seconds an attacker's guesses were counted on neither. The handler now
+/// derives the question from the same `would_verify_totp(uuid, "api_admin")`,
+/// so inside grace it verifies nothing and records nothing, and the approval
+/// resolves on grace alone.
+///
+/// Seven wrong codes is two past `TOTP_MAX_FAILURES` (5): before the fix the
+/// first answers 400 and the sixth answers "Too many failed TOTP attempts";
+/// after it every one approves via grace and the `api_admin` counter stays
+/// clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_approve_ignores_a_code_sent_inside_the_totp_grace_window() {
+    let harness = start_full_router_with_approval_policy(
+        librefang_types::approval::SecondFactor::Totp,
+        Vec::new(),
+    )
+    .await;
+
+    // Open the grace window the way a code-verified approval does.
+    let opener = seed_pending_approval(&harness, "shell_exec");
+    harness
+        .state
+        .kernel
+        .approvals()
+        .resolve(
+            uuid::Uuid::parse_str(&opener).expect("seeded id must be a uuid"),
+            librefang_types::approval::ApprovalDecision::Approved,
+            Some("api".to_string()),
+            true,
+            Some("api_admin"),
+        )
+        .expect("a code-verified approval must resolve");
+
+    for i in 0..7 {
+        let id = seed_pending_approval(&harness, "shell_exec");
+        let mut request = public_post_with_body(
+            &format!("/api/approvals/{id}/approve"),
+            [203, 0, 113, 141],
+            r#"{"totp_code":"000000"}"#,
+        );
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!("Bearer {APPROVAL_TEST_API_KEY}")).unwrap(),
+        );
+        let resp = harness.app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "wrong code {i} inside grace must be ignored, not verified: \
+             the approval resolves on grace"
+        );
+    }
+
+    assert!(
+        !harness
+            .state
+            .kernel
+            .approvals()
+            .is_totp_locked_out("api_admin"),
+        "no failed attempt may be recorded while the grace window skips verification"
+    );
 }
 
 /// Build a GET request to `uri` and inject loopback `ConnectInfo` so the
