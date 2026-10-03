@@ -890,6 +890,11 @@
       "manifest_history": "清单历史",
       "manifest_history_load_err": "加载清单历史失败。",
       "no_history": "尚未记录配置更改。",
+      "restore_title": "Restore this version?",
+      "restore_confirm": "Restore '{{name}}' to the version saved {{timestamp}} ({{source}})? This overwrites the agent's current agent.toml; the snapshot recorded afterwards holds the restored content, not the content it replaced.",
+      "restore_btn": "Restore",
+      "restored": "Manifest restored",
+      "restore_failed": "Restore failed",
 "edit_full_manifest": "编辑完整配置",
       "edit_full_manifest_hint": "所有清单字段——资源、能力、自主性、响应格式等。",
       "description": "描述",
@@ -915,8 +920,8 @@
       "tools": "工具",
       "schedule": "计划",
       "logs": "日志",
-      "routing": "路由",
-      "history": "历史"
+      "history": "历史",
+      "routing": "路由"
     },
     "configure": "配置",
     "select_an_agent": "选择智能体",

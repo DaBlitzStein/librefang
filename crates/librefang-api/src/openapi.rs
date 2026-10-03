@@ -66,6 +66,8 @@ use crate::types;
         routes::get_agent_stats,
         routes::list_agent_events,
         routes::list_agent_ephemeral_runs,
+        routes::list_agent_manifest_history,
+        routes::restore_agent_manifest_version,
         routes::spawn_agent,
         routes::spawn_ephemeral_agent,
         routes::get_agent,
@@ -125,7 +127,6 @@ use crate::types;
         routes::resume_agent,
         routes::agent_metrics,
         routes::agent_logs,
-        routes::list_agent_manifest_history,
 
         // ── Bulk Operations ──
         routes::bulk_create_agents,

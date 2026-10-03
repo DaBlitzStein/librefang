@@ -24,6 +24,7 @@ export {
   getAgentChannels,
   getAgentStats,
   listAgentEvents,
+  getAgentManifestHistory,
   listAgentSessions,
   listAgentTemplates,
   getAgentType,
@@ -149,7 +150,6 @@ export {
   getAgentSkills,
   // per-agent MCP server assignment — read (#7713)
   getAgentMcpServers,
-  getAgentManifestHistory,
   getAgentTemplateToml,
   getTemplateHistory,
   // overview
@@ -216,6 +216,7 @@ export {
   promoteAgentType,
   restoreAgentTypeFromRegistry,
   restoreTemplateVersion,
+  restoreAgentManifestVersion,
   spawnEphemeral,
   spawnAgent,
   cloneAgent,

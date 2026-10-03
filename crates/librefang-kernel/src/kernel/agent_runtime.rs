@@ -59,19 +59,13 @@ fn register_agent_watcher_slot(
     guard.push(handle);
 }
 
-/// Re-serialize a patched `agent.toml` into the canonical layout
-/// `persist_full_manifest_at` records, so suspend/resume history rows are
-/// directly comparable with the `update` rows they sit next to.
+/// Re-serialize a patched `agent.toml` into the canonical layout `persist_full_manifest_at` records, so suspend/resume history rows are directly comparable with the `update` rows they sit next to.
 ///
-/// `persist_agent_enabled` writes the operator's file with only the `enabled`
-/// line patched, preserving comments and key order. Snapshotting that text
-/// verbatim (the pre-fix behaviour) makes consecutive rows alternate between
-/// the operator's layout and the serializer's, so the History tab reports
-/// nearly every line as changed when only `enabled` moved (#8041).
+/// `persist_agent_enabled` writes the operator's file with only the `enabled` line patched, preserving comments and key order.
+/// Snapshotting that text verbatim would make consecutive rows alternate between the operator's layout and the serializer's, so the History tab would report nearly every line as changed when only `enabled` moved.
 ///
-/// Falls back to the raw text when the file does not parse; by then the caller
-/// has already written it, so the best available record is what is on disk.
-fn normalized_manifest_snapshot(content: &str) -> String {
+/// Falls back to the raw text when the file does not parse; by then the caller has already written it, so the best available record is what is on disk.
+fn normalize_manifest_toml(content: &str) -> String {
     match toml::from_str::<librefang_types::agent::AgentManifest>(content) {
         Ok(manifest) => toml::to_string_pretty(&manifest).unwrap_or_else(|_| content.to_string()),
         Err(_) => content.to_string(),
@@ -329,19 +323,9 @@ impl LibreFangKernel {
                     // Append after [agent] section or at end
                     format!("{content}\nenabled = {enabled}\n")
                 };
-                // Suspend/resume rewrites agent.toml outside `persist_full_manifest_at`
-                // (this function patches the `enabled` line directly rather than
-                // re-serializing the whole manifest), so it must record its own
-                // history snapshot or the History tab silently misses every
-                // suspend/resume (#8041).
-                //
-                // Record the serializer's canonical layout, not `new_content`:
-                // `new_content` is the operator's file with one line patched, so a
-                // hand-written manifest (comments, key order) would alternate with
-                // the `update` rows' `toml::to_string_pretty` output and make two
-                // neighbouring snapshots differ on nearly every line when only
-                // `enabled` moved (#8041).
-                let snapshot = normalized_manifest_snapshot(&new_content);
+                // Suspend/resume rewrites `agent.toml` outside `persist_full_manifest_at`, so it must record its own history snapshot or the module doc's "every `agent.toml` write is recorded" is untrue for the one path an operator toggles from the dashboard.
+                // Record the serializer's canonical layout, not `new_content` (the operator's file with the `enabled` line patched), so this row is comparable with the `update` rows it sits next to instead of differing on every comment and key.
+                let snapshot = normalize_manifest_toml(&new_content);
                 let change_source = if enabled { "resume" } else { "suspend" };
                 let store =
                     librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
@@ -354,12 +338,7 @@ impl LibreFangKernel {
                 };
                 if let Err(e) = atomic_write_toml(&toml_path, &new_content) {
                     warn!("Failed to persist enabled={enabled} for {name}: {e}");
-                    // The in-memory state already changed and the disk write just
-                    // failed, so record the attempted snapshot as `*-persist-failed`
-                    // before returning — mirroring `persist_full_manifest_at`'s
-                    // `update-persist-failed` branch. Going silent here leaves the
-                    // registry suspended while disk still says `enabled = true`, with
-                    // no history row explaining the disagreement (#8041).
+                    // The registry has already moved (suspend/resume call `set_state` first), so a disk-write failure leaves state and disk disagreeing; record the attempted snapshot as `*-persist-failed` so the History tab can show it rather than going silent.
                     record(&format!("{change_source}-persist-failed"));
                     return;
                 }
@@ -418,6 +397,89 @@ impl LibreFangKernel {
         };
         self.compact_agent_session_in_lock_scope(agent_id, session_id_override, force, false)
             .await
+    }
+
+    /// Pre-turn automatic compaction, shared by the streaming and non-streaming senders (#8507).
+    /// Compacts `session` when it is over the message or token threshold, then reloads it from storage so the turn runs on the compacted history.
+    /// Must be called with the turn's serialization lock held and registered in `held_agent_locks`; `agent_scoped` names which of the two locks that is, so the compactor does not re-acquire it.
+    /// Callers skip it for fork turns: compaction rewrites the canonical session on disk, which a fork must never touch.
+    pub(crate) async fn auto_compact_before_turn(
+        &self,
+        agent_id: AgentId,
+        session: &mut librefang_memory::session::Session,
+        system_prompt: &str,
+        config: &librefang_runtime::compactor::CompactionConfig,
+        agent_scoped: bool,
+    ) {
+        use librefang_runtime::compactor::{
+            estimate_token_count, needs_compaction, needs_compaction_by_tokens,
+        };
+        let by_messages = needs_compaction(session, config);
+        let estimated = estimate_token_count(&session.messages, Some(system_prompt), None);
+        let by_tokens = needs_compaction_by_tokens(estimated, config);
+        if by_tokens && !by_messages {
+            info!(
+                agent_id = %agent_id,
+                estimated_tokens = estimated,
+                messages = session.messages.len(),
+                "Token-based compaction triggered (messages below threshold but tokens above)"
+            );
+        }
+        if !(by_messages || by_tokens) {
+            return;
+        }
+        // Pass the in-turn session id so the compactor operates on the same session just measured; `entry.session_id` points at a different session for channel-derived and `session_mode = "new"` turns.
+        info!(agent_id = %agent_id, messages = session.messages.len(), "Auto-compacting session");
+        match self
+            .compact_agent_session_in_lock_scope(agent_id, Some(session.id), false, agent_scoped)
+            .await
+        {
+            Ok(msg) => {
+                info!(agent_id = %agent_id, "{msg}");
+                if let Ok(Some(reloaded)) = self.memory.substrate.get_session(session.id) {
+                    *session = reloaded;
+                }
+            }
+            Err(e) => {
+                warn!(agent_id = %agent_id, "Auto-compaction failed: {e}");
+            }
+        }
+    }
+
+    /// Post-turn automatic compaction, shared by the streaming and non-streaming senders (#8507).
+    /// When the session a turn just wrote is over the token threshold, compacts it in the background so the next turn starts from a summary.
+    /// The spawned task runs outside the turn's `held_agent_locks` scope, so it waits for the turn's lock to be released before loading the session.
+    /// Callers skip it for fork turns, for the same reason as [`Self::auto_compact_before_turn`].
+    pub(crate) fn spawn_compaction_after_turn(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        session: &librefang_memory::session::Session,
+        manifest_compaction: Option<&librefang_types::agent::CompactionOverrides>,
+        agent_scoped: bool,
+    ) {
+        use librefang_runtime::compactor::{
+            estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
+        };
+        let cfg = self.config.load();
+        // #4976: per-agent [compaction] overrides on top of the global config; the token threshold ratio is the field that gates this check.
+        let config =
+            CompactionConfig::from_toml_with_overrides(&cfg.compaction, manifest_compaction);
+        let estimated = estimate_token_count(&session.messages, None, None);
+        if !needs_compaction_by_tokens(estimated, &config) {
+            return;
+        }
+        let kernel = Arc::clone(self);
+        let sid = session.id;
+        // #3740: spawn_logged so compaction panics surface in logs.
+        super::spawn_logged("post_loop_compaction", async move {
+            info!(agent_id = %agent_id, estimated_tokens = estimated, "Post-loop compaction triggered");
+            if let Err(e) = kernel
+                .compact_agent_session_in_lock_scope(agent_id, Some(sid), false, agent_scoped)
+                .await
+            {
+                warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");
+            }
+        });
     }
 
     /// Compact a session using the same lock domain selected by the caller's message turn.

@@ -90,13 +90,11 @@ export const agentKeys = {
   // configured on this instance".
   channels: (agentId: string) =>
     [...agentKeys.all, "channels", agentId] as const,
-  // Nested under `detail(agentId)`, not a sibling of `details()`: the history
-  // of one agent's manifest is a property of that agent, and every write that
-  // produces a new snapshot already invalidates its detail. As a sibling it
-  // needed each of those mutations to remember a second, explicit
-  // invalidation — and the ones that only invalidate `lists()` (suspend,
-  // resume) could not reach it at all, so the History tab sat stale after the
-  // very write that added a row. Same shape as `agentTypeKeys.registryDiff`.
+  // Manifest version history (#8041) — nested under `detail(agentId)`, not a
+  // sibling of it: every control-plane write that records a snapshot already
+  // invalidates the agent's detail, so the History tab refreshes itself. As a
+  // sibling it would need each mutation to remember a second, explicit
+  // invalidation and would sit stale after the very edit that added a row.
   manifestHistory: (agentId: string) =>
     [...agentKeys.detail(agentId), "manifestHistory"] as const,
 };
