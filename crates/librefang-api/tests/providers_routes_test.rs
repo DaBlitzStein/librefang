@@ -3057,6 +3057,56 @@ async fn set_provider_discovery_flips_flag_and_persists_outside_the_provider_fil
     );
 }
 
+/// A failed preference write must not leave the in-memory flip live (#8411).
+///
+/// The save fails here because a directory occupies the preference file's path, so the atomic rename cannot publish.
+/// The handler has to answer 500 and roll back both the provider flag and the store entry, or discovery keeps probing a provider whose setting the caller was told did not save — until the next restart silently reverts it.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_provider_discovery_rolls_back_when_the_save_fails() {
+    let h = boot_with_provider(ProviderInfo {
+        id: "acme-rollback".to_string(),
+        display_name: "ACME Rollback".to_string(),
+        api_key_env: "LIBREFANG_TEST_ACME_ROLLBACK_API_KEY".to_string(),
+        base_url: "http://127.0.0.1:59998/v1".to_string(),
+        key_required: true,
+        auth_status: AuthStatus::Configured,
+        ..ProviderInfo::default()
+    });
+
+    // A directory at the target path makes the staged rename fail, the same
+    // way it does in `durable_atomic_write`'s own failure test.
+    let prefs_file = h
+        ._state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("provider_discovery.json");
+    std::fs::create_dir(&prefs_file).unwrap();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/providers/acme-rollback/discovery",
+        Some(serde_json::json!({ "discover_models": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {body}");
+
+    let catalog = h._state.kernel.model_catalog_load();
+    assert!(
+        !catalog
+            .get_provider("acme-rollback")
+            .unwrap()
+            .discover_models,
+        "the failed save must roll the in-memory flip back"
+    );
+    assert_eq!(
+        catalog.provider_discover_preference("acme-rollback"),
+        None,
+        "and remove the store entry it added, so the next restart does not resurrect it"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn set_provider_discovery_rejects_unknown_provider() {
     let h = boot();

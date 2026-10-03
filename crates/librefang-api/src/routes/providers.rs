@@ -87,6 +87,11 @@ use std::time::Instant;
 
 use crate::types::ApiErrorResponse;
 
+/// Serializes the read-modify-write cycle on `data/provider_discovery.json` between concurrent PUTs (#8411).
+///
+/// The handler mutates the in-memory preference, loads a fresh catalog snapshot, and saves it; without this lock, two PUTs can interleave so the older snapshot lands last and drops the newer preference, even though both callers were answered 200.
+static DISCOVERY_PREFS_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn scrubbed_provider_error(
     operation: &'static str,
     error: impl std::fmt::Display,
@@ -2216,15 +2221,24 @@ pub async fn set_provider_discovery(
         .home_dir()
         .join("data")
         .join("provider_discovery.json");
+    // Serialize the whole mutate-snapshot-save cycle: the write happens outside the RCU closure so the closure's retries cannot leave a sticky error, but that leaves the snapshot free to race — with two concurrent PUTs, the older snapshot can land last and drop the newer preference even though its caller was answered 200 (#8411).
+    let _write_guard = DISCOVERY_PREFS_WRITE_LOCK.lock().await;
+
     // Mutate the catalog inside the RCU closure and do the disk write outside
     // it. The closure may run more than once under contention, so the write has
     // to happen exactly once, after the mutation commits; keeping it inside also
     // left a failed attempt's error sticky, turning a later successful toggle
     // into a 500.
     let mut applied = false;
-    let applied_sink = &mut applied;
+    let mut previous_flag = false;
+    let mut previous_pref = None;
     state.kernel.model_catalog_update(&mut |catalog| {
-        *applied_sink = catalog.set_provider_discover_preference(&name, discover);
+        previous_flag = catalog
+            .get_provider(&name)
+            .map(|p| p.discover_models)
+            .unwrap_or(false);
+        previous_pref = catalog.provider_discover_preference(&name);
+        applied = catalog.set_provider_discover_preference(&name, discover);
     });
     if !applied {
         return ApiErrorResponse::not_found(format!("Provider '{}' not found", name))
@@ -2237,6 +2251,16 @@ pub async fn set_provider_discovery(
     // the failure this endpoint exists to end (#7776, #8407).
     let snapshot = state.kernel.model_catalog_load();
     if let Err(e) = snapshot.save_discover_prefs(&prefs_path) {
+        // Roll the flip back on a failed save, exactly like `add_custom_model` / `remove_custom_model`: a caller told the write failed must not leave discovery running until the next restart, which would then silently revert it (#8411).
+        tracing::warn!("Failed to persist provider discovery preference: {e}");
+        let name_for_rollback = name.clone();
+        state.kernel.model_catalog_update(&mut move |catalog| {
+            catalog.restore_provider_discover_preference(
+                &name_for_rollback,
+                previous_flag,
+                previous_pref,
+            );
+        });
         return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
