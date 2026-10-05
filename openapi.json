@@ -1852,7 +1852,7 @@
           "agents"
         ],
         "summary": "POST /api/agents/{id}/manifest-history/{version_id}/restore — roll an agent's manifest back to a stored snapshot.",
-        "description": "Mirrors `restore_template_version`: the stored TOML is parsed and applied\nthrough `update_manifest`, which re-runs the module-path security check,\npreserves the runtime-only fields (name, tags, workspace, resolved\n`exec_policy`) and persists the result — the restore itself is recorded in\nthe history as a fresh `restore` snapshot.",
+        "description": "Mirrors `restore_template_version`: the stored TOML is parsed and applied through `restore_manifest_snapshot`, which re-runs the module-path security check, preserves the runtime-only fields (name, tags, workspace, resolved `exec_policy`, current `enabled`) and persists the result — the restore itself is recorded in the history as a fresh `restore` snapshot.\nUnlike a plain `update_manifest`, the restore also reconciles the runtime side effects a changed snapshot implies: the background loop is stopped and restarted on a schedule change, named workspaces are created on a workspaces change, and the canonical session is dropped on a model or endpoint change.",
         "operationId": "restore_agent_manifest_version",
         "parameters": [
           {
@@ -11981,10 +11981,10 @@
               "schema": {
                 "oneOf": [
                   {
-                    "type": "null"
+                    "$ref": "#/components/schemas/JsonObject"
                   },
                   {
-                    "$ref": "#/components/schemas/JsonObject"
+                    "type": "null"
                   }
                 ]
               }
