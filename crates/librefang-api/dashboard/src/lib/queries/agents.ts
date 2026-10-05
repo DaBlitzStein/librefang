@@ -21,7 +21,7 @@ import {
   getAgentSkills,
   getAgentMcpServers,
 } from "../http/client";
-import { agentKeys, toolKeys } from "./keys";
+import { agentAvatarKeys, agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_MS = 30_000;
@@ -173,15 +173,22 @@ export const agentQueries = {
   // gets a 401; the bytes have to be fetched and handed to the tag as an
   // object URL instead.
   //
-  // `enabled` is the caller's "this agent has one" — asking otherwise buys a
-  // guaranteed 404 per agent per render. The long `staleTime` leans on the
-  // route's `ETag` + `no-cache`: a revalidation that finds nothing changed is
-  // a bodiless 304, and a re-upload is picked up by the mutations invalidating
-  // this key rather than by polling for it.
+  // `enabled` is the caller's "there is an avatar to fetch and a mounted
+  // consumer to render it" — asking otherwise buys a guaranteed 404 per agent
+  // per render or downloads bytes nobody displays. The long `staleTime` leans
+  // on the route's `ETag` + `no-cache`: a revalidation that finds nothing
+  // changed is a bodiless 304, and a re-upload is picked up by the mutations
+  // invalidating this key rather than by polling for it.
   avatar: (agentId: string, enabled: boolean) =>
     queryOptions({
-      queryKey: agentKeys.avatar(agentId),
-      queryFn: () => fetchAuthenticatedImage(agentAvatarPath(agentId)),
+      // Sibling root, not `agentKeys.avatar`: a broad `agentKeys.all`
+      // invalidation (a hand toggle, a knowledge write) must not re-download
+      // every cached image. See `agentAvatarKeys` in `./keys`.
+      queryKey: agentAvatarKeys.avatar(agentId),
+      // React Query's signal is forwarded: switching agents quickly otherwise
+      // leaves the superseded image GET holding a connection slot until it
+      // finishes on its own.
+      queryFn: ({ signal }) => fetchAuthenticatedImage(agentAvatarPath(agentId), signal),
       enabled: !!agentId && enabled,
       staleTime: AVATAR_STALE_MS,
     }),
@@ -269,16 +276,33 @@ export function useAgentChannels(agentId: string, options: QueryOverrides = {}) 
  * gates the request: an agent without one would otherwise cost a 404 on every
  * render of the row that shows its initials.
  *
+ * `enabled` is the caller's answer to "is the component that renders the image
+ * actually mounted". It exists because the consumer may be conditionally
+ * rendered while this hook is not — the agents list keeps the selected agent in
+ * state after its detail drawer closes — so without it the blob would be
+ * downloaded and its object URL held for an image nothing displays.
+ *
  * Returns `undefined` while loading and when there is nothing to show, which is
  * exactly what `Avatar`'s `src` wants — it falls back to the initials on its
  * own, so there is no separate loading state to thread through the UI.
  */
-export function useAgentAvatarUrl(agentId: string, hasAvatar: boolean): string | undefined {
-  const { data: blob } = useQuery(agentQueries.avatar(agentId, hasAvatar));
+export function useAgentAvatarUrl(
+  agentId: string,
+  hasAvatar: boolean,
+  enabled = true,
+): string | undefined {
+  const { data: blob } = useQuery(agentQueries.avatar(agentId, hasAvatar && enabled));
   const [objectUrl, setObjectUrl] = useState<string | undefined>(undefined);
 
   useEffect(() => {
-    if (!blob) {
+    // `!hasAvatar` is part of the condition, not just the query's `enabled`: a
+    // disabled query still returns cached data, so a caller that only wants to
+    // know "is there an image" would otherwise mint an object URL for a cached
+    // Blob it is not rendering (#8339 review). Same for `enabled`: a drawer
+    // that closes revokes the handle in this cleanup, so a closed consumer
+    // does not keep an object URL alive for an image that is no longer
+    // rendered.
+    if (!blob || !hasAvatar || !enabled) {
       setObjectUrl(undefined);
       return;
     }
@@ -291,7 +315,7 @@ export function useAgentAvatarUrl(agentId: string, hasAvatar: boolean): string |
       // initials the fallback is there to give.
       setObjectUrl(undefined);
     };
-  }, [blob]);
+  }, [blob, hasAvatar, enabled]);
 
   return objectUrl;
 }

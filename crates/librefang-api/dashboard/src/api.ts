@@ -1812,9 +1812,10 @@ export interface AgentAvatarUploadResult {
  *  what lands on disk is `{agent_id}.{ext}` where the id is a UUID the daemon
  *  minted and the extension comes from sniffing the bytes.
  *
- *  Rejects with 403 for an agent the deployment provisions, because setting an
- *  avatar writes `avatar_url` into the manifest identity and the next reconcile
- *  would overwrite it (#6695). */
+ *  Rejects with 423 (Locked) for an agent the deployment provisions — every
+ *  identity write to one answers that, not 403 — because setting an avatar
+ *  writes `avatar_url` into the manifest identity and the next reconcile would
+ *  overwrite it (#6695). */
 export async function uploadAgentAvatar(agentId: string, file: Blob): Promise<AgentAvatarUploadResult> {
   const response = await fetchWithTimeout(`/api/agents/${encodeURIComponent(agentId)}/avatar`, {
     method: "POST",

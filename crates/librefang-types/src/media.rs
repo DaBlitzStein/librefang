@@ -522,6 +522,8 @@ pub fn remove_avatars_except(avatars_dir: &std::path::Path, agent_id: &str, keep
 ///
 /// All four candidates are attempted, not just the first: an upload that changed format writes the new extension and removes the old one, and a crash between those two steps would otherwise leave a file that [`find_avatar`] could return for the rest of the agent's life.
 /// A missing file is not an error — this is called on deletion paths where "already gone" is the desired end state.
+///
+/// A caller that can do something with the failures — rather than only report a count — should call [`remove_avatars_reporting`], which is this function plus the errors it drops.
 pub fn remove_avatars(avatars_dir: &std::path::Path, agent_id: &str) -> usize {
     remove_avatars_reporting(avatars_dir, agent_id).0
 }

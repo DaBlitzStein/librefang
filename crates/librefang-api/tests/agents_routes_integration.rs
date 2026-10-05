@@ -69,6 +69,19 @@ async fn boot_with_mcp_servers(
     api_key: &str,
     mcp_servers: Vec<librefang_types::config::McpServerConfigEntry>,
 ) -> Harness {
+    boot_with_users(api_key, mcp_servers, Vec::new()).await
+}
+
+/// Boot with `[[users]]` entries so the production middleware authenticates
+/// per-user bearers, not just the master key. The avatar ownership test needs
+/// a real `User`-role caller: `can_access_agent` can only be exercised through
+/// the full stack when the role gate lets the request reach the handler, which
+/// for a GET it does.
+async fn boot_with_users(
+    api_key: &str,
+    mcp_servers: Vec<librefang_types::config::McpServerConfigEntry>,
+    users: Vec<librefang_types::config::UserConfig>,
+) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Seed the pinned registry fixture so the kernel boots with content, offline.
@@ -78,6 +91,7 @@ async fn boot_with_mcp_servers(
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
         api_key: api_key.to_string(),
+        users,
         default_model: DefaultModelConfig {
             provider: "ollama".to_string(),
             model: "test-model".to_string(),
@@ -3836,5 +3850,407 @@ async fn test_avatars_are_stored_outside_workspaces_and_the_dashboard_tree() {
         status,
         StatusCode::UNAUTHORIZED,
         "the avatar route must require a token"
+    );
+}
+
+/// Another user's avatar is not readable, and a denial is indistinguishable
+/// from a missing agent (#8349).
+///
+/// RBAC admits every GET for any role — `user_role_allows_request` returns
+/// true for `Method::GET` whatever the role — so before this check the only
+/// gate was `resolve_agent`, which proves the id exists and nothing else. A
+/// non-owner `User` key could read any agent's image, and could also
+/// enumerate ids because an existing one answered with bytes while an unknown
+/// one answered `api-error-agent-not-found`. The sibling agent-scoped reads
+/// (`config.rs`, `files.rs`, `lifecycle.rs`, `cloning.rs`) all use
+/// `can_access_agent` and answer the same 404 for both cases; this route now
+/// does too.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_avatar_get_is_scoped_to_the_agent_owner() {
+    const BOB_KEY: &str = "bob-avatar-user-key";
+    const CAROL_KEY: &str = "carol-avatar-viewer-key";
+    let bob_hash =
+        librefang_api::password_hash::hash_password(BOB_KEY).expect("hash Bob's test key");
+    let carol_hash =
+        librefang_api::password_hash::hash_password(CAROL_KEY).expect("hash Carol's test key");
+    let h = boot_with_users(
+        TEST_TOKEN,
+        Vec::new(),
+        vec![
+            librefang_types::config::UserConfig {
+                name: "Bob".to_string(),
+                role: "user".to_string(),
+                api_key_hash: Some(bob_hash),
+                ..Default::default()
+            },
+            librefang_types::config::UserConfig {
+                name: "Carol".to_string(),
+                role: "viewer".to_string(),
+                api_key_hash: Some(carol_hash),
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+
+    let spawn_authored = |name: &str, author: &str| {
+        h.state
+            .kernel
+            .spawn_agent_typed(AgentManifest {
+                name: name.to_string(),
+                author: author.to_string(),
+                source_template: None,
+                ..AgentManifest::default()
+            })
+            .expect("spawn agent")
+    };
+    let alice = spawn_authored("avatar-scope-alice", "Alice");
+    let bob = spawn_authored("avatar-scope-bob", "Bob");
+
+    // Both agents get an avatar, uploaded with the master key (Admin+).
+    for id in [alice, bob] {
+        let (status, body) = send(
+            h.app.clone(),
+            post_bytes(
+                &format!("/api/agents/{id}/avatar"),
+                TINY_PNG.to_vec(),
+                "application/octet-stream",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "seeding {id}: {body:?}");
+    }
+
+    // Bob's own avatar is readable with Bob's key — the check must scope, not
+    // deny every non-admin.
+    let (status, _, bytes) = send_raw(
+        h.app.clone(),
+        get_with(&format!("/api/agents/{bob}/avatar"), Some(BOB_KEY)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the owner must still read his own avatar"
+    );
+    assert_eq!(bytes, TINY_PNG);
+
+    // Alice's is not: 404, and the same body an unknown id gets.
+    let (denied, _, denied_bytes) = send_raw(
+        h.app.clone(),
+        get_with(&format!("/api/agents/{alice}/avatar"), Some(BOB_KEY)),
+    )
+    .await;
+    assert_eq!(
+        denied,
+        StatusCode::NOT_FOUND,
+        "a non-owner must not read another user's avatar"
+    );
+    let unknown = uuid::Uuid::new_v4();
+    let (unknown_status, _, unknown_bytes) = send_raw(
+        h.app.clone(),
+        get_with(&format!("/api/agents/{unknown}/avatar"), Some(BOB_KEY)),
+    )
+    .await;
+    assert_eq!(unknown_status, StatusCode::NOT_FOUND);
+    let denied_json: serde_json::Value =
+        serde_json::from_slice(&denied_bytes).expect("denied response is JSON");
+    let unknown_json: serde_json::Value =
+        serde_json::from_slice(&unknown_bytes).expect("unknown-id response is JSON");
+    assert_eq!(
+        denied_json["error"], unknown_json["error"],
+        "the refusal must carry the same message as the unknown-id 404"
+    );
+    assert_eq!(
+        denied_json["code"], unknown_json["code"],
+        "the refusal must carry the same error code as the unknown-id 404, or the route enumerates ids"
+    );
+
+    // A Viewer is waved through every GET by the same RBAC rule, so the check
+    // has to catch that role too.
+    let (status, _, _) = send_raw(
+        h.app.clone(),
+        get_with(&format!("/api/agents/{alice}/avatar"), Some(CAROL_KEY)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a Viewer must not read another user's avatar"
+    );
+
+    // The admin master key still sees every agent's image.
+    let (status, _, bytes) =
+        send_raw(h.app.clone(), get(&format!("/api/agents/{alice}/avatar"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, TINY_PNG);
+}
+
+/// Two uploads for the same agent, in two formats, must not erase each other (#8349).
+///
+/// Every upload ends by sweeping the candidate extensions other than its own, so
+/// before the per-agent lock a PNG and a GIF in flight could each delete the
+/// other's file — the identity then named a route that served nothing. Each
+/// round here must end with exactly one file and a `GET` that serves it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_avatar_uploads_do_not_erase_each_other() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "avatar-concurrent");
+    let path = format!("/api/agents/{id}/avatar");
+
+    // Many rounds: the losing interleaving is a timing race — with the fix
+    // every round is serialised and deterministic, but a regression would slip
+    // past a single round whenever the scheduler happened to run them in order.
+    for round in 0..32 {
+        let png_upload = tokio::spawn(send_raw(
+            h.app.clone(),
+            post_bytes(&path, TINY_PNG.to_vec(), "application/octet-stream", None),
+        ));
+        let gif_upload = tokio::spawn(send_raw(
+            h.app.clone(),
+            post_bytes(&path, TINY_GIF.to_vec(), "application/octet-stream", None),
+        ));
+        let (png, gif) = tokio::join!(png_upload, gif_upload);
+        assert_eq!(
+            png.expect("png upload task").0,
+            StatusCode::OK,
+            "round {round}"
+        );
+        assert_eq!(
+            gif.expect("gif upload task").0,
+            StatusCode::OK,
+            "round {round}"
+        );
+
+        let (status, headers, bytes) = send_raw(h.app.clone(), get(&path)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "round {round}: an upload's sweep removed the other upload's file"
+        );
+        let content_type = headers["content-type"]
+            .to_str()
+            .expect("served content-type")
+            .to_string();
+        let expected = match bytes.as_slice() {
+            TINY_PNG => "image/png",
+            TINY_GIF => "image/gif",
+            other => panic!("round {round}: served bytes are neither upload: {other:?}"),
+        };
+        assert_eq!(
+            content_type, expected,
+            "round {round}: the served type must agree with the served bytes"
+        );
+    }
+
+    assert_eq!(
+        stored_identity(&h.state, id).avatar_url,
+        Some(librefang_types::media::agent_avatar_url(&id.to_string())),
+        "the stored reference must still name a route that answers"
+    );
+    let files: Vec<String> = std::fs::read_dir(avatars_dir(&h))
+        .expect("avatars dir")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        files.len(),
+        1,
+        "exactly one avatar may survive the race: {files:?}"
+    );
+}
+
+/// A `DELETE` racing an upload for the same agent must leave the reference
+/// and the file in agreement (#8349).
+///
+/// The delete handler now takes the same per-agent lock the upload takes
+/// around its rename, identity write and sweep. Without it, an upload could
+/// rename its bytes into place, a delete could then sweep the file and clear
+/// the reference, and the upload could store the reference afterwards —
+/// `avatar_url` naming a route that 404s.
+/// This is an invariant check, not a proof the window is hit: the losing
+/// interleaving is a narrow scheduling accident and the loop below did not
+/// reproduce it against the tree without the delete lock, so it documents the
+/// agreement the lock guarantees rather than pinning the absence of the lock.
+/// Every round starts the delete a jittered interval after the upload, so the
+/// sweep lands at different points across the upload's rename-then-record
+/// window instead of always before it, and then asserts: a stored reference
+/// means the route serves an image, and no reference means it does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_avatar_delete_and_upload_stay_consistent() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "avatar-delete-race");
+    let path = format!("/api/agents/{id}/avatar");
+
+    for round in 0..32u32 {
+        let upload = tokio::spawn(send_raw(
+            h.app.clone(),
+            post_bytes(&path, TINY_PNG.to_vec(), "application/octet-stream", None),
+        ));
+        // The upload's place-then-record window is short; sweeping at one
+        // fixed offset either always misses it or always lands before it.
+        tokio::time::sleep(std::time::Duration::from_micros(u64::from(round % 16) * 20)).await;
+        let delete = tokio::spawn(send_raw(h.app.clone(), delete_req(&path)));
+        let (uploaded, deleted) = tokio::join!(upload, delete);
+        assert_eq!(
+            uploaded.expect("upload task").0,
+            StatusCode::OK,
+            "round {round}: the upload must succeed"
+        );
+        assert_eq!(
+            deleted.expect("delete task").0,
+            StatusCode::OK,
+            "round {round}: the delete must succeed"
+        );
+
+        let reference = stored_identity(&h.state, id).avatar_url;
+        let (status, _, _) = send_raw(h.app.clone(), get(&path)).await;
+        if reference.is_some() {
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "round {round}: `avatar_url` names a route with no file behind it"
+            );
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "round {round}: an avatar file is served after the reference was cleared"
+            );
+        }
+    }
+}
+
+/// Cloning an agent that has an avatar duplicates the image under the clone's
+/// own id and repoints the clone at its own route (#8349).
+///
+/// The identity copy used to carry the source's `avatar_url` verbatim, so the
+/// clone rendered the source's picture and a deleted source removed the
+/// clone's face with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_clone_duplicates_the_source_avatar_under_the_clones_own_id() {
+    let h = boot(TEST_TOKEN).await;
+    let src = spawn_named(&h.state, "clone-avatar-source");
+    let source_path = format!("/api/agents/{src}/avatar");
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_bytes(
+            &source_path,
+            TINY_PNG.to_vec(),
+            "application/octet-stream",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "seeding the source avatar: {body:?}"
+    );
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{src}/clone"),
+            serde_json::json!({"new_name": "clone-avatar-dest"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "clone failed: {body:?}");
+    let new_id = body["agent_id"]
+        .as_str()
+        .expect("agent_id in response")
+        .to_string();
+    let new_agent: AgentId = new_id.parse().expect("clone id is a uuid");
+
+    // The clone serves its own copy, from its own route.
+    let (status, headers, bytes) =
+        send_raw(h.app.clone(), get(&format!("/api/agents/{new_id}/avatar"))).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the clone must serve its own image, not 404 on a reference it inherited"
+    );
+    assert_eq!(headers["content-type"], "image/png");
+    assert_eq!(bytes, TINY_PNG);
+    assert_eq!(
+        stored_identity(&h.state, new_agent).avatar_url,
+        Some(librefang_types::media::agent_avatar_url(&new_id)),
+        "the clone's reference must name its own route, not the source's"
+    );
+    assert!(
+        librefang_types::media::avatar_path(&avatars_dir(&h), &new_id, "png").is_file(),
+        "the avatar must be duplicated under the clone's own id"
+    );
+
+    // The source still serves its own image, untouched.
+    let (status, headers, bytes) = send_raw(h.app.clone(), get(&source_path)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "cloning must not move or alias the source's avatar"
+    );
+    assert_eq!(headers["content-type"], "image/png");
+    assert_eq!(bytes, TINY_PNG);
+}
+
+/// A clone whose source has an `avatar_url` but no file behind it drops the
+/// reference and says so (#8349 review).
+///
+/// The copy-failure arm already reports `avatar_copy_failed`; the
+/// missing-file arm used to clear the reference silently, so the caller saw
+/// the clone report success with no avatar and nothing to explain it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_clone_warns_when_the_source_avatar_reference_has_no_file() {
+    let h = boot(TEST_TOKEN).await;
+    let src = spawn_named(&h.state, "clone-avatar-dangling");
+    let own_reference = librefang_types::media::agent_avatar_url(&src.to_string());
+
+    // The reference without the file: what restoring the database without the
+    // avatars directory leaves behind.
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{src}/identity"),
+            serde_json::json!({ "avatar_url": own_reference }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "seeding the dangling reference: {body:?}"
+    );
+    assert!(
+        librefang_types::media::find_avatar(&avatars_dir(&h), &src.to_string()).is_none(),
+        "the point of this test is the file being absent"
+    );
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{src}/clone"),
+            serde_json::json!({"new_name": "clone-avatar-dangling-dest"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "clone failed: {body:?}");
+    assert_eq!(
+        body["warnings"],
+        serde_json::json!(["avatar_source_missing"]),
+        "the dropped avatar must be reported, not silently discarded"
+    );
+    let new_id: AgentId = body["agent_id"]
+        .as_str()
+        .expect("agent_id in response")
+        .parse()
+        .expect("clone id is a uuid");
+    assert_eq!(
+        stored_identity(&h.state, new_id).avatar_url,
+        None,
+        "the clone must not inherit the source's reference"
     );
 }

@@ -207,8 +207,12 @@ pub async fn clone_agent(
             }
             // A reference with no file behind it: nothing to duplicate, and
             // inheriting the pointer would leave the clone rendering the
-            // source's route.
-            None => cloned_identity.avatar_url = None,
+            // source's route. The caller is told the avatar was dropped
+            // instead of finding the clone has no image with no explanation.
+            None => {
+                cloned_identity.avatar_url = None;
+                warnings.push("avatar_source_missing");
+            }
         }
     }
 

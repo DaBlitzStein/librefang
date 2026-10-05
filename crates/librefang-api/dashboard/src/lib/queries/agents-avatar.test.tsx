@@ -3,11 +3,16 @@
 // document-scoped handle that lives until it is revoked, so a drawer that stays
 // mounted while the user clicks through a list of agents leaks one per click
 // unless the effect cleans up.
+//
+// The request itself is gated on the drawer being open: selecting an agent in
+// the list (or the desktop auto-select on first paint) must not download an
+// image whose only consumer is not mounted.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import * as http from "../http/client";
 import { useAgentAvatarUrl } from "./agents";
+import { agentAvatarKeys, agentKeys } from "./keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
@@ -81,6 +86,39 @@ describe("useAgentAvatarUrl", () => {
     expect(http.fetchAuthenticatedImage).not.toHaveBeenCalled();
   });
 
+  it("does not request the blob while the drawer that renders it is closed", async () => {
+    const { wrapper } = createQueryClientWrapper();
+
+    // AgentsPage keeps `detailAgent` selected after the drawer closes, so
+    // without the third gate the auto-selected agent's image is downloaded and
+    // kept for a header that is not mounted.
+    const { result } = renderHook(() => useAgentAvatarUrl("agent-1", true, false), { wrapper });
+
+    expect(result.current).toBeUndefined();
+    expect(http.fetchAuthenticatedImage).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
+  });
+
+  it("fetches when the drawer opens, and lets the URL go when it closes", async () => {
+    vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(pngBlob());
+    const { wrapper } = createQueryClientWrapper();
+
+    const { result, rerender } = renderHook(
+      ({ open }: { open: boolean }) => useAgentAvatarUrl("agent-1", true, open),
+      { wrapper, initialProps: { open: false } },
+    );
+    expect(http.fetchAuthenticatedImage).not.toHaveBeenCalled();
+
+    rerender({ open: true });
+    await waitFor(() => expect(result.current).toBe("blob:test/1"));
+
+    // Re-closing must not leave the handle alive: the blob stays in the query
+    // cache, but nothing renders it until the drawer reopens.
+    rerender({ open: false });
+    await waitFor(() => expect(result.current).toBeUndefined());
+    expect(revoked).toEqual(["blob:test/1"]);
+  });
+
   it("fetches the agent's own avatar path and returns an object URL for it", async () => {
     vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(pngBlob());
     const { wrapper } = createQueryClientWrapper();
@@ -88,7 +126,12 @@ describe("useAgentAvatarUrl", () => {
     const { result } = renderHook(() => useAgentAvatarUrl("agent-1", true), { wrapper });
 
     await waitFor(() => expect(result.current).toBe("blob:test/1"));
-    expect(http.fetchAuthenticatedImage).toHaveBeenCalledWith("/api/agents/agent-1/avatar");
+    // The request must carry React Query's signal: without it a superseded
+    // fetch is not cancelled and holds a connection slot until it ends.
+    expect(http.fetchAuthenticatedImage).toHaveBeenCalledWith(
+      "/api/agents/agent-1/avatar",
+      expect.any(AbortSignal),
+    );
   });
 
   it("revokes the object URL on unmount", async () => {
@@ -120,6 +163,39 @@ describe("useAgentAvatarUrl", () => {
     // is `[]` and the handle lives for the rest of the page's life.
     expect(created).toEqual(["blob:test/1", "blob:test/2"]);
     expect(revoked).toEqual(["blob:test/1"]);
+  });
+
+  it("returns no URL when `hasAvatar` is false, even for a cached blob", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    queryClient.setQueryData(agentAvatarKeys.avatar("agent-1"), pngBlob());
+
+    // A disabled `useQuery` still returns its cached `data`, so the flag has to
+    // gate the effect too: callers like the chat transcript use it to say "the
+    // caller already resolved the URL", and a second object URL over the same
+    // Blob is exactly what that call shape exists to avoid.
+    const { result } = renderHook(() => useAgentAvatarUrl("agent-1", false), { wrapper });
+
+    expect(result.current).toBeUndefined();
+    expect(created).toEqual([]);
+    expect(http.fetchAuthenticatedImage).not.toHaveBeenCalled();
+  });
+
+  it("does not re-mint when a broad `agentKeys.all` invalidation sweeps", async () => {
+    vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(pngBlob());
+    const { queryClient, wrapper } = createQueryClientWrapper();
+
+    const { result } = renderHook(() => useAgentAvatarUrl("agent-1", true), { wrapper });
+    await waitFor(() => expect(result.current).toBe("blob:test/1"));
+
+    // What toggling a hand does (`mutations/hands.ts`): `agentKeys.all` is
+    // invalidated to refresh every agent row. The image blob lives under its
+    // own `agentAvatars` root, so that sweep must not re-download it — with the
+    // old child key it re-fetched on every hand toggle, and each 200 re-minted
+    // the object URL, changing every `<img src>` rendering this agent.
+    await queryClient.invalidateQueries({ queryKey: agentKeys.all });
+
+    expect(http.fetchAuthenticatedImage).toHaveBeenCalledTimes(1);
+    expect(created).toEqual(["blob:test/1"]);
   });
 
   it("stays undefined when the image cannot be fetched, so the initials show", async () => {
