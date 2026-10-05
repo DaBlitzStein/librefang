@@ -456,6 +456,113 @@ describe("ModelPicker", () => {
       expect(screen.getByRole("button", { name: "Simple model: gpt-4" })).toBeInTheDocument();
     });
 
+    it("marks the configured model current even though the pair's provider is empty", () => {
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          // The form adapts a bare name into a pair with an empty provider.
+          value={{ provider: "", model: "gpt-4" }}
+          onChange={() => {}}
+          models={catalog}
+        />,
+      );
+
+      open("Simple model");
+      // The id matches; comparing `provider` too would leave it unmarked.
+      expect(screen.getByRole("button", { name: "openai/gpt-4" })).toHaveAttribute(
+        "aria-current",
+        "true",
+      );
+      expect(screen.getByRole("button", { name: "anthropic/claude-sonnet-5" })).not.toHaveAttribute(
+        "aria-current",
+      );
+    });
+
+    it("cancels hand entry back to the flat list", () => {
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          allowCustom
+          value={null}
+          onChange={() => {}}
+          models={catalog}
+        />,
+      );
+
+      open("Simple model");
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("model_param.custom") }));
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("common.cancel") }));
+
+      expect(screen.getByRole("button", { name: "openai/gpt-4" })).toBeInTheDocument();
+      expect(screen.queryByLabelText(i18n.t("agents.form.model_id"))).not.toBeInTheDocument();
+    });
+
+    it("clears the current value through the None row when the caller offers one", () => {
+      const onClear = vi.fn();
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          value={{ provider: "", model: "gpt-4" }}
+          onChange={() => {}}
+          onClear={onClear}
+          models={catalog}
+        />,
+      );
+
+      open("Simple model");
+      // Only when the caller passes `onClear`: a picker that cannot clear must
+      // not offer a row that does nothing.
+      fireEvent.click(screen.getByRole("button", { name: i18n.t("common.none") }));
+      expect(onClear).toHaveBeenCalledTimes(1);
+    });
+
+    it("offers no clear row without an onClear handler", () => {
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          value={{ provider: "", model: "gpt-4" }}
+          onChange={() => {}}
+          models={catalog}
+        />,
+      );
+
+      open("Simple model");
+      expect(
+        screen.queryByRole("button", { name: i18n.t("common.none") }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("collapses an id served by several providers into one row", () => {
+      render(
+        <ModelPicker
+          label="Simple model"
+          variant="model"
+          // The form adapts a bare name into a pair with an empty provider.
+          value={{ provider: "", model: "gpt-4" }}
+          onChange={() => {}}
+          models={[
+            model("openai", "gpt-4"),
+            model("azure", "gpt-4"),
+            model("anthropic", "claude-sonnet-5"),
+          ]}
+        />,
+      );
+
+      open("Simple model");
+      // The flat shape stores the name alone and `find_model` takes the first
+      // match, so the provider is not part of the choice: one row per id rather
+      // than one per provider, all of them marked active.
+      expect(screen.getByRole("button", { name: "openai/gpt-4" })).toHaveAttribute(
+        "aria-current",
+        "true",
+      );
+      expect(screen.queryByRole("button", { name: "azure/gpt-4" })).not.toBeInTheDocument();
+    });
+
     it("reports the provider of the row that was picked", () => {
       const onChange = vi.fn();
       render(

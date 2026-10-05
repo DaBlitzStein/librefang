@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { ArrowLeft, ArrowRight, ChevronDown, Loader2, Pencil } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, Loader2, Pencil, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 
 /**
@@ -99,6 +99,12 @@ export interface ModelPickerProps {
    * a custom rung beside their presets.
    */
   allowCustom?: boolean;
+  /**
+   * Clear the current value. Rendered as a "None" row in the flat `model`
+   * shape: those fields distinguish "absent" from a set id, so a picker that
+   * can only ever set a name cannot undo one.
+   */
+  onClear?: () => void;
   /** A write is in flight: the list is frozen and the active row spins. */
   busy?: boolean;
   /** True while the catalog is still arriving. */
@@ -130,6 +136,7 @@ export function ModelPicker({
   providers,
   disabled = false,
   allowCustom = false,
+  onClear,
   busy = false,
   isFetching = false,
   error = null,
@@ -231,18 +238,28 @@ export function ModelPicker({
 
   const filteredModels = useMemo(() => {
     const q = search.trim().toLowerCase();
+    const matches = (m: PickerModel) =>
+      m.id.toLowerCase().includes(q) ||
+      (m.display_name ?? "").toLowerCase().includes(q) ||
+      // Matching the provider name too is what makes one flat list over a
+      // large catalog navigable: typing "openai" narrows to its models.
+      (modelOnly && m.provider.toLowerCase().includes(q));
     // In the `model` shape there is no provider level, so the list is the whole
     // catalog and the provider is only a label on each row.
     const pool = modelOnly ? models : models.filter((m) => m.provider === drilldown);
-    if (!q) return pool;
-    return pool.filter(
-      (m) =>
-        m.id.toLowerCase().includes(q) ||
-        (m.display_name ?? "").toLowerCase().includes(q) ||
-        // Matching the provider name too is what makes one flat list over a
-        // large catalog navigable: typing "openai" narrows to its models.
-        (modelOnly && m.provider.toLowerCase().includes(q)),
-    );
+    const matched = q ? pool.filter(matches) : pool;
+    if (!modelOnly) return matched;
+    // The flat shape stores the name alone and hands it to `find_model`, which
+    // takes the first catalog match. An id served by several providers is one
+    // choice, not N identical rows all marked active, so keep one row per id.
+    // Deduplicating after matching lets a provider-name search still reach
+    // every id that provider serves.
+    const seen = new Set<string>();
+    return matched.filter((m) => {
+      if (seen.has(m.id)) return false;
+      seen.add(m.id);
+      return true;
+    });
   }, [models, drilldown, search, modelOnly]);
 
   // In the `model` shape the provider is empty by construction — those fields
@@ -443,6 +460,23 @@ export function ModelPicker({
               </div>
             )}
 
+            {!custom && modelOnly && !!value?.model && onClear && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  onClear();
+                  setOpen(false);
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-text-dim transition-colors hover:bg-surface-hover"
+              >
+                <X className="h-3 w-3 shrink-0 text-text-dim/50" />
+                <span className="text-xs font-medium">
+                  {t("common.none", { defaultValue: "None" })}
+                </span>
+              </button>
+            )}
+
             {!custom && !modelOnly && !drilldown && !isFetching && filteredProviders.length === 0 && (
               <p className="px-2.5 py-2 text-xs text-text-dim">
                 {t("chat.no_models_found", { defaultValue: "No models found" })}
@@ -508,7 +542,10 @@ export function ModelPicker({
             {!custom &&
               (modelOnly || drilldown) &&
               filteredModels.map((m) => {
-                const isActive = m.id === value?.model && m.provider === value?.provider;
+                // In the flat `model` shape the field holds a bare name, so the
+                // provider on the value is empty by construction; matching on it
+                // would leave the configured model permanently unmarked.
+                const isActive = m.id === value?.model && (modelOnly || m.provider === value?.provider);
                 return (
                   <button
                     key={`${m.provider}/${m.id}`}
@@ -552,9 +589,8 @@ export function ModelPicker({
                 onClick={() => {
                   // At the provider level this takes both halves of the pair: a
                   // provider the catalog does not know has no models to drill
-                  // into. Inside a provider it takes only the model. In the
-                  // flat `model` shape there is no provider level at all, so
-                  // the model is taken against the value's own provider.
+                  // into. Inside a provider — and in the flat `model` shape,
+                  // which has no provider level at all — only the model.
                   const atProviderLevel = !drilldown && !modelOnly;
                   setCustom(atProviderLevel ? "provider" : "model");
                   setCustomProvider(
@@ -563,12 +599,14 @@ export function ModelPicker({
                       : (drilldown ?? ""),
                   );
                   // Only prefill the model when it belongs to the provider
-                  // being drilled into: `value.model` under a different
-                  // provider is not a pair that exists, and prefilling it left
-                  // Confirm enabled for `{provider: "openai", model:
-                  // "<some anthropic model>"}` after a single click.
+                  // being drilled into: `value.model` under a different provider
+                  // is not a pair that exists, and prefilling it left Confirm
+                  // enabled for `{provider: "openai", model: "<some anthropic
+                  // model>"}` after a single click.
                   setCustomModel(
-                    drilldown === value?.provider || modelOnly ? (value?.model ?? "") : "",
+                    modelOnly || atProviderLevel || drilldown === value?.provider
+                      ? (value?.model ?? "")
+                      : "",
                   );
                 }}
                 className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-text-dim transition-colors hover:bg-surface-hover"

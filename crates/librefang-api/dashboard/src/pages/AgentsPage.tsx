@@ -903,15 +903,20 @@ export function AgentsPage() {
   );
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
 
-  const formModelsQueryProvider = showCreate
-    ? formState.model.provider
-    : manifestEditorFormState.model.provider;
+  // Unfiltered on purpose. The manifest editor's routing tiers hold bare names
+  // the tier router resolves against the *global* catalog, and each fallback
+  // holds a pair from any provider — so filtering this query to the agent's
+  // main provider would leave those pickers showing only that provider's
+  // models, or nothing at all before a main provider is chosen. The main model
+  // field and `pinned_model` narrow the same catalog to the agent's own
+  // provider inside `AgentManifestForm`.
+  //
+  // Shared by the create dialog and the manifest editor: they are never open
+  // at the same time, so one query serves both.
   const formModelsQuery = useModels(
-    { provider: formModelsQueryProvider },
+    {},
     {
-      enabled:
-        ((showCreate && createMode === "form") || manifestEditorLive) &&
-        !!formModelsQueryProvider.trim(),
+      enabled: (showCreate && createMode === "form") || manifestEditorLive,
     },
   );
 
@@ -1703,6 +1708,11 @@ export function AgentsPage() {
             onChange={setManifestEditorFormState}
             providers={formProviderOptions}
             models={formModelOptions}
+            modelsFetching={formModelsQuery.isFetching}
+            modelsError={formModelsQuery.isError}
+            onModelsRetry={() => {
+              void formModelsQuery.refetch();
+            }}
             invalidFields={manifestEditorErrors}
             extras={manifestEditorExtras}
             skillCatalog={skillCatalogForForm}
@@ -3409,7 +3419,6 @@ export function AgentsPage() {
         </DrawerPanel>
       )}
 
-
       {/* Tools Editor Modal */}
       {showToolsEditor && toolsEditorAgentId && (
         <DrawerPanel isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg">
@@ -3622,6 +3631,11 @@ export function AgentsPage() {
                 onChange={setFormState}
                 providers={formProviderOptions}
                 models={formModelOptions}
+                modelsFetching={formModelsQuery.isFetching}
+                modelsError={formModelsQuery.isError}
+                onModelsRetry={() => {
+                  void formModelsQuery.refetch();
+                }}
                 invalidFields={formErrors}
                 extras={formExtras}
                 skillCatalog={skillCatalogForForm}
