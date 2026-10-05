@@ -297,6 +297,79 @@ test("the general group hosts the identity sections and the model group the mode
   await expect(page.getByRole("button", { name: "Use global default" })).toBeVisible();
 });
 
+// The avatar stack folded into the unified editor (#8424): Appearance is its
+// own out-of-band panel in General, above the manifest form, gated by the
+// credential's role and locked in place for a provisioned agent.
+test("the general group hosts the Appearance editor above the form", async ({ page }) => {
+  await openAgent(page);
+  await page.getByRole("tab", { name: "config" }).click();
+
+  await expect(page.getByRole("heading", { name: "Appearance" })).toBeVisible();
+  await expect(page.getByLabel("Emoji")).toHaveValue("🤖");
+  await expect(page.getByRole("button", { name: "Upload" })).toBeVisible();
+
+  const heading = await page.getByRole("heading", { name: "Appearance" }).boundingBox();
+  const basics = await page.locator('[data-section="identity"]').boundingBox();
+  expect(heading!.y).toBeLessThan(basics!.y);
+
+  await page.screenshot({ path: join(SHOTS, "appearance-panel.png"), fullPage: true });
+});
+
+test("a non-admin sees no Appearance editor", async ({ page }) => {
+  await page.route("**/api/authz/whoami", (route) => json(route, { role: "user", name: "tester" }));
+  await openAgent(page);
+  await page.getByRole("tab", { name: "config" }).click();
+
+  await expect(page.getByRole("heading", { name: "Appearance" })).toHaveCount(0);
+});
+
+test("a provisioned agent's Appearance controls are disabled", async ({ page }) => {
+  await page.route(`**/api/agents/${AGENT_ID}`, (route) =>
+    json(route, { ...AGENT, provisioned: { source: "agents/test-agent/agent.toml" } }),
+  );
+  await openAgent(page);
+  await page.getByRole("tab", { name: "config" }).click();
+
+  await expect(page.getByRole("heading", { name: "Appearance" })).toBeVisible();
+  await expect(page.getByLabel("Emoji")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Upload" })).toBeDisabled();
+  await expect(page.getByText(/provisioned by the deployment/)).toBeVisible();
+});
+
+test("an admin can upload an avatar from the editor", async ({ page }) => {
+  let uploads = 0;
+  await page.route(`**/api/agents/${AGENT_ID}/avatar`, (route) => {
+    if (route.request().method() === "POST") {
+      uploads += 1;
+      return json(route, {
+        status: "ok",
+        avatar_url: `/api/agents/${AGENT_ID}/avatar`,
+        content_type: "image/png",
+        bytes: 4,
+      });
+    }
+    return json(route, {}, 404);
+  });
+  await openAgent(page);
+  await page.getByRole("tab", { name: "config" }).click();
+
+  await page.getByTestId("agent-avatar-file-input").setInputFiles({
+    name: "a.png",
+    mimeType: "image/png",
+    buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+  });
+  await expect(page.getByText("Avatar updated")).toBeVisible();
+  expect(uploads).toBe(1);
+});
+
+test("the list row carries the agent's emoji", async ({ page }) => {
+  await openAgent(page);
+  // The emoji renders through the row's `AgentAvatar` (the image hook cannot be
+  // called inside the list's `.map()`), so it is present in the list even
+  // though no avatar file exists.
+  await expect(page.getByText("🤖").first()).toBeVisible();
+});
+
 // The grants panels are the other half of "Tools & skills": live writes over
 // their own endpoints, above the manifest sections for the same subject. They
 // are also the piece with the least cover — removing both from the group left
