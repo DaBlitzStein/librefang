@@ -2,7 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Edit2, ExternalLink, History, LayoutTemplate, Lock, Plus, RotateCcw, Share2, ShieldCheck, Trash2 } from "lucide-react";
-import type { AgentTemplate, TemplateVersionEntry } from "../api";
+import type {
+  AgentTemplate,
+  TemplateVersionEntry,
+} from "../api";
 import { useAgentType, useAgentTypeRegistryDiff, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
@@ -10,6 +13,7 @@ import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { useMcpServers } from "../lib/queries/mcp";
 import { useModelRoutingInertReason } from "../lib/queries/config";
+import { useModelRouterProfiles } from "../lib/queries/modelRouter";
 import {
   useCreateAgentTypeFromToml,
   useDeleteAgentType,
@@ -91,6 +95,7 @@ function AgentTypeEditor({
   // #8446: a template has no running agent to carry `routing_inert_reason`, so the Routing section reads the kernel-wide mode off the shared config cache, as the agent create form does.
   // The editor is mounted only while open, so this fetches nothing until then.
   const routingInertReasonQuery = useModelRoutingInertReason();
+  const routerProfilesQuery = useModelRouterProfiles();
 
   const [newName, setNewName] = useState("");
   const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
@@ -112,9 +117,7 @@ function AgentTypeEditor({
       setParseError(
         parsed.message === "json_schema_unsafe_integer"
           ? t("agents.form.json_schema_unsafe_integer")
-          : parsed.message === "fallback_models_not_an_array"
-            ? t("agents.form.fallback_models_not_an_array")
-            : parsed.message,
+          : parsed.message,
       );
     }
     setSeeded(true);
@@ -135,7 +138,14 @@ function AgentTypeEditor({
   );
 
   const skillCatalog = useMemo<ManifestCatalogEntry[]>(
-    () => (skillsQuery.data ?? []).map((s) => ({ name: s.name, description: s.description })),
+    () =>
+      (skillsQuery.data ?? []).map((s) => ({
+        name: s.name,
+        description: s.description,
+        // Carried so the skills field can name what each skill needs and flag
+        // the needs this agent's grants do not cover.
+        required_tools: s.required_tools,
+      })),
     [skillsQuery.data],
   );
 
@@ -150,6 +160,15 @@ function AgentTypeEditor({
         ? mcpServersQuery.data.configured.map((s: { name: string }) => ({ name: s.name }))
         : [],
     [mcpServersQuery.data],
+  );
+
+  const routerProfileCatalog = useMemo<ManifestCatalogEntry[]>(
+    () =>
+      (routerProfilesQuery.data?.profiles ?? []).map((p) => ({
+        name: p.name,
+        description: [`${p.provider}/${p.model}`, p.cost_tier].join(" · "),
+      })),
+    [routerProfilesQuery.data],
   );
 
   const saving = createMutation.isPending || updateTomlMutation.isPending;
@@ -238,6 +257,8 @@ function AgentTypeEditor({
             skillCatalog={skillCatalog}
             toolCatalog={toolCatalog}
             mcpCatalog={mcpCatalog}
+            routerProfileCatalog={routerProfileCatalog}
+            routerProfilesEnabled={routerProfilesQuery.data?.enabled}
             nameField={isCreate ? "hidden" : "readonly"}
             routingInertReason={routingInertReasonQuery.data}
           />

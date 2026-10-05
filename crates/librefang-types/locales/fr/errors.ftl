@@ -89,3 +89,4 @@ api-error-generic = Erreur : { $error }
 
 api-error-validation-avatar-url-invalid = L'URL de l'avatar doit être la route d'avatar que ce démon sert pour l'agent, ou être vide. Téléversez l'image au lieu de la lier.
 api-error-validation-color-invalid = La couleur doit être un code hexadécimal commençant par '#'
+api-error-agent-manifest-conflict = Manifeste obsolète : quelqu'un a enregistré cet agent après votre chargement. Rechargez et réappliquez la modification.

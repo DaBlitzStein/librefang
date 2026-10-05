@@ -89,3 +89,4 @@ api-error-generic = Fehler: { $error }
 
 api-error-validation-avatar-url-invalid = Die Avatar-URL muss die Avatar-Route sein, die dieser Daemon für den Agenten bereitstellt, oder leer. Lade das Bild hoch, statt es zu verlinken.
 api-error-validation-color-invalid = Die Farbe muss ein Hex-Code sein, der mit '#' beginnt
+api-error-agent-manifest-conflict = Veraltetes Manifest: Dieser Agent wurde nach dem Laden von jemand anderem gespeichert. Neu laden und die Änderung erneut anwenden.

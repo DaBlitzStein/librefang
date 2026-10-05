@@ -128,6 +128,24 @@ export const agentAvatarKeys = {
   avatar: (agentId: string) => [...agentAvatarKeys.all, agentId] as const,
 };
 
+// Workspace identity file bytes — `GET|PUT /api/agents/{id}/files/{filename}`
+// (`crates/librefang-api/src/routes/agents/files.rs`). A separate domain from
+// `agentKeys` on purpose: the write replaces a file in the agent's workspace
+// and does not touch the manifest, so a save must not invalidate the agent
+// detail, the manifest cache or any of the per-agent subtrees above.
+//
+// The listing (`GET /api/agents/{id}/files`) reports per-file `exists` and
+// `size_bytes`, both of which a write changes — hence `lists()` in the
+// mutation's invalidation even though the editor itself only reads one file.
+export const agentFileKeys = {
+  all: ["agentFiles"] as const,
+  lists: () => [...agentFileKeys.all, "list"] as const,
+  list: (agentId: string) => [...agentFileKeys.lists(), agentId] as const,
+  details: () => [...agentFileKeys.all, "detail"] as const,
+  detail: (agentId: string, filename: string) =>
+    [...agentFileKeys.details(), agentId, filename] as const,
+};
+
 // Central prompt repository (#6160). The fleet-wide overview
 // (`GET /api/prompts/overview`) is a genuinely new endpoint and gets its
 // own domain key. Per-agent version lists keep using
@@ -168,15 +186,11 @@ export const modelKeys = {
 };
 
 // Profile-based model routing. `profiles()` is the kernel-wide catalog
-// (builtin asset + `~/.librefang/model_profiles.toml`); `agent(id)` is one
-// agent's mode + router override. Both hang off `all` so a mutation can
-// invalidate the whole domain in a single call.
+// (builtin asset + `~/.librefang/model_profiles.toml`).
 export const modelRouterKeys = {
   all: ["modelRouter"] as const,
   lists: () => [...modelRouterKeys.all, "list"] as const,
   profiles: () => [...modelRouterKeys.lists(), "profiles"] as const,
-  details: () => [...modelRouterKeys.all, "detail"] as const,
-  agent: (agentId: string) => [...modelRouterKeys.details(), agentId] as const,
 };
 
 export const providerKeys = {

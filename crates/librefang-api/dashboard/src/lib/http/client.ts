@@ -20,6 +20,8 @@ export {
   // agents
   listAgents,
   getAgentDetail,
+  // workspace identity file bytes (`GET /api/agents/{id}/files/{filename}`)
+  getAgentFile,
   getAgentManifest,
   getAgentChannels,
   getAgentStats,
@@ -93,7 +95,6 @@ export {
   getModelOverrides,
   // model router (profile-based routing)
   listModelRouterProfiles,
-  getAgentModelRouting,
   // providers
   listProviders,
   // credential pools (#4965)
@@ -214,6 +215,9 @@ export type {
   OperatorActionDescriptor,
   // agent avatar upload (#8339)
   AgentAvatarUploadResult,
+  // workspace identity file bytes (`GET|PUT /api/agents/{id}/files/{filename}`)
+  AgentIdentityFile,
+  AgentIdentityFileWriteResult,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -251,6 +255,8 @@ export {
   updateUserIdentity,
   uploadUserAvatar,
   deleteUserAvatar,
+  // workspace identity file bytes (`PUT /api/agents/{id}/files/{filename}`)
+  setAgentFile,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
   // per-agent MCP server grant — write (#6565 follow-up)
@@ -333,8 +339,6 @@ export {
   removeCustomModel,
   updateModelOverrides,
   deleteModelOverrides,
-  // model router (profile-based routing)
-  updateAgentModelRouting,
   // providers
   testProvider,
   setProviderKey,
@@ -428,7 +432,6 @@ export {
 // Type re-exports used by hooks and pages
 // ---------------------------------------------------------------------------
 export type {
-  AgentModelRouting,
   ModelProfile,
   ModelRouterProfiles,
   CostTier,
