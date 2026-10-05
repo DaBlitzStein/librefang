@@ -33,8 +33,7 @@ use super::super::LibreFangKernel;
 ///
 /// Two adapters of one channel type are two different tenants, so ambiguity is an error rather than an arbitrary pick:
 ///
-/// * With an `account_id`, a candidate must actually carry it — as its own `account_id()`, as its registration `name` (which is where the bridge reads the value from: `channel_bridge.rs` passes `Some(sidecar_config.name.clone())`), or as the transport-reported alias `ChannelAdapter::reported_account_id()`.
-///   The alias is the sidecar's `ready` account id, which adapters stamp into inbound `metadata["account_id"]`; because `account_id()` answers the config `name` since #8408, a `channel_send` / `channel_dm` auto-filled from that metadata would otherwise stop resolving whenever the reported id differs from the name.
+/// * With an `account_id`, a candidate must actually carry it — as its own `account_id()`, as its registration `name` (which is where the bridge reads the value from: `channel_bridge.rs` passes `Some(sidecar_config.name.clone())`), or as the transport-reported alias `ChannelAdapter::reported_account_id()`. The alias is the sidecar's `ready` account id, which adapters stamp into inbound `metadata["account_id"]`; because `account_id()` answers the config `name` since #8408, a `channel_send` / `channel_dm` auto-filled from that metadata would otherwise stop resolving whenever the reported id differs from the name.
 /// * Without one, the scan resolves only when exactly one adapter of that channel type is registered.
 ///   A bare `"slack"` on a two-workspace daemon keeps erroring instead of choosing a tenant at random.
 ///
@@ -66,13 +65,25 @@ pub(in crate::kernel) fn resolve_channel_adapter(
         }
     }
 
-    let mut candidates = adapters_of_type(adapters, channel);
-    if let Some(aid) = account_id {
-        candidates.retain(|adapter| {
-            adapter.account_id() == Some(aid)
-                || adapter.name() == aid
-                || adapter.reported_account_id() == Some(aid)
-        });
+    let mut candidates: Vec<Arc<dyn ChannelAdapter>> = Vec::new();
+    for entry in adapters.iter() {
+        let adapter = entry.value();
+        if librefang_channels::router::channel_type_to_str(&adapter.channel_type()) != channel {
+            continue;
+        }
+        if let Some(aid) = account_id {
+            if adapter.account_id() != Some(aid)
+                && adapter.name() != aid
+                && adapter.reported_account_id() != Some(aid)
+            {
+                continue;
+            }
+        }
+        // One adapter is registered under both its bare and its qualified key, so identity — not name — is what distinguishes "seen twice" from "two instances that happen to share a name".
+        if candidates.iter().any(|c| Arc::ptr_eq(c, adapter)) {
+            continue;
+        }
+        candidates.push(Arc::clone(adapter));
     }
 
     if candidates.len() == 1 {
@@ -84,30 +95,6 @@ pub(in crate::kernel) fn resolve_channel_adapter(
         account_id,
         candidates.len(),
     ))
-}
-
-/// All distinct adapters whose `channel_type` string equals `channel`, in
-/// `DashMap` iteration order.
-///
-/// One adapter is registered under both its bare and its qualified key, so
-/// identity — not name or key count — is what distinguishes "seen twice" from
-/// "two instances that happen to share a name".
-fn adapters_of_type(
-    adapters: &DashMap<String, Arc<dyn ChannelAdapter>>,
-    channel: &str,
-) -> Vec<Arc<dyn ChannelAdapter>> {
-    let mut seen: Vec<Arc<dyn ChannelAdapter>> = Vec::new();
-    for entry in adapters.iter() {
-        let adapter = entry.value();
-        if librefang_channels::router::channel_type_to_str(&adapter.channel_type()) != channel {
-            continue;
-        }
-        if seen.iter().any(|c| Arc::ptr_eq(c, adapter)) {
-            continue;
-        }
-        seen.push(Arc::clone(adapter));
-    }
-    seen
 }
 
 /// Render the miss from [`resolve_channel_adapter`] as an operator-readable message.
@@ -534,12 +521,14 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
 
 #[cfg(test)]
 mod tests {
-    use super::{outbound_wire_text, sidecar_default_agent};
+    use super::{outbound_wire_text, resolve_channel_adapter, sidecar_default_agent};
+    use dashmap::DashMap;
     use librefang_channels::types::{
         ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
     };
     use librefang_types::config::{ChannelOverrides, OutputFormat, SidecarChannelConfig};
     use std::pin::Pin;
+    use std::sync::Arc;
 
     /// Build a `SidecarChannelConfig` from a minimal JSON shape — `name` and
     /// `command` are required; everything else (incl. the restart knobs) fills
@@ -695,5 +684,147 @@ mod tests {
             }),
         };
         assert_eq!(outbound_wire_text(&adapter, "telegram", "**bold**"), "bold");
+    }
+
+    /// Adapter fake for `resolve_channel_adapter`: the three identities are
+    /// independent, so a test can give the transport-reported alias a value
+    /// (`"ready-acct"`) the config name never has.
+    struct AliasAdapter {
+        name: &'static str,
+        account_id: Option<&'static str>,
+        reported: Option<&'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChannelAdapter for AliasAdapter {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn channel_type(&self) -> ChannelType {
+            ChannelType::Telegram
+        }
+
+        async fn start(
+            &self,
+        ) -> Result<
+            Pin<Box<dyn futures::Stream<Item = ChannelMessage> + Send>>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn send(
+            &self,
+            _user: &ChannelUser,
+            _content: ChannelContent,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        fn account_id(&self) -> Option<&str> {
+            self.account_id
+        }
+
+        fn reported_account_id(&self) -> Option<&str> {
+            self.reported
+        }
+    }
+
+    /// The registry exactly as the bridge writes it: the instance name and the
+    /// name-qualified key, both sourced from the config name — never from the
+    /// `ready` value (#5955 / #8408).
+    fn register(
+        adapters: &DashMap<String, Arc<dyn ChannelAdapter>>,
+        adapter: &Arc<dyn ChannelAdapter>,
+    ) {
+        let name = adapter.name().to_string();
+        adapters.insert(name.clone(), adapter.clone());
+        adapters.insert(format!("{name}:{name}"), adapter.clone());
+    }
+
+    /// A sidecar's `ready` account id is a resolution alias, not a routing
+    /// identity: a `channel_send` / `channel_dm` auto-filled from the inbound
+    /// `metadata["account_id"]` must still find its instance after
+    /// `account_id()` moved to the config name (#8408 review).
+    #[test]
+    fn resolve_channel_adapter_matches_the_reported_account_alias() {
+        let adapters: DashMap<String, Arc<dyn ChannelAdapter>> = DashMap::new();
+        let adapter: Arc<dyn ChannelAdapter> = Arc::new(AliasAdapter {
+            name: "bot-a",
+            account_id: Some("bot-a"),
+            reported: Some("ready-acct"),
+        });
+        register(&adapters, &adapter);
+
+        // The id the adapter reports in `ready` and stamps into its messages'
+        // metadata resolves to its own instance, even though no key and no
+        // `account_id()` / `name()` carries it.
+        let hit = resolve_channel_adapter(&adapters, "telegram", Some("ready-acct"))
+            .expect("the reported account id must resolve to its own instance");
+        assert!(Arc::ptr_eq(&hit, &adapter));
+
+        // The routing identities keep resolving unchanged.
+        let by_name = resolve_channel_adapter(&adapters, "telegram", Some("bot-a"))
+            .expect("the config name must keep resolving");
+        assert!(Arc::ptr_eq(&by_name, &adapter));
+        let bare = resolve_channel_adapter(&adapters, "telegram", None)
+            .expect("the sole adapter of the type must keep resolving without an account");
+        assert!(Arc::ptr_eq(&bare, &adapter));
+    }
+
+    /// The alias is a match, not a wildcard: an account id no identity carries
+    /// still fails, and the error keeps naming the miss.
+    #[test]
+    fn resolve_channel_adapter_still_rejects_an_unknown_account() {
+        let adapters: DashMap<String, Arc<dyn ChannelAdapter>> = DashMap::new();
+        let adapter: Arc<dyn ChannelAdapter> = Arc::new(AliasAdapter {
+            name: "bot-a",
+            account_id: Some("bot-a"),
+            reported: Some("ready-acct"),
+        });
+        register(&adapters, &adapter);
+
+        let err = match resolve_channel_adapter(&adapters, "telegram", Some("other-acct")) {
+            Ok(_) => panic!("an unknown account id must not resolve"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("not found"),
+            "the miss must stay operator-readable, got: {err}"
+        );
+    }
+
+    /// An alias that collides with another instance's routing name is two
+    /// candidates, not a pick: ambiguity stays an error so a send cannot land
+    /// in the wrong tenant.
+    #[test]
+    fn resolve_channel_adapter_treats_an_alias_collision_as_ambiguous() {
+        let adapters: DashMap<String, Arc<dyn ChannelAdapter>> = DashMap::new();
+        let aliased: Arc<dyn ChannelAdapter> = Arc::new(AliasAdapter {
+            name: "bot-a",
+            account_id: Some("bot-a"),
+            reported: Some("shared-id"),
+        });
+        register(&adapters, &aliased);
+        let named: Arc<dyn ChannelAdapter> = Arc::new(AliasAdapter {
+            name: "shared-id",
+            account_id: Some("shared-id"),
+            reported: None,
+        });
+        register(&adapters, &named);
+
+        let err = match resolve_channel_adapter(&adapters, "telegram", Some("shared-id")) {
+            Ok(_) => panic!("an id carried by two instances must stay ambiguous"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("ambiguous"),
+            "the collision must surface as ambiguity, got: {err}"
+        );
     }
 }
