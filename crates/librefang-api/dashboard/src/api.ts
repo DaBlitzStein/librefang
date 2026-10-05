@@ -1520,6 +1520,12 @@ export interface AgentDetail {
   name: string;
   /** See {@link AgentProvenance}. `null` for an operator-created agent. */
   provisioned?: AgentProvenance | null;
+  /**
+   * The agent's visual identity — emoji, colour and avatar reference (#8339).
+   * Out of band from the manifest: it lives on `AgentEntry.identity` rather
+   * than `AgentManifest`, so an identity write never moves the manifest ETag.
+   */
+  identity?: AgentIdentity;
   model?: AgentModelDetail;
   system_prompt?: string;
   capabilities?: { tools?: boolean; network?: boolean };

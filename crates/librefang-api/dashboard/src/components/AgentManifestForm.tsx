@@ -328,6 +328,14 @@ interface AgentManifestFormProps {
   modelsError?: boolean;
   /** Retry the model-catalog fetch for the pickers' error state. */
   onModelsRetry?: () => void;
+  /**
+   * Extra content rendered inside the `prompt` section, after the textarea
+   * (#8424). The agent view supplies the library picker here so the drawer's
+   * standalone system-prompt textarea is not resurrected: the form's own field
+   * stays the one writer of `model.system_prompt`. Omitted (the create modal)
+   * renders nothing extra.
+   */
+  promptLibrarySlot?: React.ReactNode;
 }
 
 /**
@@ -442,6 +450,7 @@ export function AgentManifestForm({
   modelsFetching = false,
   modelsError = false,
   onModelsRetry,
+  promptLibrarySlot,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -1143,6 +1152,7 @@ export function AgentManifestForm({
             className={textareaClass}
           />
         </Field>
+        {promptLibrarySlot}
       </Section>
 
       <Section when={shows("limits")} id="limits" title={t("agents.form.resources")}>

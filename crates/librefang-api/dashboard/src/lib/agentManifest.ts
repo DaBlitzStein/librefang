@@ -11,7 +11,7 @@ import { parse, stringify, TomlError, type TomlTable } from "smol-toml";
 // here rather than restating the bounds keeps a single source of truth, the
 // same one `lib/agentModelPatch.ts` reads (#8112 review). `MODEL_PARAM_RANGES`
 // is read directly by the `max_tokens` ceiling helper below.
-import { isValidParamValue, MODEL_PARAM_NAMES, MODEL_PARAM_RANGES } from "../components/ui/ModelParamField";
+import { isValidParamValue, MODEL_PARAM_NAMES } from "../components/ui/ModelParamField";
 
 let _nextUid = 1;
 export const generateUid = (): string => String(_nextUid++);
@@ -1529,18 +1529,6 @@ const isBlankOrU32TomlInteger = (raw: string): boolean =>
   isBlankOrUnsignedTomlIntegerAtMost(raw, U32_TOML_MAX);
 
 /**
- * max_tokens's ceiling comes from the range table (#8332), not a second
- * number beside this one. The table's max for the parameter IS `u32::MAX`,
- * so table and type agree today — the fallback only names what still applies
- * if the table entry ever loses its max: the Rust field is `Option<u32>`
- * (agent.rs:949), and that bound outlives any table edit.
- */
-const MODEL_MAX_TOKENS_CEILING =
-  MODEL_PARAM_RANGES.max_tokens.max !== undefined
-    ? BigInt(MODEL_PARAM_RANGES.max_tokens.max)
-    : U32_TOML_MAX;
-
-/**
  * Parse a float that may legitimately be negative.
  *
  * `parseFloatish` refuses negatives because every field it was written for is a
@@ -1601,11 +1589,6 @@ const parseFloatish = (raw: string): number | null => {
   if (!Number.isFinite(n)) return null;
   if (n < 0) return null; // all our float fields are cost/quota — never negative
   return n;
-};
-
-const isInRange = (raw: string, min: number, max: number): boolean => {
-  const v = parseSignedFloat(raw);
-  return v === null || (v >= min && v <= max);
 };
 
 const writeStringScalar = (lines: string[], key: string, value: string): void => {
@@ -2908,22 +2891,18 @@ export const validateManifestForm = (
   if (!isBlankOrU32TomlInteger(form.max_concurrent_invocations)) {
     errors.push("max_concurrent_invocations");
   }
-  // The model's three integer parameters. max_tokens is `Option<u32>` and its
-  // ceiling lives in MODEL_PARAM_RANGES (#8332) — the table's number, not a
-  // second one here. The two token counts beside it are `Option<u64>`: no
-  // typo reaches their ceiling through TOML, so what the validator owes them
-  // is the shape — a negative or a non-integer used to pass and parseInteger
-  // dropped the key from the file without a word.
-  if (
-    !isBlankOrUnsignedTomlIntegerAtMost(form.model.max_tokens, MODEL_MAX_TOKENS_CEILING)
-  ) {
-    errors.push("model.max_tokens");
-  }
-  if (!isBlankOrUnsignedTomlInteger(form.model.context_window)) {
-    errors.push("model.context_window");
-  }
-  if (!isBlankOrUnsignedTomlInteger(form.model.max_output_tokens)) {
-    errors.push("model.max_output_tokens");
+  // Every model parameter is validated against the shared table the controls
+  // render from (`isValidParamValue` / `MODEL_PARAM_RANGES`), so this cannot
+  // drift from the ranges `PATCH /api/agents/{id}/model` enforces (#8112
+  // review). The loop covers the endpoint limits (max_tokens, context_window,
+  // max_output_tokens), the sampling preferences, and the newer params — a
+  // below-minimum `context_window` and a non-integer `max_output_tokens` are
+  // both caught here rather than by a second, hand-written shape check. An
+  // empty field is the inherit rung, not a value.
+  for (const param of MODEL_PARAM_NAMES) {
+    const raw = form.model[param];
+    if (raw.trim() === "") continue;
+    if (!isValidParamValue(param, raw)) errors.push(`model.${param}`);
   }
   // The rest of the `Option<u32>` inventory — same ceiling, same shape.
   if (!isBlankOrU32TomlInteger(form.autonomous.heartbeat_timeout_secs)) {
@@ -2973,17 +2952,6 @@ export const validateManifestForm = (
     if (!isBlankOrUnsignedTomlInteger(form.channel_overrides[key])) {
       errors.push(`channel_overrides.${key}`);
     }
-  }
-  // The sampling ranges read from MODEL_PARAM_RANGES, not a second number
-  // beside it: the table is the same source the widget's own min/max and the
-  // PATCH route's ceiling come from, so a range edit lands everywhere at
-  // once instead of the validator quietly keeping yesterday's bounds.
-  for (const param of ["temperature", "top_p", "frequency_penalty", "presence_penalty"] as const) {
-    const { min, max } = MODEL_PARAM_RANGES[param];
-    // A parameter without a table max is unbound above — the table is the
-    // source, and the validator follows it rather than inventing a bound.
-    if (max === undefined) continue;
-    if (!isInRange(form.model[param], min, max)) errors.push(`model.${param}`);
   }
   // Metadata rows. A blank row is dropped by the serializer, not an error —
   // but a row with a key and a value the row's own type cannot hold is a
@@ -3082,14 +3050,6 @@ export const validateManifestForm = (
     }
   }
 
-  // `top_k`, `min_p` and `repeat_penalty` are governed by the same table the
-  // controls render from (#8112); A's explicit model checks above cover the
-  // other seven parameters, so this closes the set without double-reporting.
-  for (const param of ["top_k", "min_p", "repeat_penalty"] as const) {
-    const raw = form.model[param];
-    if (raw.trim() === "") continue;
-    if (!isValidParamValue(param, raw)) errors.push(`model.${param}`);
-  }
   // Folder rows: duplicate names produce a duplicate TOML key (hard parse
   // failure on the daemon), and `path` mirrors the kernel's rule — relative
   // to workspaces_dir, no `..`. A mount row carries an absolute host path

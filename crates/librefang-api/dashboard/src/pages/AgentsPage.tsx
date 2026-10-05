@@ -37,7 +37,6 @@ import { Card } from "../components/ui/Card";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge, dotColors } from "../components/ui/Badge";
-import { Avatar } from "../components/ui/Avatar";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { PromptsExperimentsPanel } from "../components/PromptsExperimentsPanel";
 import { AgentTabBar } from "../components/AgentTabs";
