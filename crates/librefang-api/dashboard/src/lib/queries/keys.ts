@@ -97,6 +97,13 @@ export const agentKeys = {
   // every poll is the one thing this key exists to avoid.
   avatar: (agentId: string) =>
     [...agentKeys.all, "avatar", agentId] as const,
+  // Manifest version history (#8041) — nested under `detail(agentId)`, not a
+  // sibling of it: every control-plane write that records a snapshot already
+  // invalidates the agent's detail, so the History tab refreshes itself. As a
+  // sibling it would need each mutation to remember a second, explicit
+  // invalidation and would sit stale after the very edit that added a row.
+  manifestHistory: (agentId: string) =>
+    [...agentKeys.detail(agentId), "manifestHistory"] as const,
 };
 
 /**
