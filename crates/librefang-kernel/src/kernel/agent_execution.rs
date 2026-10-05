@@ -1306,11 +1306,12 @@ impl LibreFangKernel {
         // will actually be called, not the pre-routing one (e.g. routing may
         // switch sonnet → haiku).
         //
-        // Priority: agent manifest > per-model override > system defaults, for
-        // the sampling preferences. This block used to run the chain the other
-        // way round, which meant tuning the temperature of a shared model
-        // silently overwrote it for every agent using that model — two
-        // instances of one agent type could not hold different temperatures.
+        // Priority: agent manifest > per-model override > registry ceiling
+        // (for `max_tokens`) > system defaults, for the sampling preferences.
+        // This block used to run the chain the other way round, which meant
+        // tuning the temperature of a shared model silently overwrote it for
+        // every agent using that model — two instances of one agent type could
+        // not hold different temperatures.
         // The inversion was load-bearing only because `ModelConfig` had no
         // "inherit" state: every agent carried a concrete 4096 / 0.7, so
         // letting the manifest win would have made per-model overrides

@@ -191,11 +191,13 @@ pub(super) fn apply_resolved_inference_params(
     catalog: &librefang_runtime::model_catalog::ModelCatalog,
     model: &mut librefang_types::agent::ModelConfig,
 ) {
-    let override_key = format!("{}:{}", model.provider, model.model);
-    let resolved = librefang_types::inference_params::resolve_inference_params(
-        &*model,
-        catalog.get_overrides(&override_key),
-    );
+    // `ModelCatalog::resolve_turn_inference_params` owns the two lookups that
+    // need the catalog: the `provider:model` override key and the model's
+    // *effective* ceiling (the operator's `model_overrides.json` correction if
+    // one exists, otherwise the matched entry's own `max_output_tokens`,
+    // #7774/#8368). Routing every dispatch path through this helper means the
+    // estimate and the request cannot drift.
+    let resolved = catalog.resolve_turn_inference_params(model);
     resolved.apply_to(model);
 }
 
