@@ -71,6 +71,7 @@ vi.mock("../lib/queries/agents", () => ({
   },
   useAgents: () => ({ data: AGENTS, refetch: vi.fn(), isFetching: false }),
   useAgentSessions: () => ({ data: SESSIONS, refetch: vi.fn() }),
+  useAgentAvatarUrl: () => undefined,
 }));
 
 vi.mock("../lib/queries/config", () => ({
