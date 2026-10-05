@@ -93,9 +93,10 @@ function makeQueryClient(): QueryClient {
 }
 
 function wrapper(qc: QueryClient) {
-  return ({ children }: { children: ReactNode }) => (
+  const Wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={qc}>{children}</QueryClientProvider>
   );
+  return Wrapper;
 }
 
 describe("manifest ETag refresh (#8424)", () => {
