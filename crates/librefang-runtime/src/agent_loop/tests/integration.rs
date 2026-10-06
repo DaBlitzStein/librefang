@@ -3447,6 +3447,10 @@ async fn iteration_cap_exhaustion_delivers_accumulated_text() {
         max_iterations: Some(2),
         ..LoopOptions::default()
     };
+    // #8556 review P4: a capped turn must still report the terminal phase.
+    let phases: Arc<std::sync::Mutex<Vec<LoopPhase>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let phases_cb = phases.clone();
+    let phase_cb: PhaseCallback = Arc::new(move |p| phases_cb.lock().unwrap().push(p));
 
     let result = run_agent_loop(
         &manifest,
@@ -3462,7 +3466,7 @@ async fn iteration_cap_exhaustion_delivers_accumulated_text() {
         None, // browser_ctx
         None, // embedding_driver
         None, // workspace_root
-        None, // on_phase
+        Some(&phase_cb),
         None, // media_engine
         None, // media_drivers
         None, // tts_engine
@@ -3492,11 +3496,130 @@ async fn iteration_cap_exhaustion_delivers_accumulated_text() {
         "expected accumulated text delivered, got {:?}",
         result.response
     );
-    // The delivered text must also be pushed as the assistant message.
+    assert!(
+        phases.lock().unwrap().contains(&LoopPhase::Done),
+        "cap exit must fire LoopPhase::Done; got {:?}",
+        phases.lock().unwrap()
+    );
+
+    // #8556 review P6: the interim prose was already committed to the session
+    // by each tool-use turn, so the cap exit must NOT push a second copy.
+    let prose_copies = session
+        .messages
+        .iter()
+        .filter(|m| m.content.text_content().contains("Working on it"))
+        .count();
+    assert_eq!(
+        prose_copies, 2,
+        "cap exit must not duplicate already-committed prose; got {prose_copies} copies"
+    );
+    assert_eq!(
+        session.messages.last().map(|m| m.role),
+        Some(Role::User),
+        "no extra assistant message should be appended after the cap exit"
+    );
+}
+
+/// Tool-only driver: every iteration emits a tool call with no prose, so
+/// nothing reaches the client through the streaming pipe.
+struct AlwaysToolUseToolOnlyDriver;
+
+#[async_trait]
+impl LlmDriver for AlwaysToolUseToolOnlyDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
+            content: vec![ContentBlock::ToolUse {
+                id: "tool_only".to_string(),
+                name: "nonexistent_tool".to_string(),
+                input: serde_json::json!({}),
+                provider_metadata: None,
+            }],
+            stop_reason: StopReason::ToolUse,
+            tool_calls: vec![ToolCall {
+                id: "tool_only".to_string(),
+                name: "nonexistent_tool".to_string(),
+                input: serde_json::json!({}),
+            }],
+            usage: TokenUsage {
+                input_tokens: 5,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            actual_provider: None,
+            actual_model: None,
+        })
+    }
+}
+
+/// #8556 review P1/P6: on the streaming path a tool-only cap turn streams no
+/// text, and the channel bridge never re-sends `result.response` — so the cap
+/// exit must emit the canned guard as a `TextDelta` before completion. When
+/// prose *was* streamed, it must not be re-emitted.
+#[tokio::test]
+async fn streaming_iteration_cap_tool_only_emits_guard_text_delta() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysToolUseToolOnlyDriver);
+    let (tx, mut rx) = mpsc::channel(256);
+    let opts = LoopOptions {
+        max_iterations: Some(2),
+        ..LoopOptions::default()
+    };
+
+    let result = run_agent_loop_streaming(
+        &manifest,
+        "Please send the report",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None, // kernel
+        tx,
+        None, // skill_registry
+        None, // mcp_connections
+        None, // web_ctx
+        None, // browser_ctx
+        None, // embedding_driver
+        None, // workspace_root
+        None, // on_phase
+        None, // media_engine
+        None, // media_drivers
+        None, // tts_engine
+        None, // docker_config
+        None, // hooks
+        None, // context_window_tokens
+        None, // process_manager
+        None, // checkpoint_manager
+        None, // process_registry
+        None, // user_content_blocks
+        None, // proactive_memory
+        None, // context_engine
+        None, // pending_messages
+        &opts,
+    )
+    .await
+    .expect("streaming cap exhaustion must deliver, not fail");
+
+    assert!(result.hit_iteration_cap);
+
+    let mut deltas = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let StreamEvent::TextDelta { text } = event {
+            deltas.push_str(&text);
+        }
+    }
+    assert!(
+        deltas.contains("Task completed"),
+        "streaming cap exit must emit the guard text as a TextDelta; got {deltas:?}"
+    );
+    // Tool-only output means nothing was committed before the cap, so the
+    // guard IS the turn's assistant message.
     assert_eq!(
         session.messages.last().map(|m| m.content.text_content()),
         Some(result.response.clone()),
-        "delivered response must be pushed to session history"
+        "tool-only cap exit must push the guard as the assistant message"
     );
 }
 

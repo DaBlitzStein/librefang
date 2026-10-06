@@ -135,6 +135,10 @@ async fn run_agent_loop_streaming_inner(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
 
+    // Wall-clock start of the turn, used by the iteration-cap exit to report a
+    // real `latency_ms` (#8556 review P7).
+    let turn_start = Instant::now();
+
     // Start index of new messages added during this turn. See the matching
     // comment in run_agent_loop for details. Initialized to the current
     // session length, updated post-trim to len-1. Fixes #2067.
@@ -1860,10 +1864,29 @@ async fn run_agent_loop_streaming_inner(
         "Max iterations reached (streaming) — delivering best-so-far response"
     );
 
-    // Deliver: push the assistant message and persist, mirroring
-    // `finalize_successful_end_turn`. Fork and incognito turns skip.
-    session.push_message(Message::assistant(&text));
+    // #8556 review P6: intermediate tool-use prose was already streamed to
+    // the client by `stream_with_retry` and committed to the session by
+    // `StagedToolUseTurn::commit`. Re-pushing or re-emitting it here would
+    // duplicate both.
+    let prose_already_committed = !accumulated_text.trim().is_empty();
+    if !prose_already_committed {
+        // review P1: the tool-only cap scenario streamed no text, and the
+        // channel bridge's streaming success arm never re-sends
+        // `result.response` — so without this the user would get a "Done"
+        // reaction and no content at all. Emit the canned guard through the
+        // existing streaming pipe so WS/SSE/channel consumers receive it
+        // before completion. `signal_response_complete` follows.
+        if stream_tx
+            .send(StreamEvent::TextDelta { text: text.clone() })
+            .await
+            .is_err()
+        {
+            warn!("Stream consumer disconnected before cap-exit text delta");
+        }
+        session.push_message(Message::assistant(&text));
+    }
 
+    // Persist. Fork and incognito turns skip.
     repair_session_before_save(session, agent_id_str.as_str(), "streaming_max_iterations");
     if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {
@@ -1885,6 +1908,11 @@ async fn run_agent_loop_streaming_inner(
     };
     fire_hook_best_effort(hooks, &ctx);
 
+    // #8556 review P4: mirror `finalize_successful_end_turn`'s terminal phase.
+    if let Some(cb) = on_phase {
+        cb(LoopPhase::Done);
+    }
+
     // Unblock consumers still waiting for the response-complete phase.
     signal_response_complete(&stream_tx).await;
 
@@ -1902,7 +1930,7 @@ async fn run_agent_loop_streaming_inner(
         memory_conflicts,
         provider_not_configured: false,
         experiment_context: experiment_context.clone(),
-        latency_ms: 0,
+        latency_ms: turn_start.elapsed().as_millis() as u64,
         new_messages_start,
         owner_notice: std::mem::take(&mut pending_owner_notice),
         actual_provider: last_actual_provider.clone(),

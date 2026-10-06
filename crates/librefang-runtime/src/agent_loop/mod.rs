@@ -219,6 +219,12 @@ fn sanitize_agent_label(name: &str) -> String {
 /// Maps the loop result to a stable metric `reason` label; no `empty_response` branch (empty replies retry in-loop and land on `completed`).
 fn classify_exit_reason(result: &LibreFangResult<AgentLoopResult>) -> &'static str {
     match result {
+        // #8556: the loop now returns `Ok` when it exhausts its iteration
+        // budget and delivers the best-so-far text, so without this arm the
+        // `max_iterations` reason would never be counted again. The flag is
+        // the only thing that distinguishes a capped turn from an ordinary
+        // completed one.
+        Ok(r) if r.hit_iteration_cap => "max_iterations",
         Ok(_) => "completed",
         Err(LibreFangError::MaxIterationsExceeded(_)) => "max_iterations",
         Err(LibreFangError::RepeatedToolFailures { .. }) => "repeated_tool_failures",
@@ -589,6 +595,12 @@ async fn run_agent_loop_inner(
     opts: &LoopOptions,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
+
+    // Wall-clock start of the turn, used by the iteration-cap exit to report a
+    // real `latency_ms` (#8556 review P7). Ordinary exits leave `latency_ms`
+    // at 0 because the kernel overwrites it after the loop; the cap exit
+    // reports its own so a direct runtime caller sees a real figure.
+    let turn_start = Instant::now();
 
     // Start index of new messages added during this turn. Initialized to
     // current session length so early returns (before the user message is
@@ -2255,11 +2267,19 @@ async fn run_agent_loop_inner(
         "Max iterations reached — delivering best-so-far response"
     );
 
-    // Deliver: push the assistant message and persist, mirroring
-    // `finalize_successful_end_turn`. Fork and incognito turns skip — both
-    // are ephemeral and must not pollute canonical session history.
-    session.push_message(Message::assistant(&text));
+    // #8556 review P6: the accumulated prose was already committed to the
+    // session by each tool-use turn's `StagedToolUseTurn::commit` — that
+    // assistant message carries the same text. Re-pushing it here would
+    // duplicate it on reload. Only when nothing carried the final text (the
+    // tool-only case, where `finalize_end_turn_text` returns the canned
+    // guard) does the cap exit need to push the turn's assistant message.
+    let prose_already_committed = !accumulated_text.trim().is_empty();
+    if !prose_already_committed {
+        session.push_message(Message::assistant(&text));
+    }
 
+    // Persist. Fork and incognito turns skip — both are ephemeral and must
+    // not pollute canonical session history.
     repair_session_before_save(session, agent_id_str.as_str(), "max_iterations");
     if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {
@@ -2281,6 +2301,13 @@ async fn run_agent_loop_inner(
     };
     fire_hook_best_effort(hooks, &ctx);
 
+    // #8556 review P4: mirror `finalize_successful_end_turn`, which fires
+    // `LoopPhase::Done` at the end of a normal turn. Consumers keyed on
+    // "done" must see a capped turn complete too.
+    if let Some(cb) = on_phase {
+        cb(LoopPhase::Done);
+    }
+
     Ok(AgentLoopResult {
         response: text,
         total_usage,
@@ -2295,7 +2322,7 @@ async fn run_agent_loop_inner(
         memory_conflicts,
         provider_not_configured: false,
         experiment_context: experiment_context.clone(),
-        latency_ms: 0,
+        latency_ms: turn_start.elapsed().as_millis() as u64,
         new_messages_start,
         owner_notice: std::mem::take(&mut pending_owner_notice),
         actual_provider: last_actual_provider.clone(),

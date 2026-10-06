@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 61;
+const SCHEMA_VERSION: u32 = 62;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -306,6 +306,12 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // silent and permanent. Other open PRs also want 61; whichever merges
     // first keeps it and the rest renumber to 62, 63, … on rebase.
     run_step!(61, migrate_v61);
+
+    // v62 (#8556): mark an ephemeral run that hit its iteration cap.
+    // A capped worker still delivers a partial answer and is recorded as
+    // `completed`, which made truncation indistinguishable from a full run.
+    // `truncated` carries that signal without widening the `status` CHECK.
+    run_step!(62, migrate_v62);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1526,6 +1532,27 @@ fn migrate_v61(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (61, datetime('now'), 'Add sessions.parent_session_id for sub-agent run lineage (#7752)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v62 (#8556): add `ephemeral_runs.truncated`.
+///
+/// The #8556 iteration-cap fix makes a capped worker return `Ok` with a
+/// delivered partial answer rather than `Err`, so the run record says
+/// `completed`. That erased the operator's only signal that the worker was
+/// cut off. A dedicated boolean keeps the existing `status` CHECK untouched.
+fn migrate_v62(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "ephemeral_runs", "truncated")? {
+        conn.execute(
+            "ALTER TABLE ephemeral_runs ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (62, datetime('now'), 'Add ephemeral_runs.truncated so a cap-delivered worker run is distinguishable from a full one (#8556)')",
         [],
     )?;
     Ok(())

@@ -1952,7 +1952,17 @@ fn test_classify_exit_reason_covers_every_branch() {
         classify_exit_reason(&Ok(AgentLoopResult::default())),
         "completed"
     );
-    // max_iterations — the for-loop ran out.
+    // max_iterations — #8556: the loop delivered its best-so-far text and
+    // returned Ok with `hit_iteration_cap`. This is the path the cap fix
+    // produces; the Err arm below is retained defensively.
+    assert_eq!(
+        classify_exit_reason(&Ok(AgentLoopResult {
+            hit_iteration_cap: true,
+            ..Default::default()
+        })),
+        "max_iterations"
+    );
+    // max_iterations — legacy Err shape.
     assert_eq!(
         classify_exit_reason(&Err(LibreFangError::MaxIterationsExceeded(40))),
         "max_iterations"
@@ -1996,11 +2006,19 @@ fn test_classify_exit_reason_covers_every_branch() {
 fn test_record_agent_loop_exit_increments_once_with_labels() {
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
-    // One representative per reason: an Ok (completed) and a structured Err
-    // (max_iterations). Both must produce a single increment with the right
-    // reason label and the agent label.
+    // One representative per reason: an Ok (completed), the #8556 cap-
+    // delivered Ok (max_iterations), and a structured Err (max_iterations).
+    // Each must produce a single increment with the right reason label and
+    // the agent label.
     let cases: &[(LibreFangResult<AgentLoopResult>, &str)] = &[
         (Ok(AgentLoopResult::default()), "completed"),
+        (
+            Ok(AgentLoopResult {
+                hit_iteration_cap: true,
+                ..Default::default()
+            }),
+            "max_iterations",
+        ),
         (
             Err(LibreFangError::MaxIterationsExceeded(40)),
             "max_iterations",
