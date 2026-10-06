@@ -14673,6 +14673,7 @@ mod try_summarize_trim_tests {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
                 content: vec![ContentBlock::Text {
                     text: self.summary.clone(),
                     provider_metadata: None,
@@ -18339,6 +18340,7 @@ mod provider_budget_gate_5980 {
                 _req: CompletionRequest,
             ) -> Result<CompletionResponse, LlmError> {
                 Ok(CompletionResponse {
+                    text_synthesized_from_thinking: false,
                     content: vec![ContentBlock::Text {
                         text: "served by healthy provider".to_string(),
                         provider_metadata: None,
