@@ -1387,6 +1387,30 @@ impl LibreFangKernel {
                     }
                 }
 
+                // #8556: the loop hit its per-turn iteration cap and delivered
+                // the best-so-far text rather than failing. The user still got
+                // a response, but surface an operator notification so the
+                // truncation is observable (mirrors the task_completed push).
+                if result.hit_iteration_cap {
+                    let name = self
+                        .agents
+                        .registry
+                        .get(agent_id)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| agent_id.to_string());
+                    let msg = format!(
+                        "Agent \"{}\" hit the iteration cap after {} iterations — delivered a partial response",
+                        name, result.iterations
+                    );
+                    self.push_notification(
+                        &agent_id.to_string(),
+                        "max_iterations",
+                        &msg,
+                        resolved_session_id.as_ref(),
+                    )
+                    .await;
+                }
+
                 // Skill evolution: check if any skill_evolve_* tools were used
                 // and hot-reload the registry so new/updated skills take effect
                 // immediately for subsequent messages.

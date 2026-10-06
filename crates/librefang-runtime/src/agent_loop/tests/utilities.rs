@@ -1265,6 +1265,7 @@ fn agent_loop_result_owner_notice_defaults_none() {
 #[test]
 fn agent_loop_result_owner_notice_can_be_set() {
     let r = AgentLoopResult {
+        hit_iteration_cap: false,
         owner_notice: Some("Sir, the appointment is at 3pm.".into()),
         ..AgentLoopResult::default()
     };
@@ -1289,6 +1290,7 @@ fn agent_loop_result_actual_provider_can_be_set() {
     // The kernel metering path falls back to the configured provider
     // when this is None, and bills the named provider when set.
     let r = AgentLoopResult {
+        hit_iteration_cap: false,
         actual_provider: Some("anthropic-backup".into()),
         actual_model: None,
         ..AgentLoopResult::default()
@@ -1467,6 +1469,49 @@ fn safe_trim_messages_respects_custom_cap() {
         Some(Role::User),
         "history must start with a user turn after trim+repair"
     );
+}
+
+/// #8556 regression: the trim must keep the *current turn's* task — the last
+/// user message of a turn-shaped working copy — and not merely "some user
+/// message". Before the fix `ensure_post_trim_minimum` returned early as soon
+/// as any user message survived, so a drained task was replaced by the raw
+/// fallback string (which differs from the pushed message once a sender
+/// prefix / PII filter / injection warning has been applied). The model then
+/// answered a question it could no longer see.
+#[test]
+fn safe_trim_messages_preserves_current_turn_task_under_tiny_cap() {
+    let mut messages = vec![
+        Message::user("old user turn"),
+        Message::assistant("old assistant turn"),
+        Message::user("CURRENT TASK"),
+    ];
+    let mut session_messages = messages.clone();
+
+    // A cap so small the front-drain would otherwise empty the history: the
+    // exact task message must still survive in both copies.
+    safe_trim_messages(
+        &mut messages,
+        &mut session_messages,
+        "test-agent",
+        "fallback-for-a-different-turn",
+        0,
+    );
+
+    for (label, history) in [
+        ("working copy", &messages),
+        ("persistent session", &session_messages),
+    ] {
+        assert!(
+            history
+                .iter()
+                .any(|m| { m.role == Role::User && m.content.text_content() == "CURRENT TASK" }),
+            "{label} must retain the current-turn task; got {:?}",
+            history
+                .iter()
+                .map(|m| m.content.text_content())
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 // ── record_tool_call_metric covers failure paths ───────────────────────

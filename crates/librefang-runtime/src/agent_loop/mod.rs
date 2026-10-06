@@ -601,6 +601,7 @@ async fn run_agent_loop_inner(
     // Early return if driver is not configured
     if !driver.is_configured() {
         return Ok(AgentLoopResult {
+            hit_iteration_cap: false,
             silent: true,
             provider_not_configured: true,
             new_messages_start,
@@ -1077,6 +1078,7 @@ async fn run_agent_loop_inner(
         if opts.interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
             debug!(iteration, "Agent loop interrupted by session cancel signal");
             return Ok(AgentLoopResult {
+                hit_iteration_cap: false,
                 silent: true,
                 new_messages_start,
                 ..Default::default()
@@ -1459,6 +1461,7 @@ async fn run_agent_loop_inner(
             forced_tools_stripped_this_turn,
             response.stop_reason,
             response.tool_calls.is_empty(),
+            response.text_synthesized_from_thinking,
         ) {
             let recovered = recover_text_tool_calls(&response.text(), available_tools);
             if !recovered.is_empty() {
@@ -2168,6 +2171,7 @@ async fn run_agent_loop_inner(
                     };
                     fire_hook_best_effort(hooks, &ctx);
                     return Ok(AgentLoopResult {
+                        hit_iteration_cap: false,
                         response: text,
                         total_usage,
                         iterations: iteration + 1,
@@ -2227,9 +2231,35 @@ async fn run_agent_loop_inner(
         }
     }
 
-    // Save session before failing so conversation history is preserved.
-    // Fork and incognito turns skip — both are ephemeral and must not
-    // pollute canonical session history even when the loop bailed out.
+    // The iteration budget is exhausted. Rather than failing with
+    // `MaxIterationsExceeded` — which reaches the kernel's Err arm, alerts
+    // operators only, and leaves the user with silence — deliver the best
+    // text we have: text accumulated from intermediate tool_use iterations,
+    // or the canned guard `finalize_end_turn_text` falls back to. The
+    // `hit_iteration_cap` flag lets the kernel surface an operator
+    // notification while the user still receives the partial answer (#8556).
+    let text = finalize_end_turn_text(
+        String::new(),
+        any_tools_executed,
+        &manifest.name,
+        max_iterations,
+        &total_usage,
+        messages.len(),
+        "Max iterations reached — guard activated",
+        &accumulated_text,
+    );
+    warn!(
+        agent = %manifest.name,
+        iterations = max_iterations,
+        response_len = text.len(),
+        "Max iterations reached — delivering best-so-far response"
+    );
+
+    // Deliver: push the assistant message and persist, mirroring
+    // `finalize_successful_end_turn`. Fork and incognito turns skip — both
+    // are ephemeral and must not pollute canonical session history.
+    session.push_message(Message::assistant(&text));
+
     repair_session_before_save(session, agent_id_str.as_str(), "max_iterations");
     if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {
@@ -2237,20 +2267,41 @@ async fn run_agent_loop_inner(
         }
     }
 
-    // Fire AgentLoopEnd hook on max iterations exceeded
+    // Fire AgentLoopEnd hook on max iterations reached — with delivery.
     let ctx = crate::hooks::HookContext {
         agent_name: &manifest.name,
         agent_id: agent_id_str.as_str(),
         event: librefang_types::agent::HookEvent::AgentLoopEnd,
         data: serde_json::json!({
-            "reason": "max_iterations_exceeded",
+            "reason": "max_iterations_reached_with_delivery",
             "iterations": max_iterations,
             "is_fork": opts.is_fork,
+            "response_length": text.len(),
         }),
     };
     fire_hook_best_effort(hooks, &ctx);
 
-    Err(LibreFangError::MaxIterationsExceeded(max_iterations))
+    Ok(AgentLoopResult {
+        response: text,
+        total_usage,
+        iterations: max_iterations,
+        cost_usd: None,
+        silent: false,
+        directives: Default::default(),
+        skill_evolution_suggested: decision_traces.len() >= 5,
+        decision_traces,
+        memories_saved,
+        memories_used,
+        memory_conflicts,
+        provider_not_configured: false,
+        experiment_context: experiment_context.clone(),
+        latency_ms: 0,
+        new_messages_start,
+        owner_notice: std::mem::take(&mut pending_owner_notice),
+        actual_provider: last_actual_provider.clone(),
+        actual_model: last_actual_model.clone(),
+        hit_iteration_cap: true,
+    })
 }
 
 #[cfg(test)]

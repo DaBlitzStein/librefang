@@ -260,8 +260,37 @@ fn ensure_post_trim_minimum(
     agent_name: &str,
     user_message: &str,
     history_kind: &str,
+    turn_task: Option<&Message>,
 ) {
-    if messages.len() >= 2 && messages.iter().any(|m| m.role == Role::User) {
+    // #8556: the current turn's task message must survive the trim. A
+    // surviving user message from an *earlier* turn is not enough — the model
+    // would then be answering a question it can no longer see, which is the
+    // mid-turn amnesia that makes it flail until the iteration cap. When the
+    // caller supplies the task marker, require exactly that message; fall
+    // back to the legacy "any user message" guarantee otherwise.
+    let task_survives = match turn_task {
+        Some(task) => messages.iter().any(|m| {
+            m.role == Role::User && m.content.text_content() == task.content.text_content()
+        }),
+        None => messages.len() >= 2 && messages.iter().any(|m| m.role == Role::User),
+    };
+    if task_survives {
+        return;
+    }
+
+    if messages.len() >= 2 && turn_task.is_some() {
+        // History is otherwise healthy; only the current-turn task was
+        // trimmed away. Re-append it as the active turn instead of
+        // synthesising a fresh conversation and discarding the survivors.
+        warn!(
+            agent = %agent_name,
+            history = history_kind,
+            remaining = messages.len(),
+            "Trim dropped the current-turn user message — re-appending the task"
+        );
+        if let Some(task) = turn_task {
+            messages.push(task.clone());
+        }
         return;
     }
 
@@ -272,7 +301,11 @@ fn ensure_post_trim_minimum(
         "Trim + repair left too few messages, synthesizing minimal conversation"
     );
     messages.retain(|message| message.role == Role::System);
-    messages.push(Message::user(user_message));
+    messages.push(
+        turn_task
+            .cloned()
+            .unwrap_or_else(|| Message::user(user_message)),
+    );
 }
 
 /// Safely trim message history to `DEFAULT_MAX_HISTORY_MESSAGES`, cutting at
@@ -295,6 +328,22 @@ pub(super) fn safe_trim_messages(
 ) -> (bool, bool) {
     let mut working_mutated = false;
     let mut session_mutated = false;
+
+    // #8556: capture each history's current-turn task — its last user message
+    // — so the trim below can never strip it. For a turn-shaped working copy
+    // the last user message is the task by construction (`prepare_llm_messages`
+    // builds it from the session that already ends with the just-pushed turn
+    // message).
+    let session_turn_task = session_messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
+        .cloned();
+    let working_turn_task = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
+        .cloned();
 
     // Trim the persistent session messages first so the truncated version is
     // saved back to the database, preventing reload-OOM on next boot.
@@ -345,6 +394,7 @@ pub(super) fn safe_trim_messages(
             agent_name,
             user_message,
             "persistent session",
+            session_turn_task.as_ref(),
         );
     }
 
@@ -396,7 +446,13 @@ pub(super) fn safe_trim_messages(
 
     // Post-trim safety: ensure at least a user message survives so the LLM
     // request body is never empty.
-    ensure_post_trim_minimum(messages, agent_name, user_message, "working copy");
+    ensure_post_trim_minimum(
+        messages,
+        agent_name,
+        user_message,
+        "working copy",
+        working_turn_task.as_ref(),
+    );
 
     (working_mutated, session_mutated)
 }
