@@ -397,6 +397,8 @@ export function useRestoreAgentManifestVersion() {
   });
 }
 
+=======
+>>>>>>> fork/feat/agent-manifest-history
 /** Route model-tuning updates through the config slot selected by agent role. */
 export function usePatchAgentRuntimeConfig() {
   const qc = useQueryClient();
