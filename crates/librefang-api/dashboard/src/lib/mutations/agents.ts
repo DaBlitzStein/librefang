@@ -36,6 +36,7 @@ import {
 import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
 import {
+  agentAvatarKeys,
   agentKeys,
   approvalKeys,
   budgetKeys,
@@ -236,8 +237,10 @@ export function usePatchAgent() {
  * `avatar_url` is not writable through here. It may only hold this agent's own
  * avatar path, and the two hooks below are what put it there.
  *
- * Invalidates `detail(id)` and `lists()`, matching `usePatchAgent`: the same
- * two reads carry the identity that just changed.
+ * Invalidates `detail(id)`, `lists()` and the dashboard snapshot: those are the
+ * three reads that carry the identity that just changed. The snapshot is the
+ * one that is easy to miss — `AgentsPage`'s rows render the emoji and the
+ * avatar out of it, not out of `agentKeys`.
  */
 export function useUpdateAgentIdentity() {
   const qc = useQueryClient();
@@ -252,6 +255,19 @@ export function useUpdateAgentIdentity() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      // The list rows do not read the identity out of `agentKeys` at all —
+      // `AgentsPage` renders them from the dashboard snapshot, whose key is a
+      // sibling of `agentKeys.all` rather than a child of it. Without this the
+      // row goes on showing the previous emoji until the snapshot's own 5 s
+      // poll comes round.
+      //
+      // Every other mutation in this file that changes what the list shows
+      // already does this — spawn, clone, suspend, resume, delete and
+      // reset-session all invalidate the snapshot. The three identity hooks
+      // were the ones that got missed, which is why an uploaded avatar used to
+      // take five seconds to appear in the row. Same line in the two avatar
+      // hooks below.
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
 }
@@ -264,7 +280,8 @@ export function useUpdateAgentIdentity() {
  * still stored correctly and an SVG is still refused.
  *
  * Invalidates `avatar(id)` — the cached Blob is now the previous image — as
- * well as the two reads that carry `avatar_url`. The avatar key is invalidated
+ * well as the reads that carry `avatar_url`: `lists()`, `detail(id)` and the
+ * dashboard snapshot the list rows render from. The avatar key is invalidated
  * in `onSuccess` rather than `onSettled` deliberately: the handler writes the
  * bytes to a temp file and renames it into place, so an upload that fails leaves
  * the previous avatar exactly as it was, and re-fetching the image after one
@@ -280,9 +297,10 @@ export function useUploadAgentAvatar() {
     mutationFn: ({ agentId, file }: { agentId: string; file: Blob }) =>
       uploadAgentAvatar(agentId, file),
     onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: agentKeys.avatar(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentAvatarKeys.avatar(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
 }
@@ -295,8 +313,8 @@ export function useUploadAgentAvatar() {
  * avatars directory — gets back to rendering its initials.
  *
  * The avatar key is **removed** rather than invalidated, and that is the one
- * place this mutation diverges from the upload above it. `agentKeys.avatar` is
- * gated on `enabled: hasAvatar`, which is "is `identity.avatar_url` set", so the
+ * place this mutation diverges from the upload above it. `agentAvatarKeys.avatar`
+ * is gated on `enabled: hasAvatar`, which is "is `identity.avatar_url` set", so the
  * `detail` refetch this same `onSuccess` triggers is what switches the query
  * off. A disabled `useQuery` keeps returning its cached `data`, and an
  * invalidation on a disabled query never becomes a refetch — so the deleted
@@ -308,9 +326,10 @@ export function useDeleteAgentAvatar() {
   return useMutation({
     mutationFn: deleteAgentAvatar,
     onSuccess: (_data, agentId) => {
-      qc.removeQueries({ queryKey: agentKeys.avatar(agentId) });
+      qc.removeQueries({ queryKey: agentAvatarKeys.avatar(agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
 }

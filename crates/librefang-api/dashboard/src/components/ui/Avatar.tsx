@@ -1,6 +1,7 @@
 import { type HTMLAttributes, memo, useEffect, useState } from "react";
+import { cn } from "../../lib/cn";
 
-type AvatarSize = "sm" | "md" | "lg" | "xl";
+export type AvatarSize = "sm" | "md" | "lg" | "xl";
 
 interface AvatarProps extends HTMLAttributes<HTMLDivElement> {
   fallback: string;
@@ -49,17 +50,21 @@ export const Avatar = memo(function Avatar({
   const [imgError, setImgError] = useState(false);
   useEffect(() => setImgError(false), [src]);
 
+  // `cn` rather than a template literal so a caller's `className` wins over the
+  // colours below — the chat picker pins this avatar on a `bg-brand` row, where
+  // the default brand-on-brand initial is invisible. Same reason `Badge` merges
+  // its classes instead of concatenating them.
   return (
     <div
       role="img"
       aria-label={fallback}
-      className={`
-        relative flex shrink-0 items-center justify-center
-        rounded-full bg-brand/10 text-brand font-black
-        overflow-hidden
-        ${sizeStyles[size]}
-        ${className}
-      `}
+      className={cn(
+        "relative flex shrink-0 items-center justify-center",
+        "rounded-full bg-brand/10 text-brand font-black",
+        "overflow-hidden",
+        sizeStyles[size],
+        className,
+      )}
       {...props}
     >
       {/* Image, then emoji, then initials — the order in which the identity
