@@ -6393,6 +6393,7 @@
           "network"
         ],
         "summary": "POST /api/comms/task — Post a task to the agent task queue.",
+        "description": "The body is typed ([`librefang_types::comms::CommsTaskRequest`]), and that\nis what splits the error contract in two:\n\n* **422** — a body that is valid JSON but does not deserialize into the\n  request type: `\"priority\": 1.5`, `\"timeout_secs\": \"soon\"`, or any other\n  shape mismatch. The `Json` extractor rejects it before this handler runs,\n  because a fractional or negative-second limit must not be rounded,\n  clamped, or dropped on the way to a 201.\n* **400** — a body that deserializes but is semantically wrong: an empty\n  `title`, or an `assigned_to` that names no known agent.\n\nSibling `POST /api/tasks` carries the same fields but reads them from an\nuntyped `serde_json::Value`, so every body mistake there — syntax included\n— is its own 400. Both routes refuse the same inputs; the status differs\nbecause one body is typed and the other is inspected field by field, and\nthis note is what makes that difference a contract rather than a surprise.\n\n`priority` and `timeout_secs` are enforced, not merely recorded: they\nreach the claim queue's `ORDER BY` and the sweeper's per-row deadline.",
         "operationId": "comms_task",
         "requestBody": {
           "content": {
@@ -6405,8 +6406,28 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Post a task to the agent task queue",
+          "201": {
+            "description": "Task enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing title, or an unknown assignee",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Body does not deserialize into the request type (wrong type or out-of-range value)",
             "content": {
               "application/json": {
                 "schema": {
@@ -12186,7 +12207,7 @@
           "models"
         ],
         "summary": "PUT /api/providers/{name}/discovery — Toggle live model discovery (#6702).",
-        "description": "Body: `{ \"discover_models\": true }`.\n\nModel discovery used to be reachable only through the hard-coded local\nprovider ids, so a custom OpenAI-compatible endpoint registered under its\nown id stayed at `model_count: 0` forever with no UI action to change that.\nFlipping the flag here puts the provider on exactly the same probe path as\na built-in local one: the periodic probe loop, `POST .../test`, and the\nlive-model filter applied to `/api/models`.\n\nThe flag is persisted into the provider's own `providers/{name}.toml`\n`[provider]` table, which is where the catalog reads it back from on the\nnext boot. Registry-managed files are rewritten by the boot-time registry\nsync when their content drifts from the upstream copy, so the flag is\ndurable for the custom providers this endpoint exists to serve and\nintentionally best-effort for built-in ids — whose discovery behaviour is\ndecided by the id branch of the predicate anyway.",
+        "description": "Body: `{ \"discover_models\": true }`.\n\nModel discovery used to be reachable only through the hard-coded local\nprovider ids, so a custom OpenAI-compatible endpoint registered under its\nown id stayed at `model_count: 0` forever with no UI action to change that.\nFlipping the flag here puts the provider on exactly the same probe path as\na built-in local one: the periodic probe loop, `POST .../test`, and the\nlive-model filter applied to `/api/models`.\n\nThe preference is operator state, so it is stored where the operator's other provider preferences already live — `data/provider_discovery.json` — and applied over the catalog at boot.\nIt deliberately does not go into the provider's own `providers/{name}.toml`: the boot-time registry sync rewrites those files from the registry, and no registry-shipped file carries `discover_models` at all, so a toggle written there was cleared by the next restart (#8407).\nThe setting therefore survives restarts for every provider, built-in ids included.",
         "operationId": "set_provider_discovery",
         "parameters": [
           {
@@ -13813,6 +13834,48 @@
         "responses": {
           "200": {
             "description": "Daemon status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "POST /api/tasks — Enqueue a task on behalf of an external caller.",
+        "description": "Body: `{\"title\": \"...\", \"description\": \"...\", \"assigned_to\": \"<agent-id|name>\"?, \"created_by\": \"<agent-id>\"?, \"priority\": <int>?, \"timeout_secs\": <uint>?}`\n\nWraps `KernelHandle::task_post` so HTTP clients (skill subprocesses,\ncron scripts, external integrations) can enqueue tasks without a\nruntime/agent context. The agent-side `task_post` tool keeps the\ncaller's agent id automatically.\nAuthenticated HTTP requests use the caller's stable user id for\nprovenance and ignore a body-supplied `created_by` value.\n\n`priority` orders the claim queue (higher first, ties by age) and\n`timeout_secs` overrides `[task_board] claim_ttl_secs` for this task —\nboth are enforced by the kernel, not merely recorded.\n\nAn `assigned_to` that names no known agent is rejected with 400 rather\nthan stored: `task_claim` refuses an unknown agent, so such a row would\nsit `pending` forever with nothing to say why.",
+        "operationId": "task_queue_post_root",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Task enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid title, description, priority, timeout_secs, or unknown assignee",
             "content": {
               "application/json": {
                 "schema": {
@@ -16828,6 +16891,13 @@
               "string",
               "null"
             ]
+          },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Machine-readable failure reason (`template_not_found`,\n`template_read_failed`, `manifest_too_large`, `signature_invalid`,\n`invalid_manifest`, `agent_already_exists`, `spawn_failed`, …), the\nsame codes `POST /api/agents` returns as the response `code` field.\n`error` alone is already translated into nine locales, so a caller\ncannot branch on it to tell \"template missing\" apart from \"template\nunreadable\" without substring-matching localized prose (#8112)."
           },
           "error": {
             "type": [
