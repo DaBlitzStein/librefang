@@ -326,10 +326,6 @@
       "avatar_too_large": "Ten obraz ma {{size}} MB, a limit to {{limit}} MB.",
       "provisioned_hint": "Ten agent jest zdefiniowany przez wdrożenie w {{source}} — demon odrzuca tutaj zapisy tożsamości, więc zmień wygląd w tym pliku."
     },
-    "model": "Model",
-    "provider": "Dostawca",
-    "max_tokens": "Maks. tokenów",
-    "temperature": "Temperatura",
     "no_matching": "Brak agentów pasujących do wyszukiwania.",
     "capabilities": "Możliwości",
     "skills": "Umiejętności",

@@ -443,6 +443,7 @@ export function AgentAppearanceSection({
   );
 }
 
+/**
  * Channels quick-widget for the Configure drawer (#7742). `PUT
  * /api/agents/{id}/channels` has existed since `config.rs` shipped
  * `get_agent_channels` / `set_agent_channels` (promised when #4912 / #4963

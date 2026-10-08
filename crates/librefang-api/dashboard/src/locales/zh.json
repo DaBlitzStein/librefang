@@ -326,10 +326,6 @@
       "avatar_too_large": "该图片为 {{size}} MB，上限为 {{limit}} MB。",
       "provisioned_hint": "此代理由部署在 {{source}} 中声明 — 守护进程拒绝在此写入身份，请在相应文件中更改外观。"
     },
-    "model": "模型",
-    "provider": "供应商",
-    "max_tokens": "最大令牌数",
-    "temperature": "温度",
     "no_matching": "没有匹配的智能体。",
     "capabilities": "能力",
     "skills": "技能",

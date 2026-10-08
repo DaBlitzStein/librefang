@@ -326,10 +326,6 @@
       "avatar_too_large": "이 이미지는 {{size}}MB이며, 한도는 {{limit}}MB입니다.",
       "provisioned_hint": "이 에이전트는 배포에서 {{source}}에 선언했습니다. 데몬이 여기서의 ID 쓰기를 거부하므로 해당 파일에서 외형을 변경하세요."
     },
-    "model": "모델",
-    "provider": "공급자",
-    "max_tokens": "최대 토큰",
-    "temperature": "온도",
     "no_matching": "검색어와 일치하는 에이전트가 없습니다.",
     "capabilities": "기능",
     "skills": "기술",
