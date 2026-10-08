@@ -12,7 +12,7 @@ import {
   useUpdateAgentIdentity,
   useUploadAgentAvatar,
 } from "./agents";
-import { agentKeys } from "../queries/keys";
+import { agentAvatarKeys, agentKeys, overviewKeys } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
@@ -37,7 +37,7 @@ describe("useUpdateAgentIdentity", () => {
     expect(http.updateAgentIdentity).toHaveBeenCalledWith(AGENT, { emoji: "🤖" });
   });
 
-  it("invalidates the two reads that carry the identity", async () => {
+  it("invalidates every read that carries the identity, the snapshot included", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(() => useUpdateAgentIdentity(), { wrapper });
@@ -46,6 +46,10 @@ describe("useUpdateAgentIdentity", () => {
 
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.detail(AGENT) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.lists() });
+    // The list rows render the emoji out of the dashboard snapshot, and its key
+    // is a sibling of `agentKeys.all` rather than a child of it — so the two
+    // agent keys above leave the row on the previous emoji.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
 
   it("leaves the cached avatar image alone — an emoji change is not a new image", async () => {
@@ -55,7 +59,7 @@ describe("useUpdateAgentIdentity", () => {
 
     await result.current.mutateAsync({ agentId: AGENT, identity: { emoji: "🤖" } });
 
-    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: agentKeys.avatar(AGENT) });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: agentAvatarKeys.avatar(AGENT) });
   });
 });
 
@@ -83,9 +87,10 @@ describe("useUploadAgentAvatar", () => {
     // Without this one the drawer keeps rendering the previous image from the
     // cached Blob until the entry goes stale, so the upload looks like it did
     // nothing.
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.avatar(AGENT) });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: agentAvatarKeys.avatar(AGENT) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.detail(AGENT) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.lists() });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
 
   it("invalidates nothing when the upload fails", async () => {
@@ -103,12 +108,12 @@ describe("useUploadAgentAvatar", () => {
 
     // A refused upload changed nothing on disk; re-fetching would spend a
     // request to arrive back at the bytes already cached.
-    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: agentKeys.avatar(AGENT) });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: agentAvatarKeys.avatar(AGENT) });
   });
 });
 
 describe("useDeleteAgentAvatar", () => {
-  it("takes the agent id directly and invalidates the image and both reads", async () => {
+  it("takes the agent id directly and invalidates the image and the reads", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(() => useDeleteAgentAvatar(), { wrapper });
@@ -122,12 +127,13 @@ describe("useDeleteAgentAvatar", () => {
     expect(vi.mocked(http.deleteAgentAvatar).mock.calls[0][0]).toBe(AGENT);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.detail(AGENT) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: agentKeys.lists() });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
 
   it("drops the cached image rather than leaving it for a query that is now disabled", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" });
-    queryClient.setQueryData(agentKeys.avatar(AGENT), blob);
+    queryClient.setQueryData(agentAvatarKeys.avatar(AGENT), blob);
 
     const { result } = renderHook(() => useDeleteAgentAvatar(), { wrapper });
     await result.current.mutateAsync(AGENT);
@@ -138,7 +144,7 @@ describe("useDeleteAgentAvatar", () => {
     // invalidation on a disabled query never becomes a refetch — so invalidating
     // this key would leave the deleted image rendering until the entry happened
     // to be collected. The URL has to stop existing, not merely go stale.
-    expect(queryClient.getQueryData(agentKeys.avatar(AGENT))).toBeUndefined();
+    expect(queryClient.getQueryData(agentAvatarKeys.avatar(AGENT))).toBeUndefined();
   });
 
   it("scopes the avatar removal to the agent it was called for", async () => {
@@ -152,8 +158,8 @@ describe("useDeleteAgentAvatar", () => {
 
     await result.current.mutateAsync(AGENT);
 
-    expect(remove).toHaveBeenCalledWith({ queryKey: agentKeys.avatar(AGENT) });
-    expect(remove).not.toHaveBeenCalledWith({ queryKey: agentKeys.avatar("agent-2") });
+    expect(remove).toHaveBeenCalledWith({ queryKey: agentAvatarKeys.avatar(AGENT) });
+    expect(remove).not.toHaveBeenCalledWith({ queryKey: agentAvatarKeys.avatar("agent-2") });
     expect(remove).not.toHaveBeenCalledWith({ queryKey: agentKeys.all });
   });
 });
