@@ -21,7 +21,7 @@ import {
   getAgentSkills,
   getAgentMcpServers,
 } from "../http/client";
-import { agentKeys, toolKeys } from "./keys";
+import { agentAvatarKeys, agentKeys, toolKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_MS = 30_000;
@@ -181,7 +181,10 @@ export const agentQueries = {
   // invalidating this key rather than by polling for it.
   avatar: (agentId: string, enabled: boolean) =>
     queryOptions({
-      queryKey: agentKeys.avatar(agentId),
+      // Sibling root, not `agentKeys.avatar`: a broad `agentKeys.all`
+      // invalidation (a hand toggle, a knowledge write) must not re-download
+      // every cached image. See `agentAvatarKeys` in `./keys`.
+      queryKey: agentAvatarKeys.avatar(agentId),
       // React Query's signal is forwarded: switching agents quickly otherwise
       // leaves the superseded image GET holding a connection slot until it
       // finishes on its own.
@@ -292,10 +295,14 @@ export function useAgentAvatarUrl(
   const [objectUrl, setObjectUrl] = useState<string | undefined>(undefined);
 
   useEffect(() => {
-    // The effect depends on `enabled` too: a drawer that closes revokes the
-    // handle in this cleanup, so a closed consumer does not keep an object URL
-    // alive for an image that is no longer rendered.
-    if (!enabled || !blob) {
+    // `!hasAvatar` is part of the condition, not just the query's `enabled`: a
+    // disabled query still returns cached data, so a caller that only wants to
+    // know "is there an image" would otherwise mint an object URL for a cached
+    // Blob it is not rendering (#8339 review). Same for `enabled`: a drawer
+    // that closes revokes the handle in this cleanup, so a closed consumer
+    // does not keep an object URL alive for an image that is no longer
+    // rendered.
+    if (!blob || !hasAvatar || !enabled) {
       setObjectUrl(undefined);
       return;
     }
@@ -308,7 +315,7 @@ export function useAgentAvatarUrl(
       // initials the fallback is there to give.
       setObjectUrl(undefined);
     };
-  }, [blob, enabled]);
+  }, [blob, hasAvatar, enabled]);
 
   return objectUrl;
 }
