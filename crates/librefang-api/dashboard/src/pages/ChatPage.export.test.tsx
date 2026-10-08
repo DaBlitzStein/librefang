@@ -64,6 +64,10 @@ vi.mock("../lib/queries/agents", () => ({
   },
   useAgents: () => ({ data: AGENTS, refetch: vi.fn(), isFetching: false }),
   useAgentSessions: () => ({ data: [], refetch: vi.fn() }),
+  // `ChatPage` resolves the agent avatar through this hook since main grew the
+  // avatar picker (#8371). This test neither asserts nor renders avatars, so a
+  // stub that reports "no avatar" keeps the component mountable.
+  useAgentAvatarUrl: () => undefined,
 }));
 
 vi.mock("../lib/queries/config", () => ({
