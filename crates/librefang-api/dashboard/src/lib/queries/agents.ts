@@ -30,6 +30,7 @@ const REFRESH_MS = 30_000;
 const LIVE_STALE_MS = 10_000;
 const STATS_STALE_MS = 15_000;
 const LIVE_REFRESH_MS = 15_000;
+const AVATAR_STALE_MS = 300_000;
 
 export const agentQueries = {
   list: (opts: { includeHands?: boolean } = {}) =>

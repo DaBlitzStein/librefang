@@ -6,6 +6,11 @@
 // survives a round-trip back through the form.
 
 import { parse, stringify, TomlError, type TomlTable } from "smol-toml";
+// The parameter-range table lives next to the control that renders it (#8332),
+// and `isValidParamValue` is the one rule every editor applies. Importing it
+// here rather than restating the bounds keeps a single source of truth, the
+// same one `lib/agentModelPatch.ts` reads (#8112 review).
+import { isValidParamValue, MODEL_PARAM_NAMES } from "../components/ui/ModelParamField";
 
 let _nextUid = 1;
 export const generateUid = (): string => String(_nextUid++);
@@ -707,9 +712,9 @@ export const serializeManifestForm = (
   writeStringScalar(modelBody, "provider", form.model.provider.trim());
   writeStringScalar(modelBody, "model", form.model.model.trim());
   writeSystemPrompt(modelBody, form.model.system_prompt);
-  writeNumberScalar(modelBody, "temperature", parseFloatish(form.model.temperature));
+  writeNumberScalar(modelBody, "temperature", parseSignedFloat(form.model.temperature));
   writeNumberScalar(modelBody, "max_tokens", parseInteger(form.model.max_tokens));
-  writeNumberScalar(modelBody, "top_p", parseFloatish(form.model.top_p));
+  writeNumberScalar(modelBody, "top_p", parseSignedFloat(form.model.top_p));
   writeNumberScalar(modelBody, "frequency_penalty", parseSignedFloat(form.model.frequency_penalty));
   writeNumberScalar(modelBody, "presence_penalty", parseSignedFloat(form.model.presence_penalty));
   writeNumberScalar(modelBody, "top_k", parseInteger(form.model.top_k));
@@ -1111,6 +1116,18 @@ export const validateManifestForm = (
       errors.push("response_format.schema");
     }
   }
+  // Sampling preferences and endpoint limits — `isValidParamValue` is the
+  // single rule the controls render from (`MODEL_PARAM_RANGES`), so this cannot
+  // drift from the ranges `PATCH /api/agents/{id}/model` enforces
+  // (crates/librefang-api/src/routes/agents/config.rs). Iterating the table
+  // also covers `max_tokens` (a real `u32` ceiling) and `context_window` /
+  // `max_output_tokens` (at least 1), which the form serializes unchecked
+  // (#8112 review). An empty field is the inherit rung, not a value.
+  for (const param of MODEL_PARAM_NAMES) {
+    const raw = form.model[param];
+    if (raw.trim() === "") continue;
+    if (!isValidParamValue(param, raw)) errors.push(`model.${param}`);
+  }
   // Folder rows: duplicate names produce a duplicate TOML key (hard parse
   // failure on the daemon), and `path` mirrors the kernel's rule — relative
   // to workspaces_dir, no `..`. A mount row carries an absolute host path
@@ -1286,9 +1303,15 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   // so e.g. Qwen's enable_memory survives a TOML→Form→TOML round-trip.
   // `undefined` is the absent key (inherit the global fallback_providers → null);
   // a declared empty array is the disable-all statement and must stay `[]` (#7749).
+  // A present-but-non-array value is neither: the daemon's `toml::from_str`
+  // rejects it, and reading it as disable-all would rewrite `[]` on the next
+  // save — flipping invalid-but-unedited input into a hard deny (#7835 review).
+  if (parsed.fallback_models !== undefined && !Array.isArray(parsed.fallback_models)) {
+    return { ok: false, message: "fallback_models_not_an_array" };
+  }
   form.fallback_models = parsed.fallback_models === undefined
     ? null
-    : (parsed.fallback_models as unknown[])
+    : parsed.fallback_models
         .filter(isTomlTable)
         .map((fb) => ({
       _uid: generateParsedUid(),
