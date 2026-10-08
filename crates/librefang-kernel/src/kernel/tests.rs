@@ -470,6 +470,12 @@ async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
 
     // Case 2: a deferred exec with no account (single-tenant / bare source)
     // routes to the bare "whatsapp" adapter, not the account-qualified one.
+    //
+    // #8525 review: the bare key keeps this meaning even though two adapters
+    // share the channel type. Account-less callers (approval notifications,
+    // owner notify, cron targets) resolve with `None` and must not be refused;
+    // the wrong-instance capture from #8525 is closed at the send site, where
+    // `channel_send` defaults to the turn's own `sender_account_id`.
     let deferred_bare = DeferredToolExecution {
         account_id: None,
         chat_id: Some("dm-1".to_string()),
@@ -733,6 +739,180 @@ async fn test_channel_type_resolution_refuses_to_guess_between_tenants_8055() {
         "neither the unresolved account nor the ambiguous type may deliver anything"
     );
     assert_eq!(eng_sent.lock().unwrap().len(), 1);
+
+    kernel.shutdown();
+}
+
+// ── #8525 the bare channel key vs. sibling instances ─────────────────────
+//
+// `telegram` was one bot's legacy *instance name* while other Telegram
+// instances ran as `laforge` and `mercaman`. An unqualified send to the
+// channel type matched the bare `"telegram"` key before the type scan and was
+// captured by the first bot — the wrong agent's account.
+//
+// The review fix keeps that key's pre-existing resolution — account-less
+// callers such as approval notifications and cron targets depend on it — and
+// closes the capture at the send site instead: `channel_send` defaults to the
+// bot account of the conversation the turn arrived on, so an agent on
+// `laforge` never reaches the bare key with an empty account.
+//
+// These tests pin the restored key semantics: the instance named after the
+// type resolves from the bare key, sibling instances resolve by their own
+// registered name, and `NotificationTarget` (resolved with `None`) keeps
+// working while siblings exist.
+
+/// Three Telegram instances registered the way `channel_bridge` does — each
+/// under its instance name plus `<name>:<account_id>` (the account id is the
+/// name). Returns the registry and the three concrete adapters so tests can
+/// assert resolution by pointer identity.
+#[allow(clippy::type_complexity)]
+fn telegram_instances() -> (
+    dashmap::DashMap<String, Arc<dyn ChannelAdapter>>,
+    Arc<RecordingChannelAdapter>,
+    Arc<RecordingChannelAdapter>,
+    Arc<RecordingChannelAdapter>,
+) {
+    let legacy = Arc::new(RecordingChannelAdapter::named_instance(
+        "telegram", "telegram",
+    ));
+    let laforge = Arc::new(RecordingChannelAdapter::named_instance(
+        "laforge", "telegram",
+    ));
+    let mercaman = Arc::new(RecordingChannelAdapter::named_instance(
+        "mercaman", "telegram",
+    ));
+
+    let adapters: dashmap::DashMap<String, Arc<dyn ChannelAdapter>> = dashmap::DashMap::new();
+    for adapter in [
+        legacy.clone() as Arc<dyn ChannelAdapter>,
+        laforge.clone() as Arc<dyn ChannelAdapter>,
+        mercaman.clone() as Arc<dyn ChannelAdapter>,
+    ] {
+        let name = adapter.name().to_string();
+        adapters.insert(name.clone(), adapter.clone());
+        adapters.insert(format!("{name}:{name}"), adapter);
+    }
+    (adapters, legacy, laforge, mercaman)
+}
+
+/// The instance named after its channel type keeps resolving from the bare
+/// key while sibling instances exist (#8525 review). Refusing the key broke
+/// every account-less caller — approval notifications, owner notify, cron and
+/// binding targets; the wrong-account capture is prevented at the send site
+/// by inheriting the turn's own account.
+#[test]
+fn bare_channel_type_resolves_the_instance_named_after_it_8525() {
+    use super::handles::channel_sender::resolve_channel_adapter;
+
+    let (adapters, legacy, _laforge, _mercaman) = telegram_instances();
+    let resolved = resolve_channel_adapter(&adapters, "telegram", None)
+        .expect("the bare key must keep resolving the instance registered under it");
+    assert!(Arc::ptr_eq(
+        &resolved,
+        &(legacy.clone() as Arc<dyn ChannelAdapter>)
+    ));
+}
+
+#[test]
+fn account_singles_out_its_instance_8525() {
+    use super::handles::channel_sender::resolve_channel_adapter;
+
+    let (adapters, _legacy, laforge, _mercaman) = telegram_instances();
+    let resolved = resolve_channel_adapter(&adapters, "telegram", Some("laforge"))
+        .expect("an account_id must single out its instance");
+    assert!(Arc::ptr_eq(
+        &resolved,
+        &(laforge.clone() as Arc<dyn ChannelAdapter>)
+    ));
+}
+
+#[test]
+fn instance_name_keeps_resolving_8525() {
+    use super::handles::channel_sender::resolve_channel_adapter;
+
+    let (adapters, _legacy, laforge, _mercaman) = telegram_instances();
+    let resolved = resolve_channel_adapter(&adapters, "laforge", None)
+        .expect("addressing an instance by its registered name must keep working");
+    assert!(Arc::ptr_eq(
+        &resolved,
+        &(laforge.clone() as Arc<dyn ChannelAdapter>)
+    ));
+}
+
+#[test]
+fn lone_instance_still_resolves_from_its_bare_key_8525() {
+    use super::handles::channel_sender::resolve_channel_adapter;
+
+    let legacy = Arc::new(RecordingChannelAdapter::named_instance(
+        "telegram", "telegram",
+    ));
+    let adapters: dashmap::DashMap<String, Arc<dyn ChannelAdapter>> = dashmap::DashMap::new();
+    let typed = legacy.clone() as Arc<dyn ChannelAdapter>;
+    adapters.insert("telegram".to_string(), typed.clone());
+    adapters.insert("telegram:telegram".to_string(), typed);
+
+    let resolved = resolve_channel_adapter(&adapters, "telegram", None)
+        .expect("a lone instance of a type must keep resolving from the bare key");
+    assert!(Arc::ptr_eq(&resolved, &(legacy as Arc<dyn ChannelAdapter>)));
+}
+
+/// `NotificationTarget` resolution (`kernel/mod.rs::push_approval_interactive`,
+/// account `None`) must keep resolving when two adapters share the channel
+/// type and one is named after it (#8525 review). Approval notifications,
+/// owner notify and cron targets have no account to pass; the bare key is the
+/// only way they can reach an adapter, and the interactive path must be taken
+/// rather than silently degraded to the plain-text fallback.
+#[tokio::test(flavor = "multi_thread")]
+async fn interactive_approval_notification_resolves_with_sibling_instances_8525() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let (instances, legacy, laforge, _mercaman) = telegram_instances();
+    for entry in instances.iter() {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(entry.key().clone(), entry.value().clone());
+    }
+    let legacy_sent = legacy.sent.clone();
+    let laforge_sent = laforge.sent.clone();
+
+    kernel
+        .push_approval_interactive(
+            &NotificationTarget {
+                // A channel TYPE, and one that is also the legacy instance's name.
+                channel_type: "telegram".to_string(),
+                recipient: "42".to_string(),
+                thread_id: None,
+            },
+            "agent wants to run `file_write`",
+            "abcdef1234",
+        )
+        .await;
+
+    // The bare key resolves the instance registered under "telegram" — the
+    // pre-#8525 meaning account-less callers depend on.
+    let sent = legacy_sent.lock().unwrap().clone();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the account-less notification must reach the instance registered under the bare channel key: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("[Approve]") && sent[0].contains("[Reject]"),
+        "the interactive path must be taken, not the buttonless plain-text fallback: {sent:?}"
+    );
+    assert!(
+        laforge_sent.lock().unwrap().is_empty(),
+        "the sibling instance must not receive the notification"
+    );
 
     kernel.shutdown();
 }
@@ -6579,6 +6759,89 @@ system_prompt = "Test"
             .get_definition("frozenhand")
             .is_some(),
         "the surviving hand must still be loaded from the frozen checkout"
+    );
+
+    kernel.shutdown();
+}
+
+/// #8411: the first boot after an upgrade must not lose a `discover_models = true`
+/// pending in a pre-digest provider file.
+///
+/// The trap is the boot order — the registry sync runs before the model catalog
+/// is built. Its pre-digest adoption replaces the operator's `providers/acme.toml`
+/// with the registry copy, which carries no flag, and only then does the catalog
+/// load the files and run `adopt_legacy_discover_flags`. Without a capture at
+/// the overwrite the declaration is gone by the time adoption reads, and the
+/// preference disappears with no store entry and no WARN — the mechanism of
+/// #8407 defeated for its own target case.
+///
+/// The fresh `.sync_marker` keeps the boot's sync network-free while still
+/// running its fan-out, which is the half that overwrites the file.
+#[test]
+fn boot_keeps_a_pre_digest_discover_flag_despite_the_sync_overwriting_the_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    // The refreshed registry checkout: the copy the sync installs has no flag.
+    let registry_providers = home_dir.join("registry").join("providers");
+    std::fs::create_dir_all(&registry_providers).unwrap();
+    let registry_toml = "[provider]\nid = \"acme\"\nbase_url = \"https://api.acme.test/v1\"\n";
+    std::fs::write(registry_providers.join("acme.toml"), registry_toml).unwrap();
+    // Fresh marker: `should_refresh` says no, so no fetch — but
+    // `fanout_registry_content` still installs the registry copy below.
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+
+    // The upgraded install: the operator's file declares discovery on, and the
+    // manifest records the name by bare name (no digest) — the migration window.
+    let providers = home_dir.join("providers");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::write(
+        providers.join("acme.toml"),
+        "[provider]\nid = \"acme\"\nbase_url = \"https://api.acme.test/v1\"\ndiscover_models = true\n",
+    )
+    .unwrap();
+    // `.registry-managed` is `registry_sync::REGISTRY_MANAGED_MANIFEST`; a bare
+    // name is what a manifest written before digests existed looks like.
+    std::fs::write(providers.join(".registry-managed"), "acme.toml\n").unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Precondition: the sync did adopt the pre-digest file and destroy the
+    // declaration — otherwise the assertions below would pass for free.
+    assert_eq!(
+        std::fs::read_to_string(providers.join("acme.toml")).unwrap(),
+        registry_toml,
+        "the boot sync must have overwritten the pre-digest provider file; \
+         without that this test does not exercise the loss"
+    );
+
+    // The flag the overwrite would have destroyed is in the store the catalog
+    // reads...
+    let store = home_dir.join("data").join("provider_discovery.json");
+    let raw = std::fs::read_to_string(&store).expect(
+        "the first boot must record the pending discover_models = true; the sync \
+         overwrote the only file that declared it",
+    );
+    let stored: std::collections::BTreeMap<String, bool> = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("store must be a preference map ({e}); got: {raw}"));
+    assert_eq!(
+        stored.get("acme"),
+        Some(&true),
+        "the pending flag has to survive into the store; got: {raw}"
+    );
+
+    // ...and it was applied on this same boot, not just persisted.
+    assert!(
+        kernel.model_catalog_update(|catalog| catalog
+            .get_provider("acme")
+            .is_some_and(|provider| provider.discover_models)),
+        "the captured preference must be in force on the boot that captured it"
     );
 
     kernel.shutdown();
