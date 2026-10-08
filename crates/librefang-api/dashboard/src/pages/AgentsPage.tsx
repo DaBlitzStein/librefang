@@ -22,11 +22,13 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { Modal } from "../components/ui/Modal";
 import {
+  isGroupAssigned,
   isMcpGroupCardActionable,
   isMcpServerGranted,
   isToolAllowed,
   isToolBlocked,
   mcpGroupCardState,
+  mcpServerListsEqual,
   resolveMcpGrantMode,
   toggleMcpServerGrant,
   type McpGroupCardState,
@@ -92,6 +94,7 @@ import {
   useAgentTools,
   useAgentSkills,
   useAgentMcpServers,
+  useAgentAvatarUrl,
   useAgentManifest,
   useAgentChannels,
   usePromptVersions,
@@ -140,6 +143,10 @@ type AgentCronSummary = {
 type AgentView = AgentDetail & {
   state?: string;
   description?: string;
+  /** Emoji, colour and avatar reference. `GET /api/agents/{id}` emits these
+   *  (`lifecycle.rs: get_agent`) but `AgentDetail` never declared them, which
+   *  is the whole reason the drawer rendered initials for everyone (#8339). */
+  identity?: AgentIdentity;
   profile?: string;
   model_name?: string;
   model_provider?: string;
@@ -1042,6 +1049,21 @@ export function AgentsPage() {
   const templateTomlMutation = useAgentTemplateToml();
   const qc = useQueryClient();
 
+  // --- Visual identity of the agent in the drawer (#8339) ------------------
+  const detailIdentity = (detailAgent as AgentView | null)?.identity;
+  // Gated on "this agent has one" so an agent without an avatar costs no
+  // request at all; `undefined` while loading or absent, which is what `Avatar`
+  // wants — it falls back to the initials on its own. Also gated on the drawer
+  // being open: the only consumer is the drawer's header, and `detailAgent`
+  // stays selected after the drawer closes (the inline detail panel outlives
+  // it), so without that second gate the auto-selected agent's image would be
+  // downloaded and its object URL held for nothing to render.
+  const detailAvatarSrc = useAgentAvatarUrl(
+    detailAgent?.id ?? "",
+    !!detailIdentity?.avatar_url,
+    detailDrawerOpen,
+  );
+
   const rawDeleteMutation = useDeleteAgent();
   const handleDeleteSuccess = (agentId: string) => {
     if (detailAgent?.id === agentId) {
@@ -1579,9 +1601,12 @@ export function AgentsPage() {
     if (next === "form" && manifestToml.trim() && manifestToml !== serializedFormToml) {
       const parsed = parseManifestToml(manifestToml);
       if (!parsed.ok) {
-        const parseMessage = parsed.message === "json_schema_unsafe_integer"
-          ? t("agents.form.json_schema_unsafe_integer")
-          : parsed.message;
+        const parseMessage =
+          parsed.message === "json_schema_unsafe_integer"
+            ? t("agents.form.json_schema_unsafe_integer")
+            : parsed.message === "fallback_models_not_an_array"
+              ? t("agents.form.fallback_models_not_an_array")
+              : parsed.message;
         setTomlParseError(
           parsed.line !== undefined
             ? `Line ${parsed.line}:${parsed.column ?? 0} — ${parseMessage}`
@@ -1647,7 +1672,9 @@ export function AgentsPage() {
       setManifestEditorParseError(
         parsed.message === "json_schema_unsafe_integer"
           ? t("agents.form.json_schema_unsafe_integer")
-          : parsed.message,
+          : parsed.message === "fallback_models_not_an_array"
+            ? t("agents.form.fallback_models_not_an_array")
+            : parsed.message,
       );
     }
     setManifestEditorSeededFor(manifestEditorAgentId);
@@ -1661,7 +1688,16 @@ export function AgentsPage() {
 
   const saveManifestEditor = () => {
     if (!detailAgent) return;
-    const errors = validateManifestForm(manifestEditorFormState);
+    // Same preserved-name list the create dialog passes: `[workspaces]` entries
+    // the form can't render (mount-based declarations) are invisible here, so a
+    // form row reusing one of their names validates clean and then serializes a
+    // duplicate key, which the daemon rejects as an unattributable TOML parse
+    // error. `manifestEditorExtras`, not `formExtras` — this handler edits the
+    // detail drawer's state.
+    const errors = validateManifestForm(
+      manifestEditorFormState,
+      preservedWorkspaceNamesFromExtras(manifestEditorExtras),
+    );
     setManifestEditorErrors(new Set(errors));
     if (errors.length > 0) {
       // The offending field may live in a config group the operator is not
@@ -2730,9 +2766,13 @@ export function AgentsPage() {
     // server-as-of-last-fetch baseline `isMcpDirty` compares against.
     const persistedMcpServers = agent.mcp_servers ?? [];
     const mcpDraftArr = mcpServersDraft ?? persistedMcpServers;
+    // `mcpServerListsEqual`, not `Array.includes`: the kernel matches server
+    // names after `normalizeMcpName`, so revoking and re-granting the same
+    // server under another spelling is not a change to save. A raw includes
+    // marked it dirty and Save rewrote agent.toml with the normalized name
+    // the operator never chose (#7835 review).
     const isMcpDirty = mcpServersDraft !== null &&
-      (mcpServersDraft.length !== persistedMcpServers.length ||
-        mcpServersDraft.some((n) => !persistedMcpServers.includes(n)));
+      !mcpServerListsEqual(mcpServersDraft, persistedMcpServers);
     // The kernel gates MCP on `!mcp_disabled && !mcp_servers.is_empty()`, and `tools_disabled` short-circuits every tool before that.
     // Both hard switches have to fold into "none", or an `mcp_disabled` agent with `mcp_servers = ["*"]` renders as a live grant.
     // Once the operator stages an edit, the mode is re-derived from the draft array alone (mirrors `usesAll`/`isBuiltinDirty` for capabilities_tools) rather than the server's last-known mode string, so a fresh single-server grant reads as "allowlist" immediately instead of staying pinned at the persisted "none".
@@ -2754,15 +2794,24 @@ export function AgentsPage() {
     // card as grantable.
     const mcpHardDisabled = !!(agent.tools_disabled || agent.mcp_disabled);
     // One source of truth for what an MCP card may do and say, shared by the
-    // all-tools grid and the assigned/available lists (#7749 review).
+    // all-tools grid and the assigned/available lists (#7749 review). A
+    // hand-derived agent is folded into the state itself: the kernel rejects
+    // `set_agent_mcp_servers` for hands, so every card must read as inert
+    // rather than clickable (#7835 review).
     const mcpCardStateOf = (groupName: string) =>
       mcpGroupCardState({
         granted: isMcpGroupGranted(groupName),
         mode: mcpModeEffective,
         hardDisabled: mcpHardDisabled,
+        handControlled: agent.is_hand === true,
       });
     // Never "click to assign" on a card that cannot be clicked.
     const mcpGroupLabel = (state: McpGroupCardState): string => {
+      if (state === "hand-controlled") {
+        return t("agents.detail.tools_mcp_hand_controlled", {
+          defaultValue: "controlled by the Hand definition",
+        });
+      }
       if (state === "hard-disabled") {
         return t("agents.detail.tools_mcp_inert", {
           defaultValue: "not granted — MCP is hard-disabled",
@@ -2821,6 +2870,11 @@ export function AgentsPage() {
         // `mcp_disabled` the kernel skips MCP entirely, so a staged grant
         // would arm a Save that changes nothing visible or effective
         // (#7749 review) — the banner above the cards explains why instead.
+        // A hand-derived agent is the same shape of dead end: its grant is
+        // owned by the Hand definition and `set_agent_mcp_servers` rejects
+        // the write with a 400 (#7835 review), so `mcpCardStateOf` folds the
+        // hand flag into the `hand-controlled` state this guard already
+        // refuses.
         const server = mcpServerByGroup.get(groupName);
         if (!server || !isMcpGroupCardActionable(mcpCardStateOf(groupName))) return;
         setMcpServersDraft((prev) => toggleMcpServerGrant(prev ?? persistedMcpServers, server));
@@ -2939,13 +2993,23 @@ export function AgentsPage() {
     const pendingMcpServers: string[] = (tabAgentMcpQuery.data?.pending ?? [])
       .slice()
       .sort();
+    // A pending server contributes no tools, so it renders no group card in
+    // either list. Before this the banner was read-only, which left a grant to
+    // a server that failed to connect — a typo in config.toml, or a server
+    // since removed — impossible to undo from the tab that owns MCP grants
+    // (#7835 review). The chips carry the same staged flow as a card: the
+    // draft update arms Save, and a click toggles between revoke and restore.
+    const mcpPendingRevocable = agent.is_hand !== true && !mcpHardDisabled;
 
-    const assignedGroups = sortedGroups.filter(
-      ([name, tools]) => getGroupStatus(name, tools) !== "none",
-    );
-    const availableGroups = sortedGroups.filter(
-      ([name, tools]) => getGroupStatus(name, tools) === "none",
-    );
+    // Which list a group belongs to is not one question — see `isGroupAssigned`.
+    const groupIsAssigned = ([name, tools]: [string, ToolDefinition[]]) =>
+      isGroupAssigned({
+        isMcp: isMcpGroup(name),
+        granted: isMcpGroupGranted(name),
+        activeTools: activeCountIn(name, tools),
+      });
+    const assignedGroups = sortedGroups.filter(groupIsAssigned);
+    const availableGroups = sortedGroups.filter((g) => !groupIsAssigned(g));
 
     // Shared per-tool checklist rendered under an expanded group, for both
     // the assigned and available sections (#6565 follow-up — previously
@@ -3041,15 +3105,47 @@ export function AgentsPage() {
                 })}
               </div>
               <div className="flex flex-wrap gap-1.5 mt-2">
-                {pendingMcpServers.map((name) => (
-                  <span
-                    key={name}
-                    className="font-mono text-[10.5px] rounded px-1.5 py-0.5 bg-main/60 border border-border-subtle text-text-main"
-                    data-testid="agent-pending-mcp-item"
-                  >
-                    {name}
-                  </span>
-                ))}
+                {pendingMcpServers.map((name) => {
+                  // Read off the draft, not just the (stale-until-save) query:
+                  // a struck-through chip has been staged for removal, and a
+                  // second click restores the grant.
+                  const staged = isMcpServerGranted(name, mcpDraftArr, mcpModeEffective);
+                  return (
+                    <span
+                      key={name}
+                      className={`font-mono text-[10.5px] rounded px-1.5 py-0.5 bg-main/60 border border-border-subtle text-text-main inline-flex items-center gap-1 ${
+                        staged ? "" : "opacity-50 line-through"
+                      }`}
+                      data-testid="agent-pending-mcp-item"
+                    >
+                      {name}
+                      {mcpPendingRevocable && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setMcpServersDraft((prev) =>
+                              toggleMcpServerGrant(prev ?? persistedMcpServers, name),
+                            )
+                          }
+                          className="text-text-dim hover:text-red-400 transition-colors p-0.5"
+                          title={
+                            staged
+                              ? t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })
+                              : t("agents.detail.tools_remove_group", { defaultValue: "Remove entire group" })
+                          }
+                          aria-label={
+                            staged
+                              ? `${t("common.add", { defaultValue: "Add" })} ${name}`
+                              : `${t("common.remove", { defaultValue: "Remove" })} ${name}`
+                          }
+                          data-testid="agent-pending-mcp-revoke"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -3062,6 +3158,16 @@ export function AgentsPage() {
         {!isLoading && mcpHardDisabled && (
           <p className="text-xs text-warning">
             {t("agents.detail.mcp_hard_disabled_note", { defaultValue: "MCP servers are hard-disabled for this agent (tools_disabled or mcp_disabled). Granting one here would change nothing until the hard switch is turned off, so the toggles are inert." })}
+          </p>
+        )}
+
+        {/* Same reason, different gate: a hand-derived agent's MCP grant is
+            owned by the Hand definition and the endpoint rejects an edit, so
+            the cards below render read-only instead of arming a Save that can
+            only answer 400 (#7835 review). */}
+        {!isLoading && agent.is_hand === true && (
+          <p className="text-xs text-warning" data-testid="tools-hand-controlled-note">
+            {t("agents.detail.tools_mcp_hand_note", { defaultValue: "This agent is derived from a Hand: its MCP servers are controlled by the Hand definition and cannot be granted or revoked here." })}
           </p>
         )}
 

@@ -2225,6 +2225,7 @@ tui-agents-label-manifest-history-loading = Loading configuration history...
 tui-agents-label-manifest-history-empty = No configuration changes recorded for this agent yet.
 tui-agents-hints-manifest-history =   [↑↓] Browse versions  [PgUp/PgDn] Scroll  [Esc] Back
 tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [w] Shared folders  [p] Model params  [$] Tokens  [c] Chat  [k] Kill  [Esc] Back
+tui-agents-hints-detail =   [s] Edit skills  [m] Edit MCP  [n] Edit channels  [w] Shared folders  [p] Model params  [$] Tokens  [c] Chat  [k] Kill  [Esc] Back
 tui-agents-title-model-params = Model parameters
 tui-agents-prompt-model-params = This agent's own settings win over the model's. `inherit` means the model's setting applies.
 tui-agents-hints-model-params =   [←→] Change  [i] Inherit  [e] Custom value  [Enter] Save  [Esc] Cancel
