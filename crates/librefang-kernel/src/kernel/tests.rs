@@ -7,7 +7,8 @@ use crate::MeteringSubsystemApi;
 use futures::stream;
 use librefang_channels::types::{ChannelAdapter, ChannelContent, ChannelType, ChannelUser};
 use librefang_types::approval::{
-    AgentNotificationRule, ApprovalRequest, NotificationConfig, NotificationTarget, RiskLevel,
+    AgentNotificationRule, ApprovalPolicy, ApprovalRequest, NotificationConfig, NotificationTarget,
+    RiskLevel, SecondFactor,
 };
 use librefang_types::config::DefaultModelConfig;
 use std::collections::HashMap;
@@ -470,6 +471,12 @@ async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
 
     // Case 2: a deferred exec with no account (single-tenant / bare source)
     // routes to the bare "whatsapp" adapter, not the account-qualified one.
+    //
+    // #8525 review: the bare key keeps this meaning even though two adapters
+    // share the channel type. Account-less callers (approval notifications,
+    // owner notify, cron targets) resolve with `None` and must not be refused;
+    // the wrong-instance capture from #8525 is closed at the send site, where
+    // `channel_send` defaults to the turn's own `sender_account_id`.
     let deferred_bare = DeferredToolExecution {
         account_id: None,
         chat_id: Some("dm-1".to_string()),
@@ -649,6 +656,74 @@ async fn test_interactive_approval_notification_reaches_a_named_instance_8055() 
     kernel.shutdown();
 }
 
+/// `SecondFactor::Both` requires a code on tool approvals exactly as `Totp`
+/// does, so the interactive notification must ask for it — and must not offer
+/// an Approve button.
+///
+/// The branch this exercises reads `ApprovalManager::requires_totp()`, which
+/// compared `second_factor` against `Totp` alone and therefore answered `false`
+/// for `Both`. The approver got the plain escalation text plus an `[Approve]`
+/// button, pressed it, and `resolve` then rejected the approval with "TOTP code
+/// required for approval (second_factor = totp)" — a button inviting an action
+/// that cannot succeed, on the one notification whose entire purpose is that
+/// decision.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_interactive_approval_notification_asks_for_a_code_when_second_factor_is_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        approval: librefang_types::approval::ApprovalPolicy {
+            second_factor: librefang_types::approval::SecondFactor::Both,
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let adapter = Arc::new(RecordingChannelAdapter::new("slack"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack".to_string(), adapter);
+
+    kernel
+        .push_approval_interactive(
+            &NotificationTarget {
+                channel_type: "slack".to_string(),
+                recipient: "C0BN6UAQ75M".to_string(),
+                thread_id: None,
+            },
+            "agent wants to run `file_write`",
+            "abcdef1234",
+        )
+        .await;
+
+    let sent = sent.lock().unwrap().clone();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the notification must be delivered exactly once: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("TOTP required. Reply: /approve abcdef12 <6-digit-code>"),
+        "second_factor = both verifies a code on approvals, so the notification must ask for it: {sent:?}"
+    );
+    assert!(
+        !sent[0].contains("[Approve]"),
+        "no Approve button may be offered when the code has to be typed — `resolve` rejects that approval: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("[Reject]"),
+        "the Reject button must still be offered: {sent:?}"
+    );
+
+    kernel.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_channel_type_resolution_refuses_to_guess_between_tenants_8055() {
     // The #8055 channel-type scan must never widen cross-tenant reach.
@@ -733,6 +808,180 @@ async fn test_channel_type_resolution_refuses_to_guess_between_tenants_8055() {
         "neither the unresolved account nor the ambiguous type may deliver anything"
     );
     assert_eq!(eng_sent.lock().unwrap().len(), 1);
+
+    kernel.shutdown();
+}
+
+// ── #8525 the bare channel key vs. sibling instances ─────────────────────
+//
+// `telegram` was one bot's legacy *instance name* while other Telegram
+// instances ran as `laforge` and `mercaman`. An unqualified send to the
+// channel type matched the bare `"telegram"` key before the type scan and was
+// captured by the first bot — the wrong agent's account.
+//
+// The review fix keeps that key's pre-existing resolution — account-less
+// callers such as approval notifications and cron targets depend on it — and
+// closes the capture at the send site instead: `channel_send` defaults to the
+// bot account of the conversation the turn arrived on, so an agent on
+// `laforge` never reaches the bare key with an empty account.
+//
+// These tests pin the restored key semantics: the instance named after the
+// type resolves from the bare key, sibling instances resolve by their own
+// registered name, and `NotificationTarget` (resolved with `None`) keeps
+// working while siblings exist.
+
+/// Three Telegram instances registered the way `channel_bridge` does — each
+/// under its instance name plus `<name>:<account_id>` (the account id is the
+/// name). Returns the registry and the three concrete adapters so tests can
+/// assert resolution by pointer identity.
+#[allow(clippy::type_complexity)]
+fn telegram_instances() -> (
+    dashmap::DashMap<String, Arc<dyn ChannelAdapter>>,
+    Arc<RecordingChannelAdapter>,
+    Arc<RecordingChannelAdapter>,
+    Arc<RecordingChannelAdapter>,
+) {
+    let legacy = Arc::new(RecordingChannelAdapter::named_instance(
+        "telegram", "telegram",
+    ));
+    let laforge = Arc::new(RecordingChannelAdapter::named_instance(
+        "laforge", "telegram",
+    ));
+    let mercaman = Arc::new(RecordingChannelAdapter::named_instance(
+        "mercaman", "telegram",
+    ));
+
+    let adapters: dashmap::DashMap<String, Arc<dyn ChannelAdapter>> = dashmap::DashMap::new();
+    for adapter in [
+        legacy.clone() as Arc<dyn ChannelAdapter>,
+        laforge.clone() as Arc<dyn ChannelAdapter>,
+        mercaman.clone() as Arc<dyn ChannelAdapter>,
+    ] {
+        let name = adapter.name().to_string();
+        adapters.insert(name.clone(), adapter.clone());
+        adapters.insert(format!("{name}:{name}"), adapter);
+    }
+    (adapters, legacy, laforge, mercaman)
+}
+
+/// The instance named after its channel type keeps resolving from the bare
+/// key while sibling instances exist (#8525 review). Refusing the key broke
+/// every account-less caller — approval notifications, owner notify, cron and
+/// binding targets; the wrong-account capture is prevented at the send site
+/// by inheriting the turn's own account.
+#[test]
+fn bare_channel_type_resolves_the_instance_named_after_it_8525() {
+    use super::handles::channel_sender::resolve_channel_adapter;
+
+    let (adapters, legacy, _laforge, _mercaman) = telegram_instances();
+    let resolved = resolve_channel_adapter(&adapters, "telegram", None)
+        .expect("the bare key must keep resolving the instance registered under it");
+    assert!(Arc::ptr_eq(
+        &resolved,
+        &(legacy.clone() as Arc<dyn ChannelAdapter>)
+    ));
+}
+
+#[test]
+fn account_singles_out_its_instance_8525() {
+    use super::handles::channel_sender::resolve_channel_adapter;
+
+    let (adapters, _legacy, laforge, _mercaman) = telegram_instances();
+    let resolved = resolve_channel_adapter(&adapters, "telegram", Some("laforge"))
+        .expect("an account_id must single out its instance");
+    assert!(Arc::ptr_eq(
+        &resolved,
+        &(laforge.clone() as Arc<dyn ChannelAdapter>)
+    ));
+}
+
+#[test]
+fn instance_name_keeps_resolving_8525() {
+    use super::handles::channel_sender::resolve_channel_adapter;
+
+    let (adapters, _legacy, laforge, _mercaman) = telegram_instances();
+    let resolved = resolve_channel_adapter(&adapters, "laforge", None)
+        .expect("addressing an instance by its registered name must keep working");
+    assert!(Arc::ptr_eq(
+        &resolved,
+        &(laforge.clone() as Arc<dyn ChannelAdapter>)
+    ));
+}
+
+#[test]
+fn lone_instance_still_resolves_from_its_bare_key_8525() {
+    use super::handles::channel_sender::resolve_channel_adapter;
+
+    let legacy = Arc::new(RecordingChannelAdapter::named_instance(
+        "telegram", "telegram",
+    ));
+    let adapters: dashmap::DashMap<String, Arc<dyn ChannelAdapter>> = dashmap::DashMap::new();
+    let typed = legacy.clone() as Arc<dyn ChannelAdapter>;
+    adapters.insert("telegram".to_string(), typed.clone());
+    adapters.insert("telegram:telegram".to_string(), typed);
+
+    let resolved = resolve_channel_adapter(&adapters, "telegram", None)
+        .expect("a lone instance of a type must keep resolving from the bare key");
+    assert!(Arc::ptr_eq(&resolved, &(legacy as Arc<dyn ChannelAdapter>)));
+}
+
+/// `NotificationTarget` resolution (`kernel/mod.rs::push_approval_interactive`,
+/// account `None`) must keep resolving when two adapters share the channel
+/// type and one is named after it (#8525 review). Approval notifications,
+/// owner notify and cron targets have no account to pass; the bare key is the
+/// only way they can reach an adapter, and the interactive path must be taken
+/// rather than silently degraded to the plain-text fallback.
+#[tokio::test(flavor = "multi_thread")]
+async fn interactive_approval_notification_resolves_with_sibling_instances_8525() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let (instances, legacy, laforge, _mercaman) = telegram_instances();
+    for entry in instances.iter() {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(entry.key().clone(), entry.value().clone());
+    }
+    let legacy_sent = legacy.sent.clone();
+    let laforge_sent = laforge.sent.clone();
+
+    kernel
+        .push_approval_interactive(
+            &NotificationTarget {
+                // A channel TYPE, and one that is also the legacy instance's name.
+                channel_type: "telegram".to_string(),
+                recipient: "42".to_string(),
+                thread_id: None,
+            },
+            "agent wants to run `file_write`",
+            "abcdef1234",
+        )
+        .await;
+
+    // The bare key resolves the instance registered under "telegram" — the
+    // pre-#8525 meaning account-less callers depend on.
+    let sent = legacy_sent.lock().unwrap().clone();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the account-less notification must reach the instance registered under the bare channel key: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("[Approve]") && sent[0].contains("[Reject]"),
+        "the interactive path must be taken, not the buttonless plain-text fallback: {sent:?}"
+    );
+    assert!(
+        laforge_sent.lock().unwrap().is_empty(),
+        "the sibling instance must not receive the notification"
+    );
 
     kernel.shutdown();
 }
@@ -3221,6 +3470,68 @@ async fn resolved_exec_policy_survives_reload_and_update_manifest() {
     kernel.shutdown();
 }
 
+/// #7835: `update_manifest` used to route a tags change through
+/// `registry::update_tags` and then, on the next line, through
+/// `replace_manifest_and_retag` — which already reprojects `entry.tags` and
+/// the `tag_index` from `manifest.tags` as part of the same call (#7742).
+/// Both fired `notify_changed()`, so every `AgentRegistry` watcher (the
+/// dashboard WebSocket re-snapshot path, #3513) woke twice per PATCH that
+/// changed tags. `replace_manifest_and_retag_reprojects_entry_tags_and_index`
+/// only checks the final `tags` / `tag_index` state, which is identical
+/// either way, so it would not have caught a regression here.
+#[test]
+fn update_manifest_notifies_registry_watchers_exactly_once_per_tags_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-tags-notify-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "tags-notify-agent".to_string(),
+        description: "agent used to count notify_changed calls".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        tags: vec!["alpha".to_string()],
+        ..Default::default()
+    };
+
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    // Subscribe after spawn so only the update below is under test.
+    let mut rx = kernel.agents.registry.subscribe_changes();
+
+    let mut replacement = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent must be registered")
+        .manifest
+        .clone();
+    replacement.tags = vec!["beta".to_string()];
+
+    kernel
+        .update_manifest(agent_id, replacement, "test")
+        .expect("manifest update should succeed");
+
+    assert!(
+        matches!(rx.try_recv(), Ok(())),
+        "update_manifest must notify registry watchers when tags change"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "update_manifest must notify exactly once per tags-changing PATCH, not twice"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_should_reuse_cached_route_for_brief_follow_up() {
     assert!(LibreFangKernel::should_reuse_cached_route("fix that"));
@@ -3445,6 +3756,213 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     kernel.shutdown();
 }
 
+/// Boot a kernel whose only agent talks to a mocked Ollama backend, with
+/// `top_p` present **only** as a per-model catalog override.
+///
+/// The agent's own `top_p` is left unset, so a value observed on the wire can
+/// only have come from the resolution step each dispatcher is supposed to run.
+/// The returned `TempDir` owns the kernel's home directory and must outlive it.
+async fn boot_kernel_with_catalog_top_p_override() -> (
+    wiremock::MockServer,
+    Arc<LibreFangKernel>,
+    AgentId,
+    tempfile::TempDir,
+) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    // Non-empty content and an explicit `done_reason: "stop"`: an empty-text
+    // `EndTurn` reply retries in-loop (agent_loop/mod.rs:212) rather than
+    // completing the turn, which against this deterministic mock would spin
+    // until `MaxIterationsExceeded` instead of returning after one call.
+    //
+    // `done: true` and the **trailing newline** are what make this one body
+    // serve the streaming dispatcher as well. Native Ollama streams NDJSON —
+    // one JSON object per line, the last carrying `done: true` — and the
+    // driver's reader only consumes a line once it finds a `\n`
+    // (drivers/ollama.rs: `while let Some(pos) = buffer.find('\n')`).
+    // A `set_body_json` body has no terminator, so the single chunk would sit
+    // unparsed in the buffer, the turn would come back empty, and the agent
+    // loop would retry it to `MaxIterationsExceeded(50)` instead of ending.
+    // `set_body_raw` keeps the `application/json` content type the
+    // non-streaming path expects while letting us append that newline.
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "message": {"content": "ok"},
+                    "done": true,
+                    "done_reason": "stop",
+                })
+            ),
+            "application/json",
+        ))
+        .mount(&backend)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    // Every dispatcher here builds its kernel-handle arg via `kernel_handle()`,
+    // which panics if the self-handle weak ref was never installed.
+    kernel.set_self_handle();
+
+    kernel.model_catalog_update(|cat| {
+        cat.set_overrides(
+            "ollama:llama3.2".to_string(),
+            librefang_types::model_catalog::ModelOverrides {
+                top_p: Some(0.42),
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut manifest = test_manifest("top-p-parity", "agent for #8112 parity check", vec![]);
+    manifest.model.provider = "ollama".to_string();
+    manifest.model.model = "llama3.2".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    (backend, kernel, agent_id, dir)
+}
+
+/// Every request the mock recorded must carry the catalog's `top_p`.
+///
+/// Native Ollama nests sampling knobs under `options` (#8290): a bare
+/// top-level `top_p` would mean the merge point regressed back to the
+/// pre-fix behaviour that Ollama silently ignores.
+/// `f32` widens to `f64` inside the resolved value, so compare with a
+/// tolerance rather than against the `f64` literal (same reasoning as
+/// `build_request_places_sampling_params_in_options` in the Ollama tests).
+async fn assert_every_request_carries_catalog_top_p(
+    backend: &wiremock::MockServer,
+    expected: usize,
+    dispatcher: &str,
+) {
+    let requests = backend
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    assert_eq!(
+        requests.len(),
+        expected,
+        "{dispatcher} must have reached the mock backend"
+    );
+    for req in &requests {
+        let body: serde_json::Value = req.body_json().expect("valid JSON body");
+        let observed_top_p = body["options"]["top_p"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("options.top_p missing from wire body: {body}"));
+        assert!(
+            (observed_top_p - 0.42).abs() < 1e-6,
+            "{dispatcher} must resolve the model-catalog top_p override onto the \
+             wire request (#8112): {body}"
+        );
+    }
+}
+
+/// #8112: `resolve_inference_params` + `apply_to` used to run on only one of
+/// the dispatch paths (`execute_llm_agent`, reached by `send_message`). The
+/// ephemeral (`/btw`) path built its manifest from a bare `entry.manifest.clone()`
+/// with no resolution step, so a `top_p` set as a per-model catalog override —
+/// the agent itself leaves the field unset — reached the wire on the
+/// persistent path and reached nothing on the ephemeral one. Both paths now
+/// call the shared `manifest_helpers::apply_resolved_inference_params`, and
+/// this drives both all the way to a mocked Ollama backend and inspects the
+/// literal wire body each one sent, rather than trusting that calling the
+/// same function twice must produce the same result.
+#[tokio::test(flavor = "multi_thread")]
+async fn top_p_catalog_override_reaches_both_ephemeral_and_persistent_dispatch() {
+    let (backend, kernel, agent_id, _dir) = boot_kernel_with_catalog_top_p_override().await;
+
+    // Dispatcher #1: the ephemeral (`/btw`) path — `messaging::send_message_ephemeral`.
+    kernel
+        .send_message_ephemeral(agent_id, "ephemeral turn", None, None)
+        .await
+        .expect("ephemeral turn must not error");
+
+    // Dispatcher #2: the persistent-session path — `messaging::send_message`
+    // down to `agent_execution::execute_llm_agent`.
+    kernel
+        .send_message(agent_id, "persistent turn")
+        .await
+        .expect("persistent turn must not error");
+
+    assert_every_request_carries_catalog_top_p(
+        &backend,
+        2,
+        "the ephemeral (/btw) and persistent dispatch paths",
+    )
+    .await;
+
+    kernel.shutdown();
+}
+
+/// The third dispatcher: the **streaming** turn.
+///
+/// `send_message_streaming_with_sender_and_opts` (kernel::messaging) builds its
+/// own `entry.manifest.clone()` and is a wholly separate merge point from the
+/// two the test above drives — deleting its
+/// `apply_resolved_inference_params` call leaves every other test in this
+/// crate green while a streamed turn silently loses the catalog override.
+/// That is the injection site this test exists to hold, so it asserts on the
+/// literal wire body the streaming path produced rather than on the helper.
+#[tokio::test(flavor = "multi_thread")]
+async fn top_p_catalog_override_reaches_the_streaming_dispatch() {
+    let (backend, kernel, agent_id, _dir) = boot_kernel_with_catalog_top_p_override().await;
+
+    let (mut rx, join) = kernel
+        .send_message_streaming(agent_id, "streamed turn", None)
+        .expect("the streaming turn must start");
+    // Drain the fanout: the receiver is bounded, so an undrained stream can
+    // back-pressure the turn into a stall instead of completing.
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    join.await
+        .expect("the streaming task joins")
+        .expect("the streamed turn must not error");
+    drain.await.expect("the drain task joins");
+
+    assert_every_request_carries_catalog_top_p(&backend, 1, "the streaming dispatch path").await;
+
+    kernel.shutdown();
+}
+
+/// The fourth dispatcher: the **ephemeral worker spawn**.
+///
+/// `ephemeral_spawn::spawn_ephemeral_worker` derives the worker's manifest from
+/// `parent.manifest.clone()` — a third independent clone, reached by neither of
+/// the tests above — so it needs its own resolution call and its own guard.
+/// The worker inherits the parent's `base_url`, which is what puts it in front
+/// of the same mock.
+#[tokio::test(flavor = "multi_thread")]
+async fn top_p_catalog_override_reaches_the_ephemeral_worker_spawn() {
+    let (backend, kernel, agent_id, _dir) = boot_kernel_with_catalog_top_p_override().await;
+
+    kernel
+        .spawn_ephemeral_worker(librefang_types::ephemeral::EphemeralSpawnRequest::new(
+            agent_id,
+            "mission",
+            "do the thing",
+        ))
+        .await
+        .expect("the ephemeral worker must not error");
+
+    assert_every_request_carries_catalog_top_p(&backend, 1, "the ephemeral worker spawn path")
+        .await;
+
+    kernel.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_spawn_approval_sweep_task_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
@@ -3547,6 +4065,8 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
             "Worker will stall",
             Some("worker"),
             None,
+            0,
+            None,
             librefang_memory::TaskQueueCaps::UNLIMITED,
         )
         .await
@@ -3614,12 +4134,24 @@ async fn queue_depth_cap_reaches_task_post_and_answers_as_a_quota() {
     kernel.clone().set_self_handle();
 
     kernel
-        .task_post("first", "body", None, None)
+        .task_post(
+            "first",
+            "body",
+            None,
+            None,
+            &librefang_kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect("the first post fits the cap");
 
     let err = kernel
-        .task_post("second", "body", None, None)
+        .task_post(
+            "second",
+            "body",
+            None,
+            None,
+            &librefang_kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect_err("the second post exceeds max_depth_global = 1");
     assert!(
@@ -3654,9 +4186,24 @@ async fn a_reloaded_queue_depth_cap_takes_effect_without_a_restart() {
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
     kernel.clone().set_self_handle();
 
-    kernel.task_post("first", "body", None, None).await.unwrap();
     kernel
-        .task_post("second", "body", None, None)
+        .task_post(
+            "first",
+            "body",
+            None,
+            None,
+            &librefang_kernel_handle::TaskPostOptions::default(),
+        )
+        .await
+        .unwrap();
+    kernel
+        .task_post(
+            "second",
+            "body",
+            None,
+            None,
+            &librefang_kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect_err("at the cap");
 
@@ -3665,7 +4212,13 @@ async fn a_reloaded_queue_depth_cap_takes_effect_without_a_restart() {
     kernel.config.store(Arc::new(raised));
 
     kernel
-        .task_post("second", "body", None, None)
+        .task_post(
+            "second",
+            "body",
+            None,
+            None,
+            &librefang_kernel_handle::TaskPostOptions::default(),
+        )
         .await
         .expect("the raised cap is in force on the next post");
 
@@ -6567,6 +7120,89 @@ system_prompt = "Test"
             .get_definition("frozenhand")
             .is_some(),
         "the surviving hand must still be loaded from the frozen checkout"
+    );
+
+    kernel.shutdown();
+}
+
+/// #8411: the first boot after an upgrade must not lose a `discover_models = true`
+/// pending in a pre-digest provider file.
+///
+/// The trap is the boot order — the registry sync runs before the model catalog
+/// is built. Its pre-digest adoption replaces the operator's `providers/acme.toml`
+/// with the registry copy, which carries no flag, and only then does the catalog
+/// load the files and run `adopt_legacy_discover_flags`. Without a capture at
+/// the overwrite the declaration is gone by the time adoption reads, and the
+/// preference disappears with no store entry and no WARN — the mechanism of
+/// #8407 defeated for its own target case.
+///
+/// The fresh `.sync_marker` keeps the boot's sync network-free while still
+/// running its fan-out, which is the half that overwrites the file.
+#[test]
+fn boot_keeps_a_pre_digest_discover_flag_despite_the_sync_overwriting_the_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    // The refreshed registry checkout: the copy the sync installs has no flag.
+    let registry_providers = home_dir.join("registry").join("providers");
+    std::fs::create_dir_all(&registry_providers).unwrap();
+    let registry_toml = "[provider]\nid = \"acme\"\nbase_url = \"https://api.acme.test/v1\"\n";
+    std::fs::write(registry_providers.join("acme.toml"), registry_toml).unwrap();
+    // Fresh marker: `should_refresh` says no, so no fetch — but
+    // `fanout_registry_content` still installs the registry copy below.
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+
+    // The upgraded install: the operator's file declares discovery on, and the
+    // manifest records the name by bare name (no digest) — the migration window.
+    let providers = home_dir.join("providers");
+    std::fs::create_dir_all(&providers).unwrap();
+    std::fs::write(
+        providers.join("acme.toml"),
+        "[provider]\nid = \"acme\"\nbase_url = \"https://api.acme.test/v1\"\ndiscover_models = true\n",
+    )
+    .unwrap();
+    // `.registry-managed` is `registry_sync::REGISTRY_MANAGED_MANIFEST`; a bare
+    // name is what a manifest written before digests existed looks like.
+    std::fs::write(providers.join(".registry-managed"), "acme.toml\n").unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Precondition: the sync did adopt the pre-digest file and destroy the
+    // declaration — otherwise the assertions below would pass for free.
+    assert_eq!(
+        std::fs::read_to_string(providers.join("acme.toml")).unwrap(),
+        registry_toml,
+        "the boot sync must have overwritten the pre-digest provider file; \
+         without that this test does not exercise the loss"
+    );
+
+    // The flag the overwrite would have destroyed is in the store the catalog
+    // reads...
+    let store = home_dir.join("data").join("provider_discovery.json");
+    let raw = std::fs::read_to_string(&store).expect(
+        "the first boot must record the pending discover_models = true; the sync \
+         overwrote the only file that declared it",
+    );
+    let stored: std::collections::BTreeMap<String, bool> = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("store must be a preference map ({e}); got: {raw}"));
+    assert_eq!(
+        stored.get("acme"),
+        Some(&true),
+        "the pending flag has to survive into the store; got: {raw}"
+    );
+
+    // ...and it was applied on this same boot, not just persisted.
+    assert!(
+        kernel.model_catalog_update(|catalog| catalog
+            .get_provider("acme")
+            .is_some_and(|provider| provider.discover_models)),
+        "the captured preference must be in force on the boot that captured it"
     );
 
     kernel.shutdown();
@@ -19517,6 +20153,123 @@ fn boot_warns_that_a_non_local_tool_exec_backend_does_not_route_tool_calls_8221(
     );
 
     kernel.shutdown();
+}
+
+/// Every `second_factor` other than `none` promises a TOTP code on some surface, and with nothing enrolled the daemon serves that surface without one — silently.
+///
+/// `Login` belongs in this list for the same reason as the other two, and it is the variant whose absence costs the most: it is the dashboard login that verifies the code (`server.rs`, under `requires_login_totp()`), and when no secret is confirmed the check is skipped outright, so an operator who set `second_factor = "login"` is back to a password-only login with a clean boot and no line anywhere saying so.
+/// `Both` covers that surface and the approval surface, and had the same silence.
+/// Only `Totp` ever produced the warning, because the check compared against that variant alone.
+///
+/// The warning must also be exact about what happens after it is read, because the surfaces diverge: the login skips the check, while an approval that demands one is rejected with "TOTP code required for approval" and fails closed.
+/// A line that describes the login's silence as the rule would point the operator at the opposite failure mode for approvals, so each variant is asserted against what it must say and what it must not.
+#[test]
+fn boot_warns_for_every_second_factor_that_demands_a_code() {
+    // Each variant, the fragments the warning has to render for it, and the
+    // fragments it must not, because they describe the other surface and would
+    // misstate this variant's consequence.
+    // Asserting on the rendered text rather than on a predicate, for the reason
+    // the #8221 test above gives: the text is the deliverable, and a line that
+    // does not say which surface will run without a code — or says the wrong
+    // thing about it — leaves the operator to work out what they lost.
+    let cases = [
+        (
+            SecondFactor::Totp,
+            vec![
+                "Tool approvals fail closed",
+                "TOTP code required for approval",
+                "TOTP not configured",
+            ],
+            vec!["Dashboard login skips the TOTP check"],
+        ),
+        (
+            SecondFactor::Login,
+            vec![
+                "Dashboard login skips the TOTP check",
+                "login half of the second factor is not enforced",
+            ],
+            vec![
+                "fail closed",
+                "TOTP code required for approval",
+                "TOTP not configured",
+            ],
+        ),
+        (
+            SecondFactor::Both,
+            vec![
+                "Dashboard login skips the TOTP check",
+                "login half of the second factor is not enforced",
+                "Tool approvals fail closed",
+                "TOTP code required for approval",
+                "TOTP not configured",
+            ],
+            vec![],
+        ),
+    ];
+
+    let mut failures = Vec::new();
+
+    for (second_factor, expected_fragments, forbidden_fragments) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-second-factor-warning-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            approval: ApprovalPolicy {
+                second_factor,
+                ..Default::default()
+            },
+            ..KernelConfig::default()
+        };
+
+        let logs = CapturedLogs::new();
+        let kernel = {
+            let _g = logs.install();
+            LibreFangKernel::boot_with_config(config).expect(
+                "a configured second factor with no enrollment is a misconfiguration to warn \
+                 about, not a boot failure",
+            )
+        };
+
+        let captured = logs.text();
+        if !captured.contains("not enrolled/confirmed") {
+            failures.push(format!("{second_factor:?}: boot said nothing at all"));
+            kernel.shutdown();
+            continue;
+        }
+        for fragment in expected_fragments {
+            if !captured.contains(fragment) {
+                failures.push(format!(
+                    "{second_factor:?}: the warning never says {fragment:?}"
+                ));
+            }
+        }
+        for fragment in forbidden_fragments {
+            if captured.contains(fragment) {
+                failures.push(format!(
+                    "{second_factor:?}: the warning says {fragment:?}, which is false for this \
+                     variant"
+                ));
+            }
+        }
+        // The line has to echo the value as it is written in `config.toml`, not
+        // the Rust variant name — an operator greps their config for what the
+        // warning quotes.
+        let configured = format!("second_factor = \"{}\"", second_factor.as_str());
+        if !captured.contains(&configured) {
+            failures.push(format!(
+                "{second_factor:?}: the warning does not quote {configured:?}"
+            ));
+        }
+
+        kernel.shutdown();
+    }
+
+    assert!(
+        failures.is_empty(),
+        "boot did not explain what a configured second factor leaves unprotected: {failures:#?}"
+    );
 }
 
 /// #8220: booting with `[docker] mode = "all"` must say out loud that agent tool calls still run on the daemon host.
