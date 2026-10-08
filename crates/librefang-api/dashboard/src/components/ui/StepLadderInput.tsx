@@ -91,6 +91,7 @@ export function StepLadderInput({
   min,
   max,
   step,
+  invalid,
 }: StepLadderInputProps) {
   const id = useId();
   const rungs = ladderUpTo(ladder, cap);
@@ -145,7 +146,10 @@ export function StepLadderInput({
     // element is non-labellable, so the control announced itself as an
     // unnamed group.
     <div className="space-y-1.5">
-      <span id={`${id}-label`} className="block text-xs font-bold text-text-dim">
+      <span
+        id={`${id}-label`}
+        className={`block text-xs font-bold ${invalid ? "text-error" : "text-text-dim"}`}
+      >
         {label}
       </span>
       <div
@@ -207,14 +211,16 @@ export function StepLadderInput({
           // field rather than adding one.
           data-no-field
           aria-label={`${label} — ${customLabel}`}
-          aria-invalid={warning ? true : undefined}
+          aria-invalid={invalid || warning ? true : undefined}
           aria-describedby={warning ? `${id}-warning` : undefined}
           onChange={(e) => {
             setDraft(e.target.value);
             onChange(e.target.value);
           }}
           placeholder={customPlaceholder}
-          className="w-full rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs font-mono outline-none focus:border-brand"
+          className={`w-full rounded-lg border bg-main px-2 py-1 text-xs font-mono outline-none focus:border-brand ${
+            invalid ? "border-error" : "border-border-subtle"
+          }`}
         />
       ) : null}
       {warning ? (

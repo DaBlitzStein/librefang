@@ -159,6 +159,11 @@ fn store_avatar_url(state: &AppState, agent_id: AgentId, avatar_url: Option<Stri
             tracing::warn!("Failed to persist agent state: {e}");
         }
     }
+    // The dashboard snapshot memoizes for 900 ms, and the frontend's avatar
+    // mutation invalidates that snapshot as soon as this answers; without the
+    // eviction the refetch can land on the pre-write payload and the row keeps
+    // the old image until the next 5 s poll (#8371 review).
+    crate::routes::config::invalidate_dashboard_snapshot(state);
     true
 }
 

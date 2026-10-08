@@ -1496,6 +1496,9 @@ pub async fn patch_agent_config(
                 Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
+        // /config writes the same identity fields /identity does, so it has to
+        // drop the snapshot memo for the same reason (#8371 review).
+        crate::routes::config::invalidate_dashboard_snapshot(&state);
     }
 
     // Update model/provider through set_agent_model so provider-change semantics (prefix stripping, canonical-session cleanup, and stale per-agent credential/base URL removal) are applied uniformly.

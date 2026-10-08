@@ -42,6 +42,10 @@ export {
   getUsageByModelPerformance,
   getBudgetStatus,
   getProviderBudgets,
+  // the agent avatar image — authenticated, so it is fetched as a Blob and
+  // turned into an object URL by the caller rather than given to an `<img src>` (#8339)
+  fetchAuthenticatedImage,
+  agentAvatarPath,
   // channels & comms
   listChannels,
   getChannelQr,
@@ -205,6 +209,8 @@ export type {
   // workspace identity file bytes (`GET|PUT /api/agents/{id}/files/{filename}`)
   AgentIdentityFile,
   AgentIdentityFileWriteResult,
+  // agent avatar upload (#8339)
+  AgentAvatarUploadResult,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -235,6 +241,10 @@ export {
   updateAgentTools,
   // workspace identity file bytes (`PUT /api/agents/{id}/files/{filename}`)
   setAgentFile,
+  // visual identity: emoji / colour, and the avatar image (#8339)
+  updateAgentIdentity,
+  uploadAgentAvatar,
+  deleteAgentAvatar,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
   // per-agent MCP server grant — write (#6565 follow-up)

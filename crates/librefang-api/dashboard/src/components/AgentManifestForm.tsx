@@ -943,21 +943,25 @@ export function AgentManifestForm({
             param="temperature"
             value={value.model.temperature}
             onChange={(next) => updateModel({ temperature: next })}
+            invalid={invalidFields.has("model.temperature")}
           />
           <ModelParamField
             param="top_p"
             value={value.model.top_p}
             onChange={(next) => updateModel({ top_p: next })}
+            invalid={invalidFields.has("model.top_p")}
           />
           <ModelParamField
             param="frequency_penalty"
             value={value.model.frequency_penalty}
             onChange={(next) => updateModel({ frequency_penalty: next })}
+            invalid={invalidFields.has("model.frequency_penalty")}
           />
           <ModelParamField
             param="presence_penalty"
             value={value.model.presence_penalty}
             onChange={(next) => updateModel({ presence_penalty: next })}
+            invalid={invalidFields.has("model.presence_penalty")}
           />
         </div>
         <p className="text-[11px] text-text-dim">{t("model_param.local_samplers_hint")}</p>
@@ -966,16 +970,19 @@ export function AgentManifestForm({
             param="top_k"
             value={value.model.top_k}
             onChange={(next) => updateModel({ top_k: next })}
+            invalid={invalidFields.has("model.top_k")}
           />
           <ModelParamField
             param="min_p"
             value={value.model.min_p}
             onChange={(next) => updateModel({ min_p: next })}
+            invalid={invalidFields.has("model.min_p")}
           />
           <ModelParamField
             param="repeat_penalty"
             value={value.model.repeat_penalty}
             onChange={(next) => updateModel({ repeat_penalty: next })}
+            invalid={invalidFields.has("model.repeat_penalty")}
           />
         </div>
         <ModelParamField
