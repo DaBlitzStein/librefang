@@ -144,8 +144,6 @@ export const agentFileKeys = {
   details: () => [...agentFileKeys.all, "detail"] as const,
   detail: (agentId: string, filename: string) =>
     [...agentFileKeys.details(), agentId, filename] as const,
-=======
->>>>>>> fork/feat/agent-manifest-history
 };
 
 // Central prompt repository (#6160). The fleet-wide overview
