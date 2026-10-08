@@ -1275,6 +1275,7 @@ tui-agents-label-manifest-history-empty = 该代理尚未记录任何配置变�
 tui-agents-hints-manifest-history =   [↑↓] 浏览版本  [PgUp/PgDn] 滚动  [Esc] 返回
 tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [w] 共享文件夹  [p] 模型参数  [$] 令牌  [c] 聊天  [k] 停止  [Esc] 返回
 tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [w] 共享文件夹  [p] 模型参数  [$] 令牌  [c] 聊天  [k] 停止  [Esc] 返回
+tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [w] 共享文件夹  [p] 模型参数  [$] 令牌  [h] 配置历史  [c] 聊天  [k] 停止  [Esc] 返回
 tui-agents-title-model-params = 模型参数
 tui-agents-prompt-model-params = 该代理自己的设置优先于模型设置。`inherit` 表示使用模型的设置。
 tui-agents-hints-model-params =   [←→] 修改  [i] 继承  [e] 自定义值  [Enter] 保存  [Esc] 取消
