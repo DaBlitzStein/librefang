@@ -1324,6 +1324,9 @@ impl LibreFangKernel {
         // see `librefang_types::inference_params` for why the model level has
         // to keep winning there (#7770).
         //
+        // `ModelCatalog::resolve_turn_inference_params` owns the two lookups that need the catalog: the `provider:model` override key and the model's *effective* ceiling (the operator's `model_overrides.json` correction if one exists, otherwise the matched entry's own `max_output_tokens`, #7774).
+        // The pre-call holds in `messaging.rs` call the same method, so the estimate and the request cannot drift.
+        //
         // Shared with the other two dispatch paths (`messaging::send_message_ephemeral`,
         // `messaging::send_message_streaming_with_sender_context_routing_thinking_and_session`)
         // and the ephemeral worker spawn (#8112) — see
