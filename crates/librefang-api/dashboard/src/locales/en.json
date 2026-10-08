@@ -345,10 +345,6 @@
       "avatar_too_large": "That image is {{size}} MB; the limit is {{limit}} MB.",
       "provisioned_hint": "This agent is provisioned by the deployment in {{source}} — the daemon refuses identity writes here, so change the appearance in that file."
     },
-    "model": "Model",
-    "provider": "Provider",
-    "max_tokens": "Max Tokens",
-    "temperature": "Temperature",
     "no_matching": "No agents matching your search.",
     "capabilities": "Capabilities",
     "skills": "Skills",
