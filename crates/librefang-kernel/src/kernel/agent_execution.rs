@@ -1324,11 +1324,16 @@ impl LibreFangKernel {
         //
         // `ModelCatalog::resolve_turn_inference_params` owns the two lookups that need the catalog: the `provider:model` override key and the model's *effective* ceiling (the operator's `model_overrides.json` correction if one exists, otherwise the matched entry's own `max_output_tokens`, #7774).
         // The pre-call holds in `messaging.rs` call the same method, so the estimate and the request cannot drift.
-        {
-            let catalog = self.llm.model_catalog.load();
-            let resolved = catalog.resolve_turn_inference_params(&manifest.model);
-            resolved.apply_to(&mut manifest.model);
-        }
+        //
+        // Shared with the other two dispatch paths (`messaging::send_message_ephemeral`,
+        // `messaging::send_message_streaming_with_sender_context_routing_thinking_and_session`)
+        // and the ephemeral worker spawn (#8112) — see
+        // `manifest_helpers::apply_resolved_inference_params` for why calling
+        // this from only one of the four used to matter.
+        super::manifest_helpers::apply_resolved_inference_params(
+            &self.llm.model_catalog.load(),
+            &mut manifest.model,
+        );
 
         // #5980: pre-dispatch per-provider budget gate. The provider name is
         // now finalized (model routing + key-availability fallback above), so
