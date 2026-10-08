@@ -76,4 +76,28 @@ describe("Avatar", () => {
       expect(avatar).toHaveTextContent("🤖");
     });
   });
+
+  // The classes are merged with `cn` rather than concatenated, so a caller can
+  // restate the colours. The chat's agent picker relies on it: it paints the
+  // avatar on a `bg-brand` row, where the default brand-on-brand initial is
+  // invisible. Concatenating instead would leave both classes on the element
+  // and let the stylesheet's order pick the winner.
+  describe("className overrides", () => {
+    it("lets the caller replace the base colours", () => {
+      render(<Avatar fallback="Jane Doe" className="bg-white/20 text-white" />);
+
+      const avatar = screen.getByRole("img", { name: "Jane Doe" });
+      expect(avatar).toHaveClass("bg-white/20");
+      expect(avatar).toHaveClass("text-white");
+      expect(avatar).not.toHaveClass("bg-brand/10");
+      expect(avatar).not.toHaveClass("text-brand");
+    });
+
+    it("keeps the sizing classes the caller did not touch", () => {
+      render(<Avatar fallback="Jane Doe" size="lg" className="bg-white/20" />);
+
+      const avatar = screen.getByRole("img", { name: "Jane Doe" });
+      expect(avatar).toHaveClass("h-12", "w-12");
+    });
+  });
 });

@@ -74,9 +74,11 @@ export const agentKeys = {
   // PUT only invalidates the skill read, not the tool read.
   skills: (agentId: string) =>
     [...agentKeys.all, "skills", agentId] as const,
-  // Per-agent MCP server assignment (#7713) — backs the pending-server surface
-  // on the agent detail Tools tab. Its own subtree for the same reason `skills`
-  // is separate from `tools`: an MCP read must not be invalidated by a tool write.
+  // Per-agent MCP server grant (#6565 follow-up) — backs `useAgentMcpServers`,
+  // the live GET the agent detail Tools tab reads for its MCP grant/revoke
+  // sub-view. Kept in its own subtree, distinct from `tools`, so a
+  // tool-capability write (`useUpdateAgentTools`) does not invalidate this
+  // MCP read.
   mcpServers: (agentId: string) =>
     [...agentKeys.all, "mcpServers", agentId] as const,
   // Full manifest as raw TOML (#7742) — backs the dashboard's full manifest
@@ -97,6 +99,26 @@ export const agentKeys = {
   // every poll is the one thing this key exists to avoid.
   avatar: (agentId: string) =>
     [...agentKeys.all, "avatar", agentId] as const,
+};
+
+/**
+ * The avatar image itself (#8339), cached as a Blob because
+ * `GET /api/agents/{id}/avatar` is authenticated and an `<img src>` carries no
+ * bearer token.
+ *
+ * Its own root rather than a child of `agentKeys.all`, for the same reason it
+ * is not a leaf under `detail(id)`: broad invalidations. `detail(id)` is
+ * refetched on a timer, and several unrelated mutations — a hand toggle
+ * (`mutations/hands.ts:42`, `:180`) and the knowledge-sharing writes
+ * (`mutations/knowledge.ts`) — sweep `agentKeys.all` precisely because they
+ * touch every agent. A child key there re-downloaded every cached image on
+ * each of those: 22 avatars, 22 image GETs for a change that touched none of
+ * them. Nothing invalidates this root wholesale; the upload and delete hooks
+ * name the one agent whose image changed.
+ */
+export const agentAvatarKeys = {
+  all: ["agentAvatars"] as const,
+  avatar: (agentId: string) => [...agentAvatarKeys.all, agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview

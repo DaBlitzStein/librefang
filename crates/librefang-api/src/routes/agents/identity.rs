@@ -147,6 +147,11 @@ pub async fn update_agent_identity(
                     tracing::warn!("Failed to persist agent state: {e}");
                 }
             }
+            // Drop the dashboard snapshot memo so the frontend's own
+            // invalidation refetch — which lands well inside the 900 ms TTL —
+            // reads this write rather than the previous poll's payload
+            // (#8371 review).
+            crate::routes::config::invalidate_dashboard_snapshot(&state);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"status": "ok", "agent_id": id})),
