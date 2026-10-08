@@ -3,8 +3,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  ALLOWED_AGENT_AVATAR_TYPES,
+  MAX_AGENT_AVATAR_BYTES,
   type AgentDetail,
+  type AgentIdentity,
   type AgentItem,
+  type AgentProvenance,
   type CloneAgentResult,
   type PromptVersion,
   type ToolDefinition,
@@ -18,11 +22,13 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { Modal } from "../components/ui/Modal";
 import {
+  isGroupAssigned,
   isMcpGroupCardActionable,
   isMcpServerGranted,
   isToolAllowed,
   isToolBlocked,
   mcpGroupCardState,
+  mcpServerListsEqual,
   resolveMcpGrantMode,
   toggleMcpServerGrant,
   type McpGroupCardState,
@@ -33,8 +39,9 @@ import { Card } from "../components/ui/Card";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
-import { Badge } from "../components/ui/Badge";
+import { Badge, dotColors } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
+import { AgentAvatar } from "../components/AgentAvatar";
 import { PromptsExperimentsModal } from "../components/PromptsExperimentsModal";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
@@ -87,6 +94,7 @@ import {
   useAgentTools,
   useAgentSkills,
   useAgentMcpServers,
+  useAgentAvatarUrl,
   useAgentManifest,
   useAgentChannels,
   usePromptVersions,
@@ -96,7 +104,10 @@ import {
   useAgentTemplateToml,
   useCloneAgent,
   useDeleteAgent,
+  useDeleteAgentAvatar,
   usePatchAgent,
+  useUpdateAgentIdentity,
+  useUploadAgentAvatar,
   usePatchAgentRuntimeConfig,
   useResetAgentSession,
   useResumeAgent,
@@ -134,6 +145,10 @@ type AgentCronSummary = {
 type AgentView = AgentDetail & {
   state?: string;
   description?: string;
+  /** Emoji, colour and avatar reference. `GET /api/agents/{id}` emits these
+   *  (`lifecycle.rs: get_agent`) but `AgentDetail` never declared them, which
+   *  is the whole reason the drawer rendered initials for everyone (#8339). */
+  identity?: AgentIdentity;
   profile?: string;
   model_name?: string;
   model_provider?: string;
@@ -191,6 +206,246 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
       <span className="text-text-dim text-sm">{label}</span>
       <span className="text-sm text-right min-w-0">{children}</span>
     </div>
+  );
+}
+
+/**
+ * The agent's visual identity, editable: emoji, and the avatar image (#8339).
+ *
+ * There is deliberately no field for `avatar_url`. It may only ever hold this
+ * agent's own avatar path — #8349 closed it to that — so the upload and remove
+ * buttons are the only two things that write it. A free-text URL box would be a
+ * way to make the dashboard fetch from wherever the text said, which is the one
+ * thing the backend change exists to prevent.
+ *
+ * `onChanged` fires after a successful write so the drawer can re-read the
+ * agent: the identity lives in the page's local `detailAgent` state, which a
+ * query invalidation alone does not reach.
+ */
+export function AgentAppearanceSection({
+  agentId,
+  identity,
+  provisioned,
+  onChanged,
+}: {
+  agentId: string;
+  identity?: AgentIdentity;
+  /** The deployment's provenance for this agent, when it has one. Every write
+   *  below answers `423 Locked` for such an agent, so the controls are locked
+   *  here rather than left to discover it by pressing (#8354). */
+  provisioned?: AgentProvenance | null;
+  onChanged: () => void;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const updateIdentityMutation = useUpdateAgentIdentity();
+  const uploadAvatarMutation = useUploadAgentAvatar();
+  const deleteAvatarMutation = useDeleteAgentAvatar();
+  const storedEmoji = identity?.emoji ?? "";
+  const hasAvatar = !!identity?.avatar_url;
+  const isProvisioned = !!provisioned;
+  const [emojiDraft, setEmojiDraft] = useState(storedEmoji);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Re-seed on the agent, not on the stored emoji: the drawer stays mounted
+  // while the user clicks through the list, and keying this on the value would
+  // wipe a half-typed emoji the moment an unrelated poll refreshed the agent.
+  useEffect(() => {
+    setEmojiDraft(identity?.emoji ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the agent, deliberately not on the stored emoji
+  }, [agentId]);
+
+  /** PATCH the emoji. Colour is left alone — the body omits it, and #6608 made
+   *  an omitted field preserve its stored value rather than null it. */
+  function saveEmoji() {
+    if (isProvisioned || updateIdentityMutation.isPending) return;
+    const next = emojiDraft.trim();
+    if (next === storedEmoji) return;
+    updateIdentityMutation.mutate(
+      // The empty string, never `undefined`: omitting a field is how a PATCH
+      // says "leave it", so clearing an emoji has to be spelled out.
+      { agentId, identity: { emoji: next } },
+      {
+        onSuccess: () => {
+          onChanged();
+          addToast(
+            next
+              ? t("agents.identity.emoji_saved", { defaultValue: "Emoji updated" })
+              : t("agents.identity.emoji_cleared", { defaultValue: "Emoji cleared" }),
+            "success",
+          );
+        },
+        onError: (e: Error) =>
+          addToast(
+            e?.message || t("agents.identity.emoji_failed", { defaultValue: "Failed to update the emoji" }),
+            "error",
+          ),
+      },
+    );
+  }
+
+  /** Validate the picked file, then send its bytes.
+   *
+   *  Both checks mirror the server's and neither replaces it: the daemon
+   *  decides the format by sniffing the bytes, so a `.png` that is really
+   *  something else is refused there whatever the browser said here. Checking
+   *  first only avoids spending an upload that was never going to be accepted,
+   *  and lets the message name the actual problem.
+   *
+   *  An empty `file.type` is passed through rather than refused: a browser
+   *  reports that for an extension-less file picked via "All files", and the
+   *  type list is a courtesy — the daemon's sniffing is what accepts or
+   *  rejects the bytes. */
+  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const input = event.target;
+    const file = input.files?.[0];
+    // Cleared before any early return, so picking the same file twice in a row
+    // still fires `change` — the value is what the browser compares against.
+    input.value = "";
+    if (!file || isProvisioned) return;
+
+    if (file.type && !(ALLOWED_AGENT_AVATAR_TYPES as readonly string[]).includes(file.type)) {
+      addToast(
+        t("agents.identity.avatar_type_rejected", {
+          defaultValue: "An avatar must be a PNG, JPEG, GIF or WebP image. SVG is not accepted.",
+        }),
+        "error",
+      );
+      return;
+    }
+    if (file.size > MAX_AGENT_AVATAR_BYTES) {
+      addToast(
+        t("agents.identity.avatar_too_large", {
+          defaultValue: "That image is {{size}} MB; the limit is {{limit}} MB.",
+          // Rounded up, so a rejection can never render as "2.0 MB; the limit
+          // is 2 MB": to-one-decimal rounding let 2 MiB + 1 byte do exactly
+          // that. Ceiling at the first decimal keeps the named size strictly
+          // above the cap for every file this branch rejects.
+          size: (Math.ceil(file.size / (100 * 1024)) / 10).toFixed(1),
+          limit: (MAX_AGENT_AVATAR_BYTES / (1024 * 1024)).toFixed(0),
+        }),
+        "error",
+      );
+      return;
+    }
+
+    uploadAvatarMutation.mutate(
+      { agentId, file },
+      {
+        onSuccess: () => {
+          onChanged();
+          addToast(t("agents.identity.avatar_saved", { defaultValue: "Avatar updated" }), "success");
+        },
+        onError: (e: Error) =>
+          addToast(
+            e?.message || t("agents.identity.avatar_failed", { defaultValue: "Failed to upload the avatar" }),
+            "error",
+          ),
+      },
+    );
+  }
+
+  function removeAvatar() {
+    if (isProvisioned || deleteAvatarMutation.isPending) return;
+    deleteAvatarMutation.mutate(agentId, {
+      onSuccess: () => {
+        onChanged();
+        addToast(t("agents.identity.avatar_removed", { defaultValue: "Avatar removed" }), "success");
+      },
+      onError: (e: Error) =>
+        addToast(
+          e?.message || t("agents.identity.avatar_remove_failed", { defaultValue: "Failed to remove the avatar" }),
+          "error",
+        ),
+    });
+  }
+
+  return (
+    <section>
+      <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+        <Sparkles className="w-3.5 h-3.5 text-brand" />
+        {t("agents.identity.title", { defaultValue: "Appearance" })}
+      </h4>
+      <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
+        <DetailRow label={t("agents.identity.emoji", { defaultValue: "Emoji" })}>
+          <div className="flex items-center gap-2 justify-end">
+            <input
+              type="text"
+              value={emojiDraft}
+              onChange={e => setEmojiDraft(e.target.value)}
+              onKeyDown={e => {
+                // Same `isComposing` guard as the rename field: in a CJK IME
+                // Enter confirms the candidate, and submitting on it would
+                // hijack the composition.
+                if (e.key === "Enter" && !e.nativeEvent.isComposing) saveEmoji();
+              }}
+              // 16, not 1 or 2: a single emoji is not a single character. A
+              // family with ZWJ joiners (👨‍👩‍👧‍👦) is eleven UTF-16 units,
+              // and a cap that counted "characters" would truncate it into a
+              // different picture.
+              maxLength={16}
+              placeholder={t("agents.identity.emoji_placeholder", { defaultValue: "None" })}
+              aria-label={t("agents.identity.emoji", { defaultValue: "Emoji" })}
+              disabled={isProvisioned}
+              className="w-24 px-2 py-1 rounded-md border border-border-subtle bg-surface text-lg text-center outline-none focus:border-brand disabled:opacity-50 disabled:cursor-not-allowed"
+            />
+            <button
+              type="button"
+              onClick={saveEmoji}
+              disabled={isProvisioned || updateIdentityMutation.isPending || emojiDraft.trim() === storedEmoji}
+              className="px-3 py-1 rounded-lg text-xs font-semibold bg-brand text-white hover:bg-brand/90 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+            >
+              {updateIdentityMutation.isPending ? t("common.saving") : t("common.save")}
+            </button>
+          </div>
+        </DetailRow>
+        <DetailRow label={t("agents.identity.avatar", { defaultValue: "Avatar image" })}>
+          <div className="flex items-center gap-2 justify-end">
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept={ALLOWED_AGENT_AVATAR_TYPES.join(",")}
+              onChange={handleFileChange}
+              className="hidden"
+              data-testid="agent-avatar-file-input"
+              aria-label={t("agents.identity.avatar", { defaultValue: "Avatar image" })}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isProvisioned || uploadAvatarMutation.isPending}
+              className="px-3 py-1 rounded-lg text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+            >
+              {uploadAvatarMutation.isPending
+                ? t("common.saving")
+                : hasAvatar
+                  ? t("agents.identity.avatar_replace", { defaultValue: "Replace" })
+                  : t("agents.identity.avatar_upload", { defaultValue: "Upload" })}
+            </button>
+            {hasAvatar && (
+              <button
+                type="button"
+                onClick={removeAvatar}
+                disabled={isProvisioned || deleteAvatarMutation.isPending}
+                className="px-3 py-1 rounded-lg text-xs font-semibold text-error border border-error/30 hover:bg-error/10 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+              >
+                {t("common.remove", { defaultValue: "Remove" })}
+              </button>
+            )}
+          </div>
+        </DetailRow>
+        <p className="text-[11px] text-text-dim leading-relaxed">
+          {isProvisioned
+            ? t("agents.identity.provisioned_hint", {
+                defaultValue: "This agent is provisioned by the deployment in {{source}} — the daemon refuses identity writes here, so change the appearance in that file.",
+                source: provisioned?.source,
+              })
+            : t("agents.identity.avatar_hint", {
+                defaultValue: "PNG, JPEG, GIF or WebP, up to 2 MB. SVG is not accepted. The image is stored by the daemon and served only to signed-in callers.",
+              })}
+        </p>
+      </div>
+    </section>
   );
 }
 
@@ -394,9 +649,30 @@ export function DescriptionSection({
 
   const current = description ?? "";
   const [draft, setDraft] = useState(current);
+  // Follow the persisted value only while the draft is pristine. The parent
+  // re-renders this section after an unrelated save — the full manifest editor
+  // PATCHes the same manifest and `refreshDetailAgent` moves `description` —
+  // and reseeding unconditionally wiped text the operator had typed but not
+  // yet saved (#7835 review). A selection change still reseeds through the
+  // `key` the parent sets on this section.
+  const seeded = useRef(current);
   useEffect(() => {
-    setDraft(current);
-  }, [current]);
+    // Pristine by intent: the draft matches the persisted value, so re-anchor
+    // the seed to it. The parent's post-save refresh moves `current` to the
+    // draft and this is the only moment the two agree; without the re-anchor
+    // the seed stays on the pre-edit text, the dirty guard below never lets
+    // the follow branch run again, and a later server-side change is silently
+    // clobbered by the next save (#7835 re-gate).
+    if (draft === current) {
+      seeded.current = current;
+      return;
+    }
+    if (draft !== seeded.current) return; // dirty: keep the operator's text
+    if (current !== seeded.current) {
+      seeded.current = current;
+      setDraft(current);
+    }
+  }, [current, draft]);
 
   const patchAgent = usePatchAgent();
   const dirty = draft !== current;
@@ -696,6 +972,21 @@ export function AgentsPage() {
   const templateTomlMutation = useAgentTemplateToml();
   const qc = useQueryClient();
 
+  // --- Visual identity of the agent in the drawer (#8339) ------------------
+  const detailIdentity = (detailAgent as AgentView | null)?.identity;
+  // Gated on "this agent has one" so an agent without an avatar costs no
+  // request at all; `undefined` while loading or absent, which is what `Avatar`
+  // wants — it falls back to the initials on its own. Also gated on the drawer
+  // being open: the only consumer is the drawer's header, and `detailAgent`
+  // stays selected after the drawer closes (the inline detail panel outlives
+  // it), so without that second gate the auto-selected agent's image would be
+  // downloaded and its object URL held for nothing to render.
+  const detailAvatarSrc = useAgentAvatarUrl(
+    detailAgent?.id ?? "",
+    !!detailIdentity?.avatar_url,
+    detailDrawerOpen,
+  );
+
   const rawDeleteMutation = useDeleteAgent();
   const handleDeleteSuccess = (agentId: string) => {
     if (detailAgent?.id === agentId) {
@@ -844,7 +1135,16 @@ export function AgentsPage() {
     try {
       await qc.invalidateQueries({ queryKey: agentQueries.detail(agentId).queryKey });
       const d = await qc.fetchQuery(agentQueries.detail(agentId));
-      setDetailAgent(mergeOriginFields(mergeHandFlag(d, fallback), (detailAgent as AgentView) ?? undefined));
+      // Apply the refreshed detail only while the drawer still shows the agent
+      // it was requested for, the same id gate `saveName` uses on its
+      // optimistic update. An async completion — an avatar upload or a config
+      // save started on A — must not pull the drawer back to A after the user
+      // has moved on to B.
+      setDetailAgent(prev =>
+        prev && prev.id === agentId
+          ? mergeOriginFields(mergeHandFlag(d, fallback), prev as AgentView)
+          : prev,
+      );
     } catch {
       // keep current state when refresh fails
     }
@@ -1212,9 +1512,12 @@ export function AgentsPage() {
     if (next === "form" && manifestToml.trim() && manifestToml !== serializedFormToml) {
       const parsed = parseManifestToml(manifestToml);
       if (!parsed.ok) {
-        const parseMessage = parsed.message === "json_schema_unsafe_integer"
-          ? t("agents.form.json_schema_unsafe_integer")
-          : parsed.message;
+        const parseMessage =
+          parsed.message === "json_schema_unsafe_integer"
+            ? t("agents.form.json_schema_unsafe_integer")
+            : parsed.message === "fallback_models_not_an_array"
+              ? t("agents.form.fallback_models_not_an_array")
+              : parsed.message;
         setTomlParseError(
           parsed.line !== undefined
             ? `Line ${parsed.line}:${parsed.column ?? 0} — ${parseMessage}`
@@ -1238,6 +1541,14 @@ export function AgentsPage() {
   // parse (the drawer's own TOML source is the server, not a sibling tab),
   // not a bidirectional textarea round-trip.
   const openManifestEditor = () => {
+    // A hand-derived agent's manifest belongs to the Hand definition: the PATCH
+    // succeeds and persists to agent.toml, but the next hand activation
+    // re-materializes the role's manifest and silently reverts the edit
+    // (#7835 review). Opening an editor whose save can only report a lie is
+    // what the rename lock exists to prevent, so gate this entry point the
+    // same way. The button is hidden for hands too; this covers the case where
+    // the selected agent changed while the button was mounted.
+    if (detailAgent?.is_hand) return;
     setManifestEditorSeeded(false);
     setManifestEditorErrors(new Set());
     setManifestEditorParseError(null);
@@ -1273,7 +1584,9 @@ export function AgentsPage() {
       setManifestEditorParseError(
         parsed.message === "json_schema_unsafe_integer"
           ? t("agents.form.json_schema_unsafe_integer")
-          : parsed.message,
+          : parsed.message === "fallback_models_not_an_array"
+            ? t("agents.form.fallback_models_not_an_array")
+            : parsed.message,
       );
     }
     setManifestEditorSeeded(true);
@@ -1281,7 +1594,16 @@ export function AgentsPage() {
 
   const saveManifestEditor = () => {
     if (!detailAgent) return;
-    const errors = validateManifestForm(manifestEditorFormState);
+    // Same preserved-name list the create dialog passes: `[workspaces]` entries
+    // the form can't render (mount-based declarations) are invisible here, so a
+    // form row reusing one of their names validates clean and then serializes a
+    // duplicate key, which the daemon rejects as an unattributable TOML parse
+    // error. `manifestEditorExtras`, not `formExtras` — this handler edits the
+    // detail drawer's state.
+    const errors = validateManifestForm(
+      manifestEditorFormState,
+      preservedWorkspaceNamesFromExtras(manifestEditorExtras),
+    );
     setManifestEditorErrors(new Set(errors));
     if (errors.length > 0) return;
     const toml = serializeManifestForm(manifestEditorFormState, manifestEditorExtras);
@@ -1447,9 +1769,27 @@ export function AgentsPage() {
         } ${stateLower === "suspended" ? "opacity-70" : ""}`}
       >
         <div className="flex items-center gap-2 min-w-0">
-          <Badge variant={getStatusVariant(agent.state)} dot className="shrink-0">
-            <span className="sr-only">{agent.state || "idle"}</span>
-          </Badge>
+          {/* `<div>`, not `<span>`: `AgentAvatar` renders `Avatar`, which is a
+              `<div>`, and a span cannot legally contain one. */}
+          <div className="relative shrink-0">
+            <AgentAvatar
+              agentId={agent.id}
+              avatarUrl={agent.identity?.avatar_url}
+              emoji={agent.identity?.emoji}
+              fallback={agent.name}
+              size="sm"
+            />
+            {/* State pinned to the avatar's corner, the way the detail drawer
+                below places it, instead of the pill this row used to carry —
+                that pill held nothing but the dot. Placement is the same; the
+                colour is not, and was not before either: this row reads
+                `getStatusVariant`, the drawer its own three-way map. */}
+            <span
+              className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ${dotColors[getStatusVariant(agent.state)]} border-2 border-surface`}
+              role="img"
+              aria-label={agent.state || "idle"}
+            />
+          </div>
           <span className="font-mono text-[13px] truncate flex-1 min-w-0 text-text-main">
             {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
           </span>
@@ -1467,7 +1807,7 @@ export function AgentsPage() {
             {agent.last_active ? formatRelativeTime(agent.last_active) : "—"}
           </span>
         </div>
-        <div className="font-mono text-[10.5px] text-text-dim flex items-center gap-2 pl-[22px] mt-1">
+        <div className="font-mono text-[10.5px] text-text-dim flex items-center gap-2 pl-10 mt-1">
           <span className="truncate min-w-0">{agent.model_name || agent.model_provider || "—"}</span>
           <span className="text-text-dim/60">·</span>
           <span className="truncate min-w-0">
@@ -2270,9 +2610,13 @@ export function AgentsPage() {
     // server-as-of-last-fetch baseline `isMcpDirty` compares against.
     const persistedMcpServers = agent.mcp_servers ?? [];
     const mcpDraftArr = mcpServersDraft ?? persistedMcpServers;
+    // `mcpServerListsEqual`, not `Array.includes`: the kernel matches server
+    // names after `normalizeMcpName`, so revoking and re-granting the same
+    // server under another spelling is not a change to save. A raw includes
+    // marked it dirty and Save rewrote agent.toml with the normalized name
+    // the operator never chose (#7835 review).
     const isMcpDirty = mcpServersDraft !== null &&
-      (mcpServersDraft.length !== persistedMcpServers.length ||
-        mcpServersDraft.some((n) => !persistedMcpServers.includes(n)));
+      !mcpServerListsEqual(mcpServersDraft, persistedMcpServers);
     // The kernel gates MCP on `!mcp_disabled && !mcp_servers.is_empty()`, and `tools_disabled` short-circuits every tool before that.
     // Both hard switches have to fold into "none", or an `mcp_disabled` agent with `mcp_servers = ["*"]` renders as a live grant.
     // Once the operator stages an edit, the mode is re-derived from the draft array alone (mirrors `usesAll`/`isBuiltinDirty` for capabilities_tools) rather than the server's last-known mode string, so a fresh single-server grant reads as "allowlist" immediately instead of staying pinned at the persisted "none".
@@ -2294,15 +2638,24 @@ export function AgentsPage() {
     // card as grantable.
     const mcpHardDisabled = !!(agent.tools_disabled || agent.mcp_disabled);
     // One source of truth for what an MCP card may do and say, shared by the
-    // all-tools grid and the assigned/available lists (#7749 review).
+    // all-tools grid and the assigned/available lists (#7749 review). A
+    // hand-derived agent is folded into the state itself: the kernel rejects
+    // `set_agent_mcp_servers` for hands, so every card must read as inert
+    // rather than clickable (#7835 review).
     const mcpCardStateOf = (groupName: string) =>
       mcpGroupCardState({
         granted: isMcpGroupGranted(groupName),
         mode: mcpModeEffective,
         hardDisabled: mcpHardDisabled,
+        handControlled: agent.is_hand === true,
       });
     // Never "click to assign" on a card that cannot be clicked.
     const mcpGroupLabel = (state: McpGroupCardState): string => {
+      if (state === "hand-controlled") {
+        return t("agents.detail.tools_mcp_hand_controlled", {
+          defaultValue: "controlled by the Hand definition",
+        });
+      }
       if (state === "hard-disabled") {
         return t("agents.detail.tools_mcp_inert", {
           defaultValue: "not granted — MCP is hard-disabled",
@@ -2361,6 +2714,11 @@ export function AgentsPage() {
         // `mcp_disabled` the kernel skips MCP entirely, so a staged grant
         // would arm a Save that changes nothing visible or effective
         // (#7749 review) — the banner above the cards explains why instead.
+        // A hand-derived agent is the same shape of dead end: its grant is
+        // owned by the Hand definition and `set_agent_mcp_servers` rejects
+        // the write with a 400 (#7835 review), so `mcpCardStateOf` folds the
+        // hand flag into the `hand-controlled` state this guard already
+        // refuses.
         const server = mcpServerByGroup.get(groupName);
         if (!server || !isMcpGroupCardActionable(mcpCardStateOf(groupName))) return;
         setMcpServersDraft((prev) => toggleMcpServerGrant(prev ?? persistedMcpServers, server));
@@ -2458,13 +2816,23 @@ export function AgentsPage() {
     const pendingMcpServers: string[] = (tabAgentMcpQuery.data?.pending ?? [])
       .slice()
       .sort();
+    // A pending server contributes no tools, so it renders no group card in
+    // either list. Before this the banner was read-only, which left a grant to
+    // a server that failed to connect — a typo in config.toml, or a server
+    // since removed — impossible to undo from the tab that owns MCP grants
+    // (#7835 review). The chips carry the same staged flow as a card: the
+    // draft update arms Save, and a click toggles between revoke and restore.
+    const mcpPendingRevocable = agent.is_hand !== true && !mcpHardDisabled;
 
-    const assignedGroups = sortedGroups.filter(
-      ([name, tools]) => getGroupStatus(name, tools) !== "none",
-    );
-    const availableGroups = sortedGroups.filter(
-      ([name, tools]) => getGroupStatus(name, tools) === "none",
-    );
+    // Which list a group belongs to is not one question — see `isGroupAssigned`.
+    const groupIsAssigned = ([name, tools]: [string, ToolDefinition[]]) =>
+      isGroupAssigned({
+        isMcp: isMcpGroup(name),
+        granted: isMcpGroupGranted(name),
+        activeTools: activeCountIn(name, tools),
+      });
+    const assignedGroups = sortedGroups.filter(groupIsAssigned);
+    const availableGroups = sortedGroups.filter((g) => !groupIsAssigned(g));
 
     // Shared per-tool checklist rendered under an expanded group, for both
     // the assigned and available sections (#6565 follow-up — previously
@@ -2560,15 +2928,47 @@ export function AgentsPage() {
                 })}
               </div>
               <div className="flex flex-wrap gap-1.5 mt-2">
-                {pendingMcpServers.map((name) => (
-                  <span
-                    key={name}
-                    className="font-mono text-[10.5px] rounded px-1.5 py-0.5 bg-main/60 border border-border-subtle text-text-main"
-                    data-testid="agent-pending-mcp-item"
-                  >
-                    {name}
-                  </span>
-                ))}
+                {pendingMcpServers.map((name) => {
+                  // Read off the draft, not just the (stale-until-save) query:
+                  // a struck-through chip has been staged for removal, and a
+                  // second click restores the grant.
+                  const staged = isMcpServerGranted(name, mcpDraftArr, mcpModeEffective);
+                  return (
+                    <span
+                      key={name}
+                      className={`font-mono text-[10.5px] rounded px-1.5 py-0.5 bg-main/60 border border-border-subtle text-text-main inline-flex items-center gap-1 ${
+                        staged ? "" : "opacity-50 line-through"
+                      }`}
+                      data-testid="agent-pending-mcp-item"
+                    >
+                      {name}
+                      {mcpPendingRevocable && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setMcpServersDraft((prev) =>
+                              toggleMcpServerGrant(prev ?? persistedMcpServers, name),
+                            )
+                          }
+                          className="text-text-dim hover:text-red-400 transition-colors p-0.5"
+                          title={
+                            staged
+                              ? t("agents.detail.tools_click_assign", { defaultValue: "click to assign" })
+                              : t("agents.detail.tools_remove_group", { defaultValue: "Remove entire group" })
+                          }
+                          aria-label={
+                            staged
+                              ? `${t("common.add", { defaultValue: "Add" })} ${name}`
+                              : `${t("common.remove", { defaultValue: "Remove" })} ${name}`
+                          }
+                          data-testid="agent-pending-mcp-revoke"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -2581,6 +2981,16 @@ export function AgentsPage() {
         {!isLoading && mcpHardDisabled && (
           <p className="text-xs text-warning">
             {t("agents.detail.mcp_hard_disabled_note", { defaultValue: "MCP servers are hard-disabled for this agent (tools_disabled or mcp_disabled). Granting one here would change nothing until the hard switch is turned off, so the toggles are inert." })}
+          </p>
+        )}
+
+        {/* Same reason, different gate: a hand-derived agent's MCP grant is
+            owned by the Hand definition and the endpoint rejects an edit, so
+            the cards below render read-only instead of arming a Save that can
+            only answer 400 (#7835 review). */}
+        {!isLoading && agent.is_hand === true && (
+          <p className="text-xs text-warning" data-testid="tools-hand-controlled-note">
+            {t("agents.detail.tools_mcp_hand_note", { defaultValue: "This agent is derived from a Hand: its MCP servers are controlled by the Hand definition and cannot be granted or revoked here." })}
           </p>
         )}
 
@@ -3105,7 +3515,12 @@ export function AgentsPage() {
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   <div className="relative shrink-0">
-                    <Avatar fallback={detailAgent.name} size="lg" />
+                    <Avatar
+                      fallback={detailAgent.name}
+                      size="lg"
+                      src={detailAvatarSrc}
+                      emoji={detailIdentity?.emoji}
+                    />
                     <span
                       className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${drawerStatusColor} border-2 border-surface ${!isDetailDrawerSuspended && !isDetailDrawerCrashed ? "animate-pulse" : ""}`}
                       role="img"
@@ -3196,31 +3611,56 @@ export function AgentsPage() {
             {/* Body — scrollable inspectable sections. */}
             <div className="px-6 py-5 space-y-5">
 
+              {/* Appearance — the emoji and the avatar image (#8339).
+                  Its own component, and exported, for the reason the file header
+                  gives for `SystemPromptSection`: `AgentsPage` has ~20 hooks and no
+                  render harness, so anything that has to be tested has to be
+                  reachable without mounting the page. */}
+              <AgentAppearanceSection
+                // Re-keyed on the agent: without it the section stays mounted
+                // across a list click, so an upload still in flight for A
+                // carries its `isPending` into B and disables B's controls
+                // until it settles.
+                key={detailAgent.id}
+                agentId={detailAgent.id}
+                identity={detailIdentity}
+                provisioned={detailAgent.provisioned}
+                onChanged={() => { void refreshDetailAgent(detailAgent.id); }}
+              />
+
               {/* Full manifest editor entry point (#7742). The widgets below
                   only cover a fraction of AgentManifest's fields — this is
                   the discoverable "long path" to everything else
                   (resources, autonomy, response format, routing, …)
-                  without dropping to SSH + agent.toml. */}
-              <button
-                type="button"
-                onClick={openManifestEditor}
-                className="w-full flex items-center justify-between gap-3 rounded-lg border border-dashed border-brand/40 bg-brand/5 px-4 py-3 text-left hover:bg-brand/10 transition-colors"
-              >
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-brand">
-                    {t("agents.detail.edit_full_manifest", { defaultValue: "Edit full configuration" })}
-                  </p>
-                  <p className="text-[11px] text-text-dim mt-0.5 leading-relaxed">
-                    {t("agents.detail.edit_full_manifest_hint", {
-                      defaultValue: "Every manifest field — resources, capabilities, autonomy, response format, and more.",
-                    })}
-                  </p>
-                </div>
-                <ChevronRight className="w-4 h-4 text-brand shrink-0" />
-              </button>
+                  without dropping to SSH + agent.toml.
+                  Hidden for a hand-derived agent: `update_manifest` pins the
+                  name and re-merges `hand:*` tags, so the PATCH would answer
+                  200 and persist to agent.toml, but the next hand activation
+                  re-materializes the manifest from the Hand definition and
+                  silently reverts it (#7835 review). */}
+              {!detailAgent.is_hand && (
+                <button
+                  type="button"
+                  onClick={openManifestEditor}
+                  className="w-full flex items-center justify-between gap-3 rounded-lg border border-dashed border-brand/40 bg-brand/5 px-4 py-3 text-left hover:bg-brand/10 transition-colors"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-brand">
+                      {t("agents.detail.edit_full_manifest", { defaultValue: "Edit full configuration" })}
+                    </p>
+                    <p className="text-[11px] text-text-dim mt-0.5 leading-relaxed">
+                      {t("agents.detail.edit_full_manifest_hint", {
+                        defaultValue: "Every manifest field — resources, capabilities, autonomy, response format, and more.",
+                      })}
+                    </p>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-brand shrink-0" />
+                </button>
+              )}
 
               {/* Description */}
               <DescriptionSection
+                key={detailAgent.id}
                 agentId={detailAgent.id}
                 description={(detailAgent as AgentView).description ?? ""}
                 onSaved={() => void refreshDetailAgent(detailAgent.id, detailAgent.is_hand)}
