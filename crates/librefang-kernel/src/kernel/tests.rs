@@ -3517,7 +3517,7 @@ fn update_manifest_notifies_registry_watchers_exactly_once_per_tags_change() {
     replacement.tags = vec!["beta".to_string()];
 
     kernel
-        .update_manifest(agent_id, replacement)
+        .update_manifest(agent_id, replacement, "test")
         .expect("manifest update should succeed");
 
     assert!(
