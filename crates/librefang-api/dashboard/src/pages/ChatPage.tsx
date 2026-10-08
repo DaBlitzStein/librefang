@@ -1445,9 +1445,12 @@ interface MessageBubbleProps {
  * agent and a streaming transcript to assert two lines of avatar selection.
  */
 export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarSrc, agentEmoji, userName, userEmoji, userHasAvatar, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable, selected, onToggleSelected }: MessageBubbleProps) {
+||||||| merged common ancestors
+export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarSrc, agentEmoji, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
+>>>>>>>>> Temporary merge branch 2
 =======
 export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarSrc, agentEmoji, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable, selected, onToggleSelected }: MessageBubbleProps) {
->>>>>>> fork/feat/chat-export-markdown
+>>>>>>> fork/feat/chat-session-tabs
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
