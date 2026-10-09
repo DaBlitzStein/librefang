@@ -1147,6 +1147,7 @@
       "tools_mcp_granted": "przyznane przez mcp_servers",
       "tools_mcp_hand_controlled": "kontrolowane przez definicję Hand",
       "tools_mcp_hand_note": "Ten agent pochodzi z Hand: jego serwery MCP są kontrolowane przez definicję Hand i nie można ich tu przyznawać ani odbierać.",
+      "manifest_hand_note": "Ten agent pochodzi z Hand: jego manifest należy do definicji Hand i nie można go tu edytować.",
       "tools_mcp_inert": "nie przyznano — MCP jest twardo wyłączone",
       "tools_mcp_not_granted": "nie przyznano — kliknij, aby przyznać",
       "tools_mcp_readonly": "Narzędzia MCP są przyznawane dla każdego serwera osobno przez mcp_servers w agent.toml. Przełącz grupę powyżej, aby przyznać lub cofnąć ten serwer — poszczególne narzędzia są dodatkowo filtrowane przez tool_allowlist i tool_blocklist.",

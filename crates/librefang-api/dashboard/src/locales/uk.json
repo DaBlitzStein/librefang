@@ -1142,6 +1142,7 @@
       "tools_mcp_granted": "надано через mcp_servers",
       "tools_mcp_hand_controlled": "керується визначенням Hand",
       "tools_mcp_hand_note": "Цей агент походить від Hand: його MCP-сервери керуються визначенням Hand, і тут їх не можна надавати чи відкликати.",
+      "manifest_hand_note": "Цей агент походить від Hand: його маніфест належить визначенню Hand, і тут його не можна редагувати.",
       "tools_mcp_inert": "не надано — MCP жорстко вимкнено",
       "tools_mcp_not_granted": "не надано — натисніть, щоб надати",
       "tools_mcp_readonly": "Інструменти MCP надаються по серверах через mcp_servers в agent.toml. Перемкніть групу вище, щоб надати або скасувати цей сервер — окремі інструменти додатково фільтруються через tool_allowlist і tool_blocklist.",

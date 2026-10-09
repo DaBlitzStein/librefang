@@ -1141,6 +1141,7 @@
       "tools_mcp_granted": "granted via mcp_servers",
       "tools_mcp_hand_controlled": "controlled by the Hand definition",
       "tools_mcp_hand_note": "This agent is derived from a Hand: its MCP servers are controlled by the Hand definition and cannot be granted or revoked here.",
+      "manifest_hand_note": "This agent is derived from a Hand: its manifest is owned by the Hand definition and cannot be edited here.",
       "tools_mcp_inert": "not granted — MCP is hard-disabled",
       "tools_mcp_not_granted": "not granted — click to grant",
       "tools_mcp_readonly": "MCP tools are granted per server via mcp_servers in agent.toml. Toggle the group above to grant or revoke this server — individual tools are further filtered by tool_allowlist and tool_blocklist.",
