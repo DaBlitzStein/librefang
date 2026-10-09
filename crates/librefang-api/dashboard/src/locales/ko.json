@@ -1124,6 +1124,7 @@
       "tools_mcp_granted": "mcp_servers로 허용됨",
       "tools_mcp_hand_controlled": "Hand 정의에 의해 제어됨",
       "tools_mcp_hand_note": "이 에이전트는 Hand에서 파생되었습니다. MCP 서버는 Hand 정의에 의해 제어되며 여기서 허용하거나 해지할 수 없습니다.",
+      "manifest_hand_note": "이 에이전트는 Hand에서 파생되었습니다. 매니페스트는 Hand 정의가 소유하며 여기서 편집할 수 없습니다.",
       "tools_mcp_inert": "허용되지 않음 — MCP가 강제 비활성화됨",
       "tools_mcp_not_granted": "허용되지 않음 — 클릭하여 허용",
       "tools_mcp_readonly": "MCP 도구는 agent.toml의 mcp_servers를 통해 서버 단위로 허용됩니다. 위의 그룹을 눌러 이 서버를 허용하거나 취소하세요 — 개별 도구는 tool_allowlist와 tool_blocklist로 추가 필터링됩니다.",

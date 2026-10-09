@@ -185,6 +185,8 @@ export {
   getUserPolicy,
   // effective permissions snapshot (RBAC follow-up — backs the simulator)
   getEffectivePermissions,
+  // caller's own resolved identity (#8339) — role gate for the identity editor
+  getWhoami,
   // credential vault — names and a set/not-set boolean only (#8164)
   listVaultKeys,
 } from "../../api";

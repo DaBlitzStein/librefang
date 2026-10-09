@@ -68,6 +68,7 @@ import type { ManifestSectionId } from "../components/AgentManifestForm";
 import { sectionForInvalidField } from "../components/AgentManifestForm";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
 import { useModelRouterProfiles } from "../lib/queries/modelRouter";
+import { useWhoami } from "../lib/queries/authz";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
   adoptTopLevelExtras,
@@ -201,6 +202,22 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
       <span className="text-sm text-right min-w-0">{children}</span>
     </div>
   );
+}
+
+/**
+ * Whether the signed-in credential may edit an agent's emoji and avatar.
+ *
+ * The daemon's rule for both writes the appearance section performs is
+ * `role >= UserRole::Admin` (middleware.rs), and it reads the *credential's*
+ * role — the group-derived ones `whoami` reports separately do not open this
+ * door, which is the direction that would hand a viewer controls that can only
+ * 403.
+ *
+ * Pure and exported because `AgentsPage` has no render harness, so a predicate
+ * left inline would be covered by nothing.
+ */
+export function canEditAgentIdentity(role: string | undefined): boolean {
+  return role === "admin" || role === "owner";
 }
 
 /**
@@ -834,6 +851,11 @@ export function AgentsPage() {
   const qc = useQueryClient();
 
   // --- Visual identity of the agent in the drawer (#8339) ------------------
+  // Who may edit it. Read from the caller's own credential, and an unresolved
+  // `whoami` reads as "no": a gate that failed open would flash controls the
+  // daemon answers with 403.
+  const whoami = useWhoami();
+  const canEditAppearance = canEditAgentIdentity(whoami.data?.role);
   const detailIdentity = (detailAgent as AgentView | null)?.identity;
   // Gated on "this agent has one" so an agent without an avatar costs no
   // request at all; `undefined` while loading or absent, which is what `Avatar`
@@ -1450,6 +1472,13 @@ export function AgentsPage() {
 
   const saveManifestEditor = () => {
     if (!detailAgent) return;
+    // A hand-derived agent's manifest belongs to the Hand definition: the PATCH
+    // succeeds and persists to agent.toml, but the next hand activation
+    // re-materializes the role's manifest and silently reverts the edit
+    // (#7835 review). The config tab withholds the form for a hand; this
+    // repeats the check because the selected agent can change while the tab
+    // stays mounted.
+    if (detailAgent.is_hand === true) return;
     // Same preserved-name list the create dialog passes: `[workspaces]` entries
     // the form can't render (mount-based declarations) are invisible here, so a
     // form row reusing one of their names validates clean and then serializes a
@@ -1944,40 +1973,52 @@ export function AgentsPage() {
         </p>
       );
     }
+    // A hand-derived agent's manifest belongs to the Hand definition: the PATCH
+    // succeeds and persists to agent.toml, but the next hand activation
+    // re-materializes the role's manifest and silently reverts the edit
+    // (#7835 review). The form — and the Save/advanced chrome that only writes
+    // the manifest — is withheld for a hand rather than left to accept a save
+    // that can only report a lie. The live panels above stay: they own their
+    // own endpoints. `saveManifestEditor` repeats the check because the
+    // selected agent can change while the tab is mounted.
+    const isHandLocked = agent.is_hand === true;
     return (
       <div className="flex flex-col gap-4">
         {/* The switch governs every section's folded half, and Save commits the
             whole manifest — so both belong at the top of the tab, not at the
-            bottom of a group the operator may not be in. */}
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <label className="inline-flex items-center gap-2 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={advancedMode}
-              onChange={(e) => setAdvancedMode(e.target.checked)}
-              className="h-3.5 w-3.5 accent-brand"
-              aria-label={t("agents.config.advanced_mode", { defaultValue: "Advanced mode" })}
-            />
-            <span className="text-xs font-semibold text-text-dim">
-              {t("agents.config.advanced_mode", { defaultValue: "Advanced mode" })}
-            </span>
-            <span className="text-[11px] text-text-dim/70 hidden sm:inline">
-              {t("agents.config.advanced_hint", {
-                defaultValue: "show every field, not just the everyday ones",
-              })}
-            </span>
-          </label>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={saveManifestEditor}
-            disabled={manifestPatchMutation.isPending}
-          >
-            {manifestPatchMutation.isPending
-              ? t("common.saving", { defaultValue: "Saving..." })
-              : t("common.save", { defaultValue: "Save" })}
-          </Button>
-        </div>
+            bottom of a group the operator may not be in. Neither renders for a
+            hand: there is no manifest it may write. */}
+        {!isHandLocked && (
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={advancedMode}
+                onChange={(e) => setAdvancedMode(e.target.checked)}
+                className="h-3.5 w-3.5 accent-brand"
+                aria-label={t("agents.config.advanced_mode", { defaultValue: "Advanced mode" })}
+              />
+              <span className="text-xs font-semibold text-text-dim">
+                {t("agents.config.advanced_mode", { defaultValue: "Advanced mode" })}
+              </span>
+              <span className="text-[11px] text-text-dim/70 hidden sm:inline">
+                {t("agents.config.advanced_hint", {
+                  defaultValue: "show every field, not just the everyday ones",
+                })}
+              </span>
+            </label>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={saveManifestEditor}
+              disabled={manifestPatchMutation.isPending}
+            >
+              {manifestPatchMutation.isPending
+                ? t("common.saving", { defaultValue: "Saving..." })
+                : t("common.save", { defaultValue: "Save" })}
+            </Button>
+          </div>
+        )}
         <AgentTabBar
           tabs={configTabs}
           active={configGroup}
@@ -1988,6 +2029,18 @@ export function AgentsPage() {
           variant="pill"
         />
         <div className="flex flex-col gap-4">
+          {configGroup === "general" && canEditAppearance && (
+            <AgentAppearanceSection
+              // Without the key the section stays mounted across a list click
+              // and an in-flight upload for A carries its `isPending` into B,
+              // disabling B's controls.
+              key={agent.id}
+              agentId={agent.id}
+              identity={detailIdentity}
+              provisioned={agent.provisioned}
+              onChanged={() => void refreshDetailAgent(agent.id, agent.is_hand)}
+            />
+          )}
           {configGroup === "channels" && (
             <ChannelsSection
               agentId={agent.id}
@@ -2014,35 +2067,44 @@ export function AgentsPage() {
               {renderToolsTab(agent)}
             </>
           )}
-          <AgentManifestForm
-            value={manifestEditorFormState}
-            onChange={setManifestEditorFormState}
-            providers={formProviderOptions}
-            models={formModelOptions}
-            modelsFetching={formModelsQuery.isFetching}
-            modelsError={formModelsQuery.isError}
-            onModelsRetry={() => {
-              void formModelsQuery.refetch();
-            }}
-            invalidFields={manifestEditorErrors}
-            extras={manifestEditorExtras}
-            skillCatalog={skillCatalogForForm}
-            toolCatalog={toolCatalogForForm}
-            mcpCatalog={mcpCatalogForForm}
-            routerProfileCatalog={routerProfileCatalog}
-            routerProfilesEnabled={routerProfilesQuery.data?.enabled}
-            // Identity is decided by the panel header's rename control; a
-            // second editable Name field here would be a second answer to the
-            // same question.
-            nameField="readonly"
-            // The identity section offers this agent's `IDENTITY.md` front
-            // matter. The create modal renders the same form without an id,
-            // because there is no workspace file to read yet.
-            agentId={agent.id}
-            sections={CONFIG_GROUPS[configGroup] as ManifestSectionId[]}
-            advanced={advancedMode}
-            routingInertReason={agent.routing_inert_reason ?? null}
-          />
+          {isHandLocked ? (
+            <p className="text-xs text-warning" data-testid="manifest-hand-controlled-note">
+              {t("agents.detail.manifest_hand_note", {
+                defaultValue:
+                  "This agent is derived from a Hand: its manifest is owned by the Hand definition and cannot be edited here.",
+              })}
+            </p>
+          ) : (
+            <AgentManifestForm
+              value={manifestEditorFormState}
+              onChange={setManifestEditorFormState}
+              providers={formProviderOptions}
+              models={formModelOptions}
+              modelsFetching={formModelsQuery.isFetching}
+              modelsError={formModelsQuery.isError}
+              onModelsRetry={() => {
+                void formModelsQuery.refetch();
+              }}
+              invalidFields={manifestEditorErrors}
+              extras={manifestEditorExtras}
+              skillCatalog={skillCatalogForForm}
+              toolCatalog={toolCatalogForForm}
+              mcpCatalog={mcpCatalogForForm}
+              routerProfileCatalog={routerProfileCatalog}
+              routerProfilesEnabled={routerProfilesQuery.data?.enabled}
+              // Identity is decided by the panel header's rename control; a
+              // second editable Name field here would be a second answer to the
+              // same question.
+              nameField="readonly"
+              // The identity section offers this agent's `IDENTITY.md` front
+              // matter. The create modal renders the same form without an id,
+              // because there is no workspace file to read yet.
+              agentId={agent.id}
+              sections={CONFIG_GROUPS[configGroup] as ManifestSectionId[]}
+              advanced={advancedMode}
+              routingInertReason={agent.routing_inert_reason ?? null}
+            />
+          )}
         </div>
       </div>
     );

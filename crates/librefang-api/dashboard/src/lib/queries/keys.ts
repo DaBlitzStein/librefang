@@ -569,6 +569,10 @@ export const authzKeys = {
   all: ["authz"] as const,
   effectives: () => [...authzKeys.all, "effective"] as const,
   effective: (name: string) => [...authzKeys.effectives(), name] as const,
+  // The calling credential's own identity (#8339). It is `gcTime: 0` (see
+  // `authzQueries.whoami`), which keeps a stale copy from outliving the page
+  // that read it — the credential can change while the SPA is loaded.
+  whoami: () => [...authzKeys.all, "whoami"] as const,
 };
 
 export const mediaKeys = {
