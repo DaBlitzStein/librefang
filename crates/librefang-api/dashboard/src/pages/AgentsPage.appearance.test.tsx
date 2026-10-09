@@ -161,6 +161,7 @@ vi.mock("../lib/queries/agents", () => ({
   useAgentManifest: () => ({ data: undefined, isLoading: false }),
   useAgentChannels: () => ({ data: [], isLoading: false }),
   useTools: () => ({ data: [], isLoading: false }),
+  usePromptVersions: () => ({ data: undefined, isLoading: false, isError: false }),
 }));
 
 const updateIdentity = vi.fn();
