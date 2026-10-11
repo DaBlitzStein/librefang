@@ -726,9 +726,8 @@ pub async fn put_agent_template_toml(
         );
     }
 
-    match persist_agent_type_in(&home_dir, &name, &manifest) {
+    match persist_agent_type_versioned(&state, &home_dir, &name, &manifest, AgentTypeWrite::Toml) {
         Ok(rendered) => {
-            let _ = record_template_version(&state, &name, &rendered, "toml");
             let mut detail =
                 agent_type_detail(&name, TemplateSource::AgentType, &manifest, &rendered);
             if !unknown_keys.is_empty() {
@@ -799,9 +798,14 @@ pub async fn post_agent_template_toml(
     }
 
     let home_dir = state.kernel.config_ref().home_dir.clone();
-    match store_create_from_manifest_in(&home_dir, &name, &manifest, None) {
+    match create_agent_type_from_manifest_versioned(
+        &state,
+        &home_dir,
+        &name,
+        &manifest,
+        AgentTypeWrite::Create,
+    ) {
         Ok(rendered) => {
-            let _ = record_template_version(&state, &name, &rendered, "create");
             let mut detail =
                 agent_type_detail(&name, TemplateSource::AgentType, &manifest, &rendered);
             if !unknown_keys.is_empty() {
@@ -865,10 +869,117 @@ fn parse_manifest_toml_body(
 // the tool writes through the kernel's own `home_dir` too (`kernel::handles::agent_control`), so
 // every writer of `agent-types/` — flat create/update/delete/restore, the raw-TOML put/post, the
 // registry restore and the tool — agrees on where the file lands.
-use librefang_types::agent_type_store::{
-    create_agent_type_from_manifest_in as store_create_from_manifest_in,
-    create_agent_type_in as store_create_in, persist_agent_type_in, CreateAgentTypeError,
-};
+//
+// Every handler in this module writes through one of the `*_versioned` helpers below, and each of
+// those imports the store's raw writer inside its own body rather than at module scope (#8021).
+// That is deliberate: a new write path cannot reach `persist_agent_type_in` /
+// `create_agent_type_in` / `create_agent_type_from_manifest_in` without first adding the import
+// right next to the raw call, so it cannot land a manifest on disk without passing through the
+// version stamp and naming the kind of change it is making — see [`AgentTypeWrite`] for the
+// vocabulary.
+use librefang_types::agent_type_store::{CreateAgentTypeError, CreatedAgentType};
+
+/// The kind of change a versioned agent-type write is making — the closed vocabulary of
+/// `template_versions.change_source` values this module records.
+///
+/// Adding a write path means adding a variant, which is the point: the set of ways a manifest can
+/// change is an enumeration rather than free-form strings sprinkled across the handlers, and the
+/// recorded `change_source` of every write is reviewable in one match arm.
+///
+/// The lone record-only source, `pre-registry-restore` in [`restore_from_registry`], is not a
+/// write and stays a direct [`record_template_version`] call — it snapshots content *before* the
+/// versioned write below destroys it, and must be able to refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentTypeWrite {
+    /// `PUT /api/templates/{name}/toml` — raw TOML saved over an existing type.
+    Toml,
+    /// `POST /api/templates` and `POST /api/templates/{name}/toml` — the first write of a new type.
+    Create,
+    /// `PUT /api/templates/{name}` — a save from the dashboard editor (read-modify-write patch).
+    Dashboard,
+    /// `POST /api/templates/{name}/restore` — the registry copy written over the local one.
+    RegistryRestore,
+    /// `POST /api/templates/{name}/history/{version_id}/restore` — a rollback to a history row.
+    Restore,
+}
+
+impl AgentTypeWrite {
+    /// The `change_source` recorded in history. Part of the API surface — `GET .../history`
+    /// echoes it and clients key on it — so the strings are pinned rather than derived from the
+    /// variant names.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Toml => "toml",
+            Self::Create => "create",
+            Self::Dashboard => "dashboard",
+            Self::RegistryRestore => "registry-restore",
+            Self::Restore => "restore",
+        }
+    }
+}
+
+/// Persist `manifest` over an existing agent type and record the version it produced, in one call.
+///
+/// The raw `persist_agent_type_in` is imported inside this function on purpose: it is this
+/// module's only caller, so there is no module-scope path to the write that skips the stamp.
+/// The snapshot stays best-effort exactly as it was at every pre-existing call site — it runs
+/// after the manifest is already on disk, so a failure costs one history row, not content — and
+/// persistence errors propagate unchanged.
+fn persist_agent_type_versioned(
+    state: &AppState,
+    home_dir: &std::path::Path,
+    name: &str,
+    manifest: &AgentManifest,
+    source: AgentTypeWrite,
+) -> Result<String, String> {
+    use librefang_types::agent_type_store::persist_agent_type_in;
+
+    let rendered = persist_agent_type_in(home_dir, name, manifest)?;
+    let _ = record_template_version(state, name, &rendered, source.as_str());
+    Ok(rendered)
+}
+
+/// Create a new agent type from the flat spec and record the version it produced, in one call.
+///
+/// Same import discipline and best-effort snapshot semantics as
+/// [`persist_agent_type_versioned`]; the create errors propagate unchanged so callers keep their
+/// per-variant HTTP mapping.
+fn create_agent_type_versioned(
+    state: &AppState,
+    home_dir: &std::path::Path,
+    name: &str,
+    spec: librefang_types::agent_type::AgentTypeSpec,
+    source: AgentTypeWrite,
+) -> Result<CreatedAgentType, CreateAgentTypeError> {
+    use librefang_types::agent_type_store::create_agent_type_in;
+
+    let created = create_agent_type_in(home_dir, name, spec)?;
+    let _ = record_template_version(
+        state,
+        &created.name,
+        &created.manifest_toml,
+        source.as_str(),
+    );
+    Ok(created)
+}
+
+/// Create a new agent type from an already-complete manifest and record the version it produced.
+///
+/// The raw-TOML create's landing (#8028); same import discipline and best-effort snapshot
+/// semantics as [`persist_agent_type_versioned`].
+fn create_agent_type_from_manifest_versioned(
+    state: &AppState,
+    home_dir: &std::path::Path,
+    name: &str,
+    manifest: &AgentManifest,
+    source: AgentTypeWrite,
+) -> Result<String, CreateAgentTypeError> {
+    use librefang_types::agent_type_store::create_agent_type_from_manifest_in;
+
+    let rendered = create_agent_type_from_manifest_in(home_dir, name, manifest)?;
+    let _ = record_template_version(state, name, &rendered, source.as_str());
+    Ok(rendered)
+}
 
 /// POST /api/templates — Create an operator-authored agent type.
 ///
@@ -892,20 +1003,16 @@ pub async fn create_agent_type(
     };
 
     let home_dir = state.kernel.config_ref().home_dir.clone();
-    match store_create_in(&home_dir, &name, spec) {
-        Ok(created) => {
-            let _ =
-                record_template_version(&state, &created.name, &created.manifest_toml, "create");
-            (
-                StatusCode::CREATED,
-                Json(agent_type_detail(
-                    &created.name,
-                    TemplateSource::AgentType,
-                    &created.manifest,
-                    &created.manifest_toml,
-                )),
-            )
-        }
+    match create_agent_type_versioned(&state, &home_dir, &name, spec, AgentTypeWrite::Create) {
+        Ok(created) => (
+            StatusCode::CREATED,
+            Json(agent_type_detail(
+                &created.name,
+                TemplateSource::AgentType,
+                &created.manifest,
+                &created.manifest_toml,
+            )),
+        ),
         Err(CreateAgentTypeError::InvalidName) => ApiErrorResponse::bad_request(invalid_name)
             .with_code("template_invalid_name")
             .into_json_tuple(),
@@ -993,19 +1100,22 @@ pub async fn update_agent_type(
     spec.apply_to(&mut manifest);
     manifest.name = name.clone();
 
-    match persist_agent_type_in(&home_dir, &name, &manifest) {
-        Ok(rendered) => {
-            let _ = record_template_version(&state, &name, &rendered, "dashboard");
-            (
-                StatusCode::OK,
-                Json(agent_type_detail(
-                    &name,
-                    TemplateSource::AgentType,
-                    &manifest,
-                    &rendered,
-                )),
-            )
-        }
+    match persist_agent_type_versioned(
+        &state,
+        &home_dir,
+        &name,
+        &manifest,
+        AgentTypeWrite::Dashboard,
+    ) {
+        Ok(rendered) => (
+            StatusCode::OK,
+            Json(agent_type_detail(
+                &name,
+                TemplateSource::AgentType,
+                &manifest,
+                &rendered,
+            )),
+        ),
         Err(e) => {
             tracing::error!("{e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()
@@ -1446,19 +1556,22 @@ pub async fn restore_from_registry(
     }
 
     // Write via the shared persist path (atomic rename).
-    match persist_agent_type_in(&home_dir, &name, &manifest) {
-        Ok(rendered) => {
-            let _ = record_template_version(&state, &name, &rendered, "registry-restore");
-            (
-                StatusCode::OK,
-                Json(agent_type_detail(
-                    &name,
-                    TemplateSource::AgentType,
-                    &manifest,
-                    &rendered,
-                )),
-            )
-        }
+    match persist_agent_type_versioned(
+        &state,
+        &home_dir,
+        &name,
+        &manifest,
+        AgentTypeWrite::RegistryRestore,
+    ) {
+        Ok(rendered) => (
+            StatusCode::OK,
+            Json(agent_type_detail(
+                &name,
+                TemplateSource::AgentType,
+                &manifest,
+                &rendered,
+            )),
+        ),
         Err(e) => {
             tracing::error!("{e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()
@@ -1792,19 +1905,17 @@ pub async fn restore_template_version(
         }
     };
 
-    match persist_agent_type_in(&home_dir, &name, &manifest) {
-        Ok(rendered) => {
-            let _ = record_template_version(&state, &name, &rendered, "restore");
-            (
-                StatusCode::OK,
-                Json(agent_type_detail(
-                    &name,
-                    TemplateSource::AgentType,
-                    &manifest,
-                    &rendered,
-                )),
-            )
-        }
+    match persist_agent_type_versioned(&state, &home_dir, &name, &manifest, AgentTypeWrite::Restore)
+    {
+        Ok(rendered) => (
+            StatusCode::OK,
+            Json(agent_type_detail(
+                &name,
+                TemplateSource::AgentType,
+                &manifest,
+                &rendered,
+            )),
+        ),
         Err(e) => {
             tracing::error!("{e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()
@@ -1814,29 +1925,31 @@ pub async fn restore_template_version(
 
 #[cfg(test)]
 mod read_agent_type_in_tests {
-    use super::{read_agent_type_in, TemplateSource};
+    use super::{
+        agent_type_path_in, read_agent_type_in, workspace_agent_manifest_path_in, TemplateSource,
+    };
 
-    /// #8112: the `agent-types/` read failing for a real reason (here,
-    /// `agent-types` existing as a plain file — the ENOTDIR case cited in the
-    /// review) must not veto a value the independently-readable workspace
-    /// manifest can still supply. Before the fix, any non-`NotFound` error on
-    /// the first source short-circuited the whole function with `return
-    /// Err(e)`, so `POST /api/agents {"template": name}` hard-failed even
-    /// though the same name was a perfectly readable live agent.
+    /// Make `path` unreadable for a reason other than absence on every platform by putting a directory where the file should be.
+    /// Reading a directory as a file fails with EISDIR on Unix and `ERROR_ACCESS_DENIED` on Windows, neither of which maps to `NotFound`.
+    /// A plain file standing in for a parent directory is not portable: Unix reports ENOTDIR, but Windows reports `ERROR_PATH_NOT_FOUND`, which Rust maps to `NotFound` and the code under test rightly treats as absence.
+    async fn make_unreadable(path: &std::path::Path) {
+        tokio::fs::create_dir_all(path).await.unwrap();
+    }
+
+    /// #8112: the `agent-types/` read failing for a real reason must not veto a value the independently-readable workspace manifest can still supply.
+    /// Before the fix, any non-`NotFound` error on the first source short-circuited the whole function with `return Err(e)`, so `POST /api/agents {"template": name}` hard-failed even though the same name was a perfectly readable live agent.
     #[tokio::test]
     async fn broken_agent_type_read_falls_back_to_the_workspace_manifest() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
 
-        // `agent-types/{name}.toml` becomes unreadable for a reason other
-        // than absence: the parent `agent-types` is a file, not a directory.
-        tokio::fs::write(home.join("agent-types"), "not a directory")
+        make_unreadable(&agent_type_path_in(home, "researcher")).await;
+
+        let manifest = workspace_agent_manifest_path_in(home, "researcher");
+        tokio::fs::create_dir_all(manifest.parent().unwrap())
             .await
             .unwrap();
-
-        let workspace_dir = home.join("workspaces").join("agents").join("researcher");
-        tokio::fs::create_dir_all(&workspace_dir).await.unwrap();
-        tokio::fs::write(workspace_dir.join("agent.toml"), "name = \"researcher\"\n")
+        tokio::fs::write(&manifest, "name = \"researcher\"\n")
             .await
             .unwrap();
 
@@ -1855,20 +1968,8 @@ mod read_agent_type_in_tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
 
-        tokio::fs::write(home.join("agent-types"), "not a directory")
-            .await
-            .unwrap();
-        // `workspaces/agents/researcher` as a file, not a directory, makes
-        // `.../researcher/agent.toml` ENOTDIR too.
-        tokio::fs::create_dir_all(home.join("workspaces").join("agents"))
-            .await
-            .unwrap();
-        tokio::fs::write(
-            home.join("workspaces").join("agents").join("researcher"),
-            "not a directory either",
-        )
-        .await
-        .unwrap();
+        make_unreadable(&agent_type_path_in(home, "researcher")).await;
+        make_unreadable(&workspace_agent_manifest_path_in(home, "researcher")).await;
 
         let result = read_agent_type_in(home, "researcher").await;
         assert!(
@@ -1944,6 +2045,24 @@ mod template_loading_tests {
         let found = load_agent_type_files(tmp.path()).await.unwrap();
         let names: Vec<&str> = found.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, vec!["good"]);
+    }
+}
+
+#[cfg(test)]
+mod agent_type_write_tests {
+    use super::AgentTypeWrite;
+
+    /// `change_source` is part of the API surface — `GET /api/templates/{name}/history` echoes it
+    /// and clients key on it — so every variant's recorded string is pinned here. A variant added
+    /// for a new write path has to pick its string deliberately rather than inherit whatever the
+    /// variant happens to be named.
+    #[test]
+    fn change_source_vocabulary_is_stable() {
+        assert_eq!(AgentTypeWrite::Toml.as_str(), "toml");
+        assert_eq!(AgentTypeWrite::Create.as_str(), "create");
+        assert_eq!(AgentTypeWrite::Dashboard.as_str(), "dashboard");
+        assert_eq!(AgentTypeWrite::RegistryRestore.as_str(), "registry-restore");
+        assert_eq!(AgentTypeWrite::Restore.as_str(), "restore");
     }
 }
 

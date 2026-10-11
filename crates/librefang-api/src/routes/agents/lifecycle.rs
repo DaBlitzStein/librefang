@@ -62,47 +62,48 @@ async fn resolve_manifest(
                     code: Some("invalid_template_name"),
                 });
             }
-            let home = &state.kernel.config_ref().home_dir;
-            // Delegate to the kernel's canonical loader rather than re-walking
-            // the candidate paths here. That function owns the `agent-types/`
-            // → `workspaces/agents/` → `registry/agents/` precedence, continues
-            // past an absent file only (an existing file it cannot read is a
-            // real failure, not a missing template), and pins the manifest's
-            // declared name to the requested type — none of which the previous
-            // hand-rolled lookup did.
-            match librefang_kernel::agent_template::load_agent_template(home, &safe_name) {
-                Ok((template_manifest, _path)) => {
+            let home = state.kernel.config_ref().home_dir.clone();
+            // The candidate order is owned by the kernel, so this door, the ephemeral spawn engine and the step-agent resolvers all answer "does this template exist?" the same way: the writable agent-type store, then the live instance, then the read-only registry checkout (see `agent_template_candidates`).
+            //
+            // The **agent type** comes first because it is what a deployment copies from — a spec, which the API never writes a `workspace` into (`AgentTypeSpec` has no such field) — whereas the instance is a live agent's own manifest, with spawn's resolved absolute workspace already written into it.
+            // A hand-written file in either store can still carry a `workspace`, which is why the decision about honouring one is made in the kernel, where every caller passes. See `kernel/spawn.rs`.
+            let candidates =
+                librefang_kernel::agent_template::agent_template_candidates(&home, &safe_name);
+            let mut found: Option<String> = None;
+            for candidate in &candidates {
+                // Use tokio::fs to avoid blocking in an async context
+                match tokio::fs::read_to_string(candidate).await {
+                    Ok(content) => {
+                        found = Some(content);
+                        break;
+                    }
+                    // Only an absent file continues the search, exactly as `load_agent_template` does: an existing file that cannot be read is a real failure, not a reason to serve a different manifest than the one on the operator's disk.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => {
+                        tracing::warn!(
+                            template = %safe_name,
+                            path = %candidate.display(),
+                            error = %e,
+                            "Failed to read agent template"
+                        );
+                        let t = ErrorTranslator::new(lang);
+                        return Err(ManifestError {
+                            message: t.t("api-error-template-read-failed"),
+                            code: Some("template_read_failed"),
+                        });
+                    }
+                }
+            }
+            match found {
+                Some(content) => {
                     used_template = Some(safe_name.clone());
                     template_manifest
                 }
-                Err(e) if e.is_missing() => {
+                None => {
                     let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
                         message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
                         code: Some("template_not_found"),
-                    });
-                }
-                Err(e) if e.kind() == "unreadable" => {
-                    tracing::warn!(template = %safe_name, error = %e, "agent template is unreadable");
-                    let t = ErrorTranslator::new(lang);
-                    // The file exists and could not be read (permissions, I/O):
-                    // a server-side fault, not a malformed request. Reporting it
-                    // as "not found" or "invalid" sends the operator looking for
-                    // the wrong problem.
-                    return Err(ManifestError {
-                        message: t.t("api-error-template-read-failed"),
-                        code: Some("template_read_failed"),
-                    });
-                }
-                Err(e) => {
-                    // Malformed or name-mismatched: a real file needs attention,
-                    // and reporting it as "not found" would send the operator
-                    // looking for the wrong problem.
-                    tracing::warn!(template = %safe_name, error = %e, "agent template lookup failed");
-                    let t = ErrorTranslator::new(lang);
-                    return Err(ManifestError {
-                        message: t.t("api-error-manifest-invalid-format"),
-                        code: Some("invalid_manifest"),
                     });
                 }
             }
@@ -179,8 +180,11 @@ async fn resolve_manifest(
             manifest.name = custom_name.trim().to_string();
         }
     }
-    if used_template.is_some() {
-        manifest.source_template = used_template;
+    if let Some(template_name) = used_template {
+        // A workspace the template carried is *not* dropped here.
+        // Whether it may be honoured is a question about where the path points, and only the kernel can answer it — it is the one place every door passes through, and a caller that supplies `manifest_toml` directly (the CLI expands a template before posting it) never reaches this function at all.
+        // See the guard in `kernel/spawn.rs`.
+        manifest.source_template = Some(template_name);
     }
 
     let name = manifest.name.clone();
