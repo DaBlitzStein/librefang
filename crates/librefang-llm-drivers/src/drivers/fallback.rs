@@ -637,7 +637,6 @@ mod tests {
             },
             actual_provider: None,
             actual_model: None,
-            text_synthesized_from_thinking: false,
         }
     }
 
