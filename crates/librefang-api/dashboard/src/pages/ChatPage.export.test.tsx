@@ -65,8 +65,8 @@ vi.mock("../lib/queries/agents", () => ({
   useAgents: () => ({ data: AGENTS, refetch: vi.fn(), isFetching: false }),
   useAgentSessions: () => ({ data: [], refetch: vi.fn() }),
   // `ChatPage` resolves the agent avatar through this hook since main grew the
-  // avatar picker (#8371). This test neither asserts nor renders avatars, so a
-  // stub that reports "no avatar" keeps the component mountable.
+  // avatar picker (#8371). The export test neither asserts nor renders avatars,
+  // so a stub that reports "no avatar" keeps the component mountable.
   useAgentAvatarUrl: () => undefined,
 }));
 
@@ -146,8 +146,9 @@ const uiState = {
   hiddenModelKeys: [] as string[],
   chatScale: 1,
   setChatScale: vi.fn(),
-  // Session tabs (the branch this test lives on). Empty list: the strip stays
-  // out of the way and only `pruneChatTabs` runs on mount.
+  // Session tabs (#8326) read these store fields, and the page prunes tabs on
+  // mount. The empty state keeps the strip out of the way; without the stubs
+  // the merged page crashes before this test can reach the export bar.
   openChatTabs: {} as Record<string, string[]>,
   chatTabRecency: {} as Record<string, string[]>,
   openChatTab: vi.fn(),
