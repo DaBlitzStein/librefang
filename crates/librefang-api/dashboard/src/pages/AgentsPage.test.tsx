@@ -206,6 +206,39 @@ describe("PromptLibraryPicker (#6187, folded into the prompt section #8424)", ()
   });
 });
 
+// The receiving half of the agent-types Run round trip. The full-page harness
+// (AgentsPage.quickRun.test.tsx) renders the seed effect end to end, but this is
+// the only thing pinning the mapping itself; the param name is the contract
+// with the sender on /agent-types.
+describe("resolveDrawerSeed", () => {
+  it("opens the drawer on the template tab with a type the list knows", () => {
+    expect(resolveDrawerSeed("researcher", ["researcher", "analyst"])).toEqual({
+      kind: "template",
+      templateName: "researcher",
+    });
+  });
+
+  it("opens nothing when the param is absent", () => {
+    expect(resolveDrawerSeed(undefined, ["researcher"])).toEqual({ kind: "none" });
+  });
+
+  // No agent type can be named "", and admitting it would open the drawer on an
+  // empty picker with Create disabled and no way back.
+  it("opens nothing for an empty value", () => {
+    expect(resolveDrawerSeed("", ["researcher"])).toEqual({ kind: "none" });
+  });
+
+  // A stale bookmark, a renamed or deleted type, or a typo. The drawer still
+  // opens, but on the blank form tab with a notice, not on a `<select>` whose
+  // value matches no option.
+  it("reports an unknown name so the caller can degrade visibly", () => {
+    expect(resolveDrawerSeed("ghost", ["researcher", "analyst"])).toEqual({
+      kind: "unknown",
+      templateName: "ghost",
+    });
+  });
+});
+
 describe("cloneResultNotice", () => {
   const base = { agent_id: "agent-copy", name: "copy" };
 

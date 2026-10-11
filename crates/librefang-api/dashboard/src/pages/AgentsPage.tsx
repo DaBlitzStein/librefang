@@ -1552,6 +1552,18 @@ export function AgentsPage() {
     setTomlParseError(null);
     setTemplateName("");
     setTemplateCustomName("");
+    // Drop the incoming `template` param on the way out. Without this, pressing
+    // Run on the same type a second time would navigate to a URL that already
+    // equals the current one, the effect below would not re-run, and the drawer
+    // would stay shut — the press would look like nothing happened.
+    if (routeTemplate) {
+      void navigate({ to: "/agents", search: {}, replace: true });
+      // This drawer was opened by a Run press rather than by the Create button,
+      // so hand the tab back to its default. Leaving it on Template would show
+      // an empty picker with Create disabled the next time the drawer is opened
+      // by hand. A tab the operator picked for themselves still persists.
+      setCreateMode("form");
+    }
     // Don't reset while a spawn is in flight — reset() flips isPending
     // back to false, and since the fetch isn't actually aborted the user
     // could reopen the modal and submit again before the first response
@@ -1574,6 +1586,57 @@ export function AgentsPage() {
       setCreateMode("form");
     }
   };
+
+  // Arriving from the agent-types page's Run button: the operator asked to
+  // instantiate that type, so the create drawer opens on the template tab with
+  // the type already selected. Run used to ask which *existing* agent to fork
+  // instead, which answers a different question than the button asks.
+  //
+  // `validateSearch` can only reject the empty string — it runs before any page
+  // data exists. An unknown `?template=` (a stale bookmark, a renamed or deleted
+  // type, a typo) would otherwise open the drawer on the Template tab with a
+  // `<select>` whose value matches no option while Create stays enabled and POSTs
+  // the bogus name. The membership check therefore needs the fetched list, so
+  // this waits for it and degrades to a blank form tab with a visible notice.
+  useEffect(() => {
+    const seed = resolveDrawerSeed(
+      routeTemplate,
+      (templatesQuery.data ?? []).map((template) => template.name),
+    );
+    if (seed.kind === "none") {
+      handledTemplate.current = null;
+      return;
+    }
+    if (templatesQuery.isPending) return;
+    // A failed *initial* fetch leaves `data` undefined, and `resolveDrawerSeed`
+    // would read every name as unknown. A failed background refetch keeps the
+    // last successful `data` and only flips the status to error, and that cached
+    // list still resolves names; only the no-data case cannot be judged. Wait
+    // rather than announcing that a type is gone when the list that would prove
+    // it never arrived.
+    if (templatesQuery.isError && templatesQuery.data === undefined) return;
+    // Process each distinct param once: a refetch replaces `data` with a new
+    // reference and must not re-open the drawer or re-fire the notice.
+    if (handledTemplate.current === seed.templateName) return;
+    handledTemplate.current = seed.templateName;
+
+    setShowCreate(true);
+    if (seed.kind === "unknown") {
+      setCreateMode("form");
+      setTemplateName("");
+      addToast(
+        t("agents.template_not_found", {
+          name: seed.templateName,
+          defaultValue:
+            "Agent type '{{name}}' no longer exists — pick a template or start from scratch.",
+        }),
+        "error",
+      );
+      return;
+    }
+    setCreateMode("template");
+    setTemplateName(seed.templateName);
+  }, [routeTemplate, templatesQuery.isPending, templatesQuery.isError, templatesQuery.data, addToast, t]);
 
   // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
   // serialized output into the textarea so advanced users can keep editing.
