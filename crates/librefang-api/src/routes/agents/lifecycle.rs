@@ -1756,7 +1756,7 @@ pub struct SaveAsAgentTypeRequest {
         (status = 201, description = "Agent type created from live agent"),
         (status = 400, description = "Malformed agent id, or a template_name outside [A-Za-z0-9_-]{1,64}"),
         (status = 404, description = "Agent not found"),
-        (status = 409, description = "Template name already taken, or it belongs to a different live agent"),
+        (status = 409, description = "The source agent is a hand-spawned agent, the template name is already taken, or it belongs to a different live agent"),
         (status = 422, description = "JSON body present but missing the required 'template_name' field"),
         (status = 500, description = "The agent type could not be rendered or written")
     )
@@ -1771,22 +1771,39 @@ pub async fn save_agent_as_agent_type(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
         }
     };
 
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-            );
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .with_code("agent_not_found")
+                .into_response();
         }
     };
+
+    // A hand-spawned agent is refused for the same reason the delete paths
+    // refuse one (`hand_agent_delete_denied`, `DELETE /api/agents/{id}` and
+    // the bulk delete): the hand lifecycle owns the agent's definition, so
+    // the operator makes the hand's copy reusable, not the live instance's.
+    // It also keeps state that must not be frozen into a reusable type: the
+    // live manifest carries `is_hand = true` (hand activation,
+    // `kernel/hands_lifecycle.rs`), which is persisted into
+    // `agent-types/<name>.toml` and reloaded as `entry.is_hand` on restart —
+    // boot then skips the row and the orphaned-hand GC deletes agents spawned
+    // from the type along with their sessions. The hand's injected
+    // capabilities/skills merge would travel with it too.
+    if entry.is_hand {
+        return ApiErrorResponse::conflict(
+            "Cannot save a hand-spawned agent as an agent type; deactivate or uninstall the owning hand instead.",
+        )
+        .with_code("hand_agent_save_denied")
+        .into_response();
+    }
 
     let template_name = req.template_name.trim().to_string();
 
@@ -1796,6 +1813,23 @@ pub async fn save_agent_as_agent_type(
     // side: a template spawned from later must get a fresh workspace, not
     // point new agents at the SOURCE agent's own workspace directory.
     manifest.workspace = None;
+    // `enabled` is instance-local state like `workspace` above: it gates
+    // whether an agent is spawned on startup, not how one is configured. A
+    // paused source must not save a paused type — every agent spawned from it
+    // would be skipped at boot with nothing in the TOML to explain why.
+    // `manifest_privacy.rs` classifies `enabled` as `LocalState` for the same
+    // reason it classifies `is_hand` that way.
+    manifest.enabled = true;
+    // `is_hand` needs the same reset, and the guard above cannot deliver it:
+    // that guard reads `entry.is_hand`, but the flag can ride in on the
+    // manifest itself — a directly supplied `manifest_toml`, or an
+    // `agent.toml` edited by hand and reloaded at startup, where the flag is
+    // not recomputed from the tags. The saved type would then inherit
+    // `is_hand = true` and its agents would be skipped at boot and reclaimed
+    // by the orphaned-hand GC, the same failure mode the guard's comment
+    // describes. `manifest_privacy::sanitize_for_publication` resets this
+    // field (and `enabled`) for the same reason.
+    manifest.is_hand = false;
     // Kernel-owned tags must not travel into the saved type. `spawn` recomputes
     // `is_hand` from `manifest.tags`, and the approval gate auto-approves every
     // tool call for a hand — so a copied `hand:*` tag would silently turn every
@@ -1849,29 +1883,35 @@ pub async fn save_agent_as_agent_type(
                     "description": manifest.description,
                 })),
             )
+                .into_response()
         }
-        Err(librefang_types::agent_type_store::CreateAgentTypeError::InvalidName) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-template-invalid-name")})),
-        ),
-        Err(librefang_types::agent_type_store::CreateAgentTypeError::NameTaken) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": t.t_args("api-error-agent-type-exists", &[("name", &template_name)])
-            })),
-        ),
-        Err(librefang_types::agent_type_store::CreateAgentTypeError::ShadowsLiveAgent) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": t.t_args("api-error-agent-type-name-taken", &[("name", &template_name)])
-            })),
-        ),
+        // Same mapping (and same codes) as the sibling
+        // `post_agent_template_toml` in `routes/agent_templates.rs`, so a
+        // client can tell the two 409s apart instead of seeing one bare
+        // `{"error": ...}` shape for every failure.
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::InvalidName) => {
+            ApiErrorResponse::bad_request(t.t("api-error-template-invalid-name"))
+                .with_code("template_invalid_name")
+                .into_response()
+        }
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::NameTaken) => {
+            ApiErrorResponse::conflict(
+                t.t_args("api-error-agent-type-exists", &[("name", &template_name)]),
+            )
+            .with_code("template_exists")
+            .into_response()
+        }
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::ShadowsLiveAgent) => {
+            ApiErrorResponse::conflict(t.t_args(
+                "api-error-agent-type-name-taken",
+                &[("name", &template_name)],
+            ))
+            .with_code("template_name_taken")
+            .into_response()
+        }
         Err(librefang_types::agent_type_store::CreateAgentTypeError::Io(e)) => {
             tracing::error!("failed to save agent as agent type: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": t.t("api-error-internal")})),
-            )
+            ApiErrorResponse::internal_scrub(e).into_response()
         }
     }
 }

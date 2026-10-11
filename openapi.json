@@ -2849,7 +2849,7 @@
             "description": "Agent not found"
           },
           "409": {
-            "description": "Template name already taken, or it belongs to a different live agent"
+            "description": "The source agent is a hand-spawned agent, the template name is already taken, or it belongs to a different live agent"
           },
           "422": {
             "description": "JSON body present but missing the required 'template_name' field"
