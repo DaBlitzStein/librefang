@@ -1,11 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { Edit2, ExternalLink, History, LayoutTemplate, Lock, Plus, RotateCcw, Share2, ShieldCheck, Trash2 } from "lucide-react";
-import type {
-  AgentTemplate,
-  TemplateVersionEntry,
-} from "../api";
+import type { AgentTemplate, TemplateVersionEntry } from "../api";
 import { useAgentType, useAgentTypeRegistryDiff, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
@@ -639,6 +636,7 @@ function TemplateHistoryModal({
 
 function AgentTypeRow({
   type,
+  onRun,
   onEdit,
   onDelete,
   onPromote,
@@ -647,6 +645,7 @@ function AgentTypeRow({
   onHistory,
 }: {
   type: AgentTemplate;
+  onRun: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onPromote: () => void;
@@ -671,6 +670,25 @@ function AgentTypeRow({
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
+        {/* Instantiation is offered on every row, editable or not. Spawnability
+            and writability are different questions: a workspace-sourced row is a
+            live agent's manifest this API refuses to edit, but the spawn engine
+            resolves it by name just as happily as an operator-authored type
+            (#6699). */}
+        {/* The row's own name is interpolated into the accessible name through
+            the locale rather than concatenated outside it: every row carries
+            this same control, so a bare "Create Agent" repeated N times tells a
+            screen-reader user nothing about which type it would create, and a
+            hardcoded separator would not be translated. */}
+        <button
+          type="button"
+          onClick={onRun}
+          className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
+          aria-label={t("agents.create_agent_named", { name: type.name })}
+          title={t("agents.create_agent_named", { name: type.name })}
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </button>
         {/* Read-only sanitized-manifest modal. Its own key, not
             `agentTypes.promote`: the Share2 button below opens the registry
             pull request, and while the two shared a key these adjacent
@@ -776,6 +794,7 @@ function AgentTypeRow({
 
 export function AgentTypesPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const addToast = useUIStore((s) => s.addToast);
   const types = useAgentTypes();
   const deleteMutation = useDeleteAgentType();
@@ -849,6 +868,7 @@ export function AgentTypesPage() {
             <AgentTypeRow
               key={`${type.source}:${type.name}`}
               type={type}
+              onRun={() => void navigate({ to: "/agents", search: { template: type.name } })}
               onEdit={() => setEditing({ name: type.name })}
               onDelete={() => setPendingDelete(type.name)}
               onPromote={() => setPendingPromote(type.name)}

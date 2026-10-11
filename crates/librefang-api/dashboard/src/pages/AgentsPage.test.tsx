@@ -1,6 +1,10 @@
 // Tests the pure decisions the page makes plus the two surfaces that can be
 // rendered without it (ChannelsSection, and the layout guards over the config
-// group map). AgentsPage itself has no render harness (~20 hooks).
+// group map), plus the resolveDrawerSeed mapping that receives the agent-types
+// Run round trip. AgentsPage itself has no render harness (~20 hooks); the
+// page-level effects are exercised by the full-page harness in
+// AgentsPage.quickRun.test.tsx, which is the wrong place to pin these narrow
+// rules.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
@@ -10,6 +14,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   cloneResultNotice,
+  resolveDrawerSeed,
   ChannelsSection,
   CONFIG_GROUPS,
   CONFIG_GROUP_IDS,
@@ -53,6 +58,39 @@ const LOCALE_FILES = readdirSync(LOCALES_DIR).filter((f) => f.endsWith(".json"))
 
 const useAgentChannelsMock = useAgentChannels as unknown as ReturnType<typeof vi.fn>;
 const useSetAgentChannelsMock = useSetAgentChannels as unknown as ReturnType<typeof vi.fn>;
+
+// The receiving half of the agent-types Run round trip. The full-page harness
+// (AgentsPage.quickRun.test.tsx) renders the seed effect end to end, but this is
+// the only thing pinning the mapping itself; the param name is the contract
+// with the sender on /agent-types.
+describe("resolveDrawerSeed", () => {
+  it("opens the drawer on the template tab with a type the list knows", () => {
+    expect(resolveDrawerSeed("researcher", ["researcher", "analyst"])).toEqual({
+      kind: "template",
+      templateName: "researcher",
+    });
+  });
+
+  it("opens nothing when the param is absent", () => {
+    expect(resolveDrawerSeed(undefined, ["researcher"])).toEqual({ kind: "none" });
+  });
+
+  // No agent type can be named "", and admitting it would open the drawer on an
+  // empty picker with Create disabled and no way back.
+  it("opens nothing for an empty value", () => {
+    expect(resolveDrawerSeed("", ["researcher"])).toEqual({ kind: "none" });
+  });
+
+  // A stale bookmark, a renamed or deleted type, or a typo. The drawer still
+  // opens, but on the blank form tab with a notice, not on a `<select>` whose
+  // value matches no option.
+  it("reports an unknown name so the caller can degrade visibly", () => {
+    expect(resolveDrawerSeed("ghost", ["researcher", "analyst"])).toEqual({
+      kind: "unknown",
+      templateName: "ghost",
+    });
+  });
+});
 
 describe("cloneResultNotice", () => {
   const base = { agent_id: "agent-copy", name: "copy" };

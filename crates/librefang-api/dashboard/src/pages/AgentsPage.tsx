@@ -1,7 +1,7 @@
 import { formatRelativeTime } from "../lib/datetime";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ALLOWED_AGENT_AVATAR_TYPES,
   MAX_AGENT_AVATAR_BYTES,
@@ -45,6 +45,7 @@ import type { AgentTabDef } from "../components/AgentTabs";
 import { AgentBrief } from "../components/AgentBrief";
 import type { AgentBriefMessage } from "../components/AgentBrief";
 import { AgentAvatar } from "../components/AgentAvatar";
+import { QuickRunModal } from "../components/QuickRunModal";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
@@ -461,6 +462,40 @@ export function AgentAppearanceSection({
 }
 
 /**
+ * What the create drawer should open on when `/agents` was reached with a
+ * `template` search param.
+ *
+ * Pure and exported on purpose: the mapping is the contract with the sender on
+ * `/agent-types`, and keeping it out of the ~20-hook page pins it directly in
+ * `AgentsPage.test.tsx`. The full-page harness in `AgentsPage.quickRun.test.tsx`
+ * now renders the effect around it too, with the search param and the fetched
+ * list mocked, but the rule itself stays testable without that page.
+ *
+ * `knownNames` is the fetched agent-type list. It is required rather than
+ * optional because `validateSearch` cannot do this check — it runs before any
+ * page data exists — so the only place that can reject a stale bookmark, a
+ * renamed or deleted type or a typo is here, where the list has arrived.
+ * An unknown name is its own state, not `null`: the drawer still opens, but on
+ * the blank form tab with a notice rather than a `<select>` matching no option.
+ */
+export type DrawerSeed =
+  | { kind: "none" }
+  | { kind: "template"; templateName: string }
+  | { kind: "unknown"; templateName: string };
+
+export function resolveDrawerSeed(
+  template: string | undefined,
+  knownNames: readonly string[],
+): DrawerSeed {
+  // Falsy covers both "no param" and the empty string `validateSearch` would
+  // otherwise admit.
+  if (!template) return { kind: "none" };
+  return knownNames.includes(template)
+    ? { kind: "template", templateName: template }
+    : { kind: "unknown", templateName: template };
+}
+
+/**
  * Channels quick-widget for the Configure drawer (#7742). `PUT
  * /api/agents/{id}/channels` has existed since `config.rs` shipped
  * `get_agent_channels` / `set_agent_channels` (promised when #4912 / #4963
@@ -711,6 +746,10 @@ export function AgentsPage() {
   const navigate = useNavigate();
   // The `template` search param, set by the agent-types page's Run button.
   // Deliberately not named `search`: the local state below is the agent filter.
+  const { template: routeTemplate } = useSearch({ from: "/agents" });
+  // The last `?template=` value the seed effect acted on, so a refetch does not
+  // re-run its side effects.
+  const handledTemplate = useRef<string | null>(null);
   const [search, setSearch] = useState("");
   const [detailAgent, setDetailAgent] = useState<AgentDetail | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -723,6 +762,9 @@ export function AgentsPage() {
   const [formExtras, setFormExtras] = useState<ManifestExtras>(emptyManifestExtras);
   const [formErrors, setFormErrors] = useState<Set<string>>(new Set());
   const [tomlParseError, setTomlParseError] = useState<string | null>(null);
+  // Parent whose ledger pays for the Quick Run (#6699). Held as an id rather
+  // than a flag so the dialog knows which agent to preselect; `null` is closed.
+  const [quickRunParent, setQuickRunParent] = useState<string | null>(null);
   // Inline-rename state for the detail/edit modal header. The agent name is
   // the primary identifier in the UI and was previously read-only — now
   // clicking the title swaps it for an input and PATCHes /agents/{id}.
@@ -817,7 +859,9 @@ export function AgentsPage() {
   const addToast = useUIStore((s) => s.addToast);
   useCreateShortcut(() => setShowCreate(true));
   const templatesQuery = useAgentTemplates({
-    enabled: showCreate && createMode === "template",
+    // Keep the list warm while a `template` param is being validated, so the
+    // drawer can tell a real type from a stale bookmark before it opens.
+    enabled: (showCreate && createMode === "template") || routeTemplate != null,
   });
   const localizedTemplates = useMemo(
     () =>
@@ -1364,6 +1408,18 @@ export function AgentsPage() {
     setTomlParseError(null);
     setTemplateName("");
     setTemplateCustomName("");
+    // Drop the incoming `template` param on the way out. Without this, pressing
+    // Run on the same type a second time would navigate to a URL that already
+    // equals the current one, the effect below would not re-run, and the drawer
+    // would stay shut — the press would look like nothing happened.
+    if (routeTemplate) {
+      void navigate({ to: "/agents", search: {}, replace: true });
+      // This drawer was opened by a Run press rather than by the Create button,
+      // so hand the tab back to its default. Leaving it on Template would show
+      // an empty picker with Create disabled the next time the drawer is opened
+      // by hand. A tab the operator picked for themselves still persists.
+      setCreateMode("form");
+    }
     // Don't reset while a spawn is in flight — reset() flips isPending
     // back to false, and since the fetch isn't actually aborted the user
     // could reopen the modal and submit again before the first response
@@ -1374,6 +1430,57 @@ export function AgentsPage() {
       spawnMutation.reset();
     }
   };
+
+  // Arriving from the agent-types page's Run button: the operator asked to
+  // instantiate that type, so the create drawer opens on the template tab with
+  // the type already selected. Run used to ask which *existing* agent to fork
+  // instead, which answers a different question than the button asks.
+  //
+  // `validateSearch` can only reject the empty string — it runs before any page
+  // data exists. An unknown `?template=` (a stale bookmark, a renamed or deleted
+  // type, a typo) would otherwise open the drawer on the Template tab with a
+  // `<select>` whose value matches no option while Create stays enabled and POSTs
+  // the bogus name. The membership check therefore needs the fetched list, so
+  // this waits for it and degrades to a blank form tab with a visible notice.
+  useEffect(() => {
+    const seed = resolveDrawerSeed(
+      routeTemplate,
+      (templatesQuery.data ?? []).map((template) => template.name),
+    );
+    if (seed.kind === "none") {
+      handledTemplate.current = null;
+      return;
+    }
+    if (templatesQuery.isPending) return;
+    // A failed *initial* fetch leaves `data` undefined, and `resolveDrawerSeed`
+    // would read every name as unknown. A failed background refetch keeps the
+    // last successful `data` and only flips the status to error, and that cached
+    // list still resolves names; only the no-data case cannot be judged. Wait
+    // rather than announcing that a type is gone when the list that would prove
+    // it never arrived.
+    if (templatesQuery.isError && templatesQuery.data === undefined) return;
+    // Process each distinct param once: a refetch replaces `data` with a new
+    // reference and must not re-open the drawer or re-fire the notice.
+    if (handledTemplate.current === seed.templateName) return;
+    handledTemplate.current = seed.templateName;
+
+    setShowCreate(true);
+    if (seed.kind === "unknown") {
+      setCreateMode("form");
+      setTemplateName("");
+      addToast(
+        t("agents.template_not_found", {
+          name: seed.templateName,
+          defaultValue:
+            "Agent type '{{name}}' no longer exists — pick a template or start from scratch.",
+        }),
+        "error",
+      );
+      return;
+    }
+    setCreateMode("template");
+    setTemplateName(seed.templateName);
+  }, [routeTemplate, templatesQuery.isPending, templatesQuery.isError, templatesQuery.data, addToast, t]);
 
   // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
   // serialized output into the textarea so advanced users can keep editing.
@@ -1827,6 +1934,23 @@ export function AgentsPage() {
                   }}
                 >
                   <span className="hidden sm:inline">{t("agents.suspend", { defaultValue: "Pause" })}</span>
+                </Button>
+              )}
+              {/* Quick Run (#6699) — a one-off ephemeral worker on this
+                  agent's budget. Anchored here rather than on the agent-types
+                  row because the parent that is billed, and whose
+                  `[resources]` quota is the ceiling, is the agent, not a type.
+                  Hidden for hands, which cannot be a parent. */}
+              {!agent.is_hand && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leftIcon={<Zap className="w-3.5 h-3.5" />}
+                  aria-label={t("agents.quick_run")}
+                  title={t("agents.quick_run")}
+                  onClick={() => setQuickRunParent(agent.id)}
+                >
+                  <span className="hidden sm:inline">{t("agents.quick_run")}</span>
                 </Button>
               )}
               {/* Details — the agent's read-only lineage
@@ -4327,6 +4451,13 @@ export function AgentsPage() {
         </div>
       </DrawerPanel>
 
+      {/* Quick Run Modal (#6699) — one ephemeral worker, gone when it ends. */}
+      {quickRunParent !== null && (
+        <QuickRunModal
+          initialParent={quickRunParent}
+          onClose={() => setQuickRunParent(null)}
+        />
+      )}
       <ConfirmDialog
         isOpen={confirmDialog !== null}
         title={confirmDialog?.title ?? ""}
