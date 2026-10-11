@@ -1755,6 +1755,16 @@ pub async fn save_agent_as_agent_type(
     // `manifest_privacy.rs` classifies `enabled` as `LocalState` for the same
     // reason it classifies `is_hand` that way.
     manifest.enabled = true;
+    // `is_hand` needs the same reset, and the guard above cannot deliver it:
+    // that guard reads `entry.is_hand`, but the flag can ride in on the
+    // manifest itself — a directly supplied `manifest_toml`, or an
+    // `agent.toml` edited by hand and reloaded at startup, where the flag is
+    // not recomputed from the tags. The saved type would then inherit
+    // `is_hand = true` and its agents would be skipped at boot and reclaimed
+    // by the orphaned-hand GC, the same failure mode the guard's comment
+    // describes. `manifest_privacy::sanitize_for_publication` resets this
+    // field (and `enabled`) for the same reason.
+    manifest.is_hand = false;
     // Kernel-owned tags must not travel into the saved type. `spawn` recomputes
     // `is_hand` from `manifest.tags`, and the approval gate auto-approves every
     // tool call for a hand — so a copied `hand:*` tag would silently turn every

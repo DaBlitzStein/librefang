@@ -571,14 +571,21 @@ async fn save_agent_as_agent_type_strips_kernel_hand_tags() {
         "hand_allowed_env".to_string(),
         serde_json::json!(["HAND_INSTANCE_TOKEN"]),
     );
+    // The flag the `entry.is_hand` guard above cannot see; it makes the
+    // `!saved.is_hand` assertion below non-vacuous — without the snapshot's
+    // reset, the saved TOML would carry it back.
+    source.is_hand = true;
     // Registered directly rather than spawned: `spawn` derives
-    // `entry.is_hand` from `hand:*` tags, and the handler now refuses
-    // `entry.is_hand` sources outright (see the test above) — a live hand
-    // must not be snapshotted at all. This entry models the other way
-    // kernel-owned tags can sit on a non-hand agent: a manifest file
-    // hand-edited to carry them, loaded from disk with `is_hand = false`.
-    // The snapshot's scrub still has to strip them, so nothing spawned from
-    // the type inherits hand-ness.
+    // `entry.is_hand` from `hand:*` tags, and the handler refuses
+    // `entry.is_hand` sources outright (see the test above). This entry
+    // models the case that guard cannot see: a manifest carrying hand-ness
+    // in its own fields — `is_hand = true` (set below) plus `hand:*` tags —
+    // reloaded from an edited `agent.toml` at startup, where the flag is not
+    // recomputed from the tags and the registered `entry.is_hand` stays
+    // `false` (the `AgentEntry` default). The snapshot's scrub is what has to
+    // strip both, or a type saved from it would reload with
+    // `entry.is_hand = true`, and its agents would be skipped at boot and
+    // reclaimed by the orphaned-hand GC.
     let agent_id = AgentId::new();
     h.state
         .kernel
