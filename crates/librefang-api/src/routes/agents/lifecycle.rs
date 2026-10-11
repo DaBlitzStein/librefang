@@ -35,14 +35,18 @@ async fn resolve_manifest(
     req: &SpawnRequest,
     lang: &'static str,
 ) -> Result<ResolvedManifest, ManifestError> {
-    // Resolve template name → manifest, or parse a client-supplied one.
+    // Resolve template name → manifest text, or take a client-supplied one.
     let mut used_template: Option<String> = None;
-    let mut manifest: AgentManifest = if req.manifest_toml.trim().is_empty() {
-        // A signature covers the exact bytes the client signed. When the
-        // manifest comes from a server-side template there is no
-        // client-supplied text left to verify it against, so accepting the
-        // pair would silently skip verification entirely. Reject instead of
-        // ignoring the signature.
+    let manifest_toml: String = if req.manifest_toml.trim().is_empty() {
+        // A signature covers the exact bytes the client signed. Main accepted
+        // `signed_manifest` + `template` and verified the signature against
+        // the resolved template's content — a verified flow, not a skipped
+        // one: it only passed for a caller whose signed bytes equalled the
+        // template on disk. This door rejects the pair anyway, so a
+        // signature-pinned spawn can only pin content the client supplied,
+        // not whatever the template store happens to hold at verification
+        // time. Behaviour change against main, recorded in
+        // `changelog.d/added/8360-save-as-agent-type.md`.
         if req.signed_manifest.is_some() {
             let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
@@ -97,7 +101,7 @@ async fn resolve_manifest(
             match found {
                 Some(content) => {
                     used_template = Some(safe_name.clone());
-                    template_manifest
+                    content
                 }
                 None => {
                     let t = ErrorTranslator::new(lang);
@@ -115,61 +119,63 @@ async fn resolve_manifest(
             });
         }
     } else {
-        let manifest_toml = req.manifest_toml.clone();
+        req.manifest_toml.clone()
+    };
 
-        // Size guard
-        if manifest_toml.len() > MAX_MANIFEST_SIZE {
-            let t = ErrorTranslator::new(lang);
-            return Err(ManifestError {
-                message: t.t("api-error-manifest-too-large"),
-                code: Some("manifest_too_large"),
-            });
-        }
+    // Size guard — bounds the inline `manifest_toml` and the content of a
+    // resolved template file alike. `MAX_MANIFEST_SIZE` no longer covers only
+    // the client-supplied body: a template is still read into memory here, so
+    // the same cap applies before either is parsed or verified.
+    if manifest_toml.len() > MAX_MANIFEST_SIZE {
+        let t = ErrorTranslator::new(lang);
+        return Err(ManifestError {
+            message: t.t("api-error-manifest-too-large"),
+            code: Some("manifest_too_large"),
+        });
+    }
 
-        // SECURITY: Verify Ed25519 signature when provided. Only the inline
-        // manifest can be signed — `signed_manifest` + `template` is rejected
-        // above, and the comparison below is against the content the client
-        // supplied.
-        if let Some(ref signed_json) = req.signed_manifest {
-            match state.kernel.verify_signed_manifest(signed_json) {
-                Ok(verified_toml) => {
-                    if verified_toml.trim() != manifest_toml.trim() {
-                        tracing::warn!("Signed manifest content does not match manifest_toml");
-                        let t = ErrorTranslator::new(lang);
-                        return Err(ManifestError {
-                            message: t.t("api-error-manifest-signature-mismatch"),
-                            code: Some("signature_invalid"),
-                        });
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Manifest signature verification failed: {e}");
-                    state.kernel.audit().record(
-                        "system",
-                        librefang_kernel::audit::AuditAction::AuthAttempt,
-                        "manifest signature verification failed",
-                        format!("error: {e}"),
-                    );
+    // SECURITY: Verify Ed25519 signature when provided. `signed_manifest` +
+    // `template` is rejected above, so only the inline manifest reaches this
+    // comparison, against the exact content the client supplied.
+    if let Some(ref signed_json) = req.signed_manifest {
+        match state.kernel.verify_signed_manifest(signed_json) {
+            Ok(verified_toml) => {
+                if verified_toml.trim() != manifest_toml.trim() {
+                    tracing::warn!("Signed manifest content does not match manifest_toml");
                     let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
-                        message: t.t("api-error-manifest-signature-failed"),
+                        message: t.t("api-error-manifest-signature-mismatch"),
                         code: Some("signature_invalid"),
                     });
                 }
             }
-        }
-
-        // Parse TOML
-        match toml::from_str(&manifest_toml) {
-            Ok(m) => m,
             Err(e) => {
-                tracing::warn!("Failed to parse agent manifest TOML: {e}");
+                tracing::warn!("Manifest signature verification failed: {e}");
+                state.kernel.audit().record(
+                    "system",
+                    librefang_kernel::audit::AuditAction::AuthAttempt,
+                    "manifest signature verification failed",
+                    format!("error: {e}"),
+                );
                 let t = ErrorTranslator::new(lang);
                 return Err(ManifestError {
-                    message: t.t("api-error-manifest-invalid-format"),
-                    code: Some("invalid_manifest"),
+                    message: t.t("api-error-manifest-signature-failed"),
+                    code: Some("signature_invalid"),
                 });
             }
+        }
+    }
+
+    // Parse TOML
+    let mut manifest: AgentManifest = match toml::from_str(&manifest_toml) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("Failed to parse agent manifest TOML: {e}");
+            let t = ErrorTranslator::new(lang);
+            return Err(ManifestError {
+                message: t.t("api-error-manifest-invalid-format"),
+                code: Some("invalid_manifest"),
+            });
         }
     };
 
@@ -1685,7 +1691,7 @@ pub struct SaveAsAgentTypeRequest {
         (status = 201, description = "Agent type created from live agent"),
         (status = 400, description = "Malformed agent id, or a template_name outside [A-Za-z0-9_-]{1,64}"),
         (status = 404, description = "Agent not found"),
-        (status = 409, description = "Template name already taken, or it belongs to a different live agent"),
+        (status = 409, description = "The source agent is a hand-spawned agent, the template name is already taken, or it belongs to a different live agent"),
         (status = 422, description = "JSON body present but missing the required 'template_name' field"),
         (status = 500, description = "The agent type could not be rendered or written")
     )
@@ -1700,22 +1706,39 @@ pub async fn save_agent_as_agent_type(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
         }
     };
 
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-            );
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .with_code("agent_not_found")
+                .into_response();
         }
     };
+
+    // A hand-spawned agent is refused for the same reason the delete paths
+    // refuse one (`hand_agent_delete_denied`, `DELETE /api/agents/{id}` and
+    // the bulk delete): the hand lifecycle owns the agent's definition, so
+    // the operator makes the hand's copy reusable, not the live instance's.
+    // It also keeps state that must not be frozen into a reusable type: the
+    // live manifest carries `is_hand = true` (hand activation,
+    // `kernel/hands_lifecycle.rs`), which is persisted into
+    // `agent-types/<name>.toml` and reloaded as `entry.is_hand` on restart —
+    // boot then skips the row and the orphaned-hand GC deletes agents spawned
+    // from the type along with their sessions. The hand's injected
+    // capabilities/skills merge would travel with it too.
+    if entry.is_hand {
+        return ApiErrorResponse::conflict(
+            "Cannot save a hand-spawned agent as an agent type; deactivate or uninstall the owning hand instead.",
+        )
+        .with_code("hand_agent_save_denied")
+        .into_response();
+    }
 
     let template_name = req.template_name.trim().to_string();
 
@@ -1725,6 +1748,13 @@ pub async fn save_agent_as_agent_type(
     // side: a template spawned from later must get a fresh workspace, not
     // point new agents at the SOURCE agent's own workspace directory.
     manifest.workspace = None;
+    // `enabled` is instance-local state like `workspace` above: it gates
+    // whether an agent is spawned on startup, not how one is configured. A
+    // paused source must not save a paused type — every agent spawned from it
+    // would be skipped at boot with nothing in the TOML to explain why.
+    // `manifest_privacy.rs` classifies `enabled` as `LocalState` for the same
+    // reason it classifies `is_hand` that way.
+    manifest.enabled = true;
     // Kernel-owned tags must not travel into the saved type. `spawn` recomputes
     // `is_hand` from `manifest.tags`, and the approval gate auto-approves every
     // tool call for a hand — so a copied `hand:*` tag would silently turn every
@@ -1778,29 +1808,35 @@ pub async fn save_agent_as_agent_type(
                     "description": manifest.description,
                 })),
             )
+                .into_response()
         }
-        Err(librefang_types::agent_type_store::CreateAgentTypeError::InvalidName) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-template-invalid-name")})),
-        ),
-        Err(librefang_types::agent_type_store::CreateAgentTypeError::NameTaken) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": t.t_args("api-error-agent-type-exists", &[("name", &template_name)])
-            })),
-        ),
-        Err(librefang_types::agent_type_store::CreateAgentTypeError::ShadowsLiveAgent) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": t.t_args("api-error-agent-type-name-taken", &[("name", &template_name)])
-            })),
-        ),
+        // Same mapping (and same codes) as the sibling
+        // `post_agent_template_toml` in `routes/agent_templates.rs`, so a
+        // client can tell the two 409s apart instead of seeing one bare
+        // `{"error": ...}` shape for every failure.
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::InvalidName) => {
+            ApiErrorResponse::bad_request(t.t("api-error-template-invalid-name"))
+                .with_code("template_invalid_name")
+                .into_response()
+        }
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::NameTaken) => {
+            ApiErrorResponse::conflict(
+                t.t_args("api-error-agent-type-exists", &[("name", &template_name)]),
+            )
+            .with_code("template_exists")
+            .into_response()
+        }
+        Err(librefang_types::agent_type_store::CreateAgentTypeError::ShadowsLiveAgent) => {
+            ApiErrorResponse::conflict(t.t_args(
+                "api-error-agent-type-name-taken",
+                &[("name", &template_name)],
+            ))
+            .with_code("template_name_taken")
+            .into_response()
+        }
         Err(librefang_types::agent_type_store::CreateAgentTypeError::Io(e)) => {
             tracing::error!("failed to save agent as agent type: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": t.t("api-error-internal")})),
-            )
+            ApiErrorResponse::internal_scrub(e).into_response()
         }
     }
 }

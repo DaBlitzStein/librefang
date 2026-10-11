@@ -740,13 +740,9 @@ pub(super) fn peer_scoped_key(
     }
 }
 
-/// Tag prefixes the kernel owns rather than the operator.
-///
-/// Defined in `librefang_types::agent::SYSTEM_TAG_PREFIXES` so the kernel's
-/// [`merge_agent_tags`] and the API's save-as-agent-type snapshot agree on which
-/// tags are kernel-owned; see that definition for why the set matters.
-///
 /// Merge an incoming tag list over the tags an agent is currently running with.
+///
+/// Kernel-owned tag prefixes — kept out of operator reach in both directions — are defined in `librefang_types::agent::SYSTEM_TAG_PREFIXES`; see that definition for why the set matters.
 ///
 /// System-owned tags are taken from `live` and operator-owned tags from `incoming`, so a caller that submits a whole manifest can freely rewrite the operator half without being able to forge, drop or preserve-by-accident the kernel half.
 /// A submitted system tag is dropped rather than rejected: the round-trip a dashboard performs is GET-manifest / edit-one-field / PUT-manifest, and echoing back the `hand:` tags it was just shown must not fail the write.

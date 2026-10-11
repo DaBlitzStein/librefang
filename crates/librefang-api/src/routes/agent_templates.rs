@@ -976,7 +976,10 @@ fn create_agent_type_from_manifest_versioned(
 ) -> Result<String, CreateAgentTypeError> {
     use librefang_types::agent_type_store::create_agent_type_from_manifest_in;
 
-    let rendered = create_agent_type_from_manifest_in(home_dir, name, manifest)?;
+    // `None`: this funnel is the caller-authoring path (raw TOML from the
+    // operator), with no source agent whose own name it may collide with — the
+    // shadow check then applies unconditionally, as its `snapshot_of` doc says.
+    let rendered = create_agent_type_from_manifest_in(home_dir, name, manifest, None)?;
     let _ = record_template_version(state, name, &rendered, source.as_str());
     Ok(rendered)
 }
