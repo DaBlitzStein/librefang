@@ -65,6 +65,10 @@ const useSetAgentChannelsMock = useSetAgentChannels as unknown as ReturnType<typ
 const usePromptVersionsMock = usePromptVersions as unknown as ReturnType<typeof vi.fn>;
 const useBindMock = useBindPromptVersionToAgent as unknown as ReturnType<typeof vi.fn>;
 
+// The daemon gates both appearance writes at `role >= UserRole::Admin`, so the
+// floor is the whole content of this predicate: a `user` shown these controls
+// collects a 403, and an `admin` denied them is blocked from work the daemon
+// would accept.
 describe("canEditAgentIdentity", () => {
   it("lets an admin and an owner through", () => {
     expect(canEditAgentIdentity("admin")).toBe(true);
