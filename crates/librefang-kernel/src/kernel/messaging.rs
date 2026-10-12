@@ -1387,11 +1387,12 @@ impl LibreFangKernel {
                     "ok",
                 );
 
-                // Push task_completed notification for autonomous (hand) agents
+                // Push task_completed notification for autonomous (hand) agents.
+                // A capped turn (#8556) did not complete its task; it gets the `max_iterations` notification below instead.
                 if let Some(entry) = self.agents.registry.get(agent_id) {
                     let is_autonomous = entry.tags.iter().any(|t| t.starts_with("hand:"))
                         || entry.manifest.autonomous.is_some();
-                    if is_autonomous {
+                    if is_autonomous && !result.hit_iteration_cap {
                         let name = &entry.name;
                         let msg = format!(
                             "Agent \"{}\" completed task (in={}, out={} tokens)",
@@ -1489,7 +1490,9 @@ impl LibreFangKernel {
                 // the cooldown slot if this loop actually suggested a
                 // review AND the agent didn't already evolve a skill
                 // AND the registry isn't frozen AND auto_evolve is on.
+                // A capped turn (#8556) never finished, so its trajectory is not one to distill a skill from.
                 let eligible = result.skill_evolution_suggested
+                    && !result.hit_iteration_cap
                     && !used_evolution_tool
                     && !registry_frozen
                     && entry.manifest.auto_evolve;
