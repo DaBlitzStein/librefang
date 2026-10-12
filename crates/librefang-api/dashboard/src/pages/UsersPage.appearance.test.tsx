@@ -100,14 +100,14 @@ afterEach(() => {
 
 const NAME = "alice";
 
-function renderSection(props: { emoji?: string; hasAvatar?: boolean } = {}) {
+function renderSection(props: { name?: string; emoji?: string; hasAvatar?: boolean } = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   const view = render(
     <QueryClientProvider client={queryClient}>
       <UserAppearanceSection
-        name={NAME}
+        name={props.name ?? NAME}
         emoji={props.emoji}
         hasAvatar={props.hasAvatar}
       />
@@ -152,6 +152,24 @@ describe("hasPicture", () => {
 
     expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
+  });
+});
+
+// The daemon's GET-only `/api/users/me/avatar` shadows `/api/users/{name}/avatar` for a row named `me`, so an upload or removal there would be a 405. The emoji route has no such literal and must stay offered.
+describe("a row named me", () => {
+  it("offers no image controls but keeps the emoji editor", () => {
+    renderSection({ name: "me", hasAvatar: false });
+
+    expect(screen.queryByTestId("user-avatar-file-input")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Upload" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+  });
+
+  it("is the name and not the state that hides them", () => {
+    renderSection({ name: "mel", hasAvatar: false });
+
+    expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();
   });
 });
 

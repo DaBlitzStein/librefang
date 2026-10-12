@@ -71,3 +71,18 @@ export function useEffectivePermissions(
 export function useWhoami(options: QueryOverrides = {}) {
   return useQuery(withOverrides(authzQueries.whoami(), options));
 }
+
+/**
+ * The name to draw the signed-in user's identity under, or `undefined` when there is no person to draw (#8339).
+ *
+ * `undefined` while `whoami` is in flight or failed, and for the synthetic `root` credential — the master key, a trusted loopback caller or a no-auth deployment — which `principal === null` marks and which names no `[[users]]` row. Drawing `root`'s initial would put an "R" on every message for nobody in particular. The exception is a deployment that did give `root` an emoji or a picture: then there is an identity to show, and it is shown.
+ *
+ * `principal` being `undefined` (a daemon older than the field) counts as a person, so an older daemon keeps the behaviour it had.
+ */
+export function whoamiPersonName(
+  me: { name: string; principal?: string | null; emoji?: string; has_avatar?: boolean } | undefined,
+): string | undefined {
+  if (!me?.name) return undefined;
+  if (me.principal !== null || !!me.emoji || me.has_avatar === true) return me.name;
+  return undefined;
+}

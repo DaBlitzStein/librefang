@@ -3819,6 +3819,10 @@ export interface WhoamiResponse {
    *  read `false` as "there is nothing to fetch" and `undefined` as "not told",
    *  never conflating them — the second one must still fetch. */
   has_avatar?: boolean;
+  /** The caller's principal in `kind:uuid` form, or `null` for the synthetic `root` credential — the master API key, a trusted loopback caller, or a no-auth deployment — which names no `[[users]]` row.
+   *
+   *  Read to tell a person from that stand-in: drawing `root`'s initial on every message would be a confident identity for nobody. Optional for the same version-skew reason as `has_avatar`; `undefined` is "not told", never "no row". */
+  principal?: string | null;
 }
 
 /** The calling credential's own resolved identity — `GET /api/authz/whoami`.

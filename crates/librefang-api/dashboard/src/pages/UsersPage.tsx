@@ -53,7 +53,7 @@ import { parseUsersCsv } from "../lib/csvParser";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 
-import { UserAvatar } from "../components/UserAvatar";
+import { Avatar } from "../components/ui/Avatar";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -874,6 +874,9 @@ export function UserAppearanceSection({
   const avatarSrc = useUserAvatarUrl(name, hasAvatar !== false);
   const hasPicture = Boolean(hasAvatar) || Boolean(avatarSrc);
 
+  // A row literally named `me` can be drawn but not given a picture from here. The daemon registers the GET-only `/api/users/me/avatar` ahead of `/api/users/{name}/avatar`, so a POST or DELETE addressed to this row reaches the literal route and comes back 405. The emoji goes through `/identity`, which has no such literal, so it stays editable.
+  const imageWritable = name !== "me";
+
   // Re-seed on the user, not on the stored emoji: the drawer stays mounted
   // while the operator clicks through the list, and keying this on the value
   // would wipe a half-typed emoji the moment an unrelated poll refreshed it.
@@ -1005,11 +1008,12 @@ export function UserAppearanceSection({
       </h4>
       <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
         {/* The preview carries the draft emoji rather than the stored one, so
-            the circle answers before the PATCH does. The image underneath comes
-            from `UserAvatar`, which is the signed-in caller's own — correct
-            here precisely because this section only ever edits the caller. */}
+            the circle answers before the PATCH does. The image is the
+            signed-in caller's own — correct here precisely because this
+            section only ever edits the caller — and it is the same object URL
+            `hasPicture` reads, so the preview and the buttons cannot disagree. */}
         <div className="flex items-center gap-3 pb-2 border-b border-border-subtle">
-          <UserAvatar name={name} emoji={emojiDraft} hasAvatar={hasAvatar} size="lg" />
+          <Avatar src={avatarSrc} emoji={emojiDraft} fallback={name} size="lg" />
           <p className="text-sm font-semibold truncate">{name}</p>
         </div>
         <AppearanceRow label={t("users.identity.emoji", { defaultValue: "Emoji" })}>
@@ -1046,47 +1050,51 @@ export function UserAppearanceSection({
             </button>
           </div>
         </AppearanceRow>
-        <AppearanceRow label={t("users.identity.avatar", { defaultValue: "Avatar image" })}>
-          <div className="flex items-center gap-2 justify-end">
-            <input
-              type="file"
-              ref={fileInputRef}
-              accept={ALLOWED_USER_AVATAR_TYPES.join(",")}
-              onChange={handleFileChange}
-              className="hidden"
-              data-testid="user-avatar-file-input"
-              aria-label={t("users.identity.avatar", { defaultValue: "Avatar image" })}
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploadAvatarMutation.isPending}
-              className="px-3 py-1 rounded-lg text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-            >
-              {uploadAvatarMutation.isPending
-                ? t("common.saving")
-                : hasPicture
-                  ? t("users.identity.avatar_replace", { defaultValue: "Replace" })
-                  : t("users.identity.avatar_upload", { defaultValue: "Upload" })}
-            </button>
-            {hasPicture && (
-              <button
-                type="button"
-                onClick={removeAvatar}
-                disabled={deleteAvatarMutation.isPending}
-                className="px-3 py-1 rounded-lg text-xs font-semibold text-error border border-error/30 hover:bg-error/10 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-              >
-                {t("common.remove")}
-              </button>
-            )}
-          </div>
-        </AppearanceRow>
-        <p className="text-[11px] text-text-dim leading-relaxed">
-          {t("users.identity.avatar_hint", {
-            defaultValue:
-              "PNG, JPEG, GIF or WebP, up to 2 MB. SVG is not accepted. The daemon stores the image as a file and serves it over an authenticated route.",
-          })}
-        </p>
+        {imageWritable && (
+          <>
+            <AppearanceRow label={t("users.identity.avatar", { defaultValue: "Avatar image" })}>
+              <div className="flex items-center gap-2 justify-end">
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  accept={ALLOWED_USER_AVATAR_TYPES.join(",")}
+                  onChange={handleFileChange}
+                  className="hidden"
+                  data-testid="user-avatar-file-input"
+                  aria-label={t("users.identity.avatar", { defaultValue: "Avatar image" })}
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploadAvatarMutation.isPending}
+                  className="px-3 py-1 rounded-lg text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                >
+                  {uploadAvatarMutation.isPending
+                    ? t("common.saving")
+                    : hasPicture
+                      ? t("users.identity.avatar_replace", { defaultValue: "Replace" })
+                      : t("users.identity.avatar_upload", { defaultValue: "Upload" })}
+                </button>
+                {hasPicture && (
+                  <button
+                    type="button"
+                    onClick={removeAvatar}
+                    disabled={deleteAvatarMutation.isPending}
+                    className="px-3 py-1 rounded-lg text-xs font-semibold text-error border border-error/30 hover:bg-error/10 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                  >
+                    {t("common.remove")}
+                  </button>
+                )}
+              </div>
+            </AppearanceRow>
+            <p className="text-[11px] text-text-dim leading-relaxed">
+              {t("users.identity.avatar_hint", {
+                defaultValue:
+                  "PNG, JPEG, GIF or WebP, up to 2 MB. SVG is not accepted. The daemon stores the image as a file and serves it over an authenticated route.",
+              })}
+            </p>
+          </>
+        )}
       </div>
     </section>
   );
