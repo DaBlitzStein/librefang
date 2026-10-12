@@ -22,6 +22,7 @@ use librefang_kernel::auth::UserRole as KernelUserRole;
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::UserId;
 use librefang_types::config::UserConfig;
+use librefang_types::principal::Principal;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing::field::{Field, Visit};
@@ -32,11 +33,10 @@ use tracing_subscriber::Layer;
 /// Kept in sync with `librefang_runtime::tool_runner::dispatch`.
 const TOOL_IDENTITY_TARGET: &str = "librefang::tool_identity";
 
-/// Alice holds the `User` role — the weakest role that may POST to
-/// `/api/agents/{id}/message`, and therefore the role an attacker would hold.
+/// Alice holds the `User` role — the weakest role that may POST to `/api/agents/{id}/message`, and therefore the role an attacker would hold.
 const ALICE_KEY: &str = "alice-dispatch-owner-key";
-/// Agent creation needs `Admin`; Alice deliberately does not have it. The
-/// admin exists only to spawn the agent — the turn under test is Alice's.
+/// Agent creation needs `Admin`; Alice deliberately does not have it.
+/// The admin exists only to spawn the agent — the turn under test is Alice's.
 const ADMIN_KEY: &str = "admin-dispatch-owner-key";
 /// The platform handle the *attacker* supplies in the request body.
 /// Deliberately unrelated to any configured user.
@@ -44,19 +44,38 @@ const SPOOFED_SENDER_ID: &str = "B";
 
 const MASTER_KEY: &str = "dispatch-owner-master-key";
 
-/// Agent manifest granting exactly one tool, so the stub LLM has something
-/// dispatchable to ask for. `file_read` needs no network and no fixture — the
-/// call is expected to fail on a nonexistent path, which is irrelevant here:
-/// the assertion is about the identity carried *into* dispatch, not the result.
+/// Agent manifest granting exactly one tool, so the stub LLM has something dispatchable to ask for.
+/// `file_read` needs no network and no fixture — the call is expected to fail on a nonexistent path, which is irrelevant here: the assertion is about the identity carried *into* dispatch, not the result.
 ///
-/// `author = "Alice"` because `can_access_agent` scopes a non-Admin principal
-/// to the agents they authored — without it Alice's message would 404 before
-/// the turn ever starts.
+/// `author = "Alice"` because `can_access_agent` scopes a non-Admin principal to the agents they authored — without it Alice's message would 404 before the turn ever starts.
 const TEST_MANIFEST: &str = r#"
 name = "dispatch-owner-agent"
 version = "0.1.0"
 description = "Owner-at-dispatch integration test agent"
 author = "Alice"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "You are a test agent."
+
+[capabilities]
+tools = ["file_read"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+"#;
+
+/// The group that owns the unattended agent in the group-principal case.
+const ONCALL_GROUP: &str = "oncall";
+
+/// Same single-tool agent, but owned by a group through the manifest `owner` field, which is how an operator attributes turns that have no human caller (cron fires, triggers, autonomous ticks).
+const GROUP_OWNED_MANIFEST: &str = r#"
+name = "dispatch-group-owner-agent"
+version = "0.1.0"
+description = "Group-owned dispatch identity test agent"
+author = "Admin"
+owner = "group:oncall"
 module = "builtin:chat"
 
 [model]
@@ -76,9 +95,8 @@ memory_write = ["self.*"]
 
 /// Collects the fields of every `librefang::tool_identity` event.
 ///
-/// A field-level visitor rather than a text scrape of the `fmt` layer: the
-/// assertions below compare exact field values, so they must not be sensitive
-/// to formatter configuration or field ordering.
+/// A field-level visitor rather than a text scrape of the `fmt` layer: the assertions below compare exact field values, so they must not be sensitive to formatter configuration or field ordering.
+/// `owner` is recorded through `tracing::field::display`, whose `Debug` rendering is the principal's `Display` form, and `sender_id` arrives through `record_str`, so neither value carries `Option`'s `Debug` wrapping; a field that was `None` at the call site is simply absent.
 #[derive(Clone, Default)]
 struct IdentityCapture(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
 
@@ -108,8 +126,7 @@ impl<S: tracing::Subscriber> Layer<S> for IdentityCapture {
 
 /// Installs the capture layer as the process-wide subscriber exactly once.
 ///
-/// The turn runs on the multi-threaded tokio runtime, so a thread-local
-/// (`set_default`) subscriber would miss events emitted on worker threads.
+/// The turn runs on the multi-threaded tokio runtime, so a thread-local (`set_default`) subscriber would miss events emitted on worker threads.
 fn install_capture() -> IdentityCapture {
     static CAPTURE: OnceLock<IdentityCapture> = OnceLock::new();
     CAPTURE
@@ -123,6 +140,25 @@ fn install_capture() -> IdentityCapture {
         .clone()
 }
 
+/// Serializes the tests in this binary: they share the one global capture, and both drive `file_read`, so records from a concurrently running test would otherwise be indistinguishable from this test's own.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+impl IdentityCapture {
+    /// Number of records captured so far, used as the starting offset for the current test.
+    fn mark(&self) -> usize {
+        self.0.lock().expect("capture lock").len()
+    }
+
+    /// Records for `tool` captured since `mark`.
+    fn since(&self, mark: usize, tool: &str) -> Vec<BTreeMap<String, String>> {
+        self.0.lock().expect("capture lock")[mark..]
+            .iter()
+            .filter(|r| r.get("tool").map(String::as_str) == Some(tool))
+            .cloned()
+            .collect()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -130,7 +166,7 @@ fn install_capture() -> IdentityCapture {
 struct Harness {
     base_url: String,
     state: Arc<AppState>,
-    _llm: wiremock::MockServer,
+    llm: wiremock::MockServer,
     _tmp: tempfile::TempDir,
 }
 
@@ -140,9 +176,8 @@ impl Drop for Harness {
     }
 }
 
-/// Model catalog carrying an `ollama` provider that needs no key and lives at
-/// `base_url`. Without it the message handler's provider-auth gate short-
-/// circuits with 412 before the agent loop — and hence dispatch — is reached.
+/// Model catalog carrying an `ollama` provider that needs no key and lives at `base_url`.
+/// Without it the message handler's provider-auth gate short-circuits with 412 before the agent loop — and hence dispatch — is reached.
 fn ollama_stub_catalog(base_url: &str) -> librefang_testing::CatalogSeed {
     use librefang_types::model_catalog::{AuthStatus, ProviderInfo};
 
@@ -165,17 +200,16 @@ fn ollama_stub_catalog(base_url: &str) -> librefang_testing::CatalogSeed {
     (providers, models)
 }
 
-/// Boots the API with a single authenticated `User`-role principal (Alice) and
-/// a stub LLM whose first reply asks for `file_read` and whose second ends the
-/// turn — exactly one tool dispatch per request.
+/// Boots the API with a single authenticated `User`-role principal (Alice) and a stub LLM whose first reply asks for `file_read` and whose second ends the turn — exactly one tool dispatch per request.
+///
+/// The router is `routes::agents::router()` behind the real auth middleware, not the full `server.rs` composition: the agent and message routes plus authentication are all this test exercises.
 async fn boot() -> Harness {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let llm = MockServer::start().await;
 
-    // First round trip: the model requests a tool. `up_to_n_times(1)` plus the
-    // higher priority makes this the response to the opening call only.
+    // First round trip: the model requests a tool. `up_to_n_times(1)` plus the higher priority makes this the response to the opening call only.
     Mock::given(method("POST"))
         .and(path("/api/chat"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -246,8 +280,7 @@ async fn boot() -> Harness {
                 cfg.default_model.api_key_env = "OLLAMA_API_KEY".to_string();
                 cfg.default_model.base_url = Some(config_uri);
                 // Keep the turn to the two provider round trips above.
-                // Proactive memory would add retrieval / extraction calls that
-                // are orthogonal to identity threading.
+                // Proactive memory would add retrieval / extraction calls that are orthogonal to identity threading.
                 cfg.proactive_memory.enabled = false;
             })
             .with_catalog_seed(ollama_stub_catalog(&uri)),
@@ -288,7 +321,7 @@ async fn boot() -> Harness {
     Harness {
         base_url: format!("http://{addr}"),
         state,
-        _llm: llm,
+        llm,
         _tmp: tmp,
     }
 }
@@ -297,26 +330,12 @@ async fn boot() -> Harness {
 // Acceptance test (#7744)
 // ---------------------------------------------------------------------------
 
-/// `POST /api/agents/{id}/message` with user A's bearer and `"sender_id": "B"`
-/// in the body must reach tool dispatch carrying A, not B.
-///
-/// Both fields end up as A: `owner` from the bearer, and `sender_id` because
-/// `request_sender_context` pins a non-Admin caller to their own identity when
-/// the body asserts one that does not resolve back to them. The body's "B" is
-/// what must not survive — see the module header for why that is the claim, and
-/// why it is not a test that the two fields can be told apart.
-#[tokio::test(flavor = "multi_thread")]
-async fn authenticated_owner_reaches_tool_dispatch_and_body_sender_id_cannot_forge_it() {
-    let capture = install_capture();
-    let h = boot().await;
-    let client = reqwest::Client::new();
-
-    // Agent creation is an Admin action; Alice cannot do it. Irrelevant to what
-    // is under test — the turn below is Alice's.
+/// Spawns `manifest_toml` as the admin and returns the new agent's id.
+async fn spawn_agent(h: &Harness, client: &reqwest::Client, manifest_toml: &str) -> String {
     let spawn = client
         .post(format!("{}/api/agents", h.base_url))
         .header("authorization", format!("Bearer {ADMIN_KEY}"))
-        .json(&serde_json::json!({ "manifest_toml": TEST_MANIFEST }))
+        .json(&serde_json::json!({ "manifest_toml": manifest_toml }))
         .send()
         .await
         .expect("spawn request");
@@ -326,10 +345,41 @@ async fn authenticated_owner_reaches_tool_dispatch_and_body_sender_id_cannot_for
         "agent spawn must succeed before the turn can be driven"
     );
     let spawn_body: serde_json::Value = spawn.json().await.expect("spawn body");
-    let agent_id = spawn_body["agent_id"]
+    spawn_body["agent_id"]
         .as_str()
         .expect("agent_id in spawn body")
-        .to_string();
+        .to_string()
+}
+
+/// Positive control, independent of the identity plumbing: two provider round trips prove the tool actually ran (the opening call returned `tool_calls`; the second carried the tool result).
+/// Without it, a missing identity record could just mean "dispatch was never reached" rather than "the owner was dropped on the way".
+async fn assert_tool_round_trip(h: &Harness) {
+    let llm_calls = h
+        .llm
+        .received_requests()
+        .await
+        .expect("wiremock records requests")
+        .len();
+    assert!(
+        llm_calls >= 2,
+        "expected >= 2 provider round trips (tool request + tool result), got {llm_calls} — the turn never reached tool dispatch, so this test cannot say anything about identity"
+    );
+}
+
+/// `POST /api/agents/{id}/message` with user A's bearer and `"sender_id": "B"` in the body must reach tool dispatch carrying A, not B.
+///
+/// Both fields end up as A: `owner` from the bearer, and `sender_id` because `request_sender_context` pins a non-Admin caller to their own identity when the body asserts one that does not resolve back to them.
+/// The body's "B" is what must not survive — see the module header for why that is the claim, and why it is not a test that the two fields can be told apart.
+#[tokio::test(flavor = "multi_thread")]
+async fn authenticated_owner_reaches_tool_dispatch_and_body_sender_id_cannot_forge_it() {
+    let _serial = SERIAL.lock().await;
+    let capture = install_capture();
+    let h = boot().await;
+    let client = reqwest::Client::new();
+
+    // Agent creation is an Admin action; Alice cannot do it. Irrelevant to what is under test — the turn below is Alice's.
+    let agent_id = spawn_agent(&h, &client, TEST_MANIFEST).await;
+    let mark = capture.mark();
 
     // The attack: Alice's bearer, but a `sender_id` naming somebody else.
     let resp = client
@@ -349,51 +399,71 @@ async fn authenticated_owner_reaches_tool_dispatch_and_body_sender_id_cannot_for
         "the turn must complete against the stub provider — body={body:?}"
     );
 
-    // Positive control, independent of the identity plumbing: two provider
-    // round trips prove the tool actually ran (opening call returned
-    // `tool_calls`; the second carried the tool result). Without this, a
-    // missing identity record below could just mean "dispatch was never
-    // reached" rather than "the owner was dropped on the way".
-    let llm_calls = h
-        ._llm
-        .received_requests()
-        .await
-        .expect("wiremock records requests")
-        .len();
-    assert!(
-        llm_calls >= 2,
-        "expected >= 2 provider round trips (tool request + tool result), got {llm_calls} — \
-         the turn never reached tool dispatch, so this test cannot say anything about identity"
-    );
+    assert_tool_round_trip(&h).await;
 
-    let records = capture.0.lock().expect("capture lock").clone();
-    let file_read: Vec<_> = records
-        .iter()
-        .filter(|r| r.get("tool").map(String::as_str) == Some("file_read"))
-        .collect();
-
+    let file_read = capture.since(mark, "file_read");
     assert!(
         !file_read.is_empty(),
-        "tool dispatch emitted no `{TOOL_IDENTITY_TARGET}` record for `file_read`; \
-         the authenticated owner never reached the dispatcher. captured records: {records:?}"
+        "tool dispatch emitted no `{TOOL_IDENTITY_TARGET}` record for `file_read`; the authenticated owner never reached the dispatcher"
     );
 
-    let expected_owner = format!("Some({})", UserId::from_name("Alice").0);
+    let expected_owner = Principal::user(UserId::from_name("Alice")).to_string();
     for record in &file_read {
         assert_eq!(
             record.get("owner").map(String::as_str),
             Some(expected_owner.as_str()),
-            "dispatch must carry the bearer-authenticated owner (Alice), not the body-supplied \
-             sender_id — record={record:?}"
+            "dispatch must carry the bearer-authenticated owner (Alice) as a `user:` principal, not the body-supplied sender_id — record={record:?}"
         );
-        // sender_id at dispatch is the SenderContext.user_id, which
-        // `request_sender_context` pins to the authenticated caller when a
-        // non-Admin tries to assert a foreign identity. The body's "B" is
-        // correctly overridden to "Alice".
+        // sender_id at dispatch is the SenderContext.user_id, which `request_sender_context` pins to the authenticated caller when a non-Admin tries to assert a foreign identity.
+        // The body's "B" is correctly overridden to "Alice".
         assert_eq!(
             record.get("sender_id").map(String::as_str),
-            Some("Some(\"Alice\")"),
+            Some("Alice"),
             "sender_id must reflect the pinned authenticated identity — record={record:?}"
+        );
+    }
+}
+
+/// An unattended turn — no bearer caller, as for a cron fire or an autonomous tick — on an agent whose manifest declares `owner = "group:oncall"` must reach dispatch carrying that group principal.
+///
+/// This pins the record for the path where an operator most needs it: narrowing the principal to a user id would log a group owner as no owner at all, indistinguishable from a turn with no principal.
+#[tokio::test(flavor = "multi_thread")]
+async fn manifest_group_owner_reaches_tool_dispatch_on_an_unattended_turn() {
+    let _serial = SERIAL.lock().await;
+    let capture = install_capture();
+    let h = boot().await;
+    let client = reqwest::Client::new();
+
+    let agent_id = spawn_agent(&h, &client, GROUP_OWNED_MANIFEST).await;
+    let agent_id: librefang_types::agent::AgentId = agent_id.parse().expect("agent id parses");
+    let mark = capture.mark();
+
+    // `send_message` is the kernel entry point cron, triggers and autonomous ticks use: it carries no authenticated owner, so the manifest `owner` is what resolves.
+    h.state
+        .kernel
+        .send_message(agent_id, "read a file for me")
+        .await
+        .expect("unattended turn completes against the stub provider");
+
+    assert_tool_round_trip(&h).await;
+
+    let file_read = capture.since(mark, "file_read");
+    assert!(
+        !file_read.is_empty(),
+        "tool dispatch emitted no `{TOOL_IDENTITY_TARGET}` record for `file_read` on the unattended turn"
+    );
+
+    let expected_owner = Principal::group_named(ONCALL_GROUP).to_string();
+    for record in &file_read {
+        assert_eq!(
+            record.get("owner").map(String::as_str),
+            Some(expected_owner.as_str()),
+            "dispatch must carry the manifest's group principal, not drop it — record={record:?}"
+        );
+        assert_eq!(
+            record.get("sender_id"),
+            None,
+            "an unattended turn has no platform sender — record={record:?}"
         );
     }
 }
