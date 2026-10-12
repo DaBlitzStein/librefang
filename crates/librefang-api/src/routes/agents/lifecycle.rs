@@ -1,16 +1,36 @@
 use super::*;
 use librefang_types::agent_type_store;
 
-/// Optimistic-concurrency token for the manifest editor (#8424): the SHA-256
-/// of the same pretty-printed TOML `get_agent_manifest_toml` hands the client,
-/// so a `PATCH` carrying `expected_version` fails with `409` when another
-/// writer changed the manifest after the editor was seeded.
+/// Optimistic-concurrency token for the manifest editor (#8424): the SHA-256 of a canonical JSON rendering of the manifest, so a `PATCH` carrying `expected_version` fails with `409` when another writer changed the manifest after the editor was seeded.
+///
+/// The rendering is canonical because `AgentManifest` carries `HashMap` fields (`tools`, `metadata`, `workspaces`) whose iteration order differs between processes and between two maps built from the same content (#3298).
+/// Hashing the TOML text the client sees would hand out a different token for unchanged content after a reload or a re-insert, and the editor would answer a save nobody raced with a spurious `409`.
+/// Every object's keys are sorted explicitly rather than relying on `serde_json::Map` being a `BTreeMap`, because the workspace enables serde_json's `preserve_order` feature transitively.
 fn manifest_version(manifest: &librefang_types::agent::AgentManifest) -> String {
     use sha2::{Digest, Sha256};
 
-    let text = toml::to_string_pretty(manifest).unwrap_or_default();
+    fn canonicalize(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.sort_keys();
+                map.values_mut().for_each(canonicalize);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(canonicalize),
+            _ => {}
+        }
+    }
+
+    let mut value = match serde_json::to_value(manifest) {
+        Ok(value) => value,
+        Err(e) => {
+            // An empty token would match every other failed serialization and silently disable the check, so hash the error text instead: still deterministic, never equal to a real manifest's token.
+            tracing::error!(error = %e, "failed to serialize agent manifest for its version token");
+            serde_json::Value::String(format!("unserializable manifest: {e}"))
+        }
+    };
+    canonicalize(&mut value);
     let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
+    hasher.update(value.to_string().as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
