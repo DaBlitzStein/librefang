@@ -5678,10 +5678,8 @@ fn concurrent_full_and_mcp_manifest_persists_keep_both_registry_updates() {
     kernel.shutdown();
 }
 
-/// `set_agent_mcp_servers` patches the `mcp_servers` line in place instead of
-/// re-serializing the manifest through `persist_full_manifest_at`, so its
-/// history row is recorded on that path alone. Without it the MCP allowlist
-/// would be the one manifest change the History tab never shows.
+/// `set_agent_mcp_servers` patches the `mcp_servers` line in place instead of re-serializing the manifest through `persist_full_manifest_at`, so its history row is recorded on that path alone.
+/// Without it the MCP allowlist would be the one manifest change the History tab never shows.
 #[test]
 fn set_agent_mcp_servers_records_its_own_history_snapshot() {
     let tmp = tempfile::tempdir().unwrap();
@@ -5699,8 +5697,7 @@ fn set_agent_mcp_servers_records_its_own_history_snapshot() {
             None,
         )
         .expect("spawn");
-    // Materialise agent.toml first, so the MCP persist takes the in-place
-    // patch path rather than the missing-file full-serialize fallback.
+    // Materialise agent.toml first, so the MCP persist takes the in-place patch path rather than the missing-file full-serialize fallback.
     kernel.persist_manifest_to_disk(agent_id, "test");
     register_mcp_server(&kernel, "history-server");
 
@@ -16756,11 +16753,9 @@ fn a_failed_suspend_write_records_a_persist_failed_snapshot() {
     kernel.shutdown();
 }
 
-/// `persist_agent_enabled` writes the operator's file with only the `enabled`
-/// line patched. Recording that text verbatim would place the operator's
-/// comments next to the `update` rows' `toml::to_string_pretty` output, so two
-/// neighbouring snapshots would differ on nearly every line when only
-/// `enabled` moved. The recorded snapshot must be the serializer's layout.
+/// `persist_agent_enabled` writes the operator's file with only the `enabled` value patched.
+/// Recording that text verbatim would place the operator's comments next to the `update` rows' `toml::to_string_pretty` output, so two neighbouring snapshots would differ on nearly every line when only `enabled` moved.
+/// The recorded snapshot must be the serializer's layout.
 #[test]
 fn a_suspend_snapshot_is_normalized_to_the_serializer_layout() {
     let tmp = tempfile::tempdir().unwrap();
@@ -16818,8 +16813,11 @@ fn a_suspend_snapshot_is_normalized_to_the_serializer_layout() {
         "the snapshot must use the serializer's canonical layout, not the hand-written file text:\n{}",
         newest.manifest_toml
     );
+    // Parse rather than search for `enabled = false`: the serialized `[skill_workshop]` table carries that exact line too, so a substring match would pass even if the root flag never moved.
+    let snapshot: AgentManifest =
+        toml::from_str(&newest.manifest_toml).expect("suspend snapshot must parse");
     assert!(
-        newest.manifest_toml.contains("enabled = false"),
+        !snapshot.enabled,
         "the normalized snapshot must still carry the toggled value:\n{}",
         newest.manifest_toml
     );
@@ -16918,6 +16916,191 @@ fn restoring_a_suspend_snapshot_keeps_the_agent_enabled() {
     assert!(
         disk_manifest.enabled,
         "the persisted agent.toml must stay enabled:\n{disk}"
+    );
+
+    kernel.shutdown();
+}
+
+/// Suspend and resume patch only the root `enabled` key of `agent.toml` (#8504).
+///
+/// The earlier line-based patch rewrote every line starting with `enabled`, so a suspend wrote `enabled = false` onto every declarative trigger and a resume wrote `enabled = true` into the default-off `[skill_workshop]` table.
+/// Both the file on disk and the history snapshots recorded alongside it carried the flipped flags, and restoring a `resume` row then switched the skill workshop on for the live agent.
+#[test]
+fn suspend_and_resume_leave_nested_enabled_flags_alone() {
+    use librefang_types::agent::ManifestTrigger;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-nested-enabled-8504");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let name = "nested-enabled-agent";
+    let manifest_path = config
+        .effective_agent_workspaces_dir()
+        .join(name)
+        .join("agent.toml");
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: name.to_string(),
+                source_template: None,
+                description: "carries nested enabled flags".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                triggers: vec![ManifestTrigger {
+                    pattern: serde_json::json!({ "task_posted": {} }),
+                    prompt_template: "New task: {{event}}".to_string(),
+                    enabled: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+    kernel.persist_manifest_to_disk(agent_id, "test");
+
+    let assert_nested_flags = |toml_text: &str, root_enabled: bool, what: &str| {
+        let manifest: AgentManifest = toml::from_str(toml_text)
+            .unwrap_or_else(|e| panic!("{what} must parse: {e}\n{toml_text}"));
+        assert_eq!(
+            manifest.enabled, root_enabled,
+            "{what}: root flag\n{toml_text}"
+        );
+        assert!(
+            !manifest.skill_workshop.enabled,
+            "{what}: the default-off skill workshop must stay off\n{toml_text}"
+        );
+        assert_eq!(
+            manifest.triggers.len(),
+            1,
+            "{what}: trigger count\n{toml_text}"
+        );
+        assert!(
+            manifest.triggers[0].enabled,
+            "{what}: the declarative trigger must stay enabled\n{toml_text}"
+        );
+    };
+    let store = librefang_memory::ManifestVersionStore::new(kernel.memory.substrate.pool());
+    let newest = |source: &str| {
+        let versions = store
+            .list_for_agent(&agent_id.to_string(), 10)
+            .expect("history read should succeed");
+        let row = versions.first().expect("a history row").clone();
+        assert_eq!(row.change_source, source, "{versions:?}");
+        row.manifest_toml
+    };
+
+    kernel
+        .suspend_agent(agent_id)
+        .expect("suspend should succeed");
+    assert_nested_flags(
+        &std::fs::read_to_string(&manifest_path).unwrap(),
+        false,
+        "agent.toml after suspend",
+    );
+    assert_nested_flags(&newest("suspend"), false, "suspend snapshot");
+
+    kernel
+        .resume_agent(agent_id)
+        .expect("resume should succeed");
+    assert_nested_flags(
+        &std::fs::read_to_string(&manifest_path).unwrap(),
+        true,
+        "agent.toml after resume",
+    );
+    let resume_snapshot = newest("resume");
+    assert_nested_flags(&resume_snapshot, true, "resume snapshot");
+
+    // Restoring the resume row is the path that used to switch the skill workshop on for the live agent.
+    kernel
+        .restore_manifest_snapshot(
+            agent_id,
+            toml::from_str(&resume_snapshot).expect("resume snapshot parses"),
+            "restore",
+        )
+        .expect("restore should succeed");
+    let live = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent still registered")
+        .manifest
+        .clone();
+    assert!(!live.skill_workshop.enabled);
+    assert!(live.triggers.iter().all(|trigger| trigger.enabled));
+
+    kernel.shutdown();
+}
+
+/// Restoring a snapshot reconciles its declarative `[[triggers]]` into the trigger engine, the same way `reload_agent_from_disk` does.
+/// Without it a trigger in the restored snapshot sat in the manifest but never fired until the next daemon restart.
+#[test]
+fn restoring_a_snapshot_reconciles_its_declarative_triggers() {
+    use librefang_types::agent::ManifestTrigger;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-restore-triggers-8504");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "restore-triggers-agent".to_string(),
+                source_template: None,
+                description: "starts without triggers".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+    assert!(kernel
+        .workflows
+        .triggers
+        .list_agent_triggers(agent_id)
+        .is_empty());
+
+    let mut snapshot = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent registered")
+        .manifest
+        .clone();
+    snapshot.triggers = vec![ManifestTrigger {
+        pattern: serde_json::json!({ "task_posted": {} }),
+        prompt_template: "Restored trigger: {{event}}".to_string(),
+        ..Default::default()
+    }];
+    kernel
+        .restore_manifest_snapshot(agent_id, snapshot, "restore")
+        .expect("restore should succeed");
+
+    let triggers = kernel.workflows.triggers.list_agent_triggers(agent_id);
+    assert_eq!(
+        triggers
+            .iter()
+            .map(|trigger| trigger.prompt_template.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Restored trigger: {{event}}"],
+        "the restored snapshot's trigger must be live after the restore"
     );
 
     kernel.shutdown();
