@@ -1166,6 +1166,7 @@
       "no_channels_configured": "Na tej instancji nie skonfigurowano żadnych kanałów.",
       "channels_saved": "Kanały zaktualizowane",
       "manifest_saved": "Konfiguracja zapisana",
+      "manifest_conflict_merged": "Podczas edycji ten agent został zmieniony gdzie indziej. Tamte zmiany są już w formularzu obok Twoich — sprawdź je i zapisz ponownie.",
       "manifest_load_failed": "Nie udało się wczytać bieżącej konfiguracji.",
       "mcp_pending_title": "Serwery MCP niepodłączone",
       "mcp_pending_desc": "Przyznane w agent.toml, ale brak aktywnego połączenia — nie dostarczają narzędzi. Sprawdź serwer na stronie MCP; uprawnienie aktywuje się po połączeniu."

@@ -1160,6 +1160,7 @@
       "no_channels_configured": "No channels configured on this instance.",
       "channels_saved": "Channels updated",
       "manifest_saved": "Configuration saved",
+      "manifest_conflict_merged": "This agent was changed elsewhere while you were editing. Their changes are now in the form alongside yours — review and save again.",
       "manifest_load_failed": "Failed to load the current configuration.",
       "mcp_pending_title": "MCP servers not connected",
       "mcp_pending_desc": "Granted in agent.toml but no live connection, so they contribute no tools. Check the server on the MCP page; the grant activates as soon as it connects."

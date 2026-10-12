@@ -8,6 +8,7 @@ import {
   type AgentDetail,
   type AgentIdentity,
   type AgentItem,
+  type AgentManifestSnapshot,
   type AgentProvenance,
   type CloneAgentResult,
   type ToolDefinition,
@@ -83,8 +84,8 @@ import {
   type ManifestFormState,
 } from "../lib/agentManifest";
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
-import { fetchManifestVersion } from "../lib/manifestVersion";
-import { agentKeys } from "../lib/queries/keys";
+import { fetchManifestSnapshot, rebaseManifestEdits } from "../lib/manifestVersion";
+import { ApiError } from "../lib/http/errors";
 import {
   agentQueries,
   useAgentEvents,
@@ -847,6 +848,17 @@ export function AgentsPage() {
   // save so a manifest that changed in the meantime is refused with 409
   // instead of silently overwritten.
   const [manifestEditorVersion, setManifestEditorVersion] = useState<string | null>(null);
+  // The parse the form was seeded from or last rebased onto, tagged with its agent (#8516).
+  // `refreshManifestVersion` three-way merges a fresh read against it, so a new token is only ever adopted together with the content it describes.
+  // `parsed` is null when the seed did not parse: the form is withheld then, and there is nothing to merge into.
+  const manifestEditorBaseRef = useRef<{
+    agentId: string;
+    parsed: { form: ManifestFormState; extras: ManifestExtras } | null;
+  } | null>(null);
+  // Mirrors `manifestEditorVersion` for async callers, whose closures hold the render-time value.
+  const manifestEditorVersionRef = useRef<string | null>(null);
+  // Orders overlapping refreshes: a read that started before one already applied must not roll the form back to older content.
+  const manifestRefreshSeqRef = useRef({ started: 0, applied: 0 });
   // The config tab is the manifest editor's only surface, so editing is live
   // exactly while that tab is selected. Every query the form needs hangs off
   // this one condition.
@@ -1072,21 +1084,44 @@ export function AgentsPage() {
     return manifestEditorVersion ?? undefined;
   }
 
-  /** Re-read the manifest's ETag after a write the form did not make (#8424).
+  /** Re-read the manifest after a write the form did not make, and rebase the form onto it (#8424, #8516).
    *
-   * The grant panels and their modals write through their own endpoints, so
-   * the token the form was seeded with no longer describes the server's
-   * manifest. Refreshing it keeps the next form save from failing with 409 on
-   * a write the user did make. `fetchManifestVersion` forces the read past the
-   * query client's 30 s staleTime — the plain `fetchQuery` this used to be
-   * returned the cached snapshot and never moved the token. */
-  async function refreshManifestVersion(agentId: string) {
-    if (!manifestEditorLive || manifestEditorAgentId !== agentId) return;
+   * The grant panels and their modals write through their own endpoints, and a 409 means some other writer saved; either way the token the form holds no longer describes the server's manifest.
+   * Adopting only the new token would let the next form save write the form's stale copy back over that change under a token the server accepts — the lost update the token exists to prevent.
+   * So the fresh read is three-way merged into the form: fields the operator has not edited take the server's value, edited ones keep the edit, and only then does the token move.
+   * `fetchManifestSnapshot` forces the read past the query client's 30 s staleTime.
+   *
+   * Resolves to the token the form now holds, so a caller that chains a second write can send it without waiting for a re-render. */
+  async function refreshManifestVersion(agentId: string): Promise<string | undefined> {
+    if (!manifestEditorLive || manifestEditorAgentId !== agentId) return undefined;
+    const seq = ++manifestRefreshSeqRef.current.started;
+    let snapshot: AgentManifestSnapshot;
     try {
-      setManifestEditorVersion(await fetchManifestVersion(qc, agentId));
+      snapshot = await fetchManifestSnapshot(qc, agentId);
     } catch {
       // Keep the old token; the next save surfaces the conflict.
+      return manifestEditorVersionRef.current ?? undefined;
     }
+    const base = manifestEditorBaseRef.current;
+    // The selection moved to another agent while the read was in flight.
+    if (!base || base.agentId !== agentId) return undefined;
+    // A read that started later has already been applied; this one is older content.
+    if (seq < manifestRefreshSeqRef.current.applied) {
+      return manifestEditorVersionRef.current ?? undefined;
+    }
+    manifestRefreshSeqRef.current.applied = seq;
+    if (base.parsed) {
+      const fresh = parseManifestToml(snapshot.manifest_toml);
+      // An unparseable fresh read cannot be merged: keep the old token so the next save is refused rather than written over content the form never saw.
+      if (!fresh.ok) return manifestEditorVersionRef.current ?? undefined;
+      const seeded = base.parsed;
+      manifestEditorBaseRef.current = { agentId, parsed: { form: fresh.form, extras: fresh.extras } };
+      setManifestEditorFormState((mine) => rebaseManifestEdits(seeded.form, mine, fresh.form));
+      setManifestEditorExtras((mine) => rebaseManifestEdits(seeded.extras, mine, fresh.extras));
+    }
+    manifestEditorVersionRef.current = snapshot.version;
+    setManifestEditorVersion(snapshot.version);
+    return snapshot.version ?? undefined;
   }
 
   function closeToolsEditor() {
@@ -1533,6 +1568,7 @@ export function AgentsPage() {
   // once, they would keep rendering them.
   useEffect(() => {
     setManifestEditorSeededFor(null);
+    manifestEditorBaseRef.current = null;
     setManifestEditorErrors(new Set());
     setManifestEditorParseError(null);
     setManifestEditorFormState(emptyManifestForm());
@@ -1554,7 +1590,12 @@ export function AgentsPage() {
     if (!agentManifestQuery.data) return;
     const snapshot = agentManifestQuery.data;
     const parsed = parseManifestToml(snapshot.manifest_toml);
+    manifestEditorVersionRef.current = snapshot.version;
     setManifestEditorVersion(snapshot.version);
+    manifestEditorBaseRef.current = {
+      agentId: manifestEditorAgentId,
+      parsed: parsed.ok ? { form: parsed.form, extras: parsed.extras } : null,
+    };
     if (parsed.ok) {
       setManifestEditorFormState(parsed.form);
       setManifestEditorExtras(parsed.extras);
@@ -1632,12 +1673,18 @@ export function AgentsPage() {
           await refreshManifestVersion(detailAgent.id);
         },
         onError: (e: Error) => {
-          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error");
-          // A 409 means the token is stale (another writer saved after the
-          // seed). Refreshing it here is what makes "Save" again after the
-          // conflict actually work instead of failing forever on the same
-          // old ETag (#8424).
-          qc.invalidateQueries({ queryKey: agentKeys.manifest(detailAgent.id) });
+          if (e instanceof ApiError && e.status === 409) {
+            // Another writer saved after the seed. The refresh rebases the form onto their manifest — fields this form did not edit take their values, edited ones keep the edit — so "Save" again applies the operator's change without reverting theirs (#8516).
+            addToast(
+              t("agents.detail.manifest_conflict_merged", {
+                defaultValue:
+                  "This agent was changed elsewhere while you were editing. Their changes are now in the form alongside yours — review and save again.",
+              }),
+              "error",
+            );
+          } else {
+            addToast(e.message || t("common.error", { defaultValue: "Error" }), "error");
+          }
           void refreshManifestVersion(detailAgent.id);
         },
       },
@@ -2836,79 +2883,73 @@ export function AgentsPage() {
       });
     };
 
-    const handleSave = () => {
+    const handleSave = async () => {
       if (!agent.id) return;
       const agentId = agent.id;
+      // The token each write carries. Both PUTs rotate the manifest's ETag, so when both halves are dirty the second must carry the token the first one produced — sending the same token twice made the MCP half answer 409 every time, though nobody else had written anything (#8516).
+      let expectedVersion = manifestVersionFor(agentId);
       if (isBuiltinDirty) {
-        updateToolsMutation.mutate(
-          {
+        try {
+          await updateToolsMutation.mutateAsync({
             agentId,
             payload: {
               capabilities_tools: draft,
               tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
               tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
             },
-            expectedVersion: manifestVersionFor(agentId),
-          },
-          {
-            onSuccess: () => {
-              addToast(t("agents.detail.tools_saved", { defaultValue: "Saved to agent.toml" }), "success");
-              setToolsDraft(null);
-              setExpandedToolGroup(null);
-              // The form owns the same grant keys: adopt the panel's write so
-              // the next form save cannot re-emit the pre-panel lists (#8424).
-              setManifestEditorFormState((prev) => ({
-                ...prev,
-                capabilities: { ...prev.capabilities, tools: draft },
-                tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
-                tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
-              }));
-              void refreshManifestVersion(agentId);
-            },
-            onError: (e) => {
-              // See the skills panel: a 409 must not pin the form to a token
-              // the server already superseded (#8424).
-              void refreshManifestVersion(agentId);
-              addToast(
-                toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })),
-                "error",
-              );
-            },
-          },
-        );
+            expectedVersion,
+          });
+        } catch (e) {
+          // See the skills panel: a 409 must not pin the form to a token the server already superseded (#8424).
+          // The MCP half is not attempted: its draft is kept, and the retry saves both.
+          void refreshManifestVersion(agentId);
+          addToast(
+            toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })),
+            "error",
+          );
+          return;
+        }
+        addToast(t("agents.detail.tools_saved", { defaultValue: "Saved to agent.toml" }), "success");
+        setToolsDraft(null);
+        setExpandedToolGroup(null);
+        // The form owns the same grant keys: adopt the panel's write so the next form save cannot re-emit the pre-panel lists (#8424).
+        setManifestEditorFormState((prev) => ({
+          ...prev,
+          capabilities: { ...prev.capabilities, tools: draft },
+          tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
+          tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
+        }));
+        // Awaited, not fired: its result is the token the MCP half below must send.
+        expectedVersion = await refreshManifestVersion(agentId);
       }
       if (isMcpDirty) {
-        setAgentMcpServersMutation.mutate(
-          {
+        try {
+          await setAgentMcpServersMutation.mutateAsync({
             agentId,
             mcpServers: mcpDraftArr,
-            expectedVersion: manifestVersionFor(agentId),
-          },
-          {
-            onSuccess: async () => {
-              await refreshDetailAgent(agentId, agent.is_hand);
-              addToast(
-                t("agents.detail.tools_mcp_saved", { defaultValue: "MCP servers updated" }),
-                "success",
-              );
-              setMcpServersDraft(null);
-              setExpandedToolGroup(null);
-              // Same reconciliation as the builtin half (#8424).
-              setManifestEditorFormState((prev) => ({ ...prev, mcp_servers: mcpDraftArr }));
-              void refreshManifestVersion(agentId);
-            },
-            onError: (e) => {
-              void refreshManifestVersion(agentId);
-              addToast(
-                toastErr(
-                  e,
-                  t("agents.detail.tools_mcp_save_failed", { defaultValue: "Failed to update MCP servers" }),
-                ),
-                "error",
-              );
-            },
-          },
+            expectedVersion,
+          });
+        } catch (e) {
+          void refreshManifestVersion(agentId);
+          addToast(
+            toastErr(
+              e,
+              t("agents.detail.tools_mcp_save_failed", { defaultValue: "Failed to update MCP servers" }),
+            ),
+            "error",
+          );
+          return;
+        }
+        await refreshDetailAgent(agentId, agent.is_hand);
+        addToast(
+          t("agents.detail.tools_mcp_saved", { defaultValue: "MCP servers updated" }),
+          "success",
         );
+        setMcpServersDraft(null);
+        setExpandedToolGroup(null);
+        // Same reconciliation as the builtin half (#8424).
+        setManifestEditorFormState((prev) => ({ ...prev, mcp_servers: mcpDraftArr }));
+        void refreshManifestVersion(agentId);
       }
     };
 

@@ -1160,6 +1160,7 @@
       "no_channels_configured": "此实例上未配置任何频道。",
       "channels_saved": "频道已更新",
       "manifest_saved": "配置已保存",
+      "manifest_conflict_merged": "编辑期间此智能体已在别处被修改。对方的改动已与你的改动一并合入表单——请检查后再次保存。",
       "manifest_load_failed": "加载当前配置失败。",
       "mcp_pending_title": "MCP 服务器未连接",
       "mcp_pending_desc": "在 agent.toml 中已授权但无活跃连接，因此不提供工具。请在 MCP 页面检查服务器；授权将在连接后激活。"

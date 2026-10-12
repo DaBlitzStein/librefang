@@ -503,4 +503,20 @@ describe("grant panels reconcile with the manifest form (#8424)", () => {
   it("adopts the auto-evolve toggle into the form's top-level extras", () => {
     expect(source).toContain("adoptTopLevelExtras(prev, { auto_evolve: !autoEvolve })");
   });
+
+  // #8516: a fresh token is only adopted together with the content it describes.
+  // Behavioural coverage of the merge lives in manifestVersion.test.tsx ("rebaseManifestEdits"); this pins the page routing every token refresh through it.
+  it("rebases the form onto the fresh read whenever it adopts a new token", () => {
+    expect(source).toContain("rebaseManifestEdits(seeded.form, mine, fresh.form)");
+    expect(source).toContain("rebaseManifestEdits(seeded.extras, mine, fresh.extras)");
+    // The 409 handler no longer just drops the cached read and moves the token.
+    expect(source).not.toContain("qc.invalidateQueries({ queryKey: agentKeys.manifest(detailAgent.id) })");
+  });
+
+  // #8516: both PUTs rotate the ETag, so the MCP half must carry the token the tools half produced.
+  it("sends the MCP write with the token the tools write produced", () => {
+    expect(source).toContain("await updateToolsMutation.mutateAsync(");
+    expect(source).toContain("expectedVersion = await refreshManifestVersion(agentId);");
+    expect(source).toContain("await setAgentMcpServersMutation.mutateAsync(");
+  });
 });
