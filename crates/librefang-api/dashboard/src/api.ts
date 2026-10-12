@@ -1619,8 +1619,7 @@ export interface ManifestVersionEntry {
   agent_name: string;
   timestamp: string;
   manifest_toml: string;
-  // The column is free text on the server, so a producer this list does not
-  // know yet still type-checks and renders verbatim.
+  // The column is free text on the server, so a producer this list does not know yet still type-checks and renders verbatim.
   change_source: string;
 }
 

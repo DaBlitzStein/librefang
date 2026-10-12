@@ -255,10 +255,8 @@ export function usePatchAgent() {
 /**
  * Restore an agent's manifest to a stored version-history snapshot.
  *
- * A restore replaces the whole manifest, so it can move any field the detail
- * payload or an allowlist tab renders. `agentKeys.detail(agentId)` is
- * invalidated first: the history key is nested under it, so the just-recorded
- * `restore` snapshot shows up through the same invalidation.
+ * A restore replaces the whole manifest, so it can move any field the detail payload or an allowlist tab renders.
+ * `agentKeys.detail(agentId)` is invalidated first: the history key is nested under it, so the just-recorded `restore` snapshot shows up through the same invalidation.
  */
 export function useRestoreAgentManifestVersion() {
   const qc = useQueryClient();

@@ -1,6 +1,9 @@
 //! SQLite-backed agent manifest version history.
 //!
-//! Every time an agent's manifest is persisted to `agent.toml` the full TOML snapshot is recorded here so operators can see what changed over time and restore a prior configuration from the dashboard.
+//! Every time the kernel persists an agent's manifest to `agent.toml` — the API and dashboard edits, suspend/resume, provisioning and restores — the full TOML snapshot is recorded here so operators can see what changed over time and restore a prior configuration from the dashboard.
+//!
+//! Two writes are deliberately not covered: spawn records no initial version, and a hand edit of `agent.toml` picked up by `reload_agent_from_disk` is applied without a snapshot, because the kernel did not write it.
+//! An agent's history therefore starts at its first kernel-side config change.
 //!
 //! Retention is per-agent, capped at [`MAX_VERSIONS_PER_AGENT`] most recent snapshots.
 //! Trimmed on insert inside the same transaction.
@@ -280,8 +283,7 @@ mod tests {
     #[test]
     fn dedup_read_failure_is_reported_as_a_read_failure() {
         let store = ManifestVersionStore::new(test_pool());
-        // Drop the table out from under the store to force the SELECT to
-        // fail with something other than "no rows".
+        // Drop the table out from under the store to force the SELECT to fail with something other than "no rows".
         store
             .pool
             .get()

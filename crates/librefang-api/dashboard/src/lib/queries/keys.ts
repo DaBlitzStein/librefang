@@ -92,11 +92,8 @@ export const agentKeys = {
   // configured on this instance".
   channels: (agentId: string) =>
     [...agentKeys.all, "channels", agentId] as const,
-  // Manifest version history (#8041) — nested under `detail(agentId)`, not a
-  // sibling of it: every control-plane write that records a snapshot already
-  // invalidates the agent's detail, so the History tab refreshes itself. As a
-  // sibling it would need each mutation to remember a second, explicit
-  // invalidation and would sit stale after the very edit that added a row.
+  // Manifest version history (#8041) — nested under `detail(agentId)`, not a sibling of it: every control-plane write that records a snapshot already invalidates the agent's detail, so the History tab refreshes itself.
+  // As a sibling it would need each mutation to remember a second, explicit invalidation and would sit stale after the very edit that added a row.
   manifestHistory: (agentId: string) =>
     [...agentKeys.detail(agentId), "manifestHistory"] as const,
   // The avatar image itself (#8339), cached as a Blob because
