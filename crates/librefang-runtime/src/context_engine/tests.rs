@@ -996,6 +996,7 @@ async fn test_default_engine_compact_honours_reasoning_echo_policy() {
                 usage: TokenUsage::default(),
                 actual_provider: None,
                 actual_model: None,
+                text_synthesized_from_thinking: false,
             })
         }
     }
