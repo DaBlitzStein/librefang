@@ -2095,6 +2095,20 @@ pub async fn execute_tool_with_sender_account(
     }
 
     debug!(tool_name, "Executing tool");
+
+    // #7744: structured record of who a tool call acts for, emitted once per dispatch.
+    // `owner` is the full resolved principal in its canonical `kind:uuid` form: the bearer-authenticated user when there is one, otherwise the manifest `owner`, otherwise `config.toml: default_owner`, any of which may be a `group:` principal, so it must not be narrowed to a user id.
+    // A field that is absent means there was no such identity on the turn.
+    // The audit log does not carry this attribution: a successful turn writes `AuditAction::AgentMessage` with `user_id: None`, and `AuditAction::ToolInvoke` is never written on the agent-loop path.
+    // The level is `debug` because the record fires on every tool call; an operator who needs it can raise the `librefang::tool_identity` target on the hot log filter without a restart.
+    debug!(
+        target: "librefang::tool_identity",
+        tool = tool_name,
+        owner = acting_principal.map(tracing::field::display),
+        sender_id = sender_id,
+        "tool dispatch identity"
+    );
+
     // `parsed_session_id` is computed once at the top of this fn so
     // both the deferred-approval payload (v36 H1 fix) and this
     // ToolExecContext below see the same SessionId.
