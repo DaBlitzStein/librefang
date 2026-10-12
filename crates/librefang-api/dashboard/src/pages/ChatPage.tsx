@@ -1421,8 +1421,7 @@ interface MessageBubbleProps {
    *  Primitives for the reason the agent's are: this component is memoised. */
   userName?: string;
   userEmoji?: string;
-  /** The user's picture as an object URL, resolved once by `ChatPage` for the
-   *  whole transcript — the same arrangement as `agentAvatarSrc`. */
+  /** The user's picture as an object URL, resolved once by `ChatPage` for the whole transcript — the same arrangement as `agentAvatarSrc`. */
   userAvatarSrc?: string;
   onCopy?: (messageId: string, content: string) => void;
   copied?: boolean;
@@ -1513,12 +1512,7 @@ export const MessageBubble = memo(function MessageBubble({ message, usageFooter,
       <div className={`flex flex-col min-w-0 w-fit max-w-[90%] sm:max-w-[min(75%,70ch)] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
-          {/* Both sides are real. The user's keeps the generic person icon
-              when there is nobody to name — `whoami` still in flight, failed,
-              or answering with the synthetic `root` that stands in for no user
-              at all; otherwise it draws their image, then their emoji, then
-              their initials. Both sides take an object URL that `ChatPage`
-              resolved once and handed to every bubble. */}
+          {/* Both sides are real. The user's keeps the generic person icon when there is nobody to name — `whoami` still in flight, failed, or answering with the synthetic `root` that stands in for no user at all; otherwise it draws their image, then their emoji, then their initials. Both sides take an object URL that `ChatPage` resolved once and handed to every bubble. */}
           {isUser ? (
             userName ? (
               <Avatar

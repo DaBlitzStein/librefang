@@ -1007,11 +1007,7 @@ export function UserAppearanceSection({
         {t("users.identity.title", { defaultValue: "Appearance" })}
       </h4>
       <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
-        {/* The preview carries the draft emoji rather than the stored one, so
-            the circle answers before the PATCH does. The image is the
-            signed-in caller's own — correct here precisely because this
-            section only ever edits the caller — and it is the same object URL
-            `hasPicture` reads, so the preview and the buttons cannot disagree. */}
+        {/* The preview carries the draft emoji rather than the stored one, so the circle answers before the PATCH does. The image is the signed-in caller's own — correct here precisely because this section only ever edits the caller — and it is the same object URL `hasPicture` reads, so the preview and the buttons cannot disagree. */}
         <div className="flex items-center gap-3 pb-2 border-b border-border-subtle">
           <Avatar src={avatarSrc} emoji={emojiDraft} fallback={name} size="lg" />
           <p className="text-sm font-semibold truncate">{name}</p>
