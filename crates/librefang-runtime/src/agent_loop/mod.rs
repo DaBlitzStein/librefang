@@ -61,7 +61,7 @@ pub use self::types::{AgentLoopResult, ExperimentContext, LoopOptions, LoopPhase
 
 use self::end_turn::{
     build_silent_agent_loop_result, classify_end_turn_retry, finalize_end_turn_text,
-    finalize_successful_end_turn, gated_proactive_memory_for_memorize,
+    finalize_iteration_cap_text, finalize_successful_end_turn, gated_proactive_memory_for_memorize,
     gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, session_recall_scope,
     EndTurnRetry, EndTurnRetryContext, FinalizeEndTurnContext, FinalizeEndTurnResultData,
 };
@@ -2265,23 +2265,10 @@ async fn run_agent_loop_inner(
         }
     }
 
-    // The iteration budget is exhausted. Rather than failing with
-    // `MaxIterationsExceeded` — which reaches the kernel's Err arm, alerts
-    // operators only, and leaves the user with silence — deliver the best
-    // text we have: text accumulated from intermediate tool_use iterations,
-    // or the canned guard `finalize_end_turn_text` falls back to. The
-    // `hit_iteration_cap` flag lets the kernel surface an operator
-    // notification while the user still receives the partial answer (#8556).
-    let text = finalize_end_turn_text(
-        String::new(),
-        any_tools_executed,
-        &manifest.name,
-        max_iterations,
-        &total_usage,
-        messages.len(),
-        "Max iterations reached — guard activated",
-        &accumulated_text,
-    );
+    // The iteration budget is exhausted.
+    // Rather than failing with `MaxIterationsExceeded` — which reaches the kernel's Err arm, alerts operators only, and leaves the user with silence — deliver the prose accumulated from intermediate tool_use iterations, marked as cut off.
+    // The `hit_iteration_cap` flag lets the kernel surface an operator notification while the user still receives the partial answer (#8556).
+    let (text, cap_notice) = finalize_iteration_cap_text(&accumulated_text, max_iterations);
     warn!(
         agent = %manifest.name,
         iterations = max_iterations,
@@ -2289,16 +2276,9 @@ async fn run_agent_loop_inner(
         "Max iterations reached — delivering best-so-far response"
     );
 
-    // #8556 review P6: the accumulated prose was already committed to the
-    // session by each tool-use turn's `StagedToolUseTurn::commit` — that
-    // assistant message carries the same text. Re-pushing it here would
-    // duplicate it on reload. Only when nothing carried the final text (the
-    // tool-only case, where `finalize_end_turn_text` returns the canned
-    // guard) does the cap exit need to push the turn's assistant message.
-    let prose_already_committed = !accumulated_text.trim().is_empty();
-    if !prose_already_committed {
-        session.push_message(Message::assistant(&text));
-    }
+    // #8556 review P6: the accumulated prose was already committed to the session by each tool-use turn's `StagedToolUseTurn::commit`, so re-pushing it here would duplicate it on reload.
+    // Only the cut-off notice is new; persist it as the turn's closing assistant message so a reload, and the model on the next turn, both see that this turn did not finish.
+    session.push_message(Message::assistant(&cap_notice));
 
     // Persist. Fork and incognito turns skip — both are ephemeral and must
     // not pollute canonical session history.
@@ -2315,7 +2295,9 @@ async fn run_agent_loop_inner(
         agent_id: agent_id_str.as_str(),
         event: librefang_types::agent::HookEvent::AgentLoopEnd,
         data: serde_json::json!({
-            "reason": "max_iterations_reached_with_delivery",
+            // Kept as the pre-#8556 value so hook scripts filtering on it still match; `delivered` says the partial response now reaches the user.
+            "reason": "max_iterations_exceeded",
+            "delivered": true,
             "iterations": max_iterations,
             "is_fork": opts.is_fork,
             "response_length": text.len(),
@@ -2337,7 +2319,8 @@ async fn run_agent_loop_inner(
         cost_usd: None,
         silent: false,
         directives: Default::default(),
-        skill_evolution_suggested: decision_traces.len() >= 5,
+        // A capped turn never finished, so it must not seed a background skill review from its trajectory (#8556).
+        skill_evolution_suggested: false,
         decision_traces,
         memories_saved,
         memories_used,

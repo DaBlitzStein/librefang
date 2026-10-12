@@ -171,6 +171,29 @@ pub(super) fn classify_end_turn_retry(ctx: EndTurnRetryContext<'_>) -> Option<En
     None
 }
 
+/// What a turn that exhausted its iteration budget delivers (#8556).
+///
+/// Returns `(response, notice)`.
+/// `notice` says the turn was cut off, and `response` is the prose the turn produced before the cap with that notice appended, or the notice alone when the turn only ran tools.
+/// The canned end-turn guard (`[Task completed — …]`) is deliberately not reused: a capped turn did not complete, and every consumer of the response (the user, cron delivery, channel bridges) must be able to tell.
+pub(super) fn finalize_iteration_cap_text(
+    accumulated_text: &str,
+    max_iterations: u32,
+) -> (String, String) {
+    let partial = accumulated_text.trim_end();
+    if partial.trim().is_empty() {
+        let notice = format!(
+            "[Stopped after reaching the iteration limit ({max_iterations}) before finishing — the agent ran tools but did not produce an answer.]"
+        );
+        (notice.clone(), notice)
+    } else {
+        let notice = format!(
+            "[Stopped after reaching the iteration limit ({max_iterations}) before finishing — the response above may be incomplete.]"
+        );
+        (format!("{partial}\n\n{notice}"), notice)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finalize_end_turn_text(
     text: String,

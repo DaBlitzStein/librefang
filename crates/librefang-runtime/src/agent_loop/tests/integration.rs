@@ -3513,11 +3513,19 @@ async fn iteration_cap_exhaustion_delivers_accumulated_text() {
         prose_copies, 2,
         "cap exit must not duplicate already-committed prose; got {prose_copies} copies"
     );
-    assert_eq!(
-        session.messages.last().map(|m| m.role),
-        Some(Role::User),
-        "no extra assistant message should be appended after the cap exit"
+
+    // The partial answer must say it was cut off rather than read as a finished one.
+    let notice = "[Stopped after reaching the iteration limit (2) before finishing — the response above may be incomplete.]";
+    assert!(
+        result.response.ends_with(notice),
+        "capped response must carry the truncation notice, got {:?}",
+        result.response
     );
+    assert!(!result.response.contains("Task completed"));
+    // Only the notice is appended to the session, as the turn's closing assistant message.
+    let last = session.messages.last().expect("session has messages");
+    assert_eq!(last.role, Role::Assistant);
+    assert_eq!(last.content.text_content(), notice);
 }
 
 /// Tool-only driver: every iteration emits a tool call with no prose, so
@@ -3610,16 +3618,188 @@ async fn streaming_iteration_cap_tool_only_emits_guard_text_delta() {
             deltas.push_str(&text);
         }
     }
-    assert!(
-        deltas.contains("Task completed"),
-        "streaming cap exit must emit the guard text as a TextDelta; got {deltas:?}"
+    let notice = "[Stopped after reaching the iteration limit (2) before finishing — the agent ran tools but did not produce an answer.]";
+    assert_eq!(
+        deltas, notice,
+        "streaming cap exit must emit the cut-off notice as a TextDelta, not a completion guard"
     );
+    assert_eq!(result.response, notice);
     // Tool-only output means nothing was committed before the cap, so the
     // guard IS the turn's assistant message.
     assert_eq!(
         session.messages.last().map(|m| m.content.text_content()),
         Some(result.response.clone()),
         "tool-only cap exit must push the guard as the assistant message"
+    );
+}
+
+/// #8556: when prose was already streamed, the cap exit emits only the cut-off notice, so the client sees the prose once followed by the notice.
+#[tokio::test]
+async fn streaming_iteration_cap_with_prose_appends_notice_delta() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysToolUseWithTextDriver);
+    let (tx, mut rx) = mpsc::channel(256);
+    let opts = LoopOptions {
+        max_iterations: Some(2),
+        ..LoopOptions::default()
+    };
+
+    let result = run_agent_loop_streaming(
+        &manifest,
+        "Please send the report",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None, // kernel
+        tx,
+        None, // skill_registry
+        None, // mcp_connections
+        None, // web_ctx
+        None, // browser_ctx
+        None, // embedding_driver
+        None, // workspace_root
+        None, // on_phase
+        None, // media_engine
+        None, // media_drivers
+        None, // tts_engine
+        None, // docker_config
+        None, // hooks
+        None, // context_window_tokens
+        None, // process_manager
+        None, // checkpoint_manager
+        None, // process_registry
+        None, // user_content_blocks
+        None, // proactive_memory
+        None, // context_engine
+        None, // pending_messages
+        &opts,
+    )
+    .await
+    .expect("streaming cap exhaustion must deliver, not fail");
+
+    assert!(result.hit_iteration_cap);
+    let notice = "[Stopped after reaching the iteration limit (2) before finishing — the response above may be incomplete.]";
+    assert!(result.response.ends_with(notice));
+
+    let mut deltas = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let StreamEvent::TextDelta { text } = event {
+            deltas.push(text);
+        }
+    }
+    assert_eq!(
+        deltas.last().map(String::as_str),
+        Some(format!("\n\n{notice}").as_str()),
+        "the cap exit must stream the notice after the already-streamed prose; got {deltas:?}"
+    );
+    assert_eq!(
+        deltas.iter().filter(|d| d.contains(notice)).count(),
+        1,
+        "the notice must be streamed exactly once"
+    );
+}
+
+/// Every iteration emits three tool calls, so two capped iterations record six decision traces — over the threshold at which a finished turn suggests a skill review.
+struct ThreeToolCallsPerTurnDriver {
+    call_count: AtomicU32,
+}
+
+#[async_trait]
+impl LlmDriver for ThreeToolCallsPerTurnDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let call = self.call_count.fetch_add(1, Ordering::Relaxed);
+        let calls: Vec<ToolCall> = (0..3)
+            .map(|i| ToolCall {
+                id: format!("tool_{call}_{i}"),
+                // A known tool called without its `path` argument fails softly, so the batch keeps executing instead of breaking on a hard error.
+                name: "file_read".to_string(),
+                // Distinct inputs so the loop guard does not block the calls as repeats.
+                input: serde_json::json!({ "call": call, "i": i }),
+            })
+            .collect();
+        Ok(CompletionResponse {
+            text_synthesized_from_thinking: false,
+            content: calls
+                .iter()
+                .map(|c| ContentBlock::ToolUse {
+                    id: c.id.clone(),
+                    name: c.name.clone(),
+                    input: c.input.clone(),
+                    provider_metadata: None,
+                })
+                .collect(),
+            stop_reason: StopReason::ToolUse,
+            tool_calls: calls,
+            usage: TokenUsage {
+                input_tokens: 5,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            actual_provider: None,
+            actual_model: None,
+        })
+    }
+}
+
+/// #8556: a capped turn used up its budget without finishing, so it must never suggest a background skill review, however many tool calls it made.
+#[tokio::test]
+async fn iteration_cap_never_suggests_skill_review() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> = Arc::new(ThreeToolCallsPerTurnDriver {
+        call_count: AtomicU32::new(0),
+    });
+    let opts = LoopOptions {
+        max_iterations: Some(2),
+        ..LoopOptions::default()
+    };
+
+    let result = run_agent_loop(
+        &manifest,
+        "Please send the report",
+        &mut session,
+        &memory,
+        driver,
+        std::slice::from_ref(&fake_tool("file_read")),
+        None, // kernel
+        None, // skill_registry
+        None, // mcp_connections
+        None, // web_ctx
+        None, // browser_ctx
+        None, // embedding_driver
+        None, // workspace_root
+        None, // on_phase
+        None, // media_engine
+        None, // media_drivers
+        None, // tts_engine
+        None, // docker_config
+        None, // hooks
+        None, // context_window_tokens
+        None, // process_manager
+        None, // checkpoint_manager
+        None, // process_registry
+        None, // user_content_blocks
+        None, // proactive_memory
+        None, // context_engine
+        None, // pending_messages
+        &opts,
+    )
+    .await
+    .expect("cap exhaustion must deliver a response, not fail");
+
+    assert!(result.hit_iteration_cap);
+    assert!(
+        result.decision_traces.len() >= 5,
+        "precondition: enough traces that a finished turn would suggest a review; got {}",
+        result.decision_traces.len()
+    );
+    assert!(
+        !result.skill_evolution_suggested,
+        "a capped turn must not suggest a skill review"
     );
 }
 

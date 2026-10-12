@@ -1843,20 +1843,8 @@ async fn run_agent_loop_streaming_inner(
         }
     }
 
-    // Streaming twin of the graceful cap-exhaustion delivery (#8556). See
-    // `run_agent_loop` for the full rationale: build the best-so-far text,
-    // deliver it as the turn's response, persist it, and flag the kernel so
-    // operators are still notified.
-    let text = finalize_end_turn_text(
-        String::new(),
-        any_tools_executed,
-        &manifest.name,
-        max_iterations,
-        &total_usage,
-        messages.len(),
-        "Max iterations reached (streaming) — guard activated",
-        &accumulated_text,
-    );
+    // Streaming twin of the graceful cap-exhaustion delivery (#8556); see `run_agent_loop` for the full rationale.
+    let (text, cap_notice) = finalize_iteration_cap_text(&accumulated_text, max_iterations);
     warn!(
         agent = %manifest.name,
         iterations = max_iterations,
@@ -1864,27 +1852,22 @@ async fn run_agent_loop_streaming_inner(
         "Max iterations reached (streaming) — delivering best-so-far response"
     );
 
-    // #8556 review P6: intermediate tool-use prose was already streamed to
-    // the client by `stream_with_retry` and committed to the session by
-    // `StagedToolUseTurn::commit`. Re-pushing or re-emitting it here would
-    // duplicate both.
-    let prose_already_committed = !accumulated_text.trim().is_empty();
-    if !prose_already_committed {
-        // review P1: the tool-only cap scenario streamed no text, and the
-        // channel bridge's streaming success arm never re-sends
-        // `result.response` — so without this the user would get a "Done"
-        // reaction and no content at all. Emit the canned guard through the
-        // existing streaming pipe so WS/SSE/channel consumers receive it
-        // before completion. `signal_response_complete` follows.
-        if stream_tx
-            .send(StreamEvent::TextDelta { text: text.clone() })
-            .await
-            .is_err()
-        {
-            warn!("Stream consumer disconnected before cap-exit text delta");
-        }
-        session.push_message(Message::assistant(&text));
+    // #8556 review P6: intermediate tool-use prose was already streamed to the client by `stream_with_retry` and committed to the session by `StagedToolUseTurn::commit`, so only the cut-off notice is new.
+    // review P1: the channel bridge's streaming success arm never re-sends `result.response`, so the notice has to go through the streaming pipe or a channel user would never learn the answer was cut off — and, in the tool-only case, would get no content at all.
+    let has_partial_text = !accumulated_text.trim().is_empty();
+    let notice_delta = if has_partial_text {
+        format!("\n\n{cap_notice}")
+    } else {
+        cap_notice.clone()
+    };
+    if stream_tx
+        .send(StreamEvent::TextDelta { text: notice_delta })
+        .await
+        .is_err()
+    {
+        warn!("Stream consumer disconnected before cap-exit text delta");
     }
+    session.push_message(Message::assistant(&cap_notice));
 
     // Persist. Fork and incognito turns skip.
     repair_session_before_save(session, agent_id_str.as_str(), "streaming_max_iterations");
@@ -1900,7 +1883,9 @@ async fn run_agent_loop_streaming_inner(
         agent_id: agent_id_str.as_str(),
         event: librefang_types::agent::HookEvent::AgentLoopEnd,
         data: serde_json::json!({
-            "reason": "max_iterations_reached_with_delivery",
+            // Kept as the pre-#8556 value so hook scripts filtering on it still match; `delivered` says the partial response now reaches the user.
+            "reason": "max_iterations_exceeded",
+            "delivered": true,
             "iterations": max_iterations,
             "is_fork": opts.is_fork,
             "response_length": text.len(),
@@ -1923,7 +1908,8 @@ async fn run_agent_loop_streaming_inner(
         cost_usd: None,
         silent: false,
         directives: Default::default(),
-        skill_evolution_suggested: decision_traces.len() >= 5,
+        // A capped turn never finished, so it must not seed a background skill review from its trajectory (#8556).
+        skill_evolution_suggested: false,
         decision_traces,
         memories_saved,
         memories_used,
