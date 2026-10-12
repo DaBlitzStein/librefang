@@ -925,7 +925,6 @@ export function AgentsPage() {
     !!detailIdentity?.avatar_url,
     detailDrawerOpen,
   );
-
   const rawDeleteMutation = useDeleteAgent();
   const handleDeleteSuccess = (agentId: string) => {
     if (detailAgent?.id === agentId) {

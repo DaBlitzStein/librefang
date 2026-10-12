@@ -46,6 +46,8 @@ export {
   // turned into an object URL by the caller rather than given to an `<img src>` (#8339)
   fetchAuthenticatedImage,
   agentAvatarPath,
+  // the same for the signed-in user's own avatar, on a literal path (#8339)
+  currentUserAvatarPath,
   // channels & comms
   listChannels,
   getChannelQr,
@@ -185,7 +187,7 @@ export {
   getUserPolicy,
   // effective permissions snapshot (RBAC follow-up — backs the simulator)
   getEffectivePermissions,
-  // caller's own resolved identity (#8339) — role gate for the identity editor
+  // the calling credential's own name, emoji and role (#8339) — the role gates the agent editor's identity controls. `/api/auth/dashboard-check` cannot answer this: it is unauthenticated and never echoes the configured username.
   getWhoami,
   // credential vault — names and a set/not-set boolean only (#8164)
   listVaultKeys,
@@ -247,6 +249,10 @@ export {
   updateAgentIdentity,
   uploadAgentAvatar,
   deleteAgentAvatar,
+  // the user side of the same (#8339)
+  updateUserIdentity,
+  uploadUserAvatar,
+  deleteUserAvatar,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
   // per-agent MCP server grant — write (#6565 follow-up)
