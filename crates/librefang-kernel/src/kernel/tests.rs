@@ -16668,10 +16668,11 @@ fn suspend_resume_actually_transition_in_memory_state() {
     kernel.shutdown();
 }
 
-/// A suspend whose `agent.toml` write fails must still record the disagreement:
-/// `suspend_agent` has already moved the registry to `Suspended`, so going
-/// silent leaves the registry saying suspended, disk still saying
-/// `enabled = true`, and the History tab showing no row at all.
+/// A suspend whose `agent.toml` write fails must still record the disagreement.
+/// `suspend_agent` has already moved the registry to `Suspended`, so going silent leaves the registry saying suspended, disk still saying `enabled = true`, and the History tab showing no row at all.
+///
+/// Unix-only because the write failure is produced by clearing the directory's write bit, which has no `std` equivalent on Windows.
+#[cfg(unix)]
 #[test]
 fn a_failed_suspend_write_records_a_persist_failed_snapshot() {
     use std::os::unix::fs::PermissionsExt;
@@ -16717,12 +16718,24 @@ fn a_failed_suspend_write_records_a_persist_failed_snapshot() {
         "the baseline full persist must be the only row before the failing suspend"
     );
 
-    // Remove the directory's write bit so `atomic_write_toml`'s `create_new`
-    // staging file cannot be created. The manifest itself stays readable, which
-    // is the branch under test: read succeeds, write fails.
+    // Remove the directory's write bit so `atomic_write_toml`'s `create_new` staging file cannot be created.
+    // The manifest itself stays readable, which is the branch under test: read succeeds, write fails.
     let mut perms = std::fs::metadata(&agent_dir).unwrap().permissions();
     perms.set_mode(0o555);
     std::fs::set_permissions(&agent_dir, perms).unwrap();
+
+    // Root (e.g. the `Dockerfile.rust-dev` flow) ignores the write bit, so the write this test depends on failing would succeed.
+    // Probe instead of checking the euid, so any other environment where the mode is not enforced is skipped the same way.
+    let probe = agent_dir.join(".write-probe");
+    if std::fs::write(&probe, b"probe").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        let mut perms = std::fs::metadata(&agent_dir).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&agent_dir, perms).unwrap();
+        eprintln!("skipping: a 0o555 directory is still writable here (running as root?)");
+        kernel.shutdown();
+        return;
+    }
 
     let suspend_result = kernel.suspend_agent(agent_id);
 
