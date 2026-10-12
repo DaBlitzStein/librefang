@@ -97,15 +97,10 @@ impl LibreFangKernel {
             .clone()
     }
 
-    /// Serialize `entry`'s manifest to `toml_path` and record the write in the
-    /// manifest version history.
+    /// Serialize `entry`'s manifest to `toml_path` and record the write in the manifest version history.
     ///
-    /// `change_source` is forwarded verbatim to [`Self::record_manifest_version`]
-    /// — the call site names where the write came from (`model`, `skills`,
-    /// `mcp-servers`, `restore`, …) rather than this funnel guessing. The
-    /// snapshot is only recorded once the disk write succeeded: a failed write
-    /// leaves `agent.toml` at its previous content, so recording the in-memory
-    /// manifest would put a version in the history that never existed on disk.
+    /// `change_source` is forwarded verbatim to [`Self::record_manifest_version`] — the call site names where the write came from (`model`, `skills`, `mcp-servers`, `restore`, …) rather than this funnel guessing.
+    /// The snapshot is only recorded once the disk write succeeded: a failed write leaves `agent.toml` at its previous content, so recording the in-memory manifest would put a version in the history that never existed on disk.
     fn persist_full_manifest_at(
         &self,
         entry: &librefang_types::agent::AgentEntry,
@@ -164,8 +159,7 @@ impl LibreFangKernel {
     /// This is best-effort: a failure to write is logged but does not
     /// propagate as an error — the authoritative copy lives in SQLite.
     ///
-    /// `change_source` is the tag recorded in the version history for this
-    /// write; callers pass what actually changed (`model`, `skills`, `api`, …).
+    /// `change_source` is the tag recorded in the version history for this write; callers pass what actually changed (`model`, `skills`, `api`, …).
     pub fn persist_manifest_to_disk(&self, agent_id: AgentId, change_source: &str) {
         let Some(entry) = self.agents.registry.get(agent_id) else {
             return;
@@ -211,10 +205,7 @@ impl LibreFangKernel {
             warn!(agent = %entry.name, "Failed to persist MCP servers to agent manifest: {error}");
         } else {
             debug!(agent = %entry.name, path = %toml_path.display(), "Persisted MCP servers to agent manifest");
-            // This path patches the `mcp_servers` line in place rather than
-            // re-serializing the whole manifest, so it does not pass through
-            // `persist_full_manifest_at` — without its own snapshot the MCP
-            // allowlist would be the one config change the History tab misses.
+            // This path patches the `mcp_servers` line in place rather than re-serializing the whole manifest, so it does not pass through `persist_full_manifest_at` — without its own snapshot the MCP allowlist would be the one config change the History tab misses.
             self.record_manifest_version(&current_entry, &patched, change_source);
         }
     }
@@ -463,45 +454,9 @@ impl LibreFangKernel {
         // by allowlist content so it self-invalidates when the list changes.
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
-        // Reconcile declarative `[[triggers]]` from the freshly loaded
-        // manifest (#5014). Same shape as the spawn path — runs after the
-        // registry has the new manifest so the orphan policy can compare
-        // the live runtime store against the latest TOML state. Skipped
-        // when the manifest has no `[[triggers]]` and no orphan policy
-        // override, so unrelated reloads pay no work.
-        if let Some(refreshed) = self.agents.registry.get(agent_id) {
-            if !refreshed.manifest.triggers.is_empty()
-                || matches!(
-                    refreshed.manifest.reconcile_orphans,
-                    librefang_types::agent::OrphanPolicy::Warn
-                        | librefang_types::agent::OrphanPolicy::Delete
-                )
-            {
-                let report = self.workflows.triggers.reconcile_manifest_triggers(
-                    agent_id,
-                    &refreshed.manifest.triggers,
-                    refreshed.manifest.reconcile_orphans,
-                    |target_name| self.agents.registry.find_by_name(target_name).map(|e| e.id),
-                );
-                if report.mutated() {
-                    if let Err(e) = self.workflows.triggers.persist() {
-                        warn!(
-                            agent_id = %agent_id,
-                            "Failed to persist trigger reconcile on reload: {e}"
-                        );
-                    }
-                    info!(
-                        agent_id = %agent_id,
-                        created = report.created,
-                        updated = report.updated,
-                        deleted = report.deleted,
-                        skipped = report.skipped,
-                        orphans_kept = report.orphans_kept,
-                        "Reconciled manifest triggers on reload"
-                    );
-                }
-            }
-        }
+        // Reconcile declarative `[[triggers]]` from the freshly loaded manifest (#5014).
+        // Same shape as the spawn path — runs after the registry has the new manifest so the orphan policy can compare the live runtime store against the latest TOML state.
+        self.reconcile_declarative_triggers(agent_id, "reload");
 
         info!(agent_id = %agent_id, path = %toml_path.display(), "Reloaded agent manifest from disk");
         Ok(())
@@ -589,6 +544,7 @@ impl LibreFangKernel {
     /// - Schedule change: stop the running background loop and start the new one ([`Self::set_agent_schedule`]).
     /// - Workspaces change: create the named workspaces and rewrite the identity files that advertise them ([`Self::set_agent_workspaces`]).
     /// - Model or endpoint change: drop the canonical session so the previous model's responses cannot poison the new one ([`Self::set_agent_model`]).
+    /// - Declarative `[[triggers]]`: reconcile the trigger engine against the restored list, the same way `reload_agent_from_disk` does, so a restored trigger fires (or a removed one stops, under a `Warn` / `Delete` orphan policy) without waiting for a restart.
     ///
     /// `enabled` is live suspend/resume state, not snapshot content.
     /// A `suspend` row records `enabled = false`, and writing that onto a running agent would leave the dashboard reporting Running while `boot.rs` reads the flag on the next start and refuses to spawn it.
@@ -655,6 +611,8 @@ impl LibreFangKernel {
             let _ = self.memory.substrate.delete_canonical_session(agent_id);
             debug!(agent_id = %agent_id, "Cleared canonical session after manifest restore changed the model");
         }
+
+        self.reconcile_declarative_triggers(agent_id, "restore");
 
         Ok(())
     }
@@ -1229,13 +1187,56 @@ impl LibreFangKernel {
         Ok(())
     }
 
+    /// Reconcile the trigger engine against the registered manifest's declarative `[[triggers]]` (#5014).
+    ///
+    /// Shared by `reload_agent_from_disk` and `restore_manifest_snapshot`, the two paths that replace a running agent's manifest wholesale.
+    /// Skipped when the manifest has no `[[triggers]]` and no orphan policy override, so unrelated reloads pay no work.
+    /// `context` only labels the log lines.
+    fn reconcile_declarative_triggers(&self, agent_id: AgentId, context: &str) {
+        let Some(refreshed) = self.agents.registry.get(agent_id) else {
+            return;
+        };
+        if refreshed.manifest.triggers.is_empty()
+            && !matches!(
+                refreshed.manifest.reconcile_orphans,
+                librefang_types::agent::OrphanPolicy::Warn
+                    | librefang_types::agent::OrphanPolicy::Delete
+            )
+        {
+            return;
+        }
+        let report = self.workflows.triggers.reconcile_manifest_triggers(
+            agent_id,
+            &refreshed.manifest.triggers,
+            refreshed.manifest.reconcile_orphans,
+            |target_name| self.agents.registry.find_by_name(target_name).map(|e| e.id),
+        );
+        if report.mutated() {
+            if let Err(e) = self.workflows.triggers.persist() {
+                warn!(
+                    agent_id = %agent_id,
+                    context,
+                    "Failed to persist manifest trigger reconcile: {e}"
+                );
+            }
+            info!(
+                agent_id = %agent_id,
+                context,
+                created = report.created,
+                updated = report.updated,
+                deleted = report.deleted,
+                skipped = report.skipped,
+                orphans_kept = report.orphans_kept,
+                "Reconciled manifest triggers"
+            );
+        }
+    }
+
     /// Best-effort record of a manifest snapshot for version history.
     ///
-    /// `change_source` is the call site's own tag for what changed
-    /// (`model`, `skills`, `mcp-servers`, `restore`, …). A failed snapshot
-    /// costs one history row, never the config change itself, so the error is
-    /// logged rather than propagated. The schema default `unknown` covers
-    /// rows written by a producer that does not classify its persist.
+    /// `change_source` is the call site's own tag for what changed (`model`, `skills`, `mcp-servers`, `restore`, …).
+    /// A failed snapshot costs one history row, never the config change itself, so the error is logged rather than propagated.
+    /// The schema default `unknown` covers rows written by a producer that does not classify its persist.
     fn record_manifest_version(
         &self,
         entry: &librefang_types::agent::AgentEntry,

@@ -152,8 +152,7 @@ describe("useRestoreAgentManifestVersion", () => {
     await result.current.mutateAsync({ agentId: "agent-1", versionId: 7 });
 
     expect(http.restoreAgentManifestVersion).toHaveBeenCalledWith("agent-1", 7);
-    // `detail` is what the history key is nested under, so this single
-    // assertion is also the freshness guarantee for the History tab.
+    // `detail` is what the history key is nested under, so this single assertion is also the freshness guarantee for the History tab.
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.detail("agent-1"),
     });

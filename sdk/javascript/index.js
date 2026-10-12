@@ -354,6 +354,10 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/runtime`);
   }
 
+  async saveAgentAsAgentType(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/save-as-agent-type`, data, undefined);
+  }
+
   async getAgentSession(id, query) {
     return this._c._request("GET", `/api/agents/${id}/session`, undefined, query);
   }
@@ -1832,6 +1836,10 @@ class UsersResource {
     return this._c._request("POST", "/api/users/import", data, undefined);
   }
 
+  async serveMyAvatar() {
+    return this._c._request("GET", "/api/users/me/avatar");
+  }
+
   async getUser(name) {
     return this._c._request("GET", `/api/users/${name}`);
   }
@@ -1842,6 +1850,22 @@ class UsersResource {
 
   async deleteUser(name) {
     return this._c._request("DELETE", `/api/users/${name}`);
+  }
+
+  async serveUserAvatar(name) {
+    return this._c._request("GET", `/api/users/${name}/avatar`);
+  }
+
+  async uploadUserAvatar(name, body, contentType) {
+    return this._c._request("POST", `/api/users/${name}/avatar`, body, undefined, contentType || "application/octet-stream");
+  }
+
+  async deleteUserAvatar(name) {
+    return this._c._request("DELETE", `/api/users/${name}/avatar`);
+  }
+
+  async updateUserIdentity(name, data) {
+    return this._c._request("PATCH", `/api/users/${name}/identity`, data, undefined);
   }
 
   async getUserPolicy(name) {

@@ -1332,8 +1332,7 @@ export function AgentsPage() {
   });
   const setAgentSkillsMutation = useSetAgentSkills();
 
-  // Manifest version history (#8041) — fetched only while the History tab is
-  // open, since each row carries the agent's full `agent.toml`.
+  // Manifest version history (#8041) — fetched only while the History tab is open, since each row carries the agent's full `agent.toml`.
   const manifestHistoryQuery = useAgentManifestHistory(detailAgent?.id ?? "", {
     enabled: !!detailAgent && agentTab === "history",
   });
@@ -3471,11 +3470,8 @@ export function AgentsPage() {
 
   // ---------- History tab — manifest version timeline
   //
-  // Every control-plane write to an agent's `agent.toml` records a full TOML
-  // snapshot (#8041). The stored timestamp is naive UTC, so it is parsed with
-  // the `Z` suffix the whole way through — the list row and the restore
-  // confirmation must name a version identically, or the dialog would point at
-  // a row the operator cannot find above it.
+  // Every control-plane write to an agent's `agent.toml` records a full TOML snapshot (#8041).
+  // The stored timestamp is naive UTC, so it is parsed with the `Z` suffix the whole way through — the list row and the restore confirmation must name a version identically, or the dialog would point at a row the operator cannot find above it.
   const renderHistoryTab = (agent: AgentDetail) => {
     const versions = manifestHistoryQuery.data ?? [];
     const versionTimestamp = (v: ManifestVersionEntry): string =>
@@ -3538,8 +3534,7 @@ export function AgentsPage() {
                               toastErr(err, t("agents.detail.restore_failed", { defaultValue: "Restore failed" })),
                               "error",
                             );
-                            // Re-throw so the dialog stays open on failure
-                            // instead of closing over an error toast.
+                            // Re-throw so the dialog stays open on failure instead of closing over an error toast.
                             throw err;
                           }
                         },

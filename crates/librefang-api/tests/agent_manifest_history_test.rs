@@ -1,10 +1,6 @@
-//! End-to-end coverage for the agent manifest version history:
-//! `GET /api/agents/{id}/manifest-history` and
-//! `POST /api/agents/{id}/manifest-history/{version_id}/restore`.
+//! End-to-end coverage for the agent manifest version history: `GET /api/agents/{id}/manifest-history` and `POST /api/agents/{id}/manifest-history/{version_id}/restore`.
 //!
-//! The harness boots a real `LibreFangKernel` through `MockKernelBuilder` and
-//! mounts the production agent router, so persistence goes through the same
-//! `update_manifest` / `persist_manifest_to_disk` funnel the daemon uses.
+//! The harness boots a real `LibreFangKernel` through `MockKernelBuilder` and mounts the production agent router, so persistence goes through the same `update_manifest` / `persist_manifest_to_disk` funnel the daemon uses.
 //!
 //! Run: cargo test -p librefang-api --test agent_manifest_history_test
 
@@ -278,8 +274,9 @@ async fn restore_maps_missing_and_mismatched_versions() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    assert_eq!(body["error"]["code"], "version_mismatch");
+    // Another agent's version id must be indistinguishable from a missing one, or the status leaks which ids exist.
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    assert_eq!(body["error"]["code"], "version_not_found");
 
     let (status, body) = send(
         &h,
@@ -292,16 +289,14 @@ async fn restore_maps_missing_and_mismatched_versions() {
     assert_eq!(body["error"]["code"], "invalid_agent_id");
 }
 
-/// A snapshot the server cannot deserialize must fail as its own static 500
-/// rather than half-applying through the kernel or echoing parser internals.
+/// A snapshot the server cannot deserialize must fail as its own static 500 rather than half-applying through the kernel or echoing parser internals.
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_reports_a_corrupt_stored_version_as_a_static_500() {
     let h = boot();
     let id = spawn_owned_by(&h.state, "history-corrupt", "alice");
 
-    // A producer never writes unparseable TOML, but a hand-edited database or
-    // a row from an older schema can still hold one. Inserting it through the
-    // store is the only way to reach the parse guard.
+    // A producer never writes unparseable TOML, but a hand-edited database or a row from an older schema can still hold one.
+    // Inserting it through the store is the only way to reach the parse guard.
     let store =
         librefang_memory::ManifestVersionStore::new(h.state.kernel.memory_substrate().pool());
     store
@@ -329,9 +324,8 @@ async fn restore_reports_a_corrupt_stored_version_as_a_static_500() {
     );
 }
 
-/// A snapshot is the agent's whole `agent.toml`, so the read and the restore
-/// are owner-scoped. 404 rather than 403 stops id enumeration from telling
-/// "not yours" apart from "does not exist".
+/// A snapshot is the agent's whole `agent.toml`, so the read and the restore are owner-scoped.
+/// 404 rather than 403 stops id enumeration from telling "not yours" apart from "does not exist".
 #[tokio::test(flavor = "multi_thread")]
 async fn history_and_restore_are_owner_scoped() {
     let h = boot();
@@ -381,8 +375,7 @@ async fn history_and_restore_are_owner_scoped() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
 }
 
-/// The loopback / no-auth deployment mode carries no `AuthenticatedApiUser`,
-/// and the API compatibility contract keeps it allowed.
+/// The loopback / no-auth deployment mode carries no `AuthenticatedApiUser`, and the API compatibility contract keeps it allowed.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unauthenticated_trusted_request_is_still_served() {
     let h = boot();
@@ -393,9 +386,7 @@ async fn an_unauthenticated_trusted_request_is_still_served() {
     assert!(body["versions"].is_array(), "body: {body}");
 }
 
-/// `LIBREFANG_PROVISIONING_PATH` is process-global, so the provisioning case
-/// holds this lock while it is set and restores the previous value on drop,
-/// panic included.
+/// `LIBREFANG_PROVISIONING_PATH` is process-global, so the provisioning case holds this lock while it is set and restores the previous value on drop, panic included.
 fn provisioning_env_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -403,9 +394,7 @@ fn provisioning_env_lock() -> &'static tokio::sync::Mutex<()> {
 
 /// Sets `LIBREFANG_PROVISIONING_PATH` for its lifetime.
 ///
-/// Other cases in this binary boot their kernels concurrently and may observe
-/// the declaration — the reconcile is additive and runs in each kernel's own
-/// temp home, so an extra provisioned agent cannot change what they assert.
+/// Other cases in this binary boot their kernels concurrently and may observe the declaration — the reconcile is additive and runs in each kernel's own temp home, so an extra provisioned agent cannot change what they assert.
 struct ProvisioningEnv {
     previous: Option<std::ffi::OsString>,
     _lock: tokio::sync::MutexGuard<'static, ()>,
@@ -432,10 +421,7 @@ impl Drop for ProvisioningEnv {
     }
 }
 
-/// A deployment-provisioned agent is an input, not a file the API may roll
-/// back: the restore refuses through `guard_provisioned_agent` (#6695) before
-/// the version store is even consulted, because the next reconcile would
-/// overwrite whatever the restore applied.
+/// A deployment-provisioned agent is an input, not a file the API may roll back: the restore refuses through `guard_provisioned_agent` (#6695) before the version store is even consulted, because the next reconcile would overwrite whatever the restore applied.
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_refuses_a_deployment_provisioned_agent() {
     let root = tempfile::tempdir().expect("provisioning root");
@@ -459,8 +445,7 @@ async fn restore_refuses_a_deployment_provisioned_agent() {
         .id;
 
     // Version 1 does not exist: the guard must fire before the store lookup.
-    // 423 Locked is the shared provisioned-write refusal; the 409 in the
-    // restore handler's OpenAPI annotation is stale.
+    // 423 Locked is the shared provisioned-write refusal, which the restore handler's OpenAPI annotation documents.
     let (status, body) = send(
         &h,
         Method::POST,
@@ -495,8 +480,7 @@ async fn restore_reconciles_the_background_loop_on_a_schedule_change() {
         "a Reactive agent must have no background loop"
     );
 
-    // Record the two snapshots through the schedule setter, which applies its
-    // own runtime effect — Continuous starts the ticker, Reactive stops it.
+    // Record the two snapshots through the schedule setter, which applies its own runtime effect — Continuous starts the ticker, Reactive stops it.
     h.state
         .kernel
         .clone()

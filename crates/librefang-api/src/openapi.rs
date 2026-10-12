@@ -113,6 +113,7 @@ use crate::types;
         routes::patch_hand_agent_runtime_config,
         routes::delete_hand_agent_runtime_config,
         routes::clone_agent,
+        routes::save_agent_as_agent_type,
         routes::list_agent_files,
         routes::get_agent_file,
         routes::set_agent_file,
@@ -363,6 +364,11 @@ use crate::types;
         routes::users::set_user_provider_key,
         routes::users::delete_user_provider_key,
         routes::users::list_user_provider_keys,
+        routes::users::update_user_identity,
+        routes::users::upload_user_avatar,
+        routes::users::serve_user_avatar,
+        routes::users::serve_my_avatar,
+        routes::users::delete_user_avatar,
 
         // ── Authorization (RBAC checks) ──
         routes::check,
@@ -602,6 +608,7 @@ use crate::types;
         routes::users::SetProviderKeyRequest,
         routes::users::ProviderKeysResponse,
         routes::users::ProviderKeyMutationResponse,
+        routes::users::UserIdentityUpdate,
         routes::channels::ConfigureSidecarBody,
         routes::sidecar_describe::SidecarSchema,
         routes::sidecar_describe::SidecarSchemaField,
