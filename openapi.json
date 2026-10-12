@@ -2018,7 +2018,7 @@
           "agents"
         ],
         "summary": "GET /api/agents/{id}/manifest-history — how this agent's config changed over time.",
-        "description": "Returns an array of manifest snapshots, newest first.\nEach entry carries the full TOML so the dashboard can render a diff between\nconsecutive versions and offer a one-click restore.",
+        "description": "Returns an array of manifest snapshots, newest first.\nEach entry carries the full TOML so the dashboard can render a diff between consecutive versions and offer a one-click restore.",
         "operationId": "list_agent_manifest_history",
         "parameters": [
           {
@@ -2103,10 +2103,10 @@
             }
           },
           "400": {
-            "description": "Invalid agent id or version does not belong to this agent"
+            "description": "Invalid agent id"
           },
           "404": {
-            "description": "Agent or version not found, or not accessible to the caller"
+            "description": "Agent or version not found, the version belongs to another agent, or the agent is not accessible to the caller"
           },
           "423": {
             "description": "This agent is provisioned by the deployment; its manifest cannot be changed through the API",
