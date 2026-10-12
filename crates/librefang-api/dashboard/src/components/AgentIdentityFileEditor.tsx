@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ApiError } from "../lib/http/errors";
@@ -80,12 +80,9 @@ function draftFrom(document: IdentityFrontMatter): Draft {
  * by editing markdown by hand; this gives them fields without taking the file
  * away from the operator.
  *
- * Those same three names also exist on the agent record
- * (`librefang_types::agent::AgentIdentity`, reachable through
- * `PATCH /api/agents/{id}/identity`), and the two stores never reconcile — only
- * the file reaches the prompt. This editor writes the file and only the file,
- * so a value set on the record will not appear here and will not reach the
- * model either.
+ * The file is not this editor's alone: `PATCH /api/agents/{id}/identity` and `PATCH /api/agents/{id}/config` write the same three keys into its front matter (#8447), and a rename rewrites its `name:` (#8469).
+ * The mutation hooks for those writes invalidate this file's cached read, and when the refetched bytes arrive the draft is rebased onto them rather than replaced: a field the operator has edited keeps the edit, every other field takes the file's new value.
+ * Without that, the save below — which writes the whole file — would put a pre-rename `name:` or a superseded personality value back.
  *
  * Three keys are editable and nothing else is. The file's body, its other
  * keys, their order and its line endings survive a save byte for byte
@@ -113,14 +110,35 @@ export function AgentIdentityFileEditor({
     [content],
   );
 
-  // The draft is state so typing does not touch the query cache; it re-seeds
-  // whenever the underlying bytes change — after a save, or when the panel
-  // switches to another agent — so the form never shows a value the file no
-  // longer holds.
+  // The draft is state so typing does not touch the query cache. When the underlying bytes change it is rebased onto them: a field the operator has not touched follows the file, so the form never shows a value the file no longer holds, and an edit in progress survives a refetch triggered by another writer (a rename, a personality write through `/identity`).
+  // A different agent or file starts from scratch — an edit to one agent's personality must not carry over to the next one.
   const [draft, setDraft] = useState<Draft>(emptyDraft);
+  const seededFrom = useRef<{ source: string; draft: Draft } | null>(null);
   useEffect(() => {
-    if (parsed) setDraft(draftFrom(parsed));
-  }, [parsed]);
+    const source = `${agentId}\u0000${filename}`;
+    if (!parsed) {
+      // Another agent's file is loading, or it has none: drop the previous agent's draft rather than show it under this one.
+      if (seededFrom.current && seededFrom.current.source !== source) {
+        seededFrom.current = null;
+        setDraft(emptyDraft());
+      }
+      return;
+    }
+    const fresh = draftFrom(parsed);
+    const previous = seededFrom.current;
+    seededFrom.current = { source, draft: fresh };
+    if (!previous || previous.source !== source) {
+      setDraft(fresh);
+      return;
+    }
+    setDraft((current) => {
+      const next = { ...fresh };
+      for (const key of IDENTITY_FIELD_KEYS) {
+        if (current[key] !== previous.draft[key]) next[key] = current[key];
+      }
+      return next;
+    });
+  }, [parsed, agentId, filename]);
 
   const missing = fileQuery.error instanceof ApiError && fileQuery.error.status === 404;
   const document = parsed ?? EMPTY_DOCUMENT;

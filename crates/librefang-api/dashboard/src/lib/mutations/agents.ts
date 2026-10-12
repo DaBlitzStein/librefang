@@ -38,6 +38,7 @@ import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVer
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
 import {
   agentAvatarKeys,
+  agentFileKeys,
   agentKeys,
   approvalKeys,
   budgetKeys,
@@ -46,6 +47,12 @@ import {
   sessionKeys,
   usageKeys,
 } from "../queries/keys";
+
+/**
+ * The workspace file the daemon rewrites as a side effect of agent writes that are not file writes: a rename moves its front-matter `name:` (#8469), and personality sent to `/identity` or `/config` lands in its front matter (#8447).
+ * Each hook below that reaches one of those paths invalidates the cached read, or the IDENTITY.md editor would keep a pre-write copy and its next save would put the old values back.
+ */
+const IDENTITY_FILE = "IDENTITY.md";
 
 /**
  * Unified payload type for the two agent-config PATCH endpoints.
@@ -248,6 +255,10 @@ export function usePatchAgent() {
       // cached manifest read "fresh" and the editor on a superseded token
       // (#8424).
       qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
+      // A rename rewrites IDENTITY.md's `name:` (see `IDENTITY_FILE`); a manifest replacement can carry one.
+      if (variables.body.name !== undefined || variables.body.manifest_toml !== undefined) {
+        qc.invalidateQueries({ queryKey: agentFileKeys.detail(variables.agentId, IDENTITY_FILE) });
+      }
       if (variables.body.manifest_toml !== undefined) {
         qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
         qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
@@ -300,6 +311,8 @@ export function useUpdateAgentIdentity() {
       // take five seconds to appear in the row. Same line in the two avatar
       // hooks below.
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+      // The same endpoint writes personality into IDENTITY.md's front matter (see `IDENTITY_FILE`).
+      qc.invalidateQueries({ queryKey: agentFileKeys.detail(variables.agentId, IDENTITY_FILE) });
     },
   });
 }
@@ -384,6 +397,10 @@ export function usePatchAgentRuntimeConfig() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      // `/config` renames and writes personality, both of which rewrite IDENTITY.md (see `IDENTITY_FILE`).
+      if (!variables.isHand) {
+        qc.invalidateQueries({ queryKey: agentFileKeys.detail(variables.agentId, IDENTITY_FILE) });
+      }
       if (variables.isHand) {
         qc.invalidateQueries({ queryKey: handKeys.details() });
       }
