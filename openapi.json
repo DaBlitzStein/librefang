@@ -17599,6 +17599,7 @@
           "task",
           "response",
           "status",
+          "truncated",
           "provider",
           "model",
           "iterations",
@@ -17680,6 +17681,10 @@
           "tool_calls": {
             "type": "integer",
             "format": "int64"
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the worker hit its per-turn iteration cap and delivered a\npartial answer (#8556) — the run completed, but was cut off."
           },
           "worker_name": {
             "type": "string",
