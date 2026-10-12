@@ -42,6 +42,7 @@ vi.mock("../lib/mutations/agents", () => {
     useDeleteAgentAvatar: vi.fn(idle),
     useUpdateAgentIdentity: vi.fn(idle),
     useUploadAgentAvatar: vi.fn(idle),
+    useRestoreAgentManifestVersion: () => idle(),
   };
 });
 
@@ -159,6 +160,7 @@ vi.mock("../lib/queries/agents", () => ({
   useAgentMcpServers: () => ({ data: [], isLoading: false }),
   useAgentAvatarUrl: () => ({ data: undefined, isLoading: false }),
   useAgentManifest: () => ({ data: undefined, isLoading: false }),
+  useAgentManifestHistory: () => ({ data: [], isLoading: false }),
   useAgentChannels: () => ({ data: [], isLoading: false }),
   useTools: () => ({ data: [], isLoading: false }),
 }));

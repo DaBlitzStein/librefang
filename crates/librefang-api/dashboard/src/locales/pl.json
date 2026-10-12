@@ -1160,6 +1160,14 @@
       "events_tail": "zdarzenia · tail",
       "no_logs": "Nie zarejestrowano jeszcze żadnych tur dla tego agenta.",
       "crashed_title": "{{name}} jest w stanie błędu",
+      "manifest_history": "Historia manifestu",
+      "manifest_history_load_err": "Nie udało się wczytać historii manifestu.",
+      "no_history": "Nie zarejestrowano jeszcze żadnych zmian konfiguracji.",
+      "restore_title": "Przywrócić tę wersję?",
+      "restore_confirm": "Przywrócić '{{name}}' do wersji zapisanej {{timestamp}} ({{source}})? Spowoduje to nadpisanie bieżącego pliku agent.toml agenta; migawka zapisana później zawiera przywróconą treść, a nie treść, którą zastąpiła.",
+      "restore_btn": "Przywróć",
+      "restored": "Manifest przywrócony",
+      "restore_failed": "Nie udało się przywrócić",
       "channels": "Kanały",
       "channels_hint": "Puste oznacza dostępność ze wszystkich skonfigurowanych kanałów.",
       "channels_search_placeholder": "Szukaj kanałów…",
@@ -1194,7 +1202,8 @@
     "info": {
       "logs": "Logi",
       "memory": "Pamięć",
-      "prompts": "Prompty i eksperymenty"
+      "prompts": "Prompty i eksperymenty",
+      "history": "Historia"
     },
     "config": {
       "advanced_mode": "Tryb zaawansowany",

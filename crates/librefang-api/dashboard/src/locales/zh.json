@@ -1154,6 +1154,14 @@
       "events_tail": "事件 · 尾部",
       "no_logs": "此智能体还没有记录的轮次。",
       "crashed_title": "{{name}} 处于错误状态",
+      "manifest_history": "清单历史",
+      "manifest_history_load_err": "加载清单历史失败。",
+      "no_history": "尚未记录配置更改。",
+      "restore_title": "恢复到此版本？",
+      "restore_confirm": "将 '{{name}}' 恢复到 {{timestamp}} 保存的版本（{{source}}）？这会覆盖该智能体当前的 agent.toml；之后记录的快照保存的是恢复后的内容，而不是被替换的内容。",
+      "restore_btn": "恢复",
+      "restored": "清单已恢复",
+      "restore_failed": "恢复失败",
       "channels": "频道",
       "channels_hint": "留空表示可从所有已配置的频道访问。",
       "channels_search_placeholder": "搜索频道…",
@@ -1188,7 +1196,8 @@
     "info": {
       "logs": "日志",
       "memory": "记忆",
-      "prompts": "提示词与实验"
+      "prompts": "提示词与实验",
+      "history": "历史"
     },
     "config": {
       "advanced_mode": "高级模式",
