@@ -75,7 +75,8 @@ export const userQueries = {
  */
 export function useUserAvatarUrl(name: string, hasAvatar: boolean): string | undefined {
   const { data: blob } = useQuery(userQueries.avatar(name, hasAvatar));
-  return useObjectUrl(blob);
+  // Gated on `hasAvatar` as well as the query being enabled, because a disabled query still returns whatever it cached: after the picture is removed elsewhere, `whoami` says `false` while the old Blob sits in the cache, and drawing it would show — and offer Replace/Remove for — an image the daemon no longer has. Same condition as `useAgentAvatarUrl`, except that only an explicit `false` closes it — `undefined` is "not told" here, as the request gate above treats it.
+  return useObjectUrl(hasAvatar !== false && name ? blob : undefined);
 }
 
 function filterUsers(

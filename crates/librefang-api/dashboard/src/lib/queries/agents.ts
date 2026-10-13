@@ -163,9 +163,8 @@ export const agentQueries = {
       queryFn: () => getAgentChannels(agentId),
       enabled: !!agentId,
     }),
-  // Manifest version history (#8041) — the agent detail History tab. Disabled
-  // by default so the full TOML snapshots are only fetched while that tab is
-  // actually open.
+  // Manifest version history (#8041) — the agent detail History tab.
+  // Disabled by default so the full TOML snapshots are only fetched while that tab is actually open.
   manifestHistory: (agentId: string) =>
     queryOptions({
       queryKey: agentKeys.manifestHistory(agentId),
@@ -272,6 +271,10 @@ export function useAgentChannels(agentId: string, options: QueryOverrides = {}) 
   return useQuery(withOverrides(agentQueries.channels(agentId), options));
 }
 
+export function useAgentManifestHistory(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.manifestHistory(agentId), options));
+}
+
 /**
  * An agent's avatar as an object URL, ready for an `<img src>` (#8339).
  *
@@ -309,8 +312,4 @@ export function useAgentAvatarUrl(
   // wants to know "is there an image" would otherwise mint an object URL for a
   // cached Blob it is not rendering (#8339 review).
   return useObjectUrl(hasAvatar && enabled ? blob : undefined);
-}
-
-export function useAgentManifestHistory(agentId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(agentQueries.manifestHistory(agentId), options));
 }

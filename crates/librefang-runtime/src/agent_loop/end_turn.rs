@@ -171,6 +171,29 @@ pub(super) fn classify_end_turn_retry(ctx: EndTurnRetryContext<'_>) -> Option<En
     None
 }
 
+/// What a turn that exhausted its iteration budget delivers (#8556).
+///
+/// Returns `(response, notice)`.
+/// `notice` says the turn was cut off, and `response` is the prose the turn produced before the cap with that notice appended, or the notice alone when the turn only ran tools.
+/// The canned end-turn guard (`[Task completed — …]`) is deliberately not reused: a capped turn did not complete, and every consumer of the response (the user, cron delivery, channel bridges) must be able to tell.
+pub(super) fn finalize_iteration_cap_text(
+    accumulated_text: &str,
+    max_iterations: u32,
+) -> (String, String) {
+    let partial = accumulated_text.trim_end();
+    if partial.trim().is_empty() {
+        let notice = format!(
+            "[Stopped after reaching the iteration limit ({max_iterations}) before finishing — the agent ran tools but did not produce an answer.]"
+        );
+        (notice.clone(), notice)
+    } else {
+        let notice = format!(
+            "[Stopped after reaching the iteration limit ({max_iterations}) before finishing — the response above may be incomplete.]"
+        );
+        (format!("{partial}\n\n{notice}"), notice)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finalize_end_turn_text(
     text: String,
@@ -404,6 +427,7 @@ pub(super) async fn finalize_successful_end_turn(
         data: serde_json::json!({
             "iterations": end_turn.iteration + 1,
             "response_length": end_turn.final_response.len(),
+            "session_id": ctx.session.id.to_string(),
             "is_fork": ctx.opts.is_fork,
         }),
     };
@@ -505,6 +529,9 @@ pub(super) async fn maybe_fold_stale_tool_results(
         }
     }
     if fold_result.groups_folded > 0 {
+        // #4971: a folded `file_read` body is gone from the prompt, so a dedup stub pointing at it would leave the model unable to see the file again.
+        // Keyed on `groups_folded` rather than `rewrites`: the working copy is folded even when no durable rewrite applies.
+        crate::context_compressor::reset_post_compression_side_state(session.id);
         let label = if streaming {
             "streaming"
         } else {

@@ -1471,13 +1471,9 @@ fn safe_trim_messages_respects_custom_cap() {
     );
 }
 
-/// #8556 regression: the trim must keep the *current turn's* task — the last
-/// user message of a turn-shaped working copy — and not merely "some user
-/// message". Before the fix `ensure_post_trim_minimum` returned early as soon
-/// as any user message survived, so a drained task was replaced by the raw
-/// fallback string (which differs from the pushed message once a sender
-/// prefix / PII filter / injection warning has been applied). The model then
-/// answered a question it could no longer see.
+/// #8556: the trim must keep the *current turn's* task — the last user message of a turn-shaped working copy — and not merely "some user message".
+/// `max_history = 0` is below the production floor (`resolve_max_history` clamps to `MIN_HISTORY_MESSAGES`), so this pins the guard in `ensure_post_trim_minimum` itself: before it, the guard returned early as soon as any user message survived and fell back to the raw `user_message` string otherwise.
+/// `safe_trim_messages_keeps_current_turn_task_at_production_floor` covers the reachable configuration.
 #[test]
 fn safe_trim_messages_preserves_current_turn_task_under_tiny_cap() {
     let mut messages = vec![
@@ -1510,6 +1506,85 @@ fn safe_trim_messages_preserves_current_turn_task_under_tiny_cap() {
                 .iter()
                 .map(|m| m.content.text_content())
                 .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// #8556: the same guarantee at the smallest cap production can reach, on a history whose earlier turns include a full tool cycle.
+/// The task carries a sender prefix, so it differs from the raw `user_message` fallback, and it must survive the drain and the repair passes exactly once, as the last message of both copies.
+#[test]
+fn safe_trim_messages_keeps_current_turn_task_at_production_floor() {
+    use librefang_types::message::{ContentBlock, MessageContent};
+
+    let tool_use = Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "file_read".into(),
+            input: serde_json::json!({}),
+            provider_metadata: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    };
+    let tool_result = Message {
+        role: Role::User,
+        content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "t1".into(),
+            tool_name: "file_read".into(),
+            content: "result".into(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            approval_request_id: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    };
+    let task = "[from alice] CURRENT TASK";
+    let mut messages = vec![
+        Message::user("turn 1"),
+        Message::assistant("reply 1"),
+        Message::user("turn 2"),
+        tool_use,
+        tool_result,
+        Message::assistant("reply 2"),
+        Message::user("turn 3"),
+        Message::assistant("reply 3"),
+        Message::user(task),
+    ];
+    let mut session_messages = messages.clone();
+
+    safe_trim_messages(
+        &mut messages,
+        &mut session_messages,
+        "test-agent",
+        "CURRENT TASK",
+        crate::agent_loop::history::MIN_HISTORY_MESSAGES,
+    );
+
+    for (label, history) in [
+        ("working copy", &messages),
+        ("persistent session", &session_messages),
+    ] {
+        let texts: Vec<String> = history.iter().map(|m| m.content.text_content()).collect();
+        assert!(
+            history.len() < 9,
+            "{label} must actually have been trimmed; got {texts:?}"
+        );
+        assert_eq!(
+            history.first().map(|m| m.role),
+            Some(Role::User),
+            "{label} must start with a user turn; got {texts:?}"
+        );
+        assert_eq!(
+            texts.last().map(String::as_str),
+            Some(task),
+            "{label} must end with the current-turn task; got {texts:?}"
+        );
+        assert_eq!(
+            texts.iter().filter(|t| t.contains("CURRENT TASK")).count(),
+            1,
+            "{label} must hold the task exactly once; got {texts:?}"
         );
     }
 }

@@ -80,6 +80,8 @@ export function useUpdateUser() {
           queryKey: authzKeys.effective(variables.originalName),
         });
       }
+      // `whoami` answers with the caller's name and role, and the users page decides from it whether the row being edited is the caller's own. An Owner renaming their own row would otherwise keep a `whoami` naming the old row, which hides the appearance editor until the next focus refetch. Unconditional for the reason `useUpdateUserIdentity` gives: this hook cannot tell whose row it was handed.
+      qc.invalidateQueries({ queryKey: authzKeys.whoami() });
     },
   });
 }
@@ -99,6 +101,8 @@ export function useDeleteUser() {
       // write (#7745), so the cached group rows and the per-user reverse
       // lookups are both stale the moment this resolves.
       qc.invalidateQueries({ queryKey: groupKeys.all });
+      // Deleting the caller's own row changes what `whoami` reports — the emoji and picture came from that row — so the cached answer is stale too.
+      qc.invalidateQueries({ queryKey: authzKeys.whoami() });
     },
   });
 }

@@ -446,3 +446,46 @@ async fn panel_puts_reject_a_stale_expected_version() {
         "a successful panel write must rotate the ETag"
     );
 }
+
+/// #8424 / #3298: the ETag must describe the manifest's content, not the iteration order of its `HashMap` fields.
+/// Re-saving byte-identical content parses it into fresh maps whose order differs from the ones already in the registry, and that must not rotate the token — otherwise the editor's next save, raced by nobody, answers a spurious 409.
+#[tokio::test(flavor = "multi_thread")]
+async fn etag_is_stable_across_hashmap_iteration_order() {
+    let h = boot().await;
+    let metadata: std::collections::HashMap<String, serde_json::Value> = (0..32)
+        .map(|i| (format!("key-{i:02}"), serde_json::json!(i)))
+        .collect();
+    let id = spawn_with(
+        &h.state,
+        AgentManifest {
+            name: "stable-etag".to_string(),
+            metadata,
+            ..AgentManifest::default()
+        },
+    );
+
+    let before = manifest_etag(&h.app, &id).await;
+    let (status, toml_text) =
+        send_text(h.app.clone(), get(&format!("/api/agents/{id}/manifest"))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Write the same content back several times; each write rebuilds the maps from scratch.
+    let mut etag = before.clone();
+    for _ in 0..4 {
+        let (status, body) = send_text(
+            h.app.clone(),
+            patch_json(
+                &format!("/api/agents/{id}"),
+                serde_json::json!({ "manifest_toml": toml_text.clone(), "expected_version": etag }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an unchanged manifest must keep its token; body: {body}"
+        );
+        etag = manifest_etag(&h.app, &id).await;
+        assert_eq!(etag, before, "identical content must hash to the same ETag");
+    }
+}

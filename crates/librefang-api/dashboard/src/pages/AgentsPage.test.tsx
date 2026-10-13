@@ -1,6 +1,10 @@
 // Tests the pure decisions the page makes plus the two surfaces that can be
 // rendered without it (ChannelsSection, and the layout guards over the config
-// group map). AgentsPage itself has no render harness (~20 hooks).
+// group map), plus the resolveDrawerSeed mapping that receives the agent-types
+// Run round trip. AgentsPage itself has no render harness (~20 hooks); the
+// page-level effects are exercised by the full-page harness in
+// AgentsPage.quickRun.test.tsx, which is the wrong place to pin these narrow
+// rules.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
@@ -10,11 +14,9 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   canEditAgentIdentity,
-  resolveDrawerSeed,
   cloneResultNotice,
   resolveDrawerSeed,
   ChannelsSection,
-  PromptLibraryPicker,
   CONFIG_GROUPS,
   CONFIG_GROUP_IDS,
   INFO_TABS,
@@ -23,8 +25,7 @@ import {
 import { MANIFEST_SECTION_IDS } from "../components/AgentManifestForm";
 import { emptyManifestForm, validateManifestForm } from "../lib/agentManifest";
 import { useSetAgentChannels } from "../lib/mutations/agents";
-import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
-import { useAgentChannels, usePromptVersions } from "../lib/queries/agents";
+import { useAgentChannels } from "../lib/queries/agents";
 
 vi.mock("../lib/mutations/agents", () => ({
   useSetAgentChannels: vi.fn(),
@@ -32,11 +33,6 @@ vi.mock("../lib/mutations/agents", () => ({
 
 vi.mock("../lib/queries/agents", () => ({
   useAgentChannels: vi.fn(),
-  usePromptVersions: vi.fn(),
-}));
-
-vi.mock("../lib/mutations/prompts", () => ({
-  useBindPromptVersionToAgent: vi.fn(),
 }));
 
 const addToastMock = vi.fn();
@@ -208,6 +204,29 @@ describe("PromptLibraryPicker (#6187, folded into the prompt section #8424)", ()
     fireEvent.click(screen.getByRole("button", { name: /Bind from library/i }));
     fireEvent.click(screen.getByRole("button", { name: /^Bind$/i }));
     expect(onBound).toHaveBeenCalledWith("library prompt");
+  });
+});
+
+// The daemon gates both appearance writes at `role >= UserRole::Admin`, so the
+// floor is the whole content of this predicate: a `user` shown these controls
+// collects a 403, and an `admin` denied them is blocked from work the daemon
+// would accept.
+describe("canEditAgentIdentity", () => {
+  it("lets an admin and an owner through", () => {
+    expect(canEditAgentIdentity("admin")).toBe(true);
+    expect(canEditAgentIdentity("owner")).toBe(true);
+  });
+
+  it("turns away the roles that could only collect a 403", () => {
+    expect(canEditAgentIdentity("user")).toBe(false);
+    expect(canEditAgentIdentity("viewer")).toBe(false);
+  });
+
+  // Silence is not permission. `whoami` has not answered on the first render,
+  // and reading that as "yes" would flash controls that then disappear.
+  it("treats an unanswered whoami as no", () => {
+    expect(canEditAgentIdentity(undefined)).toBe(false);
+    expect(canEditAgentIdentity("")).toBe(false);
   });
 });
 
@@ -654,5 +673,21 @@ describe("grant panels reconcile with the manifest form (#8424)", () => {
   // ("auto_evolve toggle adoption"); this pins the page actually calling it.
   it("adopts the auto-evolve toggle into the form's top-level extras", () => {
     expect(source).toContain("adoptTopLevelExtras(prev, { auto_evolve: !autoEvolve })");
+  });
+
+  // #8516: a fresh token is only adopted together with the content it describes.
+  // Behavioural coverage of the merge lives in manifestVersion.test.tsx ("rebaseManifestEdits"); this pins the page routing every token refresh through it.
+  it("rebases the form onto the fresh read whenever it adopts a new token", () => {
+    expect(source).toContain("rebaseManifestEdits(seeded.form, mine, fresh.form)");
+    expect(source).toContain("rebaseManifestEdits(seeded.extras, mine, fresh.extras)");
+    // The 409 handler no longer just drops the cached read and moves the token.
+    expect(source).not.toContain("qc.invalidateQueries({ queryKey: agentKeys.manifest(detailAgent.id) })");
+  });
+
+  // #8516: both PUTs rotate the ETag, so the MCP half must carry the token the tools half produced.
+  it("sends the MCP write with the token the tools write produced", () => {
+    expect(source).toContain("await updateToolsMutation.mutateAsync(");
+    expect(source).toContain("expectedVersion = await refreshManifestVersion(agentId);");
+    expect(source).toContain("await setAgentMcpServersMutation.mutateAsync(");
   });
 });

@@ -64,8 +64,8 @@ function Harness({
   routingInertReason,
   sections,
   onState,
-  modelsFetching = false,
-  modelsError = false,
+  modelsFetching,
+  modelsError,
   onModelsRetry,
 }: {
   skillCatalog?: ManifestCatalogEntry[];
@@ -106,9 +106,6 @@ function Harness({
       nameField={nameField}
       routingInertReason={routingInertReason}
       sections={sections}
-      modelsFetching={modelsFetching}
-      modelsError={modelsError}
-      onModelsRetry={onModelsRetry}
     />
   );
 }

@@ -1681,8 +1681,7 @@ export interface ManifestVersionEntry {
   agent_name: string;
   timestamp: string;
   manifest_toml: string;
-  // The column is free text on the server, so a producer this list does not
-  // know yet still type-checks and renders verbatim.
+  // The column is free text on the server, so a producer this list does not know yet still type-checks and renders verbatim.
   change_source: string;
 }
 
@@ -1849,6 +1848,16 @@ export type AgentSchedulePatch =
  * `getAgentManifest` and serialized via `serializeManifestForm`. */
 export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: AgentSchedulePatch; manifest_toml?: string; auto_evolve?: boolean; expected_version?: string }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
+}
+
+/** A manifest read with its optimistic-concurrency token (#8424).
+ *
+ * `version` is the `ETag` of the GET; `PATCH /api/agents/{id}` answers 409
+ * when the `expected_version` it is sent no longer matches the manifest, so a
+ * save built on a stale read cannot silently undo a concurrent write. */
+export interface AgentManifestSnapshot {
+  manifest_toml: string;
+  version: string | null;
 }
 
 // --- Agent visual identity: emoji, colour, avatar image (#8339) ------------
@@ -2036,16 +2045,6 @@ export async function updateUserIdentity(
   identity: { emoji?: string },
 ): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/users/${encodeURIComponent(name)}/identity`, identity);
-}
-
-/** A manifest read with its optimistic-concurrency token (#8424).
- *
- * `version` is the `ETag` of the GET; `PATCH /api/agents/{id}` answers 409
- * when the `expected_version` it is sent no longer matches the manifest, so a
- * save built on a stale read cannot silently undo a concurrent write. */
-export interface AgentManifestSnapshot {
-  manifest_toml: string;
-  version: string | null;
 }
 
 /** GET /api/agents/{id}/manifest — the agent's full manifest as raw TOML.
@@ -3910,6 +3909,10 @@ export interface WhoamiResponse {
    *  read `false` as "there is nothing to fetch" and `undefined` as "not told",
    *  never conflating them — the second one must still fetch. */
   has_avatar?: boolean;
+  /** The caller's principal in `kind:uuid` form, or `null` for the synthetic `root` credential — the master API key, a trusted loopback caller, or a no-auth deployment — which names no `[[users]]` row.
+   *
+   *  Read to tell a person from that stand-in: drawing `root`'s initial on every message would be a confident identity for nobody. Optional for the same version-skew reason as `has_avatar`; `undefined` is "not told", never "no row". */
+  principal?: string | null;
 }
 
 /** The calling credential's own resolved identity — `GET /api/authz/whoami`.

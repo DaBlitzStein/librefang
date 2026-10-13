@@ -16,7 +16,8 @@ import { act, renderHook } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { agentQueries } from "./queries/agents";
-import { fetchManifestVersion } from "./manifestVersion";
+import { fetchManifestVersion, rebaseManifestEdits } from "./manifestVersion";
+import { parseManifestToml, serializeManifestForm } from "./agentManifest";
 import { useSetAgentSkills } from "./mutations/agents";
 import { patchAgent } from "../api";
 
@@ -162,5 +163,90 @@ describe("manifest ETag refresh (#8424)", () => {
     expect(server.patchExpectedVersions).toEqual(["manifest-v2", "manifest-v1"]);
 
     qc.clear();
+  });
+});
+
+// #8516: adopting a fresh token is only safe together with the content it describes.
+// These run the real parser and serializer, so "the other writer's change survives the retry" is observed on the TOML that would be sent, not on the merge in isolation.
+describe("rebaseManifestEdits (#8516)", () => {
+  const SEED = `name = "rebase"
+description = "seed"
+
+[compaction]
+threshold_messages = 10
+keep_recent = 4
+
+[metadata]
+team = "core"
+`;
+
+  function parseOk(toml: string) {
+    const parsed = parseManifestToml(toml);
+    if (!parsed.ok) throw new Error(`fixture must parse: ${parsed.message}`);
+    return parsed;
+  }
+
+  it("keeps a concurrent writer's change when the form is saved again after a 409", () => {
+    const seed = parseOk(SEED);
+    // The operator edits the description in the form.
+    const mine = { ...seed.form, description: "mine" };
+    // Meanwhile another writer changed a different field and saved.
+    const theirs = parseOk(SEED.replace("keep_recent = 4", "keep_recent = 9"));
+
+    const form = rebaseManifestEdits(seed.form, mine, theirs.form);
+    const extras = rebaseManifestEdits(seed.extras, seed.extras, theirs.extras);
+    const resent = parseOk(serializeManifestForm(form, extras));
+
+    expect(resent.form.description).toBe("mine");
+    // Adopting the token alone would have resent the seed's `keep_recent = 4`.
+    expect(resent.form.compaction.keep_recent).toBe("9");
+    expect(resent.form.compaction.threshold_messages).toBe("10");
+  });
+
+  it("merges a table key by key, so an edit to one knob does not pin its siblings", () => {
+    const seed = parseOk(SEED);
+    const mine = {
+      ...seed.form,
+      compaction: { ...seed.form.compaction, threshold_messages: "20" },
+    };
+    const theirs = parseOk(SEED.replace("keep_recent = 4", "keep_recent = 9"));
+
+    const form = rebaseManifestEdits(seed.form, mine, theirs.form);
+    expect(form.compaction.threshold_messages).toBe("20");
+    expect(form.compaction.keep_recent).toBe("9");
+  });
+
+  it("keeps the operator's value when both sides changed the same field", () => {
+    const seed = parseOk(SEED);
+    const mine = { ...seed.form, description: "mine" };
+    const theirs = parseOk(SEED.replace('description = "seed"', 'description = "theirs"'));
+
+    expect(rebaseManifestEdits(seed.form, mine, theirs.form).description).toBe("mine");
+  });
+
+  it("adopts the server's content for every field the operator left alone", () => {
+    const seed = parseOk(SEED);
+    const theirs = parseOk(
+      SEED.replace('description = "seed"', 'description = "theirs"').replace(
+        'team = "core"',
+        'team = "platform"',
+      ),
+    );
+
+    const form = rebaseManifestEdits(seed.form, seed.form, theirs.form);
+    expect(form).toEqual(theirs.form);
+  });
+
+  it("does not treat freshly minted row ids as an edit", () => {
+    const seed = parseOk(SEED);
+    // Same content, different `_uid`s — what a re-render or a re-parse produces.
+    const mine = {
+      ...seed.form,
+      metadata: seed.form.metadata.map((row) => ({ ...row, _uid: `${row._uid}-local` })),
+    };
+    const theirs = parseOk(SEED.replace('team = "core"', 'team = "platform"'));
+
+    const form = rebaseManifestEdits(seed.form, mine, theirs.form);
+    expect(form.metadata.map((row) => row.value)).toEqual(["platform"]);
   });
 });

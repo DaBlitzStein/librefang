@@ -142,6 +142,21 @@ describe("useUserAvatarUrl", () => {
     expect(http.fetchAuthenticatedImage).not.toHaveBeenCalled();
   });
 
+  it("draws nothing from a cached image once the daemon says there is no picture", () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    // The picture was removed somewhere else — another tab, the CLI — so the
+    // Blob from before is still cached while `whoami` now answers `false`. A
+    // disabled query still hands back cached data, so without the gate this
+    // would mint a URL for an image the daemon no longer has.
+    queryClient.setQueryData(userKeys.avatar(NAME), pngBlob());
+
+    const { result } = renderHook(() => useUserAvatarUrl(NAME, false), { wrapper });
+
+    expect(result.current).toBeUndefined();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(http.fetchAuthenticatedImage).not.toHaveBeenCalled();
+  });
+
   it("asks anyway when the daemon did not say", async () => {
     vi.mocked(http.fetchAuthenticatedImage).mockResolvedValue(pngBlob());
     const { wrapper } = createQueryClientWrapper();

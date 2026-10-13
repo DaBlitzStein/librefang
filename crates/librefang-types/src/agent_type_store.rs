@@ -69,16 +69,14 @@ pub fn workspace_agents_dir_in(home_dir: &std::path::Path) -> PathBuf {
 
 /// The `agent.toml` of a live agent, which the catalog lists but this store never writes.
 pub fn workspace_agent_manifest_path(name: &str) -> PathBuf {
-    workspace_agents_dir().join(name).join("agent.toml")
+    workspace_agent_manifest_path_in(&librefang_home(), name)
 }
 
 /// The `agent.toml` of a live agent under an explicitly supplied home directory.
 ///
-/// The kernel resolves a live agent's manifest against a `home_dir` it was handed rather than against the process environment, so the same explicit-home spelling exists here as for the agent-type store.
+/// Added for the same reason [`agent_type_path_in`] exists (#6699): a caller holding a `KernelConfig::home_dir` must be able to ask this question without the answer detouring through `LIBREFANG_HOME`, or the shadow check below would consult a different tree than the write it is guarding.
 pub fn workspace_agent_manifest_path_in(home_dir: &std::path::Path, name: &str) -> PathBuf {
-    home_dir
-        .join("workspaces")
-        .join("agents")
+    workspace_agents_dir_in(home_dir)
         .join(name)
         .join("agent.toml")
 }
@@ -244,23 +242,26 @@ pub fn create_agent_type_from_manifest(
     name: &str,
     manifest: &AgentManifest,
 ) -> Result<String, CreateAgentTypeError> {
-    create_agent_type_from_manifest_in(&librefang_home(), name, manifest, "")
+    create_agent_type_from_manifest_in(&librefang_home(), name, manifest, None)
 }
 
 /// Same resolution as [`create_agent_type_from_manifest`] against an explicitly supplied home directory.
 /// See [`create_agent_type_in`] for why this spelling exists (#8112).
 ///
-/// `snapshot_of` is the name of the live agent being snapshotted (the
-/// `save-as-agent-type` path), and it is the one name exempt from the
-/// [`CreateAgentTypeError::ShadowsLiveAgent`] check. Every other caller — the
-/// raw-TOML editor among them — passes `""` for "no snapshot source", which
-/// applies the shadow check unconditionally: an empty `snapshot_of` never
-/// matches a non-empty `name`.
+/// `snapshot_of` is `Some(source_agent_name)` when the caller is snapshotting a live
+/// agent (`POST /api/agents/{id}/save-as-agent-type`): that source's name — more
+/// precisely, its sanitized workspace component — is the one name exempt from the
+/// [`CreateAgentTypeError::ShadowsLiveAgent`] check, because saving an agent under its
+/// own name is the feature's main path and that name necessarily already has a
+/// workspace on disk. Every OTHER live agent's name stays refused, for the reason
+/// [`CreateAgentTypeError::ShadowsLiveAgent`] documents. `None` is for a caller
+/// authoring from a caller-supplied manifest (no source agent): the check then
+/// applies unconditionally.
 pub fn create_agent_type_from_manifest_in(
     home_dir: &std::path::Path,
     name: &str,
     manifest: &AgentManifest,
-    snapshot_of: &str,
+    snapshot_of: Option<&str>,
 ) -> Result<String, CreateAgentTypeError> {
     validate_agent_type_name(name).map_err(|_| CreateAgentTypeError::InvalidName)?;
     // Compare against the source's *workspace component*, not its raw manifest
@@ -268,9 +269,8 @@ pub fn create_agent_type_from_manifest_in(
     // Bot` lives at `workspaces/agents/ResearchBot`), so comparing the raw
     // `Research Bot` let the source collide with itself and 409 a save under the
     // very name the catalog lists it as.
-    if name != workspace_component(snapshot_of)
-        && workspace_agent_manifest_path_in(home_dir, name).exists()
-    {
+    let exempt = snapshot_of.is_some_and(|source| name == workspace_component(source));
+    if !exempt && workspace_agent_manifest_path_in(home_dir, name).exists() {
         return Err(CreateAgentTypeError::ShadowsLiveAgent);
     }
 
@@ -483,7 +483,7 @@ mod tests {
             dir.path(),
             "ResearchBot",
             &manifest,
-            "Research Bot",
+            Some("Research Bot"),
         );
         assert!(saved.is_ok(), "{saved:?}");
     }
@@ -500,8 +500,12 @@ mod tests {
             name: "victim".to_string(),
             ..AgentManifest::default()
         };
-        let refused =
-            create_agent_type_from_manifest_in(dir.path(), "victim", &manifest, "Research Bot");
+        let refused = create_agent_type_from_manifest_in(
+            dir.path(),
+            "victim",
+            &manifest,
+            Some("Research Bot"),
+        );
         assert_eq!(refused, Err(CreateAgentTypeError::ShadowsLiveAgent));
     }
 }

@@ -1,16 +1,36 @@
 use super::*;
 use librefang_types::agent_type_store;
 
-/// Optimistic-concurrency token for the manifest editor (#8424): the SHA-256
-/// of the same pretty-printed TOML `get_agent_manifest_toml` hands the client,
-/// so a `PATCH` carrying `expected_version` fails with `409` when another
-/// writer changed the manifest after the editor was seeded.
+/// Optimistic-concurrency token for the manifest editor (#8424): the SHA-256 of a canonical JSON rendering of the manifest, so a `PATCH` carrying `expected_version` fails with `409` when another writer changed the manifest after the editor was seeded.
+///
+/// The rendering is canonical because `AgentManifest` carries `HashMap` fields (`tools`, `metadata`, `workspaces`) whose iteration order differs between processes and between two maps built from the same content (#3298).
+/// Hashing the TOML text the client sees would hand out a different token for unchanged content after a reload or a re-insert, and the editor would answer a save nobody raced with a spurious `409`.
+/// Every object's keys are sorted explicitly rather than relying on `serde_json::Map` being a `BTreeMap`, because the workspace enables serde_json's `preserve_order` feature transitively.
 fn manifest_version(manifest: &librefang_types::agent::AgentManifest) -> String {
     use sha2::{Digest, Sha256};
 
-    let text = toml::to_string_pretty(manifest).unwrap_or_default();
+    fn canonicalize(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.sort_keys();
+                map.values_mut().for_each(canonicalize);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(canonicalize),
+            _ => {}
+        }
+    }
+
+    let mut value = match serde_json::to_value(manifest) {
+        Ok(value) => value,
+        Err(e) => {
+            // An empty token would match every other failed serialization and silently disable the check, so hash the error text instead: still deterministic, never equal to a real manifest's token.
+            tracing::error!(error = %e, "failed to serialize agent manifest for its version token");
+            serde_json::Value::String(format!("unserializable manifest: {e}"))
+        }
+    };
+    canonicalize(&mut value);
     let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
+    hasher.update(value.to_string().as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
@@ -88,19 +108,23 @@ async fn resolve_manifest(
     req: &SpawnRequest,
     lang: &'static str,
 ) -> Result<ResolvedManifest, ManifestError> {
-    // Resolve template name → manifest_toml
+    // Resolve template name → manifest text, or take a client-supplied one.
     let mut used_template: Option<String> = None;
-    let manifest_toml = if req.manifest_toml.trim().is_empty() {
-        // A signature covers the exact bytes the client signed. When the
-        // manifest comes from a server-side template there is no
-        // client-supplied text left to verify it against, so accepting the
-        // pair would silently skip verification entirely. Reject instead of
-        // ignoring the signature.
+    let manifest_toml: String = if req.manifest_toml.trim().is_empty() {
+        // A signature covers the exact bytes the client signed. Main accepted
+        // `signed_manifest` + `template` and verified the signature against
+        // the resolved template's content — a verified flow, not a skipped
+        // one: it only passed for a caller whose signed bytes equalled the
+        // template on disk. This door rejects the pair anyway, so a
+        // signature-pinned spawn can only pin content the client supplied,
+        // not whatever the template store happens to hold at verification
+        // time. Behaviour change against main, recorded in
+        // `changelog.d/added/8360-save-as-agent-type.md`.
         if req.signed_manifest.is_some() {
             let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
                 message: t.t("api-error-manifest-signed-template-conflict"),
-                code: Some("signed_template_conflict"),
+                code: Some("invalid_manifest"),
             });
         }
         if let Some(ref tmpl_name) = req.template {
@@ -171,7 +195,10 @@ async fn resolve_manifest(
         req.manifest_toml.clone()
     };
 
-    // Size guard
+    // Size guard — bounds the inline `manifest_toml` and the content of a
+    // resolved template file alike. `MAX_MANIFEST_SIZE` no longer covers only
+    // the client-supplied body: a template is still read into memory here, so
+    // the same cap applies before either is parsed or verified.
     if manifest_toml.len() > MAX_MANIFEST_SIZE {
         let t = ErrorTranslator::new(lang);
         return Err(ManifestError {
@@ -180,7 +207,9 @@ async fn resolve_manifest(
         });
     }
 
-    // SECURITY: Verify Ed25519 signature when provided
+    // SECURITY: Verify Ed25519 signature when provided. `signed_manifest` +
+    // `template` is rejected above, so only the inline manifest reaches this
+    // comparison, against the exact content the client supplied.
     if let Some(ref signed_json) = req.signed_manifest {
         match state.kernel.verify_signed_manifest(signed_json) {
             Ok(verified_toml) => {
@@ -1864,7 +1893,7 @@ pub async fn save_agent_as_agent_type(
         home,
         &template_name,
         &manifest,
-        &entry.manifest.name,
+        Some(&entry.manifest.name),
     ) {
         Ok(rendered) => {
             // Every other agent-type write path records a history baseline; this

@@ -692,7 +692,6 @@ function AgentTypeRow({
         >
           <Plus className="h-3.5 w-3.5" />
         </button>
-
         {/* Read-only sanitized-manifest modal. Its own key, not
             `agentTypes.promote`: the Share2 button below opens the registry
             pull request, and while the two shared a key these adjacent

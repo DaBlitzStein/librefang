@@ -32,10 +32,7 @@ const DEFAULT_TOOLS: &[bool] = &[true, false, true, true, true, true, false, fal
 
 /// Lines `PageUp`/`PageDown` move in the manifest-history TOML pane.
 ///
-/// A fixed step rather than the pane height because the handler has no `Rect`;
-/// ten lines is roughly half the right pane at the usual terminal size, enough
-/// to make the trailing `[model]` / `[resources]` tables reachable without
-/// overshooting the whole snapshot in one keypress.
+/// A fixed step rather than the pane height because the handler has no `Rect`; ten lines is roughly half the right pane at the usual terminal size, enough to make the trailing `[model]` / `[resources]` tables reachable without overshooting the whole snapshot in one keypress.
 const MANIFEST_HISTORY_PAGE: u16 = 10;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -188,26 +185,26 @@ pub struct AgentSelectState {
     /// (#7781 review).
     pub routing_loaded: bool,
 
-    // Manifest version history (detail view, read-only)
+    // Manifest version history (detail view; the TUI pane is view-only, restore lives in the dashboard / API)
     pub manifest_history: Vec<ManifestVersion>,
     pub manifest_history_list: ListState,
-    /// A fetch is in flight. Distinguishes "still loading" from "this agent has
-    /// no recorded history", which would otherwise render the same empty pane.
+    /// A fetch is in flight.
+    /// Distinguishes "still loading" from "this agent has no recorded history", which would otherwise render the same empty pane.
     pub manifest_history_loading: bool,
     /// Why the last history fetch produced nothing, when it failed.
     ///
-    /// Its own field rather than the shared `status_msg`: that one collects every
-    /// agent-tab message, so a skills or channels error arriving while a history
-    /// fetch is outstanding would otherwise be rendered as this fetch's reason.
+    /// Its own field rather than the shared `status_msg`: that one collects every agent-tab message, so a skills or channels error arriving while a history fetch is outstanding would otherwise be rendered as this fetch's reason.
     pub manifest_history_error: Option<String>,
-    /// First visible line of the selected snapshot's TOML.
+    /// First visible row of the selected snapshot's TOML.
     ///
-    /// The right pane shows a full `agent.toml`, which is far taller than the
-    /// pane; without this the tables at the end of the serializer's output —
-    /// `[model]`, `[resources]`, `[capabilities]` — are simply unreachable.
-    /// Reset to 0 whenever the selection changes, so the operator starts each
-    /// snapshot at the top.
+    /// The right pane shows a full `agent.toml`, which is far taller than the pane; without this the tables at the end of the serializer's output — `[model]`, `[resources]`, `[capabilities]` — are simply unreachable.
+    /// The pane wraps long lines, so this counts wrapped rows, not lines of the file.
+    /// Reset to 0 whenever the selection changes, so the operator starts each snapshot at the top.
     pub manifest_history_scroll: u16,
+    /// Text width of the TOML pane at the last draw, in columns; 0 before the pane has been drawn.
+    ///
+    /// The scroll cap has to count wrapped rows, and how many rows a line wraps to depends on this width, which only the draw call knows.
+    pub manifest_history_wrap_width: u16,
 
     // Result
     pub spawned_toml: Option<String>,
@@ -232,8 +229,8 @@ pub struct InProcessAgent {
     pub model: String,
 }
 
-/// One recorded manifest snapshot, as `GET /api/agents/{id}/manifest-history`
-/// returns it. The endpoint is read-only, so there is nothing here to write back.
+/// One recorded manifest snapshot, as `GET /api/agents/{id}/manifest-history` returns it.
+/// The TUI pane is deliberately view-only, so there is nothing here to write back; restoring a snapshot is done through the dashboard or `POST /api/agents/{id}/manifest-history/{version_id}/restore`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManifestVersion {
     /// SQLite `datetime('now')` shape: `YYYY-MM-DD HH:MM:SS`, UTC, no offset.
@@ -391,6 +388,7 @@ impl AgentSelectState {
             manifest_history_loading: false,
             manifest_history_error: None,
             manifest_history_scroll: 0,
+            manifest_history_wrap_width: 0,
             available_skills: Vec::new(),
             skill_cursor: 0,
             available_mcp: Vec::new(),
@@ -844,14 +842,13 @@ impl AgentSelectState {
                 }
             }
             KeyCode::Char('h') => {
-                // Read-only manifest version history for this agent
+                // View-only manifest version history for this agent; restore is offered by the dashboard / API, not here
                 if let Some(ref detail) = self.detail {
                     let id = detail.id.clone();
                     self.manifest_history.clear();
                     self.manifest_history_list.select(None);
                     self.manifest_history_loading = true;
-                    // Cleared so any reason the pane shows afterwards belongs to
-                    // this fetch and not to an earlier one.
+                    // Cleared so any reason the pane shows afterwards belongs to this fetch and not to an earlier one.
                     self.manifest_history_error = None;
                     self.manifest_history_scroll = 0;
                     self.sub = AgentSubScreen::ManifestHistory;
@@ -865,8 +862,8 @@ impl AgentSelectState {
 
     /// Key handling for the manifest history pane.
     ///
-    /// Navigation only — the endpoint records snapshots and offers no restore,
-    /// so there is nothing here that writes.
+    /// Navigation only — the pane is deliberately view-only, so nothing here writes.
+    /// Restoring a snapshot goes through the dashboard's History tab or `POST /api/agents/{id}/manifest-history/{version_id}/restore`.
     fn handle_manifest_history(&mut self, key: KeyEvent) -> AgentAction {
         let len = self.manifest_history.len();
         match key.code {
@@ -886,8 +883,7 @@ impl AgentSelectState {
                 self.manifest_history_list.select(Some((i + 1) % len));
                 self.manifest_history_scroll = 0;
             }
-            // The TOML is taller than the pane; page through it rather than
-            // cutting the trailing tables off with no way to reach them (#8231).
+            // The TOML is taller than the pane; page through it rather than cutting the trailing tables off with no way to reach them (#8231).
             KeyCode::PageDown => {
                 let max = self.manifest_history_scroll_max();
                 self.manifest_history_scroll = self
@@ -905,20 +901,21 @@ impl AgentSelectState {
         AgentAction::Continue
     }
 
-    /// Highest scroll offset that still shows a line of the selected snapshot.
+    /// Highest scroll offset that still shows a row of the selected snapshot.
     ///
-    /// `Paragraph::scroll` past the end renders blank, so an unbounded PageDown
-    /// hides the snapshot behind empty rows and takes the same number of PageUps
-    /// to get back. Keeping the last line visible caps the offset at
-    /// `lines - 1`.
+    /// `Paragraph::scroll` past the end renders blank, so an unbounded PageDown hides the snapshot behind empty rows and takes the same number of PageUps to get back.
+    /// Keeping the last row visible caps the offset at `rows - 1`.
+    ///
+    /// The pane wraps, and with wrapping on the scroll offset counts wrapped rows, so the cap is taken from the wrapped row count at the width the pane was last drawn at.
+    /// Capping at the file's line count instead left everything past it unreachable whenever a long `system_prompt` wrapped onto many rows.
     fn manifest_history_scroll_max(&self) -> u16 {
-        let lines = self
+        let rows = self
             .manifest_history_list
             .selected()
             .and_then(|i| self.manifest_history.get(i))
-            .map(|v| v.manifest_toml.lines().count())
+            .map(|v| manifest_toml_rows(&v.manifest_toml, self.manifest_history_wrap_width))
             .unwrap_or(0);
-        lines.saturating_sub(1).min(u16::MAX as usize) as u16
+        rows.saturating_sub(1).min(u16::MAX as usize) as u16
     }
 
     /// Record the snapshots a fetch returned and put the cursor on the newest.
@@ -931,8 +928,7 @@ impl AgentSelectState {
         self.manifest_history = versions;
     }
 
-    /// Record why a history fetch produced nothing, so the pane says that rather
-    /// than reporting the agent has no recorded history.
+    /// Record why a history fetch produced nothing, so the pane says that rather than reporting the agent has no recorded history.
     pub fn set_manifest_history_error(&mut self, message: String) {
         self.manifest_history_loading = false;
         self.manifest_history_error = Some(message);
@@ -940,9 +936,7 @@ impl AgentSelectState {
 
     /// Whether a history response for `agent_id` belongs to the agent now open.
     ///
-    /// A slow response for agent A can land after the operator has moved to agent
-    /// B and asked for its history; this pane renders a whole `agent.toml`, so
-    /// showing A's under B's header actively misleads rather than merely lagging.
+    /// A slow response for agent A can land after the operator has moved to agent B and asked for its history; this pane renders a whole `agent.toml`, so showing A's under B's header actively misleads rather than merely lagging.
     pub fn manifest_history_is_for(&self, agent_id: &str) -> bool {
         self.detail.as_ref().is_some_and(|d| d.id == agent_id)
     }
@@ -2692,11 +2686,8 @@ fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) 
 
 /// Render `manifest_versions.timestamp` the way the dashboard does.
 ///
-/// The column is defaulted to SQLite's `datetime('now')`, which stores
-/// `YYYY-MM-DD HH:MM:SS` in UTC carrying no offset. Read as-is it would show a
-/// UTC instant as if it were local, so it is parsed as UTC and converted; a
-/// value in any other shape is shown verbatim rather than as an error string,
-/// which is what `formatSqliteDateTime` in the dashboard also does.
+/// The column is defaulted to SQLite's `datetime('now')`, which stores `YYYY-MM-DD HH:MM:SS` in UTC carrying no offset.
+/// Read as-is it would show a UTC instant as if it were local, so it is parsed as UTC and converted; a value in any other shape is shown verbatim rather than as an error string, which is what `formatSqliteDateTime` in the dashboard also does.
 fn format_manifest_timestamp(raw: &str) -> String {
     chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
         .map(|naive| {
@@ -2709,12 +2700,28 @@ fn format_manifest_timestamp(raw: &str) -> String {
         .unwrap_or_else(|_| raw.to_string())
 }
 
-/// Render the read-only manifest version timeline.
+/// The TOML pane's paragraph, without its block, so drawing it and counting its rows wrap the same way.
+fn manifest_toml_paragraph(toml: &str) -> Paragraph<'_> {
+    Paragraph::new(toml)
+        .style(theme::dim_style())
+        .wrap(ratatui::widgets::Wrap { trim: false })
+}
+
+/// Rows `toml` occupies in the TOML pane at text width `width`.
 ///
-/// Left: one row per snapshot, newest first. Right: the selected snapshot's
-/// full TOML. An agent that has never been persisted, and a fetch that is still
-/// in flight, each get their own line — an empty pane on its own would not say
-/// which of the two happened.
+/// Falls back to the file's line count before the pane has been drawn (width 0), when no wrap width is known yet.
+fn manifest_toml_rows(toml: &str, width: u16) -> usize {
+    if width == 0 {
+        return toml.lines().count();
+    }
+    manifest_toml_paragraph(toml).line_count(width)
+}
+
+/// Render the view-only manifest version timeline.
+///
+/// Left: one row per snapshot, newest first.
+/// Right: the selected snapshot's full TOML.
+/// An agent that has never been persisted, and a fetch that is still in flight, each get their own line — an empty pane on its own would not say which of the two happened.
 fn draw_manifest_history(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
     let inner = widgets::render_screen_block(
         f,
@@ -2725,14 +2732,27 @@ fn draw_manifest_history(f: &mut Frame, area: Rect, state: &mut AgentSelectState
     let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(inner);
 
     if state.manifest_history.is_empty() {
-        // A failed fetch writes `manifest_history_error` and clears the loading
-        // flag, so the pane says why it is empty instead of claiming the agent has
-        // no recorded history. Reading the shared `status_msg` here instead would
-        // show whatever unrelated agent-tab message happened to arrive first.
+        // A failed fetch writes `manifest_history_error` and clears the loading flag, so the pane says why it is empty instead of claiming the agent has no recorded history.
+        // Reading the shared `status_msg` here instead would show whatever unrelated agent-tab message happened to arrive first.
+        if !state.manifest_history_loading {
+            if let Some(reason) = state.manifest_history_error.as_deref() {
+                // Wrapped rather than drawn through the single-line `empty_state`: the summary alone takes most of an 80-column row, and the part that would be clipped — the URL, agent id or daemon reason a transport error carries — is the actionable part.
+                f.render_widget(
+                    Paragraph::new(reason)
+                        .style(theme::dim_style())
+                        .wrap(ratatui::widgets::Wrap { trim: false })
+                        .block(Block::default().padding(Padding::horizontal(2))),
+                    chunks[0],
+                );
+                f.render_widget(
+                    widgets::hint_bar(&crate::i18n::t("tui-agents-hints-manifest-history")),
+                    chunks[1],
+                );
+                return;
+            }
+        }
         let message = if state.manifest_history_loading {
             crate::i18n::t("tui-agents-label-manifest-history-loading")
-        } else if let Some(reason) = state.manifest_history_error.clone() {
-            reason
         } else {
             crate::i18n::t("tui-agents-label-manifest-history-empty")
         };
@@ -2766,25 +2786,26 @@ fn draw_manifest_history(f: &mut Frame, area: Rect, state: &mut AgentSelectState
         &mut state.manifest_history_list,
     );
 
-    // `selected()` can outlive its row when a refresh returns fewer snapshots,
-    // so the index is looked up rather than indexed into.
+    // `selected()` can outlive its row when a refresh returns fewer snapshots, so the index is looked up rather than indexed into.
     let toml = state
         .manifest_history_list
         .selected()
         .and_then(|i| state.manifest_history.get(i))
-        .map(|v| v.manifest_toml.as_str())
+        .map(|v| v.manifest_toml.clone())
         .unwrap_or_default();
+    let toml_block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(theme::DIM))
+        .padding(Padding::horizontal(1));
+    // Record the width the TOML wraps at so PageDown can cap against wrapped rows, and re-clamp the offset in case a resize made the snapshot shorter than where it was scrolled to.
+    state.manifest_history_wrap_width = toml_block.inner(panes[1]).width;
+    state.manifest_history_scroll = state
+        .manifest_history_scroll
+        .min(state.manifest_history_scroll_max());
     f.render_widget(
-        Paragraph::new(toml)
-            .style(theme::dim_style())
-            .wrap(ratatui::widgets::Wrap { trim: false })
+        manifest_toml_paragraph(&toml)
             .scroll((state.manifest_history_scroll, 0))
-            .block(
-                Block::default()
-                    .borders(Borders::LEFT)
-                    .border_style(Style::default().fg(theme::DIM))
-                    .padding(Padding::horizontal(1)),
-            ),
+            .block(toml_block),
         panes[1],
     );
 
@@ -2860,8 +2881,7 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    /// Draw the screen into an off-screen buffer and return it as text, so a
-    /// test can assert what the pane actually shows.
+    /// Draw the screen into an off-screen buffer and return it as text, so a test can assert what the pane actually shows.
     fn render(state: &mut AgentSelectState) -> String {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
@@ -2894,10 +2914,8 @@ mod tests {
             state.manifest_history_error, None,
             "an earlier status must not be mistaken for this fetch's error"
         );
-        // `status_msg` is deliberately left alone: it is the agent list's message
-        // line, not this pane's, and the pane no longer reads it. Clearing it here
-        // would silently drop an unrelated agent-tab message the operator has not
-        // seen yet.
+        // `status_msg` is deliberately left alone: it is the agent list's message line, not this pane's, and the pane no longer reads it.
+        // Clearing it here would silently drop an unrelated agent-tab message the operator has not seen yet.
         assert_eq!(state.status_msg, "stale message");
         match action {
             AgentAction::FetchManifestHistory(id) => {
@@ -2939,9 +2957,7 @@ mod tests {
         assert_eq!(state.manifest_history_list.selected(), Some(1));
     }
 
-    /// The endpoint answers an agent that was never persisted with `[]`, and
-    /// `limit=0` clamps to 1 rather than erroring — either way the pane can be
-    /// asked to navigate an empty list, where a wrapping `% len` would panic.
+    /// The endpoint answers an agent that was never persisted with `[]`, and `limit=0` clamps to 1 rather than erroring — either way the pane can be asked to navigate an empty list, where a wrapping `% len` would panic.
     #[test]
     fn navigating_an_empty_history_neither_panics_nor_selects() {
         let mut state = AgentSelectState::new();
@@ -2968,15 +2984,13 @@ mod tests {
     }
 
     /// #8231 review: the TOML pane had no scroll offset, so everything past the
-    /// pane height — the `[model]`, `[resources]`, `[capabilities]` tables the
-    /// serializer writes last — was unreachable. PageDown must move the pane and
-    /// a line below the fold must become visible.
+    /// pane height — the `[model]`, `[resources]`, `[capabilities]` tables the serializer writes last — was unreachable.
+    /// PageDown must move the pane and a line below the fold must become visible.
     #[test]
     fn page_down_reveals_toml_below_the_pane_height() {
         let mut state = AgentSelectState::new();
         state.sub = AgentSubScreen::ManifestHistory;
-        // 80 short lines so the tail is far below the ~20-row pane and no line
-        // wraps, keeping the assertion a direct check on the scroll offset.
+        // 80 short lines so the tail is far below the ~20-row pane and no line wraps, keeping the assertion a direct check on the scroll offset.
         let toml = (0..80)
             .map(|i| format!("line_{i:03} = {i}"))
             .collect::<Vec<_>>()
@@ -3011,14 +3025,12 @@ mod tests {
         );
     }
 
-    /// Paging is scoped to the TOML pane; moving the snapshot cursor resets it
-    /// so the next snapshot opens at its head rather than inheriting the offset.
+    /// Paging is scoped to the TOML pane; moving the snapshot cursor resets it so the next snapshot opens at its head rather than inheriting the offset.
     #[test]
     fn changing_the_selected_snapshot_resets_the_scroll_offset() {
         let mut state = AgentSelectState::new();
         state.sub = AgentSubScreen::ManifestHistory;
-        // Taller than one page, or the PageDown below would be clamped to the
-        // snapshot's last line and the reset assertion would pass vacuously.
+        // Taller than one page, or the PageDown below would be clamped to the snapshot's last line and the reset assertion would pass vacuously.
         let tall = (0..40)
             .map(|i| format!("key_{i:02} = {i}"))
             .collect::<Vec<_>>()
@@ -3042,9 +3054,7 @@ mod tests {
         );
     }
 
-    /// A snapshot shorter than one page has nothing below the fold: PageDown
-    /// must stop with its last line still visible instead of blanking the pane,
-    /// and one PageUp must be enough to get back to the top.
+    /// A snapshot shorter than one page has nothing below the fold: PageDown must stop with its last line still visible instead of blanking the pane, and one PageUp must be enough to get back to the top.
     #[test]
     fn page_down_stops_at_the_last_line_of_a_short_snapshot() {
         let mut state = AgentSelectState::new();
@@ -3065,6 +3075,65 @@ mod tests {
         assert_eq!(
             state.manifest_history_scroll, 0,
             "one PageUp must undo the last reachable page"
+        );
+    }
+
+    /// With wrapping on, the scroll offset counts wrapped rows, so a cap taken from the file's line count stopped short whenever a long line wrapped (#8231 review).
+    /// A single `system_prompt` far wider than the pane must not leave the tables after it unreachable.
+    #[test]
+    fn page_down_reaches_the_tail_past_a_wrapped_line() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        let prompt = "lorem ipsum ".repeat(400);
+        let toml =
+            format!("name = \"wrapped\"\nsystem_prompt = \"{prompt}\"\n\n[model]\ntail_marker = 1");
+        assert!(
+            toml.lines().count() < 10,
+            "the snapshot must be short in lines so only wrapping makes it tall"
+        );
+        state.set_manifest_history(vec![ManifestVersion {
+            timestamp: "2026-09-07 10:00:00".to_string(),
+            change_source: "api".to_string(),
+            manifest_toml: toml,
+        }]);
+
+        // The first draw records the pane's wrap width, as it does in the running TUI before any key arrives.
+        let before = render(&mut state);
+        assert!(
+            !before.contains("tail_marker"),
+            "the tail must start off-screen, or scrolling proves nothing:\n{before}"
+        );
+
+        for _ in 0..20 {
+            state.handle_key(press(KeyCode::PageDown));
+        }
+        let after = render(&mut state);
+        assert!(
+            after.contains("tail_marker"),
+            "paging must reach the table after the wrapped line:\n{after}"
+        );
+    }
+
+    /// The failure reason is drawn wrapped, so the end of a long transport error — the URL and agent id an operator acts on — is not clipped at the pane edge.
+    #[test]
+    fn a_long_failure_reason_is_wrapped_not_clipped() {
+        let mut state = AgentSelectState::new();
+        state.sub = AgentSubScreen::ManifestHistory;
+        let reason = format!(
+            "Failed to load the agent's configuration history: {} END-OF-REASON",
+            "error sending request for url ".repeat(6)
+        );
+        assert!(
+            reason.len() > 120,
+            "the reason must be wider than the terminal"
+        );
+        state.set_manifest_history_error(reason);
+
+        let rendered = render(&mut state);
+
+        assert!(
+            rendered.contains("END-OF-REASON"),
+            "the tail of the reason must stay visible:\n{rendered}"
         );
     }
 
@@ -3096,9 +3165,7 @@ mod tests {
         );
     }
 
-    /// A rejected id (400 for a non-UUID, 404 for one the registry does not
-    /// know) arrives as a history failure; the pane must show it instead of the
-    /// "no changes recorded" line, which would be a different and wrong answer.
+    /// A rejected id (400 for a non-UUID, 404 for one the registry does not know) arrives as a history failure; the pane must show it instead of the "no changes recorded" line, which would be a different and wrong answer.
     #[test]
     fn a_rejected_agent_id_shows_the_daemons_reason_not_the_empty_state() {
         let mut state = AgentSelectState::new();
@@ -3117,10 +3184,8 @@ mod tests {
         );
     }
 
-    /// `status_msg` collects every agent-tab message. A skills or channels error
-    /// arriving while a history fetch is outstanding used to be rendered here as
-    /// this fetch's reason, so an operator read an unrelated failure where "no
-    /// configuration changes recorded" belonged.
+    /// `status_msg` collects every agent-tab message.
+    /// A skills or channels error arriving while a history fetch is outstanding used to be rendered here as this fetch's reason, so an operator read an unrelated failure where "no configuration changes recorded" belonged.
     #[test]
     fn an_unrelated_agent_tab_error_is_not_shown_as_the_history_fetchs_reason() {
         let mut state = AgentSelectState::new();
@@ -3158,10 +3223,8 @@ mod tests {
         );
     }
 
-    /// The kernel's longest `change_source` tags (`suspend-persist-failed` and
-    /// `resume-persist-failed`, 22 and 21 bytes) are wider than the column's 18
-    /// cells. They must truncate with the ellipsis rather than overflow or
-    /// vanish, and short tags such as `model` must pass through untouched.
+    /// The kernel's longest `change_source` tags (`suspend-persist-failed` and `resume-persist-failed`, 22 and 21 bytes) are wider than the column's 18 cells.
+    /// They must truncate with the ellipsis rather than overflow or vanish, and short tags such as `model` must pass through untouched.
     #[test]
     fn long_change_source_tags_render_truncated_within_the_column() {
         let with_source = |source: &str| ManifestVersion {
@@ -3193,9 +3256,7 @@ mod tests {
         );
     }
 
-    /// `manifest_versions.timestamp` is stored in SQLite's `datetime('now')`
-    /// shape — UTC with no offset — which is the interpretation the dashboard's
-    /// `formatSqliteDateTime` also applies.
+    /// `manifest_versions.timestamp` is stored in SQLite's `datetime('now')` shape — UTC with no offset — which is the interpretation the dashboard's `formatSqliteDateTime` also applies.
     #[test]
     fn a_utc_timestamp_is_rendered_in_local_time() {
         use chrono::TimeZone;

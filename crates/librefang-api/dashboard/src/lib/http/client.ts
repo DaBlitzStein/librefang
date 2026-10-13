@@ -188,9 +188,7 @@ export {
   getUserPolicy,
   // effective permissions snapshot (RBAC follow-up — backs the simulator)
   getEffectivePermissions,
-  // the calling credential's own name and emoji (#8339). `/api/auth/dashboard-check`
-  // cannot answer this: it is unauthenticated and never echoes the configured
-  // username.
+  // the calling credential's own name, emoji and role (#8339) — the role gates the agent editor's identity controls. `/api/auth/dashboard-check` cannot answer this: it is unauthenticated and never echoes the configured username.
   getWhoami,
   // credential vault — names and a set/not-set boolean only (#8164)
   listVaultKeys,
@@ -213,6 +211,9 @@ export type {
   OperatorPause,
   OperatorActionVerb,
   OperatorActionDescriptor,
+  // workspace identity file bytes (`GET|PUT /api/agents/{id}/files/{filename}`)
+  AgentIdentityFile,
+  AgentIdentityFileWriteResult,
   // agent avatar upload (#8339)
   AgentAvatarUploadResult,
   // workspace identity file bytes (`GET|PUT /api/agents/{id}/files/{filename}`)
@@ -247,6 +248,8 @@ export {
   clearHandAgentRuntimeConfig,
   resetAgentSession,
   updateAgentTools,
+  // workspace identity file bytes (`PUT /api/agents/{id}/files/{filename}`)
+  setAgentFile,
   // visual identity: emoji / colour, and the avatar image (#8339)
   updateAgentIdentity,
   uploadAgentAvatar,
@@ -255,8 +258,6 @@ export {
   updateUserIdentity,
   uploadUserAvatar,
   deleteUserAvatar,
-  // workspace identity file bytes (`PUT /api/agents/{id}/files/{filename}`)
-  setAgentFile,
   // per-agent skill assignment — write (#4917)
   setAgentSkills,
   // per-agent MCP server grant — write (#6565 follow-up)

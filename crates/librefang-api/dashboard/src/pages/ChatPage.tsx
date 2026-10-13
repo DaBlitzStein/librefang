@@ -52,8 +52,9 @@ import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
 import { AuthenticatedImage } from "../components/AuthenticatedImage";
 import { AgentAvatar } from "../components/AgentAvatar";
-import { UserAvatar } from "../components/UserAvatar";
-import { useWhoami } from "../lib/queries/authz";
+import { Avatar } from "../components/ui/Avatar";
+import { useWhoami, whoamiPersonName } from "../lib/queries/authz";
+import { useUserAvatarUrl } from "../lib/queries/users";
 import { useMathPlugins } from "../lib/hooks/useMathPlugins";
 import {
   useCreateAgentSession,
@@ -1420,9 +1421,8 @@ interface MessageBubbleProps {
    *  Primitives for the reason the agent's are: this component is memoised. */
   userName?: string;
   userEmoji?: string;
-  /** `whoami.has_avatar`, which decides whether the picture is worth fetching.
-   *  Undefined means the daemon did not say, which is not the same as "no". */
-  userHasAvatar?: boolean;
+  /** The user's picture as an object URL, resolved once by `ChatPage` for the whole transcript — the same arrangement as `agentAvatarSrc`. */
+  userAvatarSrc?: string;
   onCopy?: (messageId: string, content: string) => void;
   copied?: boolean;
   onSpeak?: (messageId: string, content: string) => void;
@@ -1444,7 +1444,7 @@ interface MessageBubbleProps {
  * mounting `ChatPage` to reach it would mean standing up a session, a selected
  * agent and a streaming transcript to assert two lines of avatar selection.
  */
-export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarSrc, agentEmoji, userName, userEmoji, userHasAvatar, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable, selected, onToggleSelected }: MessageBubbleProps) {
+export const MessageBubble = memo(function MessageBubble({ message, usageFooter, agentId, agentName, agentAvatarSrc, agentEmoji, userName, userEmoji, userAvatarSrc, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable, selected, onToggleSelected }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
@@ -1512,18 +1512,13 @@ export const MessageBubble = memo(function MessageBubble({ message, usageFooter,
       <div className={`flex flex-col min-w-0 w-fit max-w-[90%] sm:max-w-[min(75%,70ch)] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
-          {/* Both sides are real. The user's keeps the generic person icon only
-              when there is nobody to name — `whoami` still in flight or failed;
-              otherwise `UserAvatar` draws their image, then their emoji, then
-              their initials. The agent's draws its own, from the same
-              three-step chain, with the object URL resolved once by `ChatPage`
-              and handed to every bubble. */}
+          {/* Both sides are real. The user's keeps the generic person icon when there is nobody to name — `whoami` still in flight, failed, or answering with the synthetic `root` that stands in for no user at all; otherwise it draws their image, then their emoji, then their initials. Both sides take an object URL that `ChatPage` resolved once and handed to every bubble. */}
           {isUser ? (
             userName ? (
-              <UserAvatar
-                name={userName}
+              <Avatar
+                src={userAvatarSrc}
                 emoji={userEmoji}
-                hasAvatar={userHasAvatar}
+                fallback={userName}
                 size="sm"
               />
             ) : (
@@ -3512,6 +3507,11 @@ export function ChatPage() {
     !!selectedAgent?.identity?.avatar_url,
   );
 
+  // The user's side, resolved once for the same reason as the agent's just above: one object URL for the whole transcript rather than one per user message. `whoamiPersonName` is what keeps the synthetic `root` of a no-auth or master-key session on the person icon.
+  const me = whoami.data;
+  const userName = whoamiPersonName(me);
+  const userAvatarSrc = useUserAvatarUrl(userName ?? "", me?.has_avatar !== false);
+
   // Per-agent session list. `activeSessionId` is derived from the URL first
   // (multi-tab safety, issue #2959); if absent, fall back to the server's
   // canonical active session so initial navigation still highlights correctly.
@@ -4265,9 +4265,9 @@ export function ChatPage() {
                     agentName={selectedAgent?.name}
                     agentAvatarSrc={selectedAgentAvatarSrc}
                     agentEmoji={selectedAgent?.identity?.emoji}
-                    userName={whoami.data?.name}
-                    userEmoji={whoami.data?.emoji}
-                    userHasAvatar={whoami.data?.has_avatar}
+                    userName={userName}
+                    userEmoji={me?.emoji}
+                    userAvatarSrc={userAvatarSrc}
                     onCopy={handleCopy}
                     copied={copiedMessageId === msg.id}
                     onSpeak={ttsAvailable ? tts.toggle : undefined}

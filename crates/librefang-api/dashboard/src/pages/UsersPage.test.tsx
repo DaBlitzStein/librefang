@@ -23,11 +23,7 @@ import type { UserItem } from "../lib/http/client";
 // Mocks (#3853 — UsersPage RBAC management page).
 // ---------------------------------------------------------------------------
 
-// `importActual` rather than a bare `{ useUsers: vi.fn() }`: the edit drawer
-// now mounts `UserAppearanceSection`, which reads `userQueries.avatar` and
-// renders `UserAvatar` through `useUserAvatarUrl` — both of which live in this
-// module, and a mock that omitted them would fail with a `TypeError` on the one
-// test that opens the drawer for the caller's own row.
+// `importActual` rather than a bare `{ useUsers: vi.fn() }`: the edit drawer now mounts `UserAppearanceSection`, which reads `userQueries.avatar` through `useUserAvatarUrl` — both of which live in this module, and a mock that omitted them would fail with a `TypeError` on the one test that opens the drawer for the caller's own row.
 vi.mock("../lib/queries/users", async () => {
   const actual = await vi.importActual<typeof import("../lib/queries/users")>(
     "../lib/queries/users",

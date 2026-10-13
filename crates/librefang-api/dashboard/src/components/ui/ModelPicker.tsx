@@ -593,7 +593,11 @@ export function ModelPicker({
                   // which has no provider level at all — only the model.
                   const atProviderLevel = !drilldown && !modelOnly;
                   setCustom(atProviderLevel ? "provider" : "model");
-                  setCustomProvider(atProviderLevel ? (value?.provider ?? "") : (drilldown ?? ""));
+                  setCustomProvider(
+                    atProviderLevel || modelOnly
+                      ? (value?.provider ?? "")
+                      : (drilldown ?? ""),
+                  );
                   // Only prefill the model when it belongs to the provider
                   // being drilled into: `value.model` under a different provider
                   // is not a pair that exists, and prefilling it left Confirm

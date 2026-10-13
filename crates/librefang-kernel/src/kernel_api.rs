@@ -385,7 +385,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// preference to calling `memory_substrate().delete_session(...)`
     /// directly so the side-state map does not leak across the daemon's
     /// lifetime. Returns every session id actually removed.
-    fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>>;
+    async fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>>;
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>>;
     fn create_agent_session(
         &self,
@@ -408,30 +408,28 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         agent_id: AgentId,
         session_id: SessionId,
     ) -> KernelResult<TrajectoryBundle>;
-    /// Persist an agent's manifest to `agent.toml` and record the write in its
-    /// version history under `change_source` (the call site's own tag for what
-    /// changed). See [`LibreFangKernel::persist_manifest_to_disk`].
+    /// Persist an agent's manifest to `agent.toml` and record the write in its version history under `change_source` (the call site's own tag for what changed).
+    /// See [`LibreFangKernel::persist_manifest_to_disk`].
     fn persist_manifest_to_disk(&self, agent_id: AgentId, change_source: &str);
     fn reload_agent_from_disk(&self, agent_id: AgentId) -> KernelResult<()>;
     /// Apply a caller-supplied manifest to a running agent and persist it.
-    /// `change_source` tags the version-history snapshot this write records
-    /// (`api` for the control plane, `restore` for the history-restore route).
+    /// `change_source` tags the version-history snapshot this write records (`api` for the control plane, `restore` for the history-restore route).
     fn update_manifest(
         &self,
         agent_id: AgentId,
         new_manifest: AgentManifest,
         change_source: &str,
     ) -> KernelResult<()>;
-    /// Apply a stored manifest snapshot and reconcile the runtime side effects the per-field setters run but `update_manifest` skips: background-loop stop/start on a schedule change, named-workspace creation on a workspaces change, and canonical-session invalidation on a model or endpoint change.
+    /// Apply a stored manifest snapshot and reconcile the runtime side effects the per-field setters run but `update_manifest` skips: background-loop stop/start on a schedule change, named-workspace creation on a workspaces change, canonical-session invalidation on a model or endpoint change, and declarative trigger reconciliation.
     /// See [`LibreFangKernel::restore_manifest_snapshot`] for the full contract.
+    ///
+    /// Deliberately has no default body: falling back to `update_manifest` would skip the `enabled` pin and every reconciliation above, so an implementor that forgot to override it would silently disable a live agent on a `suspend` row restore.
     fn restore_manifest_snapshot(
         self: Arc<Self>,
         agent_id: AgentId,
         new_manifest: AgentManifest,
         change_source: &str,
-    ) -> KernelResult<()> {
-        self.update_manifest(agent_id, new_manifest, change_source)
-    }
+    ) -> KernelResult<()>;
     /// Rename an agent and carry the new name into its IDENTITY.md front matter.
     /// See [`LibreFangKernel::rename_agent`] for the full contract.
     fn rename_agent(&self, agent_id: AgentId, new_name: String) -> KernelResult<()>;
@@ -1300,8 +1298,8 @@ impl KernelApi for LibreFangKernel {
     async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
         Self::clear_agent_history(self, agent_id).await
     }
-    fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>> {
-        Self::delete_session(self, session_id)
+    async fn delete_session(&self, session_id: SessionId) -> KernelResult<Vec<SessionId>> {
+        Self::delete_session(self, session_id).await
     }
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>> {
         Self::list_agent_sessions(self, agent_id)

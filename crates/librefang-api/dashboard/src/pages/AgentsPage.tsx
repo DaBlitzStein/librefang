@@ -8,9 +8,10 @@ import {
   type AgentDetail,
   type AgentIdentity,
   type AgentItem,
+  type AgentManifestSnapshot,
   type AgentProvenance,
   type CloneAgentResult,
-  type PromptVersion,
+  type ManifestVersionEntry,
   type ToolDefinition,
 } from "../api";
 import { useQueryClient } from "@tanstack/react-query";
@@ -39,16 +40,18 @@ import { Card } from "../components/ui/Card";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge, dotColors } from "../components/ui/Badge";
-import { AgentAvatar } from "../components/AgentAvatar";
+import { Avatar } from "../components/ui/Avatar";
 import { PromptsExperimentsPanel } from "../components/PromptsExperimentsPanel";
 import { AgentTabBar } from "../components/AgentTabs";
 import type { AgentTabDef } from "../components/AgentTabs";
 import { AgentBrief } from "../components/AgentBrief";
 import type { AgentBriefMessage } from "../components/AgentBrief";
+import { AgentAvatar } from "../components/AgentAvatar";
+import { QuickRunModal } from "../components/QuickRunModal";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, GitBranch, Radio, Route, Settings, KeyRound, Library } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, GitBranch, Radio, Route, Settings, KeyRound, History } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -69,7 +72,6 @@ import { sectionForInvalidField } from "../components/AgentManifestForm";
 import { AgentSchedulePanel } from "../components/AgentSchedulePanel";
 import { useModelRouterProfiles } from "../lib/queries/modelRouter";
 import { useWhoami } from "../lib/queries/authz";
-import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
 import { AgentSkillItem } from "../components/AgentSkillItem";
 import {
   adoptTopLevelExtras,
@@ -83,8 +85,8 @@ import {
   type ManifestFormState,
 } from "../lib/agentManifest";
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
-import { fetchManifestVersion } from "../lib/manifestVersion";
-import { agentKeys } from "../lib/queries/keys";
+import { fetchManifestSnapshot, rebaseManifestEdits } from "../lib/manifestVersion";
+import { ApiError } from "../lib/http/errors";
 import {
   agentQueries,
   useAgentEvents,
@@ -96,7 +98,7 @@ import {
   useAgentMcpServers,
   useAgentManifest,
   useAgentChannels,
-  usePromptVersions,
+  useAgentManifestHistory,
   useTools,
 } from "../lib/queries/agents";
 import {
@@ -105,6 +107,8 @@ import {
   useDeleteAgent,
   useDeleteAgentAvatar,
   usePatchAgent,
+  useUpdateAgentIdentity,
+  useUploadAgentAvatar,
   useResetAgentSession,
   useResumeAgent,
   useSpawnAgent,
@@ -115,6 +119,7 @@ import {
   useSetAgentSkills,
   useSetAgentMcpServers,
   useSetAgentChannels,
+  useRestoreAgentManifestVersion,
 } from "../lib/mutations/agents";
 import { formatNumber } from "../lib/format";
 
@@ -206,135 +211,19 @@ function DetailRow({ label, children }: { label: React.ReactNode; children: Reac
 }
 
 /**
- * Channels quick-widget for the Configure drawer (#7742). `PUT
- * /api/agents/{id}/channels` has existed since `config.rs` shipped
- * `get_agent_channels` / `set_agent_channels` (promised when #4912 / #4963
- * closed) but never got a dashboard client — this is that client. Reuses
- * `MultiSelectCmdk`, the same picker skills/tools already use, seeded from
- * the instance's configured channel types.
+ * Whether the signed-in credential may edit an agent's emoji and avatar.
+ *
+ * The daemon's rule for both writes the appearance section performs is
+ * `role >= UserRole::Admin` (middleware.rs), and it reads the *credential's*
+ * role — the group-derived ones `whoami` reports separately do not open this
+ * door, which is the direction that would hand a viewer controls that can only
+ * 403.
+ *
+ * Pure and exported because `AgentsPage` has no render harness, so a predicate
+ * left inline would be covered by nothing.
  */
-export function ChannelsSection({
-  agentId,
-  expectedVersion,
-  onSaved,
-  onWriteFailed,
-}: {
-  agentId: string;
-  /** Manifest ETag from the open editor, echoed as `expected_version` (#8424). */
-  expectedVersion?: string;
-  /** Reports the persisted grant list so the manifest form re-seeds it (#8424). */
-  onSaved?: (channels: string[]) => void;
-  /** A failed PUT can leave the token stale (409) — ask the host to re-read it. */
-  onWriteFailed?: () => void;
-}) {
-  const { t } = useTranslation();
-  const addToast = useUIStore((s) => s.addToast);
-
-  const channelsQuery = useAgentChannels(agentId);
-  const setChannels = useSetAgentChannels();
-
-  const assigned = useMemo(() => channelsQuery.data?.assigned ?? [], [channelsQuery.data]);
-  const available = channelsQuery.data?.available ?? [];
-  const [draft, setDraft] = useState<string[] | null>(null);
-  // Reset the draft whenever the agent changes (drawer reused across
-  // selections) or the persisted value moves out from under a pristine draft.
-  useEffect(() => {
-    setDraft(null);
-  }, [agentId]);
-
-  const current = draft ?? assigned;
-  const dirty =
-    draft !== null &&
-    (draft.length !== assigned.length || draft.some((c) => !assigned.includes(c)));
-
-  const save = () => {
-    if (draft === null || setChannels.isPending) return;
-    const saved = draft;
-    setChannels.mutate(
-      { agentId, channels: saved, expectedVersion },
-      {
-        onSuccess: () => {
-          addToast(
-            t("agents.detail.channels_saved", { defaultValue: "Channels updated" }),
-            "success",
-          );
-          setDraft(null);
-          onSaved?.(saved);
-        },
-        onError: (e: Error) => {
-          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error");
-          // A 409 means this draft was built on a superseded read; re-read the
-          // token so a retry is not refused forever.
-          onWriteFailed?.();
-        },
-      },
-    );
-  };
-
-  return (
-    <section>
-      <h4 className="text-sm font-semibold mb-2 flex items-center gap-2">
-        <Radio className="w-3.5 h-3.5 text-brand" />
-        {t("agents.detail.channels", { defaultValue: "Channels" })}
-      </h4>
-      <p className="text-[11px] text-text-dim mb-2 leading-relaxed">
-        {t("agents.detail.channels_hint", {
-          defaultValue: "Empty means reachable from every configured channel.",
-        })}
-      </p>
-      {channelsQuery.isLoading ? (
-        <p className="text-xs text-text-dim">{t("common.loading", { defaultValue: "Loading..." })}</p>
-      ) : /* `available` comes only from `config.sidecar_channels`
-             (`routes/agents/config.rs: get_agent_channels`) and never unions in
-             the agent's own `channels`, so an allowlist left over from a
-             since-removed sidecar channel has a non-empty `assigned` against an
-             empty `available`. Gating on `available` alone hid that allowlist
-             behind "No channels configured" while it actively restricted the
-             agent, with no way to clear it. `MultiSelectCmdk` renders its chips
-             from `value`, so an assigned-but-unavailable name still shows and
-             still survives a save (#7749 review). */
-        available.length > 0 || assigned.length > 0 ? (
-        <MultiSelectCmdk
-          options={available}
-          value={current}
-          onChange={(next) => setDraft(typeof next === "function" ? next(current) : next)}
-          placeholder={t("agents.detail.channels_search_placeholder", {
-            defaultValue: "Search channels…",
-          })}
-        />
-      ) : (
-        <p className="text-xs text-text-dim">
-          {t("agents.detail.no_channels_configured", {
-            defaultValue: "No channels configured on this instance.",
-          })}
-        </p>
-      )}
-      {dirty && (
-        <div className="flex justify-end gap-2 mt-2">
-          <button
-            type="button"
-            onClick={() => setDraft(null)}
-            className="px-3 py-1 rounded-lg text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle"
-          >
-            {t("common.cancel")}
-          </button>
-          <button
-            type="button"
-            disabled={setChannels.isPending}
-            onClick={save}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-brand/90 transition-colors"
-          >
-            {setChannels.isPending ? (
-              <Loader2 className="w-3 h-3 animate-spin" />
-            ) : (
-              <Save className="w-3 h-3" />
-            )}
-            {t("common.save")}
-          </button>
-        </div>
-      )}
-    </section>
-  );
+export function canEditAgentIdentity(role: string | undefined): boolean {
+  return role === "admin" || role === "owner";
 }
 
 /**
@@ -578,166 +467,197 @@ export function AgentAppearanceSection({
 }
 
 /**
- * Whether the signed-in credential may edit an agent's emoji and avatar.
- *
- * The daemon's rule for both writes the appearance section performs is
- * `role >= UserRole::Admin` (middleware.rs), and it reads the *credential's*
- * role — the group-derived ones `whoami` reports separately do not open this
- * door, which is the direction that would hand a viewer controls that can only
- * 403.
- *
- * Pure and exported because `AgentsPage` has no render harness, so a predicate
- * left inline would be covered by nothing.
- */
-export function canEditAgentIdentity(role: string | undefined): boolean {
-  return role === "admin" || role === "owner";
-}
-
-/**
  * What the create drawer should open on when `/agents` was reached with a
  * `template` search param.
  *
- * Pure and exported on purpose: the mapping is the contract with the sender on
- * `/agent-types`, and keeping it out of the ~20-hook page pins it directly in
- * `AgentsPage.test.tsx`. The full-page harness in `AgentsPage.quickRun.test.tsx`
- * now renders the effect around it too, with the search param and the fetched
- * list mocked, but the rule itself stays testable without that page.
- *
- * `knownNames` is the fetched agent-type list. It is required rather than
- * optional because `validateSearch` cannot do this check — it runs before any
- * page data exists — so the only place that can reject a stale bookmark, a
- * renamed or deleted type or a typo is here, where the list has arrived.
- * An unknown name is its own state, not `null`: the drawer still opens, but on
- * the blank form tab with a notice rather than a `<select>` matching no option.
+ * Every other surface of an agent is reachable from one of these two, and the
+ * split is by *what you are doing*, not by which subsystem the field belongs
+ * to: `info` reads the agent (what it is doing, what it has been doing, what it
+ * remembers), `config` writes it. The eight tabs this replaced were split by
+ * subsystem, which is how the token footprint ended up in a drawer and the
+ * complexity router two levels below the tab that named it.
  */
-export type DrawerSeed =
-  | { kind: "none" }
-  | { kind: "template"; templateName: string }
-  | { kind: "unknown"; templateName: string };
-
-export function resolveDrawerSeed(
-  template: string | undefined,
-  knownNames: readonly string[],
-): DrawerSeed {
-  // Falsy covers both "no param" and the empty string `validateSearch` would
-  // otherwise admit.
-  if (!template) return { kind: "none" };
-  return knownNames.includes(template)
-    ? { kind: "template", templateName: template }
-    : { kind: "unknown", templateName: template };
-}
+export type AgentMainTab = "info" | "config";
 
 /**
- * The prompt-library picker folded into the form's `prompt` section (#8424).
- *
- * This is the drawer-era `SystemPromptSection` without its textarea and Save:
- * the form's `prompt` section owns `model.system_prompt`, so there is exactly
- * one writer of that field. What remains is the "Bind from library" toggle and
- * the version list; a bind writes the version's text into the manifest, so the
- * host is told through `onBound` to reseed the form and refresh the ETag.
+ * Channels quick-widget for the Configure drawer (#7742). `PUT
+ * /api/agents/{id}/channels` has existed since `config.rs` shipped
+ * `get_agent_channels` / `set_agent_channels` (promised when #4912 / #4963
+ * closed) but never got a dashboard client — this is that client. Reuses
+ * `MultiSelectCmdk`, the same picker skills/tools already use, seeded from
+ * the instance's configured channel types.
  */
-export function PromptLibraryPicker({
+export function ChannelsSection({
   agentId,
-  currentPrompt,
-  onBound,
+  expectedVersion,
+  onSaved,
+  onWriteFailed,
 }: {
   agentId: string;
-  currentPrompt: string;
-  onBound: (prompt: string) => void;
+  /** Manifest ETag from the open editor, echoed as `expected_version` (#8424). */
+  expectedVersion?: string;
+  /** Reports the persisted grant list so the manifest form re-seeds it (#8424). */
+  onSaved?: (channels: string[]) => void;
+  /** A failed PUT can leave the token stale (409) — ask the host to re-read it. */
+  onWriteFailed?: () => void;
 }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
-  const [showLibrary, setShowLibrary] = useState(false);
-  const bindVersion = useBindPromptVersionToAgent();
-  const versionsQuery = usePromptVersions(agentId, { enabled: showLibrary });
 
-  const bind = (version: PromptVersion) => {
-    if (bindVersion.isPending) return;
-    bindVersion.mutate(
-      { agentId, version, previousSystemPrompt: currentPrompt },
+export type ConfigGroupId = (typeof CONFIG_GROUP_IDS)[number];
+
+/**
+ * Which manifest sections each config group hosts.
+ *
+ * This is the map the whole surface hangs from: the group tabs are drawn from
+ * its keys, the form is handed its values, and the guards assert that the two
+ * directions agree — every section appears exactly once, and every group
+ * appears exactly once in the bar.
+ *
+ * The grouping is by subject rather than by manifest table, because the table
+ * boundaries are an implementation detail of the Rust struct and an operator
+ * looking for "where do I cap this agent's spending" does not know that
+ * `resources` and `rl_export` are siblings of `limits`.
+ *
+ * Every section of `AgentManifestForm` is here, including the ones the plan's
+ * original table named as separate groups: `tools` and `exec_policy` render
+ * inside `capabilities`, `resources` and `rl_export` inside `limits`, and
+ * `autonomous` — which that table omitted — is a scheduling concern, so it sits
+ * with the cron jobs it governs.
+ */
+export const CONFIG_GROUPS: Record<ConfigGroupId, readonly ManifestSectionId[]> = {
+  general: ["identity", "metadata", "prompt", "lifecycle", "response_format"],
+  model: ["model", "fallback_models", "thinking", "routing"],
+  // The user's split: model and routing on one tab, and what the agent is
+  // *allowed* to do on a tab of its own. `capabilities` grants network hosts,
+  // shell commands and tool names; `exec_policy` bounds the shell. Both were
+  // elsewhere — capabilities under Tools & skills beside the tools it grants,
+  // and exec_policy folded into Lifecycle, where every other switch is a
+  // preference rather than a permission.
+  permissions: ["capabilities", "exec_policy"],
+  tools: ["tools", "skills", "mcp_servers", "skill_workshop"],
+  memory: ["proactive_memory", "auto_dream", "compaction", "context_engine"],
+  limits: ["limits"],
+  channels: ["channel_overrides"],
+  planning: ["scheduling", "autonomous", "async_tasks"],
+  conversation: ["context_injection", "shared_folders"],
+};
+
+/**
+ * The config group that owns the first field a validation run complained about.
+ *
+ * A failed save has to send the operator somewhere they can act. With the
+ * sections grouped the offending field is usually in a group they are not
+ * looking at, and an error nobody can see is indistinguishable from no error —
+ * so this resolves the first reported field path to its section, and that
+ * section to the one group that hosts it.
+ *
+ * Pulled out of `saveManifestEditor` so it can be tested without rendering the
+ * page: `AgentsPage` has some twenty hooks and no render harness, so anything
+ * left inline there is untestable by construction. The decision is the part
+ * with behaviour in it; the caller is one `setConfigGroup`.
+ *
+ * Returns `undefined` when nothing maps — an unrecognised path (in which case
+ * `sectionForInvalidField` has no entry and its guard test fails), or a
+ * section no group hosts (in which case the layout guard fails). Every path
+ * `validateManifestForm` can produce is covered by one of those two, which is
+ * what makes the fallback safe rather than silent.
+ */
+export function groupForFirstInvalidField(
+  errors: readonly string[],
+): ConfigGroupId | undefined {
+  const firstBadSection = errors
+    .map(sectionForInvalidField)
+    .find((section): section is ManifestSectionId => section !== undefined);
+  if (!firstBadSection) return undefined;
+
+  const save = () => {
+    if (draft === null || setChannels.isPending) return;
+    const saved = draft;
+    setChannels.mutate(
+      { agentId, channels: saved, expectedVersion },
       {
         onSuccess: () => {
           addToast(
-            t("agents.prompt_bound", { defaultValue: "Prompt bound from library" }),
+            t("agents.detail.channels_saved", { defaultValue: "Channels updated" }),
             "success",
           );
-          // The bind PATCHes `system_prompt` into the manifest, so the ETag
-          // moved: the host reseeds its form state and re-reads the version
-          // rather than letting the next Save 409 on a write the operator did
-          // make.
-          onBound(version.system_prompt);
-          setShowLibrary(false);
+          setDraft(null);
+          onSaved?.(saved);
         },
-        onError: (e: Error) =>
-          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error"),
+        onError: (e: Error) => {
+          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error");
+          // A 409 means this draft was built on a superseded read; re-read the
+          // token so a retry is not refused forever.
+          onWriteFailed?.();
+        },
       },
     );
   };
 
   return (
-    <div className="mt-2">
-      <div className="flex items-center justify-end">
-        <button
-          type="button"
-          onClick={() => setShowLibrary((v) => !v)}
-          className="inline-flex items-center gap-1 text-xs text-brand hover:underline font-medium"
-        >
-          <Library className="w-3.5 h-3.5" />
-          {t("agents.bind_from_library", { defaultValue: "Bind from library" })}
-        </button>
-      </div>
-
-      {showLibrary && (
-        <div className="mt-2 rounded-lg border border-border-subtle bg-main/40 p-2 space-y-1">
-          {versionsQuery.isLoading ? (
-            <p className="text-xs text-text-dim px-1 py-2">
-              {t("common.loading", { defaultValue: "Loading..." })}
-            </p>
-          ) : versionsQuery.isError ? (
-            <p className="text-xs text-red-500 px-1 py-2">
-              {t("agents.prompt_versions_load_err", {
-                defaultValue: "Failed to load prompt versions",
-              })}
-            </p>
-          ) : !versionsQuery.data || versionsQuery.data.length === 0 ? (
-            <p className="text-xs text-text-dim px-1 py-2">
-              {t("agents.no_prompt_versions", {
-                defaultValue: "No saved prompt versions for this agent yet.",
-              })}
-            </p>
-          ) : (
-            versionsQuery.data.map((v) => (
-              <div
-                key={v.id}
-                className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-main/60"
-              >
-                <div className="min-w-0">
-                  <span className="text-xs font-semibold">v{v.version}</span>
-                  {v.is_active && (
-                    <Badge variant="brand" className="ml-1.5 text-[10px]">
-                      {t("agents.prompt_active", { defaultValue: "active" })}
-                    </Badge>
-                  )}
-                  {v.description && (
-                    <span className="ml-1.5 text-[11px] text-text-dim truncate">
-                      {v.description}
-                    </span>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  disabled={bindVersion.isPending}
-                  onClick={() => bind(v)}
-                  className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md border border-border-subtle text-[11px] font-bold text-text-dim hover:text-brand hover:border-brand disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                >
-                  {t("agents.bind", { defaultValue: "Bind" })}
-                </button>
-              </div>
-            ))
-          )}
+    <section>
+      <h4 className="text-sm font-semibold mb-2 flex items-center gap-2">
+        <Radio className="w-3.5 h-3.5 text-brand" />
+        {t("agents.detail.channels", { defaultValue: "Channels" })}
+      </h4>
+      <p className="text-[11px] text-text-dim mb-2 leading-relaxed">
+        {t("agents.detail.channels_hint", {
+          defaultValue: "Empty means reachable from every configured channel.",
+        })}
+      </p>
+      {channelsQuery.isLoading ? (
+        <p className="text-xs text-text-dim">{t("common.loading", { defaultValue: "Loading..." })}</p>
+      ) : /* `available` comes only from `config.sidecar_channels`
+             (`routes/agents/config.rs: get_agent_channels`) and never unions in
+             the agent's own `channels`, so an allowlist left over from a
+             since-removed sidecar channel has a non-empty `assigned` against an
+             empty `available`. Gating on `available` alone hid that allowlist
+             behind "No channels configured" while it actively restricted the
+             agent, with no way to clear it. `MultiSelectCmdk` renders its chips
+             from `value`, so an assigned-but-unavailable name still shows and
+             still survives a save (#7749 review). */
+        available.length > 0 || assigned.length > 0 ? (
+        <MultiSelectCmdk
+          options={available}
+          value={current}
+          onChange={(next) => setDraft(typeof next === "function" ? next(current) : next)}
+          placeholder={t("agents.detail.channels_search_placeholder", {
+            defaultValue: "Search channels…",
+          })}
+        />
+      ) : (
+        <p className="text-xs text-text-dim">
+          {t("agents.detail.no_channels_configured", {
+            defaultValue: "No channels configured on this instance.",
+          })}
+        </p>
+      )}
+      {dirty && (
+        <div className="flex justify-end gap-2 mt-2">
+          <button
+            type="button"
+            onClick={() => setDraft(null)}
+            className="px-3 py-1 rounded-lg text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle"
+          >
+            {t("common.cancel")}
+          </button>
+          <button
+            type="button"
+            disabled={setChannels.isPending}
+            onClick={save}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-brand/90 transition-colors"
+          >
+            {setChannels.isPending ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              <Save className="w-3 h-3" />
+            )}
+            {t("common.save")}
+          </button>
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -759,8 +679,10 @@ export type AgentMainTab = "info" | "config";
  * Read-only surfaces, which is why they live under the reading tab: the
  * manifest editor is the one writer of the agent's configuration, and none of
  * these four carries a field of its own.
+ *
+ * `history` is the manifest version timeline (#8041). It reads past snapshots of `agent.toml`; its one write, restoring a snapshot, replaces the whole file rather than editing a field, so it sits beside the other read surfaces instead of inside a config group.
  */
-export const INFO_TABS = ["logs", "memory", "prompts"] as const;
+export const INFO_TABS = ["logs", "memory", "prompts", "history"] as const;
 
 export type InfoTab = (typeof INFO_TABS)[number];
 
@@ -872,6 +794,9 @@ export function AgentsPage() {
   const [formExtras, setFormExtras] = useState<ManifestExtras>(emptyManifestExtras);
   const [formErrors, setFormErrors] = useState<Set<string>>(new Set());
   const [tomlParseError, setTomlParseError] = useState<string | null>(null);
+  // Parent whose ledger pays for the Quick Run (#6699). Held as an id rather
+  // than a flag so the dialog knows which agent to preselect; `null` is closed.
+  const [quickRunParent, setQuickRunParent] = useState<string | null>(null);
   // Inline-rename state for the detail/edit modal header. The agent name is
   // the primary identifier in the UI and was previously read-only — now
   // clicking the title swaps it for an input and PATCHes /agents/{id}.
@@ -954,6 +879,17 @@ export function AgentsPage() {
   // save so a manifest that changed in the meantime is refused with 409
   // instead of silently overwritten.
   const [manifestEditorVersion, setManifestEditorVersion] = useState<string | null>(null);
+  // The parse the form was seeded from or last rebased onto, tagged with its agent (#8516).
+  // `refreshManifestVersion` three-way merges a fresh read against it, so a new token is only ever adopted together with the content it describes.
+  // `parsed` is null when the seed did not parse: the form is withheld then, and there is nothing to merge into.
+  const manifestEditorBaseRef = useRef<{
+    agentId: string;
+    parsed: { form: ManifestFormState; extras: ManifestExtras } | null;
+  } | null>(null);
+  // Mirrors `manifestEditorVersion` for async callers, whose closures hold the render-time value.
+  const manifestEditorVersionRef = useRef<string | null>(null);
+  // Orders overlapping refreshes: a read that started before one already applied must not roll the form back to older content.
+  const manifestRefreshSeqRef = useRef({ started: 0, applied: 0 });
   // The config tab is the manifest editor's only surface, so editing is live
   // exactly while that tab is selected. Every query the form needs hangs off
   // this one condition.
@@ -1048,6 +984,25 @@ export function AgentsPage() {
   const templateTomlMutation = useAgentTemplateToml();
   const qc = useQueryClient();
 
+  // --- Visual identity of the agent in the drawer (#8339) ------------------
+  // Who may edit it. Read from the caller's own credential, and an unresolved
+  // `whoami` reads as "no": a gate that failed open would flash controls the
+  // daemon answers with 403.
+  const whoami = useWhoami();
+  const canEditAppearance = canEditAgentIdentity(whoami.data?.role);
+  const detailIdentity = (detailAgent as AgentView | null)?.identity;
+  // Gated on "this agent has one" so an agent without an avatar costs no
+  // request at all; `undefined` while loading or absent, which is what `Avatar`
+  // wants — it falls back to the initials on its own. Also gated on the drawer
+  // being open: the only consumer is the drawer's header, and `detailAgent`
+  // stays selected after the drawer closes (the inline detail panel outlives
+  // it), so without that second gate the auto-selected agent's image would be
+  // downloaded and its object URL held for nothing to render.
+  const detailAvatarSrc = useAgentAvatarUrl(
+    detailAgent?.id ?? "",
+    !!detailIdentity?.avatar_url,
+    detailDrawerOpen,
+  );
   const rawDeleteMutation = useDeleteAgent();
   const handleDeleteSuccess = (agentId: string) => {
     if (detailAgent?.id === agentId) {
@@ -1206,36 +1161,44 @@ export function AgentsPage() {
     return manifestEditorVersion ?? undefined;
   }
 
-  /** Re-read the manifest's ETag after a write the form did not make (#8424).
+  /** Re-read the manifest after a write the form did not make, and rebase the form onto it (#8424, #8516).
    *
-   * The grant panels and their modals write through their own endpoints, so
-   * the token the form was seeded with no longer describes the server's
-   * manifest. Refreshing it keeps the next form save from failing with 409 on
-   * a write the user did make. `fetchManifestVersion` forces the read past the
-   * query client's 30 s staleTime — the plain `fetchQuery` this used to be
-   * returned the cached snapshot and never moved the token. */
-  async function refreshManifestVersion(agentId: string) {
-    if (!manifestEditorLive || manifestEditorAgentId !== agentId) return;
+   * The grant panels and their modals write through their own endpoints, and a 409 means some other writer saved; either way the token the form holds no longer describes the server's manifest.
+   * Adopting only the new token would let the next form save write the form's stale copy back over that change under a token the server accepts — the lost update the token exists to prevent.
+   * So the fresh read is three-way merged into the form: fields the operator has not edited take the server's value, edited ones keep the edit, and only then does the token move.
+   * `fetchManifestSnapshot` forces the read past the query client's 30 s staleTime.
+   *
+   * Resolves to the token the form now holds, so a caller that chains a second write can send it without waiting for a re-render. */
+  async function refreshManifestVersion(agentId: string): Promise<string | undefined> {
+    if (!manifestEditorLive || manifestEditorAgentId !== agentId) return undefined;
+    const seq = ++manifestRefreshSeqRef.current.started;
+    let snapshot: AgentManifestSnapshot;
     try {
-      setManifestEditorVersion(await fetchManifestVersion(qc, agentId));
+      snapshot = await fetchManifestSnapshot(qc, agentId);
     } catch {
       // Keep the old token; the next save surfaces the conflict.
+      return manifestEditorVersionRef.current ?? undefined;
     }
-  }
-
-  /** Fold a prompt-library bind into the open editor (#8424).
-   *
-   * `PromptLibraryPicker`'s bind writes `system_prompt` into the manifest
-   * through `PATCH /agents/{id}`, so the form's field must show the text that
-   * was bound and the ETag it was seeded with must be re-read — otherwise the
-   * next Save 409s on a write the operator did make.
-   */
-  function handlePromptBound(agentId: string, prompt: string) {
-    setManifestEditorFormState((prev) => ({
-      ...prev,
-      model: { ...prev.model, system_prompt: prompt },
-    }));
-    void refreshManifestVersion(agentId);
+    const base = manifestEditorBaseRef.current;
+    // The selection moved to another agent while the read was in flight.
+    if (!base || base.agentId !== agentId) return undefined;
+    // A read that started later has already been applied; this one is older content.
+    if (seq < manifestRefreshSeqRef.current.applied) {
+      return manifestEditorVersionRef.current ?? undefined;
+    }
+    manifestRefreshSeqRef.current.applied = seq;
+    if (base.parsed) {
+      const fresh = parseManifestToml(snapshot.manifest_toml);
+      // An unparseable fresh read cannot be merged: keep the old token so the next save is refused rather than written over content the form never saw.
+      if (!fresh.ok) return manifestEditorVersionRef.current ?? undefined;
+      const seeded = base.parsed;
+      manifestEditorBaseRef.current = { agentId, parsed: { form: fresh.form, extras: fresh.extras } };
+      setManifestEditorFormState((mine) => rebaseManifestEdits(seeded.form, mine, fresh.form));
+      setManifestEditorExtras((mine) => rebaseManifestEdits(seeded.extras, mine, fresh.extras));
+    }
+    manifestEditorVersionRef.current = snapshot.version;
+    setManifestEditorVersion(snapshot.version);
+    return snapshot.version ?? undefined;
   }
 
   function closeToolsEditor() {
@@ -1352,6 +1315,12 @@ export function AgentsPage() {
   });
   const setAgentSkillsMutation = useSetAgentSkills();
 
+  // Manifest version history (#8041) — fetched only while the History tab is open, since each row carries the agent's full `agent.toml`.
+  const manifestHistoryQuery = useAgentManifestHistory(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && mainTab === "info" && infoTab === "history",
+  });
+  const restoreManifestVersion = useRestoreAgentManifestVersion();
+
   useEffect(() => {
     if (!toolsGroupOpen) {
       setToolsDraft(null);
@@ -1397,15 +1366,20 @@ export function AgentsPage() {
   );
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
 
-  const formModelsQueryProvider = showCreate
-    ? formState.model.provider
-    : manifestEditorFormState.model.provider;
+  // Unfiltered on purpose. The manifest editor's routing tiers hold bare names
+  // the tier router resolves against the *global* catalog, and each fallback
+  // holds a pair from any provider — so filtering this query to the agent's
+  // main provider would leave those pickers showing only that provider's
+  // models, or nothing at all before a main provider is chosen. The main model
+  // field and `pinned_model` narrow the same catalog to the agent's own
+  // provider inside `AgentManifestForm`.
+  //
+  // Shared by the create dialog and the manifest editor: they are never open
+  // at the same time, so one query serves both.
   const formModelsQuery = useModels(
     { provider: formModelsQueryProvider },
     {
-      enabled:
-        ((showCreate && createMode === "form") || manifestEditorLive) &&
-        !!formModelsQueryProvider.trim(),
+      enabled: (showCreate && createMode === "form") || manifestEditorLive,
     },
   );
 
@@ -1689,6 +1663,7 @@ export function AgentsPage() {
   // once, they would keep rendering them.
   useEffect(() => {
     setManifestEditorSeededFor(null);
+    manifestEditorBaseRef.current = null;
     setManifestEditorErrors(new Set());
     setManifestEditorParseError(null);
     setManifestEditorFormState(emptyManifestForm());
@@ -1710,7 +1685,12 @@ export function AgentsPage() {
     if (!agentManifestQuery.data) return;
     const snapshot = agentManifestQuery.data;
     const parsed = parseManifestToml(snapshot.manifest_toml);
+    manifestEditorVersionRef.current = snapshot.version;
     setManifestEditorVersion(snapshot.version);
+    manifestEditorBaseRef.current = {
+      agentId: manifestEditorAgentId,
+      parsed: parsed.ok ? { form: parsed.form, extras: parsed.extras } : null,
+    };
     if (parsed.ok) {
       setManifestEditorFormState(parsed.form);
       setManifestEditorExtras(parsed.extras);
@@ -1788,12 +1768,18 @@ export function AgentsPage() {
           await refreshManifestVersion(detailAgent.id);
         },
         onError: (e: Error) => {
-          addToast(e.message || t("common.error", { defaultValue: "Error" }), "error");
-          // A 409 means the token is stale (another writer saved after the
-          // seed). Refreshing it here is what makes "Save" again after the
-          // conflict actually work instead of failing forever on the same
-          // old ETag (#8424).
-          qc.invalidateQueries({ queryKey: agentKeys.manifest(detailAgent.id) });
+          if (e instanceof ApiError && e.status === 409) {
+            // Another writer saved after the seed. The refresh rebases the form onto their manifest — fields this form did not edit take their values, edited ones keep the edit — so "Save" again applies the operator's change without reverting theirs (#8516).
+            addToast(
+              t("agents.detail.manifest_conflict_merged", {
+                defaultValue:
+                  "This agent was changed elsewhere while you were editing. Their changes are now in the form alongside yours — review and save again.",
+              }),
+              "error",
+            );
+          } else {
+            addToast(e.message || t("common.error", { defaultValue: "Error" }), "error");
+          }
           void refreshManifestVersion(detailAgent.id);
         },
       },
@@ -1983,6 +1969,7 @@ export function AgentsPage() {
     { id: "logs", label: t("agents.info.logs", { defaultValue: "Logs" }), Icon: FileText },
     { id: "memory", label: t("agents.info.memory", { defaultValue: "Memory" }), Icon: Database },
     { id: "prompts", label: t("agents.info.prompts", { defaultValue: "Prompts & experiments" }), Icon: FlaskConical },
+    { id: "history", label: t("agents.info.history", { defaultValue: "History" }), Icon: History },
   ];
   // The group tabs, in the order the map declares. The icon per group is a
   // property of the group, not of the map — `CONFIG_GROUPS` is about which
@@ -2094,6 +2081,23 @@ export function AgentsPage() {
                   <span className="hidden sm:inline">{t("agents.suspend", { defaultValue: "Pause" })}</span>
                 </Button>
               )}
+              {/* Quick Run (#6699) — a one-off ephemeral worker on this
+                  agent's budget. Anchored here rather than on the agent-types
+                  row because the parent that is billed, and whose
+                  `[resources]` quota is the ceiling, is the agent, not a type.
+                  Hidden for hands, which cannot be a parent. */}
+              {!agent.is_hand && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leftIcon={<Zap className="w-3.5 h-3.5" />}
+                  aria-label={t("agents.quick_run")}
+                  title={t("agents.quick_run")}
+                  onClick={() => setQuickRunParent(agent.id)}
+                >
+                  <span className="hidden sm:inline">{t("agents.quick_run")}</span>
+                </Button>
+              )}
               {/* Details — the agent's read-only lineage
                   and its lifecycle actions (reset, delete, chat). Not
                   configuration: that lives on the config tab, and a second
@@ -2202,6 +2206,7 @@ export function AgentsPage() {
           {infoTab === "logs" && renderLogsTab(agent)}
           {infoTab === "memory" && renderMemoryTab(agent)}
           {infoTab === "prompts" && <PromptsExperimentsPanel agentId={agent.id} />}
+          {infoTab === "history" && renderHistoryTab(agent)}
         </div>
       </div>
     );
@@ -2345,6 +2350,11 @@ export function AgentsPage() {
               onChange={setManifestEditorFormState}
               providers={formProviderOptions}
               models={formModelOptions}
+              modelsFetching={formModelsQuery.isFetching}
+              modelsError={formModelsQuery.isError}
+              onModelsRetry={() => {
+                void formModelsQuery.refetch();
+              }}
               invalidFields={manifestEditorErrors}
               extras={manifestEditorExtras}
               skillCatalog={skillCatalogForForm}
@@ -2363,18 +2373,6 @@ export function AgentsPage() {
               sections={CONFIG_GROUPS[configGroup] as ManifestSectionId[]}
               advanced={advancedMode}
               routingInertReason={agent.routing_inert_reason ?? null}
-              modelsFetching={formModelsQuery.isFetching}
-              modelsError={formModelsQuery.isError}
-              onModelsRetry={() => {
-                void formModelsQuery.refetch();
-              }}
-              promptLibrarySlot={
-                <PromptLibraryPicker
-                  agentId={agent.id}
-                  currentPrompt={manifestEditorFormState.model.system_prompt}
-                  onBound={(prompt) => handlePromptBound(agent.id, prompt)}
-                />
-              }
             />
           )}
         </div>
@@ -2984,79 +2982,73 @@ export function AgentsPage() {
       });
     };
 
-    const handleSave = () => {
+    const handleSave = async () => {
       if (!agent.id) return;
       const agentId = agent.id;
+      // The token each write carries. Both PUTs rotate the manifest's ETag, so when both halves are dirty the second must carry the token the first one produced — sending the same token twice made the MCP half answer 409 every time, though nobody else had written anything (#8516).
+      let expectedVersion = manifestVersionFor(agentId);
       if (isBuiltinDirty) {
-        updateToolsMutation.mutate(
-          {
+        try {
+          await updateToolsMutation.mutateAsync({
             agentId,
             payload: {
               capabilities_tools: draft,
               tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
               tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
             },
-            expectedVersion: manifestVersionFor(agentId),
-          },
-          {
-            onSuccess: () => {
-              addToast(t("agents.detail.tools_saved", { defaultValue: "Saved to agent.toml" }), "success");
-              setToolsDraft(null);
-              setExpandedToolGroup(null);
-              // The form owns the same grant keys: adopt the panel's write so
-              // the next form save cannot re-emit the pre-panel lists (#8424).
-              setManifestEditorFormState((prev) => ({
-                ...prev,
-                capabilities: { ...prev.capabilities, tools: draft },
-                tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
-                tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
-              }));
-              void refreshManifestVersion(agentId);
-            },
-            onError: (e) => {
-              // See the skills panel: a 409 must not pin the form to a token
-              // the server already superseded (#8424).
-              void refreshManifestVersion(agentId);
-              addToast(
-                toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })),
-                "error",
-              );
-            },
-          },
-        );
+            expectedVersion,
+          });
+        } catch (e) {
+          // See the skills panel: a 409 must not pin the form to a token the server already superseded (#8424).
+          // The MCP half is not attempted: its draft is kept, and the retry saves both.
+          void refreshManifestVersion(agentId);
+          addToast(
+            toastErr(e, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })),
+            "error",
+          );
+          return;
+        }
+        addToast(t("agents.detail.tools_saved", { defaultValue: "Saved to agent.toml" }), "success");
+        setToolsDraft(null);
+        setExpandedToolGroup(null);
+        // The form owns the same grant keys: adopt the panel's write so the next form save cannot re-emit the pre-panel lists (#8424).
+        setManifestEditorFormState((prev) => ({
+          ...prev,
+          capabilities: { ...prev.capabilities, tools: draft },
+          tool_allowlist: agentToolCfg?.tool_allowlist ?? [],
+          tool_blocklist: agentToolCfg?.tool_blocklist ?? [],
+        }));
+        // Awaited, not fired: its result is the token the MCP half below must send.
+        expectedVersion = await refreshManifestVersion(agentId);
       }
       if (isMcpDirty) {
-        setAgentMcpServersMutation.mutate(
-          {
+        try {
+          await setAgentMcpServersMutation.mutateAsync({
             agentId,
             mcpServers: mcpDraftArr,
-            expectedVersion: manifestVersionFor(agentId),
-          },
-          {
-            onSuccess: async () => {
-              await refreshDetailAgent(agentId, agent.is_hand);
-              addToast(
-                t("agents.detail.tools_mcp_saved", { defaultValue: "MCP servers updated" }),
-                "success",
-              );
-              setMcpServersDraft(null);
-              setExpandedToolGroup(null);
-              // Same reconciliation as the builtin half (#8424).
-              setManifestEditorFormState((prev) => ({ ...prev, mcp_servers: mcpDraftArr }));
-              void refreshManifestVersion(agentId);
-            },
-            onError: (e) => {
-              void refreshManifestVersion(agentId);
-              addToast(
-                toastErr(
-                  e,
-                  t("agents.detail.tools_mcp_save_failed", { defaultValue: "Failed to update MCP servers" }),
-                ),
-                "error",
-              );
-            },
-          },
+            expectedVersion,
+          });
+        } catch (e) {
+          void refreshManifestVersion(agentId);
+          addToast(
+            toastErr(
+              e,
+              t("agents.detail.tools_mcp_save_failed", { defaultValue: "Failed to update MCP servers" }),
+            ),
+            "error",
+          );
+          return;
+        }
+        await refreshDetailAgent(agentId, agent.is_hand);
+        addToast(
+          t("agents.detail.tools_mcp_saved", { defaultValue: "MCP servers updated" }),
+          "success",
         );
+        setMcpServersDraft(null);
+        setExpandedToolGroup(null);
+        // Same reconciliation as the builtin half (#8424).
+        setManifestEditorFormState((prev) => ({ ...prev, mcp_servers: mcpDraftArr }));
+        void refreshManifestVersion(agentId);
       }
     };
 
@@ -3564,6 +3556,94 @@ export function AgentsPage() {
                   {formatLine(e)}
                 </span>
               </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ---------- History tab — manifest version timeline
+  //
+  // Every control-plane write to an agent's `agent.toml` records a full TOML snapshot (#8041).
+  // The stored timestamp is naive UTC, so it is parsed with the `Z` suffix the whole way through — the list row and the restore confirmation must name a version identically, or the dialog would point at a row the operator cannot find above it.
+  const renderHistoryTab = (agent: AgentDetail) => {
+    const versions = manifestHistoryQuery.data ?? [];
+    const versionTimestamp = (v: ManifestVersionEntry): string =>
+      new Date(v.timestamp + "Z").toLocaleString();
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+          {t("agents.detail.manifest_history", { defaultValue: "Manifest history" })} · {versions.length}
+        </div>
+        {manifestHistoryQuery.isLoading ? (
+          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading..." })}</div>
+        ) : manifestHistoryQuery.isError ? (
+          <div className="rounded-md border border-red-500/30 bg-red-500/10 p-4 text-[12px] text-red-500">
+            {t("agents.detail.manifest_history_load_err", { defaultValue: "Failed to load manifest history." })}
+          </div>
+        ) : versions.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_history", { defaultValue: "No config changes recorded yet." })}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {versions.map((v) => (
+              <details
+                key={v.id}
+                className="rounded-md border border-border-subtle bg-main/40 group"
+              >
+                <summary className="px-3 py-2 cursor-pointer text-[12px] flex flex-wrap items-center gap-2 select-none">
+                  <History className="w-3.5 h-3.5 text-text-dim shrink-0" />
+                  <span className="font-medium">{versionTimestamp(v)}</span>
+                  <span className="text-text-dim">· {v.change_source}</span>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="ml-auto"
+                    disabled={restoreManifestVersion.isPending}
+                    onClick={(e) => {
+                      // Keep the click from folding the <details> it sits in.
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setConfirmDialog({
+                        title: t("agents.detail.restore_title", { defaultValue: "Restore this version?" }),
+                        message: t("agents.detail.restore_confirm", {
+                          name: agent.name,
+                          timestamp: versionTimestamp(v),
+                          source: v.change_source,
+                        }),
+                        tone: "destructive",
+                        onConfirm: async () => {
+                          try {
+                            await restoreManifestVersion.mutateAsync({
+                              agentId: agent.id,
+                              versionId: v.id,
+                            });
+                            addToast(
+                              t("agents.detail.restored", { defaultValue: "Manifest restored" }),
+                              "success",
+                            );
+                          } catch (err) {
+                            addToast(
+                              toastErr(err, t("agents.detail.restore_failed", { defaultValue: "Restore failed" })),
+                              "error",
+                            );
+                            // Re-throw so the dialog stays open on failure instead of closing over an error toast.
+                            throw err;
+                          }
+                        },
+                      });
+                    }}
+                  >
+                    <RotateCcw className="w-3 h-3 mr-1" />
+                    {t("agents.detail.restore_btn", { defaultValue: "Restore" })}
+                  </Button>
+                </summary>
+                <pre className="px-3 pb-3 text-[11px] font-mono leading-[1.6] max-h-60 overflow-auto whitespace-pre-wrap break-all text-text-dim">
+                  {v.manifest_toml}
+                </pre>
+              </details>
             ))}
           </div>
         )}
@@ -4140,7 +4220,6 @@ export function AgentsPage() {
         </DrawerPanel>
       )}
 
-
       {/* Tools Editor Modal */}
       {showToolsEditor && toolsEditorAgentId && (
         <DrawerPanel isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg">
@@ -4601,6 +4680,13 @@ export function AgentsPage() {
         </div>
       </DrawerPanel>
 
+      {/* Quick Run Modal (#6699) — one ephemeral worker, gone when it ends. */}
+      {quickRunParent !== null && (
+        <QuickRunModal
+          initialParent={quickRunParent}
+          onClose={() => setQuickRunParent(null)}
+        />
+      )}
       <ConfirmDialog
         isOpen={confirmDialog !== null}
         title={confirmDialog?.title ?? ""}

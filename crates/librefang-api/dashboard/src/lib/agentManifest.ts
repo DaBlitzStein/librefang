@@ -6,12 +6,17 @@
 // survives a round-trip back through the form.
 
 import { parse, stringify, TomlError, type TomlTable } from "smol-toml";
-// The parameter-range table lives next to the control that renders it (#8332),
-// and `isValidParamValue` is the one rule every editor applies. Importing it
-// here rather than restating the bounds keeps a single source of truth, the
-// same one `lib/agentModelPatch.ts` reads (#8112 review). `MODEL_PARAM_RANGES`
-// is read directly by the `max_tokens` ceiling helper below.
-import { isValidParamValue, MODEL_PARAM_NAMES } from "../components/ui/ModelParamField";
+// The parameter range table is the single source of truth for a model
+// parameter's ceiling (#8332); the validator reads it rather than restating
+// a number beside it, the same table the controls render from. The same module
+// also exports `isValidParamValue`, the one rule every editor applies; reading
+// it here rather than restating the bounds keeps a single source of truth, the
+// same one `lib/agentModelPatch.ts` reads (#8112 review).
+import {
+  isValidParamValue,
+  MODEL_PARAM_NAMES,
+  MODEL_PARAM_RANGES,
+} from "../components/ui/ModelParamField";
 
 let _nextUid = 1;
 export const generateUid = (): string => String(_nextUid++);
@@ -1529,6 +1534,18 @@ const isBlankOrU32TomlInteger = (raw: string): boolean =>
   isBlankOrUnsignedTomlIntegerAtMost(raw, U32_TOML_MAX);
 
 /**
+ * max_tokens's ceiling comes from the range table (#8332), not a second
+ * number beside this one. The table's max for the parameter IS `u32::MAX`,
+ * so table and type agree today — the fallback only names what still applies
+ * if the table entry ever loses its max: the Rust field is `Option<u32>`
+ * (agent.rs:949), and that bound outlives any table edit.
+ */
+const MODEL_MAX_TOKENS_CEILING =
+  MODEL_PARAM_RANGES.max_tokens.max !== undefined
+    ? BigInt(MODEL_PARAM_RANGES.max_tokens.max)
+    : U32_TOML_MAX;
+
+/**
  * Parse a float that may legitimately be negative.
  *
  * `parseFloatish` refuses negatives because every field it was written for is a
@@ -1589,6 +1606,11 @@ const parseFloatish = (raw: string): number | null => {
   if (!Number.isFinite(n)) return null;
   if (n < 0) return null; // all our float fields are cost/quota — never negative
   return n;
+};
+
+const isInRange = (raw: string, min: number, max: number): boolean => {
+  const v = parseSignedFloat(raw);
+  return v === null || (v >= min && v <= max);
 };
 
 const writeStringScalar = (lines: string[], key: string, value: string): void => {
@@ -2891,14 +2913,187 @@ export const validateManifestForm = (
   if (!isBlankOrU32TomlInteger(form.max_concurrent_invocations)) {
     errors.push("max_concurrent_invocations");
   }
-  // Every model parameter is validated against the shared table the controls
-  // render from (`isValidParamValue` / `MODEL_PARAM_RANGES`), so this cannot
-  // drift from the ranges `PATCH /api/agents/{id}/model` enforces (#8112
-  // review). The loop covers the endpoint limits (max_tokens, context_window,
-  // max_output_tokens), the sampling preferences, and the newer params — a
-  // below-minimum `context_window` and a non-integer `max_output_tokens` are
-  // both caught here rather than by a second, hand-written shape check. An
-  // empty field is the inherit rung, not a value.
+  // The model's three integer parameters. max_tokens is `Option<u32>` and its
+  // ceiling lives in MODEL_PARAM_RANGES (#8332) — the table's number, not a
+  // second one here. The two token counts beside it are `Option<u64>`: no
+  // typo reaches their ceiling through TOML, so what the validator owes them
+  // is the shape — a negative or a non-integer used to pass and parseInteger
+  // dropped the key from the file without a word.
+  if (
+    !isBlankOrUnsignedTomlIntegerAtMost(form.model.max_tokens, MODEL_MAX_TOKENS_CEILING)
+  ) {
+    errors.push("model.max_tokens");
+  }
+  if (!isBlankOrUnsignedTomlInteger(form.model.context_window)) {
+    errors.push("model.context_window");
+  }
+  if (!isBlankOrUnsignedTomlInteger(form.model.max_output_tokens)) {
+    errors.push("model.max_output_tokens");
+  }
+  // The rest of the `Option<u32>` inventory — same ceiling, same shape.
+  if (!isBlankOrU32TomlInteger(form.autonomous.heartbeat_timeout_secs)) {
+    errors.push("autonomous.heartbeat_timeout_secs");
+  }
+  if (!isBlankOrU32TomlInteger(form.auto_dream_min_sessions)) {
+    errors.push("auto_dream_min_sessions");
+  }
+  if (!isBlankOrU32TomlInteger(form.compaction.max_retries)) {
+    errors.push("compaction.max_retries");
+  }
+  if (!isBlankOrU32TomlInteger(form.compaction.max_loop_steps_before_aggregate)) {
+    errors.push("compaction.max_loop_steps_before_aggregate");
+  }
+  if (!isBlankOrU32TomlInteger(form.compaction.strip_reasoning_after_turns)) {
+    errors.push("compaction.strip_reasoning_after_turns");
+  }
+  if (!isBlankOrU32TomlInteger(form.skill_workshop.max_pending_age_days)) {
+    errors.push("skill_workshop.max_pending_age_days");
+  }
+  if (!isBlankOrU32TomlInteger(form.skill_workshop.max_pending)) {
+    errors.push("skill_workshop.max_pending");
+  }
+  // `[channel_overrides]` counts. The six u32 fields take the type ceiling;
+  // the debounce/ownership spans are u64/usize, so only the whole-number shape
+  // is theirs. Both were unvalidated: a negative or a fractional value was
+  // refused by `parseInteger` and the key vanished from the file with no error
+  // (#8424 review).
+  for (const key of [
+    "rate_limit_per_minute",
+    "rate_limit_per_user",
+    "auto_route_ttl_minutes",
+    "auto_route_confidence_threshold",
+    "auto_route_sticky_bonus",
+    "auto_route_divergence_count",
+  ] as const) {
+    if (!isBlankOrU32TomlInteger(form.channel_overrides[key])) {
+      errors.push(`channel_overrides.${key}`);
+    }
+  }
+  for (const key of [
+    "message_debounce_ms",
+    "message_debounce_max_ms",
+    "message_debounce_max_buffer",
+    "conversation_ownership_ttl_seconds",
+  ] as const) {
+    if (!isBlankOrUnsignedTomlInteger(form.channel_overrides[key])) {
+      errors.push(`channel_overrides.${key}`);
+    }
+  }
+  // The sampling ranges read from MODEL_PARAM_RANGES, not a second number
+  // beside it: the table is the same source the widget's own min/max and the
+  // PATCH route's ceiling come from, so a range edit lands everywhere at
+  // once instead of the validator quietly keeping yesterday's bounds.
+  for (const param of ["temperature", "top_p", "frequency_penalty", "presence_penalty"] as const) {
+    const { min, max } = MODEL_PARAM_RANGES[param];
+    // A parameter without a table max is unbound above — the table is the
+    // source, and the validator follows it rather than inventing a bound.
+    if (max === undefined) continue;
+    if (!isInRange(form.model[param], min, max)) errors.push(`model.${param}`);
+  }
+  // Metadata rows. A blank row is dropped by the serializer, not an error —
+  // but a row with a key and a value the row's own type cannot hold is a
+  // half-filled row of the shared-folder kind: the serializer would drop it
+  // and the operator would believe a metadata key had been set.
+  for (const row of form.metadata) {
+    if (!row.key.trim()) continue;
+    if (row.valueType === "number" && !isTomlNumberLiteral(row.value.trim())) {
+      errors.push(`metadata.${row._uid}.value`);
+    }
+  }
+
+  // The exec policy's three numeric fields. Each is a Rust u64 / usize, so an
+  // empty box inherits and anything else has to be a whole number: `-5` and
+  // `1.5` used to reach the TOML and come back as a 400 from the whole
+  // document, which is a failure the operator cannot trace to this field.
+  for (const field of [
+    "timeout_secs",
+    "max_output_bytes",
+    "no_output_timeout_secs",
+  ] as const) {
+    if (!isBlankOrUnsignedTomlInteger(form.exec_policy[field])) {
+      errors.push(`exec_policy.${field}`);
+    }
+  }
+
+  // `[context_engine]`. The weights are positional against `plugin_stack`, so
+  // a token that is not a number drops the whole list from the file without a
+  // word; the sidecar needs a command or the daemon has nothing to spawn.
+  if (parseWeightList(form.context_engine.plugin_stack_weights) === null &&
+      form.context_engine.plugin_stack_weights.trim() !== "") {
+    errors.push("context_engine.plugin_stack_weights");
+  }
+  if (form.context_engine.sidecar_enabled && !form.context_engine.sidecar.command.trim()) {
+    errors.push("context_engine.sidecar.command");
+  }
+  if (
+    form.context_engine.sidecar_enabled &&
+    form.context_engine.sidecar.request_timeout_secs.trim() !== "" &&
+    !isBlankOrUnsignedTomlInteger(form.context_engine.sidecar.request_timeout_secs)
+  ) {
+    errors.push("context_engine.sidecar.request_timeout_secs");
+  }
+  {
+    const hooks = form.context_engine.hooks;
+    for (const field of CONTEXT_ENGINE_HOOK_COUNTS) {
+      const valid = CONTEXT_ENGINE_HOOK_U32.includes(field)
+        ? isBlankOrU32TomlInteger(hooks[field])
+        : isBlankOrUnsignedTomlInteger(hooks[field]);
+      if (!valid) errors.push(`context_engine.hooks.${field}`);
+    }
+    if (!isBlankOrSignedInteger(hooks.priority)) {
+      errors.push("context_engine.hooks.priority");
+    }
+    // The circuit breaker's two knobs are `u32` and `u64` and are only written
+    // while the switch is on — but a bad value typed before switching it on
+    // must not sail through to a save that then drops it.
+    if (!isBlankOrU32TomlInteger(hooks.circuit_max_failures)) {
+      errors.push("context_engine.hooks.circuit_max_failures");
+    }
+    if (!isBlankOrUnsignedTomlInteger(hooks.circuit_reset_secs)) {
+      errors.push("context_engine.hooks.circuit_reset_secs");
+    }
+    for (const row of hooks.env_schema) {
+      if (!row.key.trim()) continue;
+      if (row.valueType === "number" && !isTomlNumberLiteral(row.value.trim())) {
+        errors.push(`context_engine.hooks.env_schema.${row._uid}.value`);
+      }
+    }
+  }
+
+  // Tool overrides. The tool name is the TOML key, so a duplicate is a
+  // duplicate key the daemon refuses to parse, and a half-filled override —
+  // params but no name — is dropped by the serializer, exactly like a
+  // half-filled shared folder. A wholly blank entry is not an error: it is a
+  // row the operator just added and has not typed into yet.
+  const seenToolNames = new Set<string>();
+  for (const entry of form.tools) {
+    const toolName = entry.name.trim();
+    if (!toolName) {
+      const filled =
+        entry.params.some((row) => row.key.trim()) ||
+        Object.keys(entry.preserved ?? {}).length > 0 ||
+        Object.keys(entry.params_preserved ?? {}).length > 0;
+      if (filled) errors.push(`tools.${entry._uid}.name`);
+      continue;
+    }
+    if (seenToolNames.has(toolName)) errors.push(`tools.${entry._uid}.name`);
+    seenToolNames.add(toolName);
+
+    for (const row of entry.params) {
+      if (!row.key.trim()) continue;
+      if (row.valueType === "number" && !isTomlNumberLiteral(row.value.trim())) {
+        errors.push(`tools.${entry._uid}.params.${row._uid}.value`);
+      }
+    }
+  }
+
+  // Sampling preferences and endpoint limits — `isValidParamValue` is the
+  // single rule the controls render from (`MODEL_PARAM_RANGES`), so this cannot
+  // drift from the ranges `PATCH /api/agents/{id}/model` enforces
+  // (crates/librefang-api/src/routes/agents/config.rs). Iterating the table
+  // also covers `max_tokens` (a real `u32` ceiling) and `context_window` /
+  // `max_output_tokens` (at least 1), which the form serializes unchecked
+  // (#8112 review). An empty field is the inherit rung, not a value.
   for (const param of MODEL_PARAM_NAMES) {
     const raw = form.model[param];
     if (raw.trim() === "") continue;

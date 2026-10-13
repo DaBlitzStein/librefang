@@ -698,8 +698,7 @@ pub async fn list_agent_ephemeral_runs(
 
 /// Query parameters for `GET /api/agents/{id}/manifest-history`.
 ///
-/// A non-numeric `limit` is rejected at extraction (400) instead of being
-/// silently coerced to the default.
+/// A non-numeric `limit` is rejected at extraction (400) instead of being silently coerced to the default.
 #[derive(Debug, serde::Deserialize)]
 pub struct ManifestHistoryQuery {
     #[serde(default = "default_manifest_history_limit")]
@@ -714,8 +713,7 @@ fn default_manifest_history_limit() -> u32 {
 /// GET /api/agents/{id}/manifest-history — how this agent's config changed over time.
 ///
 /// Returns an array of manifest snapshots, newest first.
-/// Each entry carries the full TOML so the dashboard can render a diff between
-/// consecutive versions and offer a one-click restore.
+/// Each entry carries the full TOML so the dashboard can render a diff between consecutive versions and offer a one-click restore.
 #[utoipa::path(
     get,
     path = "/api/agents/{id}/manifest-history",
@@ -759,11 +757,8 @@ pub async fn list_agent_manifest_history(
                 .into_response();
         }
     };
-    // A snapshot is the agent's entire `agent.toml` — system prompt, capabilities,
-    // resource budgets, tool/skill/MCP allowlists — so this read is gated the way
-    // every sibling agent-scoped read in this file is rather than merely checking
-    // that the id resolves. The 404 is deliberate: it is what stops id enumeration
-    // from distinguishing "not yours" from "does not exist".
+    // A snapshot is the agent's entire `agent.toml` — system prompt, capabilities, resource budgets, tool/skill/MCP allowlists — so this read is gated the way every sibling agent-scoped read in this file is rather than merely checking that the id resolves.
+    // The 404 is deliberate: it is what stops id enumeration from distinguishing "not yours" from "does not exist".
     if !super::super::can_access_agent(&state, agent_uuid, api_user.as_ref()) {
         return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
             .with_code("agent_not_found")
@@ -809,8 +804,8 @@ pub async fn list_agent_manifest_history(
     ),
     responses(
         (status = 200, description = "Agent manifest restored", body = crate::types::JsonObject),
-        (status = 400, description = "Invalid agent id or version does not belong to this agent"),
-        (status = 404, description = "Agent or version not found, or not accessible to the caller"),
+        (status = 400, description = "Invalid agent id"),
+        (status = 404, description = "Agent or version not found, the version belongs to another agent, or the agent is not accessible to the caller"),
         (status = 423, description = "This agent is provisioned by the deployment; its manifest cannot be changed through the API", body = crate::types::JsonObject)
     )
 )]
@@ -835,23 +830,17 @@ pub async fn restore_agent_manifest_version(
             .with_code("agent_not_found")
             .into_response();
     }
-    // A deployment-owned manifest is an input, not a file the API may roll
-    // back: the provisioner re-applies its declaration on the next boot and
-    // would overwrite the restored content, so refuse the same way `patch_agent`
-    // refuses the edit (#6695).
+    // A deployment-owned manifest is an input, not a file the API may roll back: the provisioner re-applies its declaration on the next boot and would overwrite the restored content, so refuse the same way `patch_agent` refuses the edit (#6695).
     if let Some(refusal) = super::guard_provisioned_agent(&state, agent_uuid) {
         return refusal.into_response();
     }
 
     let store = librefang_memory::ManifestVersionStore::new(state.kernel.memory_substrate().pool());
+    // A version id that belongs to another agent answers exactly like one that does not exist.
+    // A distinct status would let a caller probe the global id sequence for rows of agents it cannot see, the same enumeration the `can_access_agent` 404 above closes for agent ids.
     let version = match store.get_version(version_id) {
         Ok(Some(v)) if v.agent_id == agent_uuid.0.to_string() => v,
-        Ok(Some(_)) => {
-            return ApiErrorResponse::bad_request("version does not belong to this agent")
-                .with_code("version_mismatch")
-                .into_response();
-        }
-        Ok(None) => {
+        Ok(Some(_)) | Ok(None) => {
             return ApiErrorResponse::not_found("version not found")
                 .with_code("version_not_found")
                 .into_response();
@@ -859,8 +848,7 @@ pub async fn restore_agent_manifest_version(
         Err(e) => return ApiErrorResponse::internal_scrub(e).into_response(),
     };
 
-    // Parse before applying: a snapshot the server cannot deserialize must
-    // fail as its own error rather than half-apply through the kernel.
+    // Parse before applying: a snapshot the server cannot deserialize must fail as its own error rather than half-apply through the kernel.
     let manifest: AgentManifest = match toml::from_str(&version.manifest_toml) {
         Ok(m) => m,
         Err(e) => {
@@ -886,8 +874,7 @@ pub async fn restore_agent_manifest_version(
         )
             .into_response(),
         Err(e) => match e {
-            // 4xx from the kernel keep their message (e.g. the module-path
-            // security check); 5xx are scrubbed by `From<KernelOpError>`.
+            // 4xx from the kernel keep their message (e.g. the module-path security check); 5xx are scrubbed by `From<KernelOpError>`.
             crate::error::KernelError::LibreFang(inner) => {
                 ApiErrorResponse::from(inner).into_response()
             }

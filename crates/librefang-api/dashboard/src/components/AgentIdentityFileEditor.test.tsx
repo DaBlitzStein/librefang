@@ -240,6 +240,41 @@ describe("AgentIdentityFileEditor", () => {
   });
 });
 
+// #8516: the daemon rewrites this file on a rename (`name:`) and on a personality write through `/identity` or `/config`.
+// The hooks for those writes invalidate the cached read; these pin what the editor does when the refetched bytes arrive, so its whole-file save cannot put the superseded values back.
+describe("AgentIdentityFileEditor — another writer changes the file", () => {
+  const RENAMED = DEPLOYED.replace("name: deannatroi", "name: troi").replace(
+    "archetype: assistant",
+    "archetype: counselor",
+  );
+
+  it("keeps an edit in progress and adopts everything else from the refetched file", () => {
+    const { rerender } = render(<AgentIdentityFileEditor agentId="agent-1" />);
+    fireEvent.change(screen.getByLabelText("Vibe"), { target: { value: "friendly" } });
+
+    // A rename and a personality write land; the invalidated read refetches.
+    mockQuery({ data: { name: "IDENTITY.md", content: RENAMED, size_bytes: RENAMED.length } });
+    rerender(<AgentIdentityFileEditor agentId="agent-1" />);
+
+    expect(screen.getByLabelText("Vibe")).toHaveProperty("value", "friendly");
+    expect(screen.getByLabelText("Archetype")).toHaveProperty("value", "counselor");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save IDENTITY.md" }));
+    // The new name and the other writer's archetype survive the save.
+    expect(saved).toEqual([RENAMED.replace("vibe: helpful", "vibe: friendly")]);
+  });
+
+  it("does not carry one agent's edit over to another agent", () => {
+    const { rerender } = render(<AgentIdentityFileEditor agentId="agent-1" />);
+    fireEvent.change(screen.getByLabelText("Vibe"), { target: { value: "friendly" } });
+
+    mockQuery({ data: { name: "IDENTITY.md", content: RENAMED, size_bytes: RENAMED.length } });
+    rerender(<AgentIdentityFileEditor agentId="agent-2" />);
+
+    expect(screen.getByLabelText("Vibe")).toHaveProperty("value", "helpful");
+  });
+});
+
 describe("AgentIdentityFileEditor — the daemon's 32 KiB cap", () => {
   // Whatever the server says, the operator should learn the size before the
   // save, not from a 413 whose message the daemon renders as

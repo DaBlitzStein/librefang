@@ -316,26 +316,6 @@ interface AgentManifestFormProps {
    * disagree depending on which half failed.
    */
   agentId?: string;
-  /**
-   * Whether the model catalog (`models`) is currently being fetched.
-   *
-   * The catalog-backed pickers render a loading state rather than an empty
-   * list, so a still-arriving catalog is not mistaken for one that resolved to
-   * nothing (#8112).
-   */
-  modelsFetching?: boolean;
-  /** Whether the model-catalog fetch failed; the pickers offer a retry. */
-  modelsError?: boolean;
-  /** Retry the model-catalog fetch for the pickers' error state. */
-  onModelsRetry?: () => void;
-  /**
-   * Extra content rendered inside the `prompt` section, after the textarea
-   * (#8424). The agent view supplies the library picker here so the drawer's
-   * standalone system-prompt textarea is not resurrected: the form's own field
-   * stays the one writer of `model.system_prompt`. Omitted (the create modal)
-   * renders nothing extra.
-   */
-  promptLibrarySlot?: React.ReactNode;
 }
 
 /**
@@ -447,10 +427,6 @@ export function AgentManifestForm({
   agentId,
   sections,
   advanced = false,
-  modelsFetching = false,
-  modelsError = false,
-  onModelsRetry,
-  promptLibrarySlot,
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -584,8 +560,12 @@ export function AgentManifestForm({
   const setRoutingEngine = (engine: RoutingEngine): void =>
     onChange(applyRoutingEngine(value, engine));
 
-  // B (#8112) — reintroduce; used only by pinned_model now. The tiers take the
-  // full catalog, so this narrowing is not shared with them.
+  // The main model field holds an id without a provider, so it only offers a
+  // list once a provider is chosen; before that the free-text fallback below
+  // takes over. `pinned_model` lands on the same provider in Stable mode — the
+  // kernel overwrites the model id alone — so its picker shares this list.
+  // `models` may be the unfiltered catalog (the routing tiers and fallbacks
+  // need it whole), so this narrows it back for both fields.
   const filteredModels = useMemo(
     () => (value.model.provider ? models.filter((m) => m.provider === value.model.provider) : []),
     [models, value.model.provider],
@@ -1159,7 +1139,6 @@ export function AgentManifestForm({
             className={textareaClass}
           />
         </Field>
-        {promptLibrarySlot}
       </Section>
 
       <Section when={shows("limits")} id="limits" title={t("agents.form.resources")}>

@@ -61,7 +61,7 @@ pub use self::types::{AgentLoopResult, ExperimentContext, LoopOptions, LoopPhase
 
 use self::end_turn::{
     build_silent_agent_loop_result, classify_end_turn_retry, finalize_end_turn_text,
-    finalize_successful_end_turn, gated_proactive_memory_for_memorize,
+    finalize_iteration_cap_text, finalize_successful_end_turn, gated_proactive_memory_for_memorize,
     gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, session_recall_scope,
     EndTurnRetry, EndTurnRetryContext, FinalizeEndTurnContext, FinalizeEndTurnResultData,
 };
@@ -77,7 +77,7 @@ use self::prompt::{
     build_prompt_setup, log_repair_stats, prepare_llm_messages, push_filtered_user_message,
     reply_directives_from_parsed, select_running_experiment, setup_recalled_memories,
     PreparedMessages, PromptExperimentSelection, PromptSetup, PromptSetupContext, RecallSetup,
-    RecallSetupContext,
+    RecallSetupContext, TurnInjections,
 };
 use self::retry::call_with_retry;
 use self::text_recovery::{recover_text_tool_calls, replace_unrecoverable_tool_call_reply};
@@ -138,13 +138,100 @@ fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &st
     session.last_repaired_generation = Some(session.messages_generation);
 }
 
+/// The canonical history handed to `ContextEngine::compact`.
+///
+/// Compaction must summarise what is persisted, not the LLM working copy: the working copy also carries per-turn injections (`TurnInjections`), retry nudges and assemble-stage rewrites, and whatever the engine keeps is written back into `session.messages`.
+/// System messages are filtered exactly as `prepare_llm_messages` does.
+fn compaction_history(session: &Session) -> Vec<Message> {
+    session
+        .messages
+        .iter()
+        .filter(|m| m.role != Role::System)
+        .cloned()
+        .collect()
+}
+
+/// Tool-use ids referenced by `message`, from both `ToolUse` and `ToolResult` blocks.
+fn tool_ids_of(message: &Message) -> impl Iterator<Item = &str> {
+    let blocks: &[ContentBlock] = match &message.content {
+        MessageContent::Blocks(blocks) => blocks,
+        MessageContent::Text(_) => &[],
+    };
+    blocks.iter().filter_map(|block| match block {
+        ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+        ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+        _ => None,
+    })
+}
+
+/// Messages at the end of the working copy that were never mirrored into the session (the empty-response and action nudges pushed right before a `continue`).
+///
+/// Located by finding the session's last message in the working copy; the injected time message is excluded because the rebuild re-inserts it on its own.
+/// When the session's last message cannot be found (an assemble-stage rewrite changed it) there is no reliable boundary, and an empty tail is returned rather than guessing.
+fn working_only_tail(
+    messages: &[Message],
+    session_last: Option<&Message>,
+    time_msg: Option<&Message>,
+) -> Vec<Message> {
+    let Some(last) = session_last.and_then(|m| serde_json::to_value(m).ok()) else {
+        return Vec::new();
+    };
+    let time_json = time_msg.and_then(|m| serde_json::to_value(m).ok());
+    let Some(pos) = messages
+        .iter()
+        .rposition(|m| serde_json::to_value(m).ok().as_ref() == Some(&last))
+    else {
+        return Vec::new();
+    };
+    messages[pos + 1..]
+        .iter()
+        .filter(|m| time_json.is_none() || serde_json::to_value(m).ok() != time_json)
+        .cloned()
+        .collect()
+}
+
+/// The working copy minus the per-turn injections, for the inline compressor path that persists its compressed working copy into `session.messages`.
+///
+/// Without this the time message and the head injections (web search, recalled memory, canonical context) would be written into the session and re-sent on every later turn.
+/// Matched by value, so an injection the compressor folded into its summary is simply absent and nothing else is dropped.
+fn without_turn_injections(messages: &[Message], injections: &TurnInjections) -> Vec<Message> {
+    let injected: Vec<serde_json::Value> = injections
+        .head
+        .iter()
+        .chain(injections.time_msg.iter())
+        .filter_map(|m| serde_json::to_value(m).ok())
+        .collect();
+    if injected.is_empty() {
+        return messages.to_vec();
+    }
+    messages
+        .iter()
+        .filter(|m| {
+            serde_json::to_value(m)
+                .map(|v| !injected.contains(&v))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Apply an engine compaction result to the session and rebuild the LLM working copy from it.
+///
+/// `kept_messages` must come from `compaction_history(session)`, never from the working copy, so nothing injected per turn is persisted.
+/// The working copy is rebuilt as `injections.head`, then the compacted history with `injections.time_msg` placed right after the first message of the current turn, then any working-only tail.
 fn apply_context_compaction(
     session: &mut Session,
     messages: &mut Vec<Message>,
     new_messages_start: &mut usize,
     summary: String,
     kept_messages: Vec<Message>,
+    injections: &TurnInjections,
 ) {
+    let tail = working_only_tail(
+        messages,
+        session.messages.last(),
+        injections.time_msg.as_ref(),
+    );
     let previous_new_messages_start = (*new_messages_start).min(session.messages.len());
     let current_turn = &session.messages[previous_new_messages_start..];
     let current_turn_json = current_turn
@@ -192,14 +279,54 @@ fn apply_context_compaction(
             // A custom context engine may omit or rewrite the current turn.
             // Keep it in persistent history and in the next LLM request rather
             // than letting a stale pre-compaction boundary hide or lose it.
+            // Any rewritten copy of a current-turn tool call left in `compacted` is dropped first: appending the turn next to it would send the same tool_use id twice, which strict providers reject.
+            let turn_ids: std::collections::BTreeSet<&str> =
+                current_turn.iter().flat_map(tool_ids_of).collect();
+            if !turn_ids.is_empty() {
+                compacted.retain(|m| !tool_ids_of(m).any(|id| turn_ids.contains(id)));
+            }
             let start = compacted.len();
             compacted.extend_from_slice(current_turn);
             start
         });
 
-    session.set_messages(compacted.clone());
-    *messages = compacted;
+    // The kernel's compaction path audits its kept window before saving it; this in-turn path installs the engine's window directly, and nothing between here and the request builder repairs it unless an overflow recovery also fires (#8545).
+    // A window cut inside a tool cycle opens with ToolResults whose calls were summarised away, which strict providers reject with a non-retryable 400.
+    // Only the history before the current turn is repaired, so the turn boundary located above stays exact, and only when it is actually broken, so a clean window keeps its message shape.
+    let (history, current_turn_messages) = compacted.split_at(compacted_new_messages_start);
+    let (compacted, compacted_new_messages_start) =
+        if crate::session_repair::has_orphaned_tool_results(history) {
+            let (repaired, stats) = crate::session_repair::validate_and_repair_with_stats(history);
+            warn!(
+                orphaned_results_removed = stats.orphaned_results_removed,
+                results_reordered = stats.results_reordered,
+                synthetic_results_inserted = stats.synthetic_results_inserted,
+                messages_merged = stats.messages_merged,
+                "Context compaction left a split tool cycle in the kept window; repaired it before the next request"
+            );
+            let start = repaired.len();
+            let mut joined = repaired;
+            joined.extend_from_slice(current_turn_messages);
+            (joined, start)
+        } else {
+            (compacted, compacted_new_messages_start)
+        };
+
+    let mut rebuilt = Vec::with_capacity(injections.head.len() + compacted.len() + 1 + tail.len());
+    rebuilt.extend(injections.head.iter().cloned());
+    let history_offset = rebuilt.len();
+    rebuilt.extend(compacted.iter().cloned());
+    if let Some(time_msg) = &injections.time_msg {
+        let at = history_offset + (compacted_new_messages_start + 1).min(compacted.len());
+        rebuilt.insert(at, time_msg.clone());
+    }
+    rebuilt.extend(tail);
+
+    session.set_messages(compacted);
+    *messages = rebuilt;
     *new_messages_start = compacted_new_messages_start;
+    // #4971: drop file_read dedup state — the bodies its stubs referenced have been summarised away.
+    crate::context_compressor::reset_post_compression_side_state(session.id);
 }
 
 /// Maximum consecutive iterations where every executed tool failed before
@@ -918,6 +1045,7 @@ async fn run_agent_loop_inner(
         mut messages,
         new_messages_start: prepared_new_messages_start,
         repair_stats,
+        mut injections,
     } = prepare_llm_messages(
         manifest,
         session,
@@ -943,12 +1071,11 @@ async fn run_agent_loop_inner(
     )
     .await
     {
-        messages.insert(
-            0,
-            Message::user(format!(
-                "[Web search results — use these to inform your response]\n{search_results}"
-            )),
-        );
+        let search_msg = Message::user(format!(
+            "[Web search results — use these to inform your response]\n{search_results}"
+        ));
+        messages.insert(0, search_msg.clone());
+        injections.head.insert(0, search_msg);
     }
 
     let mut total_usage = TokenUsage::default();
@@ -1102,6 +1229,12 @@ async fn run_agent_loop_inner(
             k.fire_agent_step(&agent_id_str, iteration);
         }
 
+        // Resolved once per iteration and shared by engine compaction and the history fold, so neither strips reasoning an Echo provider requires (#4842).
+        let fold_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+            .unwrap_or_default();
+
         // Pluggable context engine: threshold-gated compaction. When the
         // engine signals that the current token count has crossed its
         // compression threshold, run a compaction pass *before* assemble so
@@ -1127,13 +1260,16 @@ async fn run_agent_loop_inner(
                 // understand when used as a summarisation model.
                 let compact_model =
                     strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
+                // Compact the canonical history, not the working copy — see `compaction_history`.
+                let history = compaction_history(session);
                 match engine
                     .compact(
                         session.agent_id,
-                        &messages,
+                        &history,
                         driver.clone(),
                         &compact_model,
                         ctx_window,
+                        fold_echo_policy,
                     )
                     .await
                 {
@@ -1148,6 +1284,7 @@ async fn run_agent_loop_inner(
                             &mut new_messages_start,
                             result.summary,
                             result.kept_messages,
+                            &injections,
                         );
                         // `last_prompt_tokens` is intentionally NOT reset here.
                         // A second compaction should only fire after the next
@@ -1165,10 +1302,6 @@ async fn run_agent_loop_inner(
         // before context assembly so the LLM never sees raw bulk payloads
         // from old turns.  Runs fold first, then the compressor, mirroring
         // the ordering rationale in `history_fold`'s module-level doc.
-        let fold_echo_policy = kernel
-            .as_ref()
-            .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
-            .unwrap_or_default();
         messages = maybe_fold_stale_tool_results(
             messages,
             session,
@@ -1259,7 +1392,8 @@ async fn run_agent_loop_inner(
                 messages = crate::session_repair::ensure_starts_with_user(messages);
             }
             if had_soft_compression {
-                session.set_messages(messages.clone());
+                // Persist the compressed history without the per-turn injections, which belong to this request only.
+                session.set_messages(without_turn_injections(&messages, &injections));
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
         }
@@ -2089,6 +2223,7 @@ async fn run_agent_loop_inner(
                             "reason": "tool_failure",
                             "error_count": hard_error_count,
                             "consecutive_all_failed": consecutive_all_failed,
+                            "session_id": session.id.to_string(),
                             "is_fork": opts.is_fork,
                         }),
                     };
@@ -2178,6 +2313,7 @@ async fn run_agent_loop_inner(
                         data: serde_json::json!({
                             "iterations": iteration + 1,
                             "reason": "max_continuations",
+                            "session_id": session.id.to_string(),
                             "is_fork": opts.is_fork,
                         }),
                     };
@@ -2243,23 +2379,10 @@ async fn run_agent_loop_inner(
         }
     }
 
-    // The iteration budget is exhausted. Rather than failing with
-    // `MaxIterationsExceeded` — which reaches the kernel's Err arm, alerts
-    // operators only, and leaves the user with silence — deliver the best
-    // text we have: text accumulated from intermediate tool_use iterations,
-    // or the canned guard `finalize_end_turn_text` falls back to. The
-    // `hit_iteration_cap` flag lets the kernel surface an operator
-    // notification while the user still receives the partial answer (#8556).
-    let text = finalize_end_turn_text(
-        String::new(),
-        any_tools_executed,
-        &manifest.name,
-        max_iterations,
-        &total_usage,
-        messages.len(),
-        "Max iterations reached — guard activated",
-        &accumulated_text,
-    );
+    // The iteration budget is exhausted.
+    // Rather than failing with `MaxIterationsExceeded` — which reaches the kernel's Err arm, alerts operators only, and leaves the user with silence — deliver the prose accumulated from intermediate tool_use iterations, marked as cut off.
+    // The `hit_iteration_cap` flag lets the kernel surface an operator notification while the user still receives the partial answer (#8556).
+    let (text, cap_notice) = finalize_iteration_cap_text(&accumulated_text, max_iterations);
     warn!(
         agent = %manifest.name,
         iterations = max_iterations,
@@ -2267,16 +2390,9 @@ async fn run_agent_loop_inner(
         "Max iterations reached — delivering best-so-far response"
     );
 
-    // #8556 review P6: the accumulated prose was already committed to the
-    // session by each tool-use turn's `StagedToolUseTurn::commit` — that
-    // assistant message carries the same text. Re-pushing it here would
-    // duplicate it on reload. Only when nothing carried the final text (the
-    // tool-only case, where `finalize_end_turn_text` returns the canned
-    // guard) does the cap exit need to push the turn's assistant message.
-    let prose_already_committed = !accumulated_text.trim().is_empty();
-    if !prose_already_committed {
-        session.push_message(Message::assistant(&text));
-    }
+    // #8556 review P6: the accumulated prose was already committed to the session by each tool-use turn's `StagedToolUseTurn::commit`, so re-pushing it here would duplicate it on reload.
+    // Only the cut-off notice is new; persist it as the turn's closing assistant message so a reload, and the model on the next turn, both see that this turn did not finish.
+    session.push_message(Message::assistant(&cap_notice));
 
     // Persist. Fork and incognito turns skip — both are ephemeral and must
     // not pollute canonical session history.
@@ -2293,8 +2409,11 @@ async fn run_agent_loop_inner(
         agent_id: agent_id_str.as_str(),
         event: librefang_types::agent::HookEvent::AgentLoopEnd,
         data: serde_json::json!({
-            "reason": "max_iterations_reached_with_delivery",
+            // Kept as the pre-#8556 value so hook scripts filtering on it still match; `delivered` says the partial response now reaches the user.
+            "reason": "max_iterations_exceeded",
+            "delivered": true,
             "iterations": max_iterations,
+            "session_id": session.id.to_string(),
             "is_fork": opts.is_fork,
             "response_length": text.len(),
         }),
@@ -2315,7 +2434,8 @@ async fn run_agent_loop_inner(
         cost_usd: None,
         silent: false,
         directives: Default::default(),
-        skill_evolution_suggested: decision_traces.len() >= 5,
+        // A capped turn never finished, so it must not seed a background skill review from its trajectory (#8556).
+        skill_evolution_suggested: false,
         decision_traces,
         memories_saved,
         memories_used,
