@@ -24,6 +24,14 @@ describe("changeSourceLabel", () => {
     expect(changeSourceLabel(translate, "create")).toBe("Created");
     expect(changeSourceLabel(translate, "dashboard")).toBe("Dashboard edit");
     expect(changeSourceLabel(translate, "restore")).toBe("Restored");
+    expect(changeSourceLabel(translate, "toml")).toBe("Raw TOML edit");
+    expect(changeSourceLabel(translate, "registry-restore")).toBe(
+      "Restored from registry",
+    );
+    expect(changeSourceLabel(translate, "pre-registry-restore")).toBe(
+      "Pre-restore snapshot",
+    );
+    expect(changeSourceLabel(translate, "agent-tool")).toBe("Agent tool");
     expect(changeSourceLabel(translate, "unknown")).toBe("Unknown source");
   });
 
