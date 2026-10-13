@@ -512,6 +512,15 @@ export interface ManifestFormState {
     enabled: boolean;
     budget_tokens: string;
     stream_thinking: boolean;
+    /**
+     * Default reasoning effort this agent's turns run with — the canonical
+     * wire spelling (`none`, `low`, `medium`, `high`, `xhigh`, `max`) or any
+     * other string the kernel accepts. `""` means the key is absent, so the
+     * model (or the global default) decides; an unrecognized stored value is
+     * carried through rather than flattened, because the kernel's vocabulary
+     * can grow ahead of this form.
+     */
+    reasoning_mode: string;
   };
 
   autonomous: {
@@ -622,10 +631,12 @@ export interface ManifestExtras {
   model: TomlTable;
   resources: TomlTable;
   capabilities: TomlTable;
-  // `[thinking]` keys the form has no widget for — `reasoning_mode` (#7946) is
-  // the first one. Without this slot the form re-emits the section from its two
-  // known fields alone, so opening an agent in the editor and saving it
-  // silently deletes any newer key from that agent's agent.toml.
+  // `[thinking]` keys the form has no widget for. `reasoning_mode` (#7946)
+  // used to be the standing example here — the form now renders it, so what
+  // remains is whatever key a newer kernel adds before this editor learns it.
+  // Without this slot the form re-emits the section from its known fields
+  // alone, so opening an agent in the editor and saving it silently deletes
+  // any newer key from that agent's agent.toml.
   thinking: TomlTable;
   // `[autonomous]` and `[routing]` are in `FORM_TOP_LEVEL_KEYS`, which means
   // their tables never reach `topLevel` — so without a slot of their own, every
@@ -949,7 +960,7 @@ export const emptyManifestForm = (): ManifestFormState => ({
     video_generation: "",
     music_generation: "",
   },
-  thinking: { enabled: false, budget_tokens: "", stream_thinking: false },
+  thinking: { enabled: false, budget_tokens: "", stream_thinking: false, reasoning_mode: "" },
   autonomous: {
     enabled: false,
     max_iterations: "",
@@ -1155,7 +1166,7 @@ const FORM_CAPABILITY_KEYS = new Set([
   "transcription",
   "speech",
 ]);
-const FORM_THINKING_KEYS = new Set(["budget_tokens", "stream_thinking"]);
+const FORM_THINKING_KEYS = new Set(["budget_tokens", "stream_thinking", "reasoning_mode"]);
 const FORM_CHANNEL_OVERRIDE_KEYS = new Set([
   "model",
   "system_prompt",
@@ -2007,6 +2018,11 @@ export const serializeManifestForm = (
     const body: string[] = [];
     writeNumberScalar(body, "budget_tokens", parseInteger(form.thinking.budget_tokens));
     writeBoolScalar(body, "stream_thinking", form.thinking.stream_thinking);
+    // Written only when set: blank means the key is absent, so the model (or
+    // the global default) decides — the same "blank = not declared" shape as
+    // the rest of this writer. An unknown spelling is written as typed; the
+    // editor does not validate the kernel's vocabulary.
+    writeStringScalar(body, "reasoning_mode", form.thinking.reasoning_mode.trim());
     lines.push("", "[thinking]", ...body, ...renderExtraScalars(safeThinkingExtras));
   }
 
@@ -3457,6 +3473,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     form.thinking.enabled = true;
     form.thinking.budget_tokens = asNumberString(parsed.thinking.budget_tokens);
     form.thinking.stream_thinking = asBoolean(parsed.thinking.stream_thinking, false);
+    form.thinking.reasoning_mode = asString(parsed.thinking.reasoning_mode);
     extras.thinking = stripKnown(parsed.thinking, FORM_THINKING_KEYS);
   }
 

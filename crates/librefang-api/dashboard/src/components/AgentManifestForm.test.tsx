@@ -48,6 +48,7 @@ interface HarnessModel {
   context_window?: number;
   max_output_tokens?: number;
   limits_known?: boolean;
+  reasoning_efforts?: string[];
 }
 
 function Harness({
@@ -782,6 +783,149 @@ describe("AgentManifestForm — compact controls", () => {
     expect(
       screen.getByRole("checkbox", { name: "agents.form.stream_thinking" }),
     ).toBeInTheDocument();
+  });
+});
+
+// The agent's default reasoning effort: `[thinking] reasoning_mode`, the level
+// the kernel applies to every automated turn this agent runs. The selector
+// lists what the chosen model declares and falls back to the canonical set —
+// an older daemon that declares nothing must not read as "no levels".
+describe("AgentManifestForm — reasoning effort default", () => {
+  const stateWithModel = (
+    reasoningMode = "",
+    model = "claude-sonnet-5",
+    provider = "anthropic",
+  ): ManifestFormState => {
+    const state = emptyManifestForm();
+    state.model.provider = provider;
+    state.model.model = model;
+    state.thinking.enabled = true;
+    state.thinking.reasoning_mode = reasoningMode;
+    return state;
+  };
+
+  async function openThinking(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByText("agents.form.thinking"));
+  }
+
+  const levelSelect = () =>
+    screen.getByRole("combobox", { name: "agents.form.reasoning_mode" });
+
+  const levelOptions = (): string[] => {
+    const select = levelSelect();
+    if (!(select instanceof HTMLSelectElement)) throw new Error("not a select");
+    return Array.from(select.options).map((o) => o.textContent ?? "");
+  };
+
+  it("writes the chosen level into [thinking] and reads it back on the next edit", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | null = null;
+    render(
+      <Harness
+        initialState={stateWithModel()}
+        models={[
+          {
+            provider: "anthropic",
+            id: "claude-sonnet-5",
+            reasoning_efforts: ["none", "low", "medium", "high", "xhigh", "max"],
+          },
+        ]}
+        onState={(next) => { latest = next; }}
+      />,
+    );
+    await openThinking(user);
+
+    await user.selectOptions(levelSelect(), "xhigh");
+
+    expect(latest).not.toBeNull();
+    expect(latest!.thinking.reasoning_mode).toBe("xhigh");
+
+    // What the daemon reads.
+    const toml = serializeManifestForm(latest!);
+    expect(toml).toContain("[thinking]");
+    expect(toml).toContain('reasoning_mode = "xhigh"');
+
+    // And what comes back when the same manifest is opened again.
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.thinking.reasoning_mode).toBe("xhigh");
+    expect(parsed.extras.thinking).toEqual({});
+  });
+
+  it("clears the level back to inherit and writes no key", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | null = null;
+    render(
+      <Harness
+        initialState={stateWithModel("max")}
+        onState={(next) => { latest = next; }}
+      />,
+    );
+    await openThinking(user);
+
+    expect(levelSelect()).toHaveValue("max");
+    await user.click(
+      screen.getByRole("button", { name: "agents.form.reasoning_mode_clear" }),
+    );
+
+    expect(latest!.thinking.reasoning_mode).toBe("");
+    expect(serializeManifestForm(latest!)).not.toContain("reasoning_mode");
+    expect(levelSelect()).toHaveValue("");
+  });
+
+  it("offers the model's own declared levels", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        initialState={stateWithModel()}
+        models={[{ provider: "anthropic", id: "claude-sonnet-5", reasoning_efforts: ["minimal", "high"] }]}
+      />,
+    );
+    await openThinking(user);
+
+    expect(levelOptions()).toEqual([
+      "agents.form.reasoning_mode_inherit",
+      "Minimal",
+      "High",
+    ]);
+  });
+
+  it("falls back to the canonical levels when the catalog declares none", async () => {
+    const user = userEvent.setup();
+    // The default harness model carries no `reasoning_efforts` — the shape an
+    // older daemon serves.
+    render(<Harness initialState={stateWithModel("", "gpt-4o", "openai")} />);
+    await openThinking(user);
+
+    expect(levelOptions()).toEqual([
+      "agents.form.reasoning_mode_inherit",
+      "None",
+      "Low",
+      "Medium",
+      "High",
+      "xHigh",
+      "Max",
+    ]);
+  });
+
+  it("keeps a stored level the catalog does not list selectable", async () => {
+    const user = userEvent.setup();
+    let latest: ManifestFormState | null = null;
+    render(
+      <Harness
+        initialState={stateWithModel("ultra")}
+        onState={(next) => { latest = next; }}
+      />,
+    );
+    await openThinking(user);
+
+    expect(levelSelect()).toHaveValue("ultra");
+    expect(levelOptions()).toContain("Ultra");
+    // Opening and saving without touching the control must not rewrite it.
+    expect(serializeManifestForm(latest ?? stateWithModel("ultra"))).toContain(
+      'reasoning_mode = "ultra"',
+    );
   });
 });
 

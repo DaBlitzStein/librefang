@@ -612,6 +612,12 @@ export interface AgentMessageResponse {
 export interface SendAgentMessageOptions {
   /** Force deep-thinking on/off for this call. Omitted = manifest default. */
   thinking?: boolean;
+  /**
+   * Per-message reasoning effort ("none"|"low"|"medium"|"high"|"xhigh"|"max"
+   * as the model declares them). Omitted = the session pin or the agent
+   * manifest's default applies; never sent as `null`.
+   */
+  reasoning_mode?: string | null;
   /** Whether to receive the model's reasoning trace. Defaults to true. */
   show_thinking?: boolean;
   /**
@@ -935,6 +941,13 @@ export interface SessionDetailResponse {
   messages?: AgentSessionMessage[];
   created_at?: string;
   model_override?: string | null;
+  /**
+   * Reasoning effort pinned to this session
+   * (`PATCH /api/sessions/{id}/reasoning`), or `null`/absent when nothing is
+   * pinned and the agent manifest's default applies. Optional so the field can
+   * land after the dashboard does.
+   */
+  reasoning_mode?: string | null;
   active?: boolean;
   /** Aggregated from `usage_events`; `0` for a session with no metered calls. */
   total_tokens?: number;
@@ -2633,6 +2646,7 @@ export async function sendAgentMessage(
 ): Promise<AgentMessageResponse> {
   const body: Record<string, unknown> = { message };
   if (options?.thinking !== undefined) body.thinking = options.thinking;
+  if (options?.reasoning_mode) body.reasoning_mode = options.reasoning_mode;
   if (options?.show_thinking !== undefined) body.show_thinking = options.show_thinking;
   if (options?.session_id) body.session_id = options.session_id;
   if (options?.attachments && options.attachments.length > 0) body.attachments = options.attachments;
@@ -2703,6 +2717,14 @@ export interface ModelItem {
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
+  /**
+   * Reasoning effort levels this model accepts, e.g.
+   * `["none","low","medium","high","xhigh","max"]`. Absent on older daemons
+   * (and on providers that declare nothing) — callers fall back to the
+   * canonical set rather than rendering an empty menu, and any level the
+   * kernel accepts beyond the list stays displayable.
+   */
+  reasoning_efforts?: string[];
   // Provenance of `supports_vision`, resolved through any operator override. Refs #7957.
   // "supported" / "unsupported" mean a source declared it; "unknown" means the boolean above was
   // inferred from the model's name, and the agent loop then keeps sending images rather than
@@ -4777,6 +4799,20 @@ export async function setSessionModelOverride(
 ): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
     model_override: modelOverride
+  });
+}
+
+/**
+ * Pin a reasoning effort to the session, or clear it with `null`. The mirror of
+ * {@link setSessionModelOverride}: session-scoped live config that applies
+ * until it is changed back.
+ */
+export async function setSessionReasoningOverride(
+  sessionId: string,
+  reasoningMode: string | null
+): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/reasoning`, {
+    reasoning_mode: reasoningMode
   });
 }
 

@@ -1129,12 +1129,10 @@ model = "gpt-4o"
     expect(parsedSchema.properties.id.type).toBe("integer");
   });
 
-  // #7946 added `reasoning_mode` to the `[thinking]` table, and the form has no
-  // widget for it. Before the extras slot below, opening any agent in the visual
-  // editor and pressing save re-emitted `[thinking]` from `budget_tokens` and
-  // `stream_thinking` alone, silently deleting the operator's reasoning mode
-  // from agent.toml — the same class of loss `extras.capabilities` already guards.
-  it("round-trips an unknown [thinking] key such as reasoning_mode", () => {
+  // `reasoning_mode` is a first-class `[thinking]` field now (the Thinking
+  // section renders it), so the parser must claim it rather than shelve it as
+  // an extra — and the serializer must put it back inside `[thinking]`.
+  it("round-trips reasoning_mode as a first-class [thinking] field", () => {
     const original = `name = "agent"
 
 [thinking]
@@ -1146,13 +1144,15 @@ reasoning_mode = "none"
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.form.thinking.budget_tokens).toBe("5000");
-    expect(result.extras.thinking).toEqual({ reasoning_mode: "none" });
+    expect(result.form.thinking.reasoning_mode).toBe("none");
+    // Owned by the widget, not preserved as an opaque key.
+    expect(result.extras.thinking).toEqual({});
 
     const out = serializeManifestForm(result.form, result.extras);
     expect(out).toContain('reasoning_mode = "none"');
-    // And it must land inside [thinking], not leak into a later section: an
-    // extra scalar emitted after the next `[header]` would belong to that
-    // section instead, which is a different (and silent) kind of corruption.
+    // And it must land inside [thinking], not leak into a later section: a
+    // scalar emitted after the next `[header]` would belong to that section
+    // instead, which is a different (and silent) kind of corruption.
     const after = out.slice(out.indexOf("[thinking]") + "[thinking]".length);
     const nextHeader = after.search(/\n\[/);
     const thinkingBlock = nextHeader === -1 ? after : after.slice(0, nextHeader);
@@ -1162,7 +1162,42 @@ reasoning_mode = "none"
     const second = parseManifestToml(out);
     expect(second.ok).toBe(true);
     if (!second.ok) return;
-    expect(second.extras.thinking).toEqual({ reasoning_mode: "none" });
+    expect(second.form.thinking.reasoning_mode).toBe("none");
+    expect(second.extras.thinking).toEqual({});
+  });
+
+  // #7946 added `reasoning_mode` to the `[thinking]` table when the form had
+  // no widget for it, and the extras slot below is what kept the operator's
+  // value from being deleted on the next save. The widget now exists; the slot
+  // still has to hold the *next* key the kernel learns before this editor
+  // does. `effort_notes` stands in for that key, and what this test pins is
+  // the slot, not the name.
+  it("round-trips a [thinking] key the form has no widget for", () => {
+    const original = `name = "agent"
+
+[thinking]
+budget_tokens = 5000
+stream_thinking = true
+effort_notes = "keep me"
+`;
+    const result = parseManifestToml(original);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.form.thinking.budget_tokens).toBe("5000");
+    expect(result.extras.thinking).toEqual({ effort_notes: "keep me" });
+
+    const out = serializeManifestForm(result.form, result.extras);
+    expect(out).toContain('effort_notes = "keep me"');
+    const after = out.slice(out.indexOf("[thinking]") + "[thinking]".length);
+    const nextHeader = after.search(/\n\[/);
+    const thinkingBlock = nextHeader === -1 ? after : after.slice(0, nextHeader);
+    expect(thinkingBlock).toContain('effort_notes = "keep me"');
+
+    // Stable across a second pass.
+    const second = parseManifestToml(out);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.extras.thinking).toEqual({ effort_notes: "keep me" });
   });
 
   // The same loss, in a section that never got its slot.
@@ -1205,7 +1240,8 @@ block_stall_degrade_after = 2
   // The other half of the same slot, and the one that is pure prophylaxis today:
   // `ModelRoutingConfig` has exactly the five fields the form already knows, so
   // no `[routing]` key can be dropped — yet. The next one added there would be,
-  // which is how `block_stall_degrade_after` and `reasoning_mode` went missing.
+  // which is how `block_stall_degrade_after` went missing (and why the
+  // `[thinking]` slot exists, now that `reasoning_mode` has a widget).
   // `escalate_model` is not a field of that struct; it stands in for that next
   // field, and what this test pins is the slot, not the name.
   it("round-trips an unknown [routing] key the form has no field for", () => {
@@ -1240,8 +1276,9 @@ escalate_model = "d"
     expect(second.extras.routing).toEqual({ escalate_model: "d" });
   });
 
-  // Unticking "enabled" is the user deleting the whole table, so the preserved
-  // keys go with it rather than stranding a [thinking] block nothing owns.
+  // Unticking "enabled" is the user deleting the whole table, so the widget's
+  // own value goes with it — and the preserved keys too, rather than stranding
+  // a [thinking] block nothing owns.
   it("drops preserved [thinking] extras when the section is disabled", () => {
     const result = parseManifestToml(`name = "agent"
 
