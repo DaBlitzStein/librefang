@@ -408,36 +408,6 @@ export function useDeleteAgentAvatar() {
   });
 }
 
-/**
- * Restore an agent's manifest to a stored version-history snapshot.
- *
- * A restore replaces the whole manifest, so it can move any field the detail
- * payload or an allowlist tab renders. `agentKeys.detail(agentId)` is
- * invalidated first: the history key is nested under it, so the just-recorded
- * `restore` snapshot shows up through the same invalidation.
- */
-export function useRestoreAgentManifestVersion() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      agentId,
-      versionId,
-    }: {
-      agentId: string;
-      versionId: number;
-    }) => restoreAgentManifestVersion(agentId, versionId),
-    onSuccess: (_data, { agentId }) => {
-      qc.invalidateQueries({ queryKey: agentKeys.lists() });
-      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
-      qc.invalidateQueries({ queryKey: agentKeys.manifest(agentId) });
-      qc.invalidateQueries({ queryKey: agentKeys.mcpServers(agentId) });
-      qc.invalidateQueries({ queryKey: agentKeys.skills(agentId) });
-      qc.invalidateQueries({ queryKey: agentKeys.tools(agentId) });
-      qc.invalidateQueries({ queryKey: agentKeys.channels(agentId) });
-    },
-  });
-}
-
 /** Route model-tuning updates through the config slot selected by agent role. */
 export function usePatchAgentRuntimeConfig() {
   const qc = useQueryClient();

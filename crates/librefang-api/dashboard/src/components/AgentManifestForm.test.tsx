@@ -96,6 +96,9 @@ function Harness({
       }}
       providers={providers}
       models={models}
+      modelsFetching={modelsFetching}
+      modelsError={modelsError}
+      onModelsRetry={onModelsRetry}
       invalidFields={invalidFields}
       extras={emptyManifestExtras()}
       skillCatalog={skillCatalog}

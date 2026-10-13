@@ -207,6 +207,14 @@ interface AgentManifestFormProps {
     max_output_tokens?: number;
     limits_known?: boolean;
   }[];
+  /**
+   * State of the query that produced `models`. Without it a catalog that is
+   * still loading, or failed to load, reads the same as an empty one and the
+   * pickers claim "No models found" instead of showing the spinner or a retry.
+   */
+  modelsFetching?: boolean;
+  modelsError?: boolean;
+  onModelsRetry?: () => void;
   invalidFields: Set<string>;
   // Read-only view of preserved-but-not-form-renderable extras. We show
   // a hint next to dropdowns whose form widget can't represent the
@@ -415,6 +423,9 @@ export function AgentManifestForm({
   onChange,
   providers,
   models,
+  modelsFetching = false,
+  modelsError = false,
+  onModelsRetry,
   invalidFields,
   extras,
   skillCatalog,
@@ -574,9 +585,10 @@ export function AgentManifestForm({
   // The picker wants `{ id }` rather than `{ name }`. Memoised because it is
   // passed to every fallback row, and a fresh array each render would defeat
   // the picker's own memoisation of its provider list.
-  //
-  // B (#8112) — the fallback union: a fallback whose provider was dropped from
-  // discovery must still be re-selectable.
+  // The picker's "keep the current provider reachable" guard can only fire if
+  // that provider is in the list it is handed. A fallback whose provider was
+  // dropped from discovery — key removed since — must still be re-selectable,
+  // so union the fallbacks' providers in alongside the configured ones.
   const providerPickerList = useMemo(() => {
     const names = new Set(providerOptions.map((p) => p.name));
     for (const fb of value.fallback_models ?? []) {
@@ -585,8 +597,8 @@ export function AgentManifestForm({
     return [...names].map((id) => ({ id }));
   }, [providerOptions, value.fallback_models]);
 
-  // B (#8112) — shared by every catalog-backed picker: a loading or failed
-  // catalog must not render as an empty one.
+  // Shared by every catalog-backed picker below: a loading or failed catalog
+  // must not render as an empty one.
   const pickerCatalog = {
     isFetching: modelsFetching,
     error: modelsError ? t("chat.unable_to_load_models") : null,

@@ -96,6 +96,7 @@ import {
   useAgentTools,
   useAgentSkills,
   useAgentMcpServers,
+  useAgentAvatarUrl,
   useAgentManifest,
   useAgentChannels,
   useAgentManifestHistory,
@@ -113,9 +114,7 @@ import {
   useResumeAgent,
   useSpawnAgent,
   useSuspendAgent,
-  useUpdateAgentIdentity,
   useUpdateAgentTools,
-  useUploadAgentAvatar,
   useSetAgentSkills,
   useSetAgentMcpServers,
   useSetAgentChannels,
@@ -470,14 +469,35 @@ export function AgentAppearanceSection({
  * What the create drawer should open on when `/agents` was reached with a
  * `template` search param.
  *
- * Every other surface of an agent is reachable from one of these two, and the
- * split is by *what you are doing*, not by which subsystem the field belongs
- * to: `info` reads the agent (what it is doing, what it has been doing, what it
- * remembers), `config` writes it. The eight tabs this replaced were split by
- * subsystem, which is how the token footprint ended up in a drawer and the
- * complexity router two levels below the tab that named it.
+ * Pure and exported on purpose: the mapping is the contract with the sender on
+ * `/agent-types`, and keeping it out of the ~20-hook page pins it directly in
+ * `AgentsPage.test.tsx`. The full-page harness in `AgentsPage.quickRun.test.tsx`
+ * now renders the effect around it too, with the search param and the fetched
+ * list mocked, but the rule itself stays testable without that page.
+ *
+ * `knownNames` is the fetched agent-type list. It is required rather than
+ * optional because `validateSearch` cannot do this check — it runs before any
+ * page data exists — so the only place that can reject a stale bookmark, a
+ * renamed or deleted type or a typo is here, where the list has arrived.
+ * An unknown name is its own state, not `null`: the drawer still opens, but on
+ * the blank form tab with a notice rather than a `<select>` matching no option.
  */
-export type AgentMainTab = "info" | "config";
+export type DrawerSeed =
+  | { kind: "none" }
+  | { kind: "template"; templateName: string }
+  | { kind: "unknown"; templateName: string };
+
+export function resolveDrawerSeed(
+  template: string | undefined,
+  knownNames: readonly string[],
+): DrawerSeed {
+  // Falsy covers both "no param" and the empty string `validateSearch` would
+  // otherwise admit.
+  if (!template) return { kind: "none" };
+  return knownNames.includes(template)
+    ? { kind: "template", templateName: template }
+    : { kind: "unknown", templateName: template };
+}
 
 /**
  * Channels quick-widget for the Configure drawer (#7742). `PUT
@@ -504,72 +524,22 @@ export function ChannelsSection({
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
 
-export type ConfigGroupId = (typeof CONFIG_GROUP_IDS)[number];
+  const channelsQuery = useAgentChannels(agentId);
+  const setChannels = useSetAgentChannels();
 
-/**
- * Which manifest sections each config group hosts.
- *
- * This is the map the whole surface hangs from: the group tabs are drawn from
- * its keys, the form is handed its values, and the guards assert that the two
- * directions agree — every section appears exactly once, and every group
- * appears exactly once in the bar.
- *
- * The grouping is by subject rather than by manifest table, because the table
- * boundaries are an implementation detail of the Rust struct and an operator
- * looking for "where do I cap this agent's spending" does not know that
- * `resources` and `rl_export` are siblings of `limits`.
- *
- * Every section of `AgentManifestForm` is here, including the ones the plan's
- * original table named as separate groups: `tools` and `exec_policy` render
- * inside `capabilities`, `resources` and `rl_export` inside `limits`, and
- * `autonomous` — which that table omitted — is a scheduling concern, so it sits
- * with the cron jobs it governs.
- */
-export const CONFIG_GROUPS: Record<ConfigGroupId, readonly ManifestSectionId[]> = {
-  general: ["identity", "metadata", "prompt", "lifecycle", "response_format"],
-  model: ["model", "fallback_models", "thinking", "routing"],
-  // The user's split: model and routing on one tab, and what the agent is
-  // *allowed* to do on a tab of its own. `capabilities` grants network hosts,
-  // shell commands and tool names; `exec_policy` bounds the shell. Both were
-  // elsewhere — capabilities under Tools & skills beside the tools it grants,
-  // and exec_policy folded into Lifecycle, where every other switch is a
-  // preference rather than a permission.
-  permissions: ["capabilities", "exec_policy"],
-  tools: ["tools", "skills", "mcp_servers", "skill_workshop"],
-  memory: ["proactive_memory", "auto_dream", "compaction", "context_engine"],
-  limits: ["limits"],
-  channels: ["channel_overrides"],
-  planning: ["scheduling", "autonomous", "async_tasks"],
-  conversation: ["context_injection", "shared_folders"],
-};
+  const assigned = useMemo(() => channelsQuery.data?.assigned ?? [], [channelsQuery.data]);
+  const available = channelsQuery.data?.available ?? [];
+  const [draft, setDraft] = useState<string[] | null>(null);
+  // Reset the draft whenever the agent changes (drawer reused across
+  // selections) or the persisted value moves out from under a pristine draft.
+  useEffect(() => {
+    setDraft(null);
+  }, [agentId]);
 
-/**
- * The config group that owns the first field a validation run complained about.
- *
- * A failed save has to send the operator somewhere they can act. With the
- * sections grouped the offending field is usually in a group they are not
- * looking at, and an error nobody can see is indistinguishable from no error —
- * so this resolves the first reported field path to its section, and that
- * section to the one group that hosts it.
- *
- * Pulled out of `saveManifestEditor` so it can be tested without rendering the
- * page: `AgentsPage` has some twenty hooks and no render harness, so anything
- * left inline there is untestable by construction. The decision is the part
- * with behaviour in it; the caller is one `setConfigGroup`.
- *
- * Returns `undefined` when nothing maps — an unrecognised path (in which case
- * `sectionForInvalidField` has no entry and its guard test fails), or a
- * section no group hosts (in which case the layout guard fails). Every path
- * `validateManifestForm` can produce is covered by one of those two, which is
- * what makes the fallback safe rather than silent.
- */
-export function groupForFirstInvalidField(
-  errors: readonly string[],
-): ConfigGroupId | undefined {
-  const firstBadSection = errors
-    .map(sectionForInvalidField)
-    .find((section): section is ManifestSectionId => section !== undefined);
-  if (!firstBadSection) return undefined;
+  const current = draft ?? assigned;
+  const dirty =
+    draft !== null &&
+    (draft.length !== assigned.length || draft.some((c) => !assigned.includes(c)));
 
   const save = () => {
     if (draft === null || setChannels.isPending) return;
@@ -782,6 +752,10 @@ export function AgentsPage() {
   const navigate = useNavigate();
   // The `template` search param, set by the agent-types page's Run button.
   // Deliberately not named `search`: the local state below is the agent filter.
+  const { template: routeTemplate } = useSearch({ from: "/agents" });
+  // The last `?template=` value the seed effect acted on, so a refetch does not
+  // re-run its side effects.
+  const handledTemplate = useRef<string | null>(null);
   const [search, setSearch] = useState("");
   const [detailAgent, setDetailAgent] = useState<AgentDetail | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -900,16 +874,10 @@ export function AgentsPage() {
   // opening a page into five requests.
   const toolsGroupOpen = mainTab === "config" && configGroup === "tools";
   const addToast = useUIStore((s) => s.addToast);
-  const whoami = useWhoami();
-  const canEditAppearance = canEditAgentIdentity(whoami.data?.role);
-  const detailIdentity = (detailAgent as AgentView | null)?.identity;
   useCreateShortcut(() => setShowCreate(true));
-  const { template: routeTemplate } = useSearch({ from: "/agents" });
-  // The template param is processed once per distinct value; a refetch that
-  // replaces `templatesQuery.data` with a new reference must not re-open the
-  // drawer or re-fire the missing-type notice.
-  const handledTemplate = useRef<string | null>(null);
   const templatesQuery = useAgentTemplates({
+    // Keep the list warm while a `template` param is being validated, so the
+    // drawer can tell a real type from a stale bookmark before it opens.
     enabled: (showCreate && createMode === "template") || routeTemplate != null,
   });
   const localizedTemplates = useMemo(
@@ -927,47 +895,6 @@ export function AgentsPage() {
     () => localizedTemplates.find((template) => template.name === templateName) ?? null,
     [localizedTemplates, templateName],
   );
-
-  // Deep link from `/agent-types` (Run) into the create drawer (#8385): the
-  // param names a template, and the drawer opens on it — or, for a name the
-  // fetched list does not know, on the blank form tab with a visible notice
-  // rather than a `<select>` whose value matches no option. The membership
-  // check needs the list, so this waits for it.
-  useEffect(() => {
-    const seed = resolveDrawerSeed(
-      routeTemplate,
-      (templatesQuery.data ?? []).map((template) => template.name),
-    );
-    if (seed.kind === "none") {
-      handledTemplate.current = null;
-      return;
-    }
-    if (templatesQuery.isPending) return;
-    // A failed *initial* fetch leaves `data` undefined, and `resolveDrawerSeed`
-    // would read every name as unknown. A failed background refetch keeps the
-    // last successful `data` and only flips the status to error, and that
-    // cached list still resolves names; only the no-data case cannot be judged.
-    if (templatesQuery.isError && templatesQuery.data === undefined) return;
-    if (handledTemplate.current === seed.templateName) return;
-    handledTemplate.current = seed.templateName;
-
-    setShowCreate(true);
-    if (seed.kind === "unknown") {
-      setCreateMode("form");
-      setTemplateName("");
-      addToast(
-        t("agents.template_not_found", {
-          name: seed.templateName,
-          defaultValue:
-            "Agent type '{{name}}' no longer exists — pick a template or start from scratch.",
-        }),
-        "error",
-      );
-      return;
-    }
-    setCreateMode("template");
-    setTemplateName(seed.templateName);
-  }, [routeTemplate, templatesQuery.isPending, templatesQuery.isError, templatesQuery.data, addToast, t]);
   const spawnMutation = useSpawnAgent();
   const suspendMutation = useSuspendAgent();
   const resumeMutation = useResumeAgent();
@@ -1138,10 +1065,10 @@ export function AgentsPage() {
     try {
       await qc.invalidateQueries({ queryKey: agentQueries.detail(agentId).queryKey });
       const d = await qc.fetchQuery(agentQueries.detail(agentId));
-      // Apply the refreshed detail only while the panel still shows the agent
+      // Apply the refreshed detail only while the drawer still shows the agent
       // it was requested for, the same id gate `saveName` uses on its
       // optimistic update. An async completion — an avatar upload or a config
-      // save started on A — must not pull the panel back to A after the user
+      // save started on A — must not pull the drawer back to A after the user
       // has moved on to B.
       setDetailAgent(prev =>
         prev && prev.id === agentId
@@ -1377,7 +1304,7 @@ export function AgentsPage() {
   // Shared by the create dialog and the manifest editor: they are never open
   // at the same time, so one query serves both.
   const formModelsQuery = useModels(
-    { provider: formModelsQueryProvider },
+    {},
     {
       enabled: (showCreate && createMode === "form") || manifestEditorLive,
     },
@@ -1546,18 +1473,6 @@ export function AgentsPage() {
     // settles, isPending goes false on its own.
     if (!spawnMutation.isPending) {
       spawnMutation.reset();
-    }
-    // Drop the incoming `template` param on the way out. Without this, pressing
-    // Run on the same type a second time would navigate to a URL that already
-    // equals the current one, the seed effect would not re-run, and the drawer
-    // would stay shut — the press would look like nothing happened.
-    if (routeTemplate) {
-      void navigate({ to: "/agents", search: {}, replace: true });
-      // This drawer was opened by a Run press rather than by the Create button,
-      // so hand the tab back to its default. Leaving it on Template would show
-      // an empty picker with Create disabled the next time the drawer is opened
-      // by hand. A tab the operator picked for themselves still persists.
-      setCreateMode("form");
     }
   };
 
@@ -1904,9 +1819,11 @@ export function AgentsPage() {
               fallback={agent.name}
               size="sm"
             />
-            {/* State pinned to the avatar's corner, the way the detail panel
+            {/* State pinned to the avatar's corner, the way the detail drawer
                 below places it, instead of the pill this row used to carry —
-                that pill held nothing but the dot. */}
+                that pill held nothing but the dot. Placement is the same; the
+                colour is not, and was not before either: this row reads
+                `getStatusVariant`, the drawer its own three-way map. */}
             <span
               className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ${dotColors[getStatusVariant(agent.state)]} border-2 border-surface`}
               role="img"
@@ -2021,13 +1938,9 @@ export function AgentsPage() {
             >
               <X className="w-4 h-4" />
             </button>
-            <AgentAvatar
-              agentId={agent.id}
-              avatarUrl={(agent as AgentView).identity?.avatar_url}
-              emoji={(agent as AgentView).identity?.emoji}
-              fallback={agent.name}
-              size="lg"
-            />
+            <div className="w-9 h-9 rounded-lg bg-brand/10 border border-brand/30 grid place-items-center text-brand shrink-0">
+              <Bot className="w-[18px] h-[18px]" />
+            </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 min-w-0">
                 <h2 className="font-mono font-semibold text-base truncate text-text-main">
@@ -3837,12 +3750,11 @@ export function AgentsPage() {
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   <div className="relative shrink-0">
-                    <AgentAvatar
-                      agentId={detailAgent.id}
-                      avatarUrl={detailIdentity?.avatar_url}
-                      emoji={detailIdentity?.emoji}
+                    <Avatar
                       fallback={detailAgent.name}
                       size="lg"
+                      src={detailAvatarSrc}
+                      emoji={detailIdentity?.emoji}
                     />
                     <span
                       className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${drawerStatusColor} border-2 border-surface ${!isDetailDrawerSuspended && !isDetailDrawerCrashed ? "animate-pulse" : ""}`}
@@ -4432,6 +4344,11 @@ export function AgentsPage() {
                 onChange={setFormState}
                 providers={formProviderOptions}
                 models={formModelOptions}
+                modelsFetching={formModelsQuery.isFetching}
+                modelsError={formModelsQuery.isError}
+                onModelsRetry={() => {
+                  void formModelsQuery.refetch();
+                }}
                 invalidFields={formErrors}
                 extras={formExtras}
                 skillCatalog={skillCatalogForForm}
@@ -4440,11 +4357,6 @@ export function AgentsPage() {
                 routerProfileCatalog={routerProfileCatalog}
                 routerProfilesEnabled={routerProfilesQuery.data?.enabled}
                 routingInertReason={routingInertReasonQuery.data}
-                modelsFetching={formModelsQuery.isFetching}
-                modelsError={formModelsQuery.isError}
-                onModelsRetry={() => {
-                  void formModelsQuery.refetch();
-                }}
               />
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">

@@ -216,9 +216,6 @@ export type {
   AgentIdentityFileWriteResult,
   // agent avatar upload (#8339)
   AgentAvatarUploadResult,
-  // workspace identity file bytes (`GET|PUT /api/agents/{id}/files/{filename}`)
-  AgentIdentityFile,
-  AgentIdentityFileWriteResult,
 } from "../../api";
 
 // ---------------------------------------------------------------------------

@@ -406,19 +406,6 @@ impl LibreFangKernel {
                         warn!("Failed to record manifest version snapshot for {name}: {e}");
                     }
                 };
-                // Suspend/resume rewrites `agent.toml` outside `persist_full_manifest_at`, so it must record its own history snapshot or the module doc's "every `agent.toml` write is recorded" is untrue for the one path an operator toggles from the dashboard.
-                // Record the serializer's canonical layout, not `new_content` (the operator's file with the `enabled` line patched), so this row is comparable with the `update` rows it sits next to instead of differing on every comment and key.
-                let snapshot = normalize_manifest_toml(&new_content);
-                let change_source = if enabled { "resume" } else { "suspend" };
-                let store =
-                    librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
-                let record = |source: &str| {
-                    if let Err(e) =
-                        store.record_version(&agent_id.to_string(), name, &snapshot, source)
-                    {
-                        warn!("Failed to record manifest version snapshot for {name}: {e}");
-                    }
-                };
                 if let Err(e) = atomic_write_toml(&toml_path, &new_content) {
                     warn!("Failed to persist enabled={enabled} for {name}: {e}");
                     // The registry has already moved (suspend/resume call `set_state` first), so a disk-write failure leaves state and disk disagreeing; record the attempted snapshot as `*-persist-failed` so the History tab can show it rather than going silent.
