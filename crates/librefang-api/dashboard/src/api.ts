@@ -1668,6 +1668,42 @@ export async function listAgentEvents(
   return data.events ?? [];
 }
 
+/**
+ * What produced a stored manifest version, as the kernel's `ManifestVersionStore` writes it.
+ *
+ * Closed inventory of every `manifest_versions.change_source` token a producer can record:
+ * `model`, `skills`, `workspaces`, `channels`, `routing`, `schedule`, `tool-filters` and
+ * `mcp-servers` are the per-field setters in `crates/librefang-kernel/src/kernel/agent_state.rs`;
+ * `api` is the control-plane persist in `crates/librefang-api/src/routes/agents/{config,lifecycle}.rs`;
+ * `provisioning` is the deployment reconcile in `crates/librefang-kernel/src/kernel/provisioning_ops.rs`;
+ * `restore` is the manifest-history restore route in `crates/librefang-api/src/routes/agents/observability.rs`;
+ * `suspend` / `resume` — plus the `*-persist-failed` variants recorded when the `agent.toml` write
+ * fails — come from `persist_agent_enabled` in `crates/librefang-kernel/src/kernel/agent_runtime.rs`;
+ * `unknown` is the SQLite column default (`crates/librefang-memory/src/migration.rs`), which no
+ * producer writes but an older row can carry.
+ * Every entry needs an `agents.detail.manifest_change_source.<value>` locale key — render through
+ * `manifestChangeSourceLabel` in `lib/changeSource.ts`, never the raw token.
+ */
+export const MANIFEST_CHANGE_SOURCES = [
+  "model",
+  "skills",
+  "workspaces",
+  "channels",
+  "routing",
+  "schedule",
+  "tool-filters",
+  "mcp-servers",
+  "api",
+  "provisioning",
+  "restore",
+  "suspend",
+  "resume",
+  "suspend-persist-failed",
+  "resume-persist-failed",
+  "unknown",
+] as const;
+export type ManifestChangeSource = (typeof MANIFEST_CHANGE_SOURCES)[number];
+
 /** One snapshot in an agent's manifest version history. */
 export interface ManifestVersionEntry {
   id: number;
@@ -1676,7 +1712,7 @@ export interface ManifestVersionEntry {
   timestamp: string;
   manifest_toml: string;
   // The column is free text on the server, so a producer this list does not know yet still type-checks and renders verbatim.
-  change_source: string;
+  change_source: ManifestChangeSource | (string & {});
 }
 
 export async function getAgentManifestHistory(
