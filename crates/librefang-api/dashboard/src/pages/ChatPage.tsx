@@ -538,8 +538,8 @@ export function useChatMessages(
   // The one-shot reasoning effort armed on the composer control. Read here
   // rather than passed down, because `sendMessage` is the single point every
   // caller funnels through (the slash-command completion list included).
-  const nextReasoningMode = useUIStore((s) => s.nextReasoningMode);
-  const setNextReasoningMode = useUIStore((s) => s.setNextReasoningMode);
+  const nextReasoningEffort = useUIStore((s) => s.nextReasoningEffort);
+  const setNextReasoningEffort = useUIStore((s) => s.setNextReasoningEffort);
 
   // Track the currently-viewed agent in a ref so async handlers registered
   // during a previous render can tell whether their target is still on screen.
@@ -949,12 +949,12 @@ export function useChatMessages(
     const sendAgentId = agentId;
 
     // The one-shot reasoning effort is armed on the composer and spent here:
-    // this turn's frame (WS or HTTP fallback) carries it once, then the store
-    // clears so the next message falls back to the session pin / manifest
-    // default. `null` is not written to the frame — an unset override is not a
-    // statement about the turn.
-    const turnReasoningMode = nextReasoningMode ?? null;
-    if (turnReasoningMode !== null) setNextReasoningMode(null);
+    // this turn's frame (WS or HTTP fallback) carries it once as
+    // `reasoning_effort`, then the store clears so the next message falls back
+    // to the session pin / manifest default. `null` is not written to the
+    // frame — an unset override is not a statement about the turn.
+    const turnReasoningEffort = nextReasoningEffort ?? null;
+    if (turnReasoningEffort !== null) setNextReasoningEffort(null);
 
     const userMsg: ChatMessage = {
       id: makeMessageId("user"),
@@ -985,7 +985,7 @@ export function useChatMessages(
           options: {
             thinking: deepThinking,
             show_thinking: showThinkingProcess,
-            reasoning_mode: turnReasoningMode,
+            reasoning_effort: turnReasoningEffort,
             session_id: sessionId,
             attachments: hasAttachments ? attachments : undefined,
           },
@@ -1353,8 +1353,8 @@ export function useChatMessages(
           thinking: deepThinking,
           show_thinking: showThinkingProcess,
           // Per-message reasoning effort, only when the operator armed one
-          // this turn (see `turnReasoningMode` above).
-          ...(turnReasoningMode !== null ? { reasoning_mode: turnReasoningMode } : {}),
+          // this turn (see `turnReasoningEffort` above).
+          ...(turnReasoningEffort !== null ? { reasoning_effort: turnReasoningEffort } : {}),
           // Turn correlation id (#6390): the daemon echoes it on every terminal frame so late frames bind to this bubble, not the newest one.
           // Reuses the bubble id — no extra mapping needed.
           message_id: botMsg.id,
@@ -1374,7 +1374,7 @@ export function useChatMessages(
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [addSkillOutput, agentId, agents, chatCommands, commandsPending, clearHistory, deepThinking, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, nextReasoningMode, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, setNextReasoningMode, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
+  }, [addSkillOutput, agentId, agents, chatCommands, commandsPending, clearHistory, deepThinking, finishTurnIfCurrent, flushStreamingContent, flushThinkingContent, nextReasoningEffort, onAutoPinSession, onDropRef, onModelSwitch, onNewSession, pendingCommandsRef, queryClient, scheduleStreamingFlush, scheduleThinkingFlush, sendAgentMessageMutation, sessionId, setAgentLoading, setNextReasoningEffort, showThinkingProcess, t, updateAgentMessages, ws, wsConnected]);
 
   // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
   // the tokio task on the kernel side) and optimistically finalizes any
@@ -1419,7 +1419,7 @@ export function useChatMessages(
  *
  * Two sources, one answer:
  *
- *   - `serverValue` is the session record's `reasoning_mode`. `undefined`
+ *   - `serverValue` is the session record's `reasoning_effort`. `undefined`
  *     means the field is absent — an older daemon that has no such column —
  *     and reading it as "nothing pinned" would make a successful PATCH look
  *     like it silently failed.
@@ -2079,7 +2079,7 @@ function LimitReachedBanner({ onNewSession, creating }: { onNewSession: () => vo
 }
 
 // Input box - with shortcut hints
-function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable, reasoningEfforts, modelName, sessionReasoningMode, onPinReasoning, onUnpinReasoning, reasoningPinPending, reasoningPinError, canPinReasoning }: { agentId: string; onSend: (msg: string, attachments?: ChatAttachment[]) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean; reasoningEfforts?: string[]; modelName?: string; sessionReasoningMode?: string | null; onPinReasoning?: (level: string) => void; onUnpinReasoning?: () => void; reasoningPinPending?: boolean; reasoningPinError?: string | null; canPinReasoning?: boolean }) {
+function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable, reasoningEfforts, modelName, sessionReasoningEffort, onPinReasoning, onUnpinReasoning, reasoningPinPending, reasoningPinError, canPinReasoning }: { agentId: string; onSend: (msg: string, attachments?: ChatAttachment[]) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean; reasoningEfforts?: string[]; modelName?: string; sessionReasoningEffort?: string | null; onPinReasoning?: (level: string) => void; onUnpinReasoning?: () => void; reasoningPinPending?: boolean; reasoningPinError?: string | null; canPinReasoning?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -2106,8 +2106,8 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
   const setDeepThinking = useUIStore((s) => s.setDeepThinking);
   const setShowThinkingProcess = useUIStore((s) => s.setShowThinkingProcess);
-  const nextReasoningMode = useUIStore((s) => s.nextReasoningMode);
-  const setNextReasoningMode = useUIStore((s) => s.setNextReasoningMode);
+  const nextReasoningEffort = useUIStore((s) => s.nextReasoningEffort);
+  const setNextReasoningEffort = useUIStore((s) => s.setNextReasoningEffort);
 
   const voiceInput = useVoiceInput(useCallback((text: string) => {
     setMessage((prev) => (prev ? prev + " " + text : text));
@@ -2487,9 +2487,9 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
         <ReasoningEffortMenu
           efforts={reasoningEfforts}
           modelName={modelName}
-          nextReasoningMode={nextReasoningMode}
-          sessionReasoningMode={sessionReasoningMode ?? null}
-          onUseOnce={setNextReasoningMode}
+          nextReasoningEffort={nextReasoningEffort}
+          sessionReasoningEffort={sessionReasoningEffort ?? null}
+          onUseOnce={setNextReasoningEffort}
           onPin={canPinReasoning ? onPinReasoning : undefined}
           onUnpin={canPinReasoning ? onUnpinReasoning : undefined}
           pinPending={reasoningPinPending}
@@ -3659,12 +3659,12 @@ export function ChatPage() {
     enabled: !!activeSessionId && !!selectedAgent?.supports_thinking,
   });
   const {
-    pinned: sessionReasoningMode,
+    pinned: sessionReasoningEffort,
     setOptimistic: setOptimisticReasoning,
     clearOptimistic: clearOptimisticReasoning,
   } = useOptimisticPinnedReasoning(
     activeSessionId ?? null,
-    sessionReasoningQuery.data?.reasoning_mode,
+    sessionReasoningQuery.data?.reasoning_effort,
   );
   const setSessionReasoning = useSetSessionReasoning();
   const { mutate: mutateSessionReasoning } = setSessionReasoning;
@@ -3677,7 +3677,7 @@ export function ChatPage() {
     mutateSessionReasoning(
       {
         sessionId: activeSessionId,
-        reasoningMode: level,
+        reasoningEffort: level,
         agentId: selectedAgentId ?? null,
       },
       { onError: clearOptimisticReasoning },
@@ -3689,7 +3689,7 @@ export function ChatPage() {
     mutateSessionReasoning(
       {
         sessionId: activeSessionId,
-        reasoningMode: null,
+        reasoningEffort: null,
         agentId: selectedAgentId ?? null,
       },
       { onError: clearOptimisticReasoning },
@@ -4460,7 +4460,7 @@ export function ChatPage() {
               sttAvailable={sttAvailable}
               reasoningEfforts={reasoningEfforts}
               modelName={selectedAgent?.model_name}
-              sessionReasoningMode={sessionReasoningMode}
+              sessionReasoningEffort={sessionReasoningEffort}
               onPinReasoning={handlePinReasoning}
               onUnpinReasoning={handleUnpinReasoning}
               reasoningPinPending={setSessionReasoning.isPending}

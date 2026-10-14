@@ -2,14 +2,24 @@
  * Reasoning effort levels — the shared vocabulary between the composer menu,
  * the agent editor and the wire.
  *
- * The wire spelling is the product's: `"none" | "low" | "medium" | "high" |
- * "xhigh" | "max"`. A model may accept a narrower (or wider — `minimal`) set;
- * the catalog declares it as `reasoning_efforts` on the model entry. Nothing
- * in the UI hard-codes a level menu of its own: it asks the model, and falls
- * back to the canonical six only when the catalog has no answer, because an
- * empty menu would read as "reasoning does not exist" rather than "nobody
- * said". Unrecognized levels stay reachable for the same reason — the kernel's
- * vocabulary can grow ahead of the dashboard.
+ * The wire spelling is the ecosystem's: `reasoning_effort` on the message
+ * frame and on the session PATCH; the levels themselves are `"none" | "low" |
+ * "medium" | "high" | "xhigh" | "max"`. `reasoning_mode` is the deprecated
+ * alias of the field name — the dashboard reads it from old manifests but
+ * never emits it.
+ *
+ * Capability is the rule: the levels offered come from the active model's
+ * `reasoning_efforts` catalog field, and a level the model does not declare is
+ * never offered — not armed, not pinned. The canonical six are only a
+ * fallback for "nobody said" (older daemon, provider without metadata),
+ * because an empty menu would read as "reasoning does not exist" rather than
+ * as missing data. Unrecognized *stored* levels stay reachable for display for
+ * the same reason — the kernel's vocabulary can grow ahead of the dashboard —
+ * but they render disabled rather than offered.
+ *
+ * Noted for when the catalog learns to mark it: a model whose reasoning is
+ * shaped by a token budget rather than a level enum should get a budget input
+ * instead of a level list. Nothing marks that today.
  */
 
 /** The fallback set, and the levels every agreed surface understands. */

@@ -57,11 +57,11 @@ vi.mock("../api", async () => {
 // real store both arms the one-shot and clears it after the turn, and a static
 // mock could not tell those two moments apart.
 const store = vi.hoisted(() => {
-  const state = { nextReasoningMode: null as string | null };
+  const state = { nextReasoningEffort: null as string | null };
   return {
     state,
-    setNextReasoningMode: vi.fn((value: string | null) => {
-      state.nextReasoningMode = value;
+    setNextReasoningEffort: vi.fn((value: string | null) => {
+      state.nextReasoningEffort = value;
     }),
   };
 });
@@ -73,8 +73,8 @@ vi.mock("../lib/store", () => ({
       addToast: vi.fn(),
       deepThinking: false,
       showThinkingProcess: false,
-      nextReasoningMode: store.state.nextReasoningMode,
-      setNextReasoningMode: store.setNextReasoningMode,
+      nextReasoningEffort: store.state.nextReasoningEffort,
+      setNextReasoningEffort: store.setNextReasoningEffort,
     }),
 }));
 
@@ -159,7 +159,7 @@ describe("chat reasoning effort travels with the turn", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     MockWebSocket.instances = [];
-    store.state.nextReasoningMode = null;
+    store.state.nextReasoningEffort = null;
     vi.stubGlobal("WebSocket", MockWebSocket);
   });
 
@@ -167,16 +167,16 @@ describe("chat reasoning effort travels with the turn", () => {
   // must ride exactly one user message — sent over the socket — and then fall
   // back to the session/agent default on its own.
   it("sends the armed level on the next WS frame, then resets to the session default", async () => {
-    store.state.nextReasoningMode = "xhigh";
+    store.state.nextReasoningEffort = "xhigh";
     const { result, socket, rerender } = await connected();
 
     await act(async () => {
       result.current.sendMessage("first turn");
     });
-    expect(turnFrame(socket).reasoning_mode).toBe("xhigh");
+    expect(turnFrame(socket).reasoning_effort).toBe("xhigh");
     // Consumed: the store is no longer holding it for a later message.
-    expect(store.setNextReasoningMode).toHaveBeenCalledWith(null);
-    expect(store.state.nextReasoningMode).toBeNull();
+    expect(store.setNextReasoningEffort).toHaveBeenCalledWith(null);
+    expect(store.state.nextReasoningEffort).toBeNull();
 
     // The re-render is what a real store subscription would do for us; the
     // mock store cannot push, so the test pulls.
@@ -188,7 +188,7 @@ describe("chat reasoning effort travels with the turn", () => {
     });
     const second = turnFrame(socket);
     // Absent, not `null`: an unset override is not a statement about the turn.
-    expect("reasoning_mode" in second).toBe(false);
+    expect("reasoning_effort" in second).toBe(false);
   });
 
   it("sends nothing extra when no level is armed", async () => {
@@ -198,13 +198,13 @@ describe("chat reasoning effort travels with the turn", () => {
       result.current.sendMessage("plain turn");
     });
 
-    expect("reasoning_mode" in turnFrame(socket)).toBe(false);
+    expect("reasoning_effort" in turnFrame(socket)).toBe(false);
   });
 
   // The HTTP fallback is the same turn over a different transport — a socket
   // that never opened must not silently drop the operator's choice.
   it("carries the armed level on the HTTP fallback too", async () => {
-    store.state.nextReasoningMode = "high";
+    store.state.nextReasoningEffort = "high";
     const view = renderHook(({ agent }: { agent: string }) => useChatMessages(agent, AGENTS), {
       wrapper,
       initialProps: { agent: AGENTS[0].id },
@@ -216,14 +216,14 @@ describe("chat reasoning effort travels with the turn", () => {
     await waitFor(() => expect(sendAgentMessage).toHaveBeenCalled());
 
     const call = sendAgentMessage.mock.calls[0][0] as {
-      options?: { reasoning_mode?: string };
+      options?: { reasoning_effort?: string };
     };
-    expect(call.options?.reasoning_mode).toBe("high");
-    expect(store.state.nextReasoningMode).toBeNull();
+    expect(call.options?.reasoning_effort).toBe("high");
+    expect(store.state.nextReasoningEffort).toBeNull();
   });
 
   it("leaves the armed level alone when the turn never leaves the composer", async () => {
-    store.state.nextReasoningMode = "max";
+    store.state.nextReasoningEffort = "max";
     const { result } = await connected();
 
     // An empty submit is a no-op, not a consumed one-shot.
@@ -231,8 +231,8 @@ describe("chat reasoning effort travels with the turn", () => {
       result.current.sendMessage("   ");
     });
 
-    expect(store.setNextReasoningMode).not.toHaveBeenCalled();
-    expect(store.state.nextReasoningMode).toBe("max");
+    expect(store.setNextReasoningEffort).not.toHaveBeenCalled();
+    expect(store.state.nextReasoningEffort).toBe("max");
   });
 });
 

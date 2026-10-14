@@ -59,12 +59,12 @@ interface UIState {
    *
    * Deliberately not persisted: it is an intent about one send, and a value
    * surviving a reload would silently ride a message the operator never armed.
-   * The send path consumes it (the frame carries `reasoning_mode` once, then
+   * The send path consumes it (the frame carries `reasoning_effort` once, then
    * this clears) and the session pin — server state — is what outlives the
    * turn.
    */
-  nextReasoningMode: string | null;
-  setNextReasoningMode: (value: string | null) => void;
+  nextReasoningEffort: string | null;
+  setNextReasoningEffort: (value: string | null) => void;
   /**
    * Scale applied to the chat transcript, as a multiplier.
    *
@@ -281,7 +281,7 @@ export const useUIStore = create<UIState>()(
       modelsAvailableOnly: true,
       deepThinking: false,
       showThinkingProcess: true,
-      nextReasoningMode: null,
+      nextReasoningEffort: null,
       chatScale: DEFAULT_CHAT_SCALE,
       setChatScale: (value) => set({ chatScale: clampChatScale(value) }),
       openChatTabs: {},
@@ -378,7 +378,7 @@ export const useUIStore = create<UIState>()(
       setModelsAvailableOnly: (value) => set({ modelsAvailableOnly: value }),
       setDeepThinking: (value) => set({ deepThinking: value }),
       setShowThinkingProcess: (value) => set({ showThinkingProcess: value }),
-      setNextReasoningMode: (value) => set({ nextReasoningMode: value }),
+      setNextReasoningEffort: (value) => set({ nextReasoningEffort: value }),
       toggleTheme: () =>
         set((state) => ({ theme: state.theme === "light" ? "dark" : "light" })),
       setLanguage: async (lang) => {

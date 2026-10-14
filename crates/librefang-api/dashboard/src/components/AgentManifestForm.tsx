@@ -1874,13 +1874,13 @@ export function AgentManifestForm({
                 does), and "inherit" is a real setting rather than a blank. */}
             <div className="mt-2">
               <Field
-                label={t("agents.form.reasoning_mode")}
-                hint={t("agents.form.reasoning_mode_hint")}
+                label={t("agents.form.reasoning_effort")}
+                hint={t("agents.form.reasoning_effort_hint")}
               >
                 <ReasoningEffortField
-                  value={value.thinking.reasoning_mode}
+                  value={value.thinking.reasoning_effort}
                   options={reasoningEfforts}
-                  onChange={(next) => updateThinking({ reasoning_mode: next })}
+                  onChange={(next) => updateThinking({ reasoning_effort: next })}
                 />
               </Field>
             </div>
@@ -4511,7 +4511,7 @@ function OpenStringSelect({
 }
 
 /**
- * The agent's default reasoning effort — `[thinking] reasoning_mode`.
+ * The agent's default reasoning effort — `[thinking] reasoning_effort`.
  *
  * "inherit default" is the absent key: the model (or the global default)
  * decides. The level list is the chosen model's own when the catalog declares
@@ -4533,22 +4533,30 @@ function ReasoningEffortField({
 }) {
   const { t } = useTranslation();
   const known = value === "" || options.includes(value);
-  const clearLabel = t("agents.form.reasoning_mode_clear");
+  const clearLabel = t("agents.form.reasoning_effort_clear");
   return (
     <div className="flex items-center gap-2">
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        aria-label={t("agents.form.reasoning_mode")}
+        aria-label={t("agents.form.reasoning_effort")}
         className={`${inputClass} flex-1`}
       >
-        <option value="">{t("agents.form.reasoning_mode_inherit")}</option>
+        <option value="">{t("agents.form.reasoning_effort_inherit")}</option>
         {options.map((level) => (
           <option key={level} value={level}>
             {reasoningEffortLabel(level)}
           </option>
         ))}
-        {!known ? <option value={value}>{reasoningEffortLabel(value)}</option> : null}
+        {/* A stored value the model's list does not carry keeps its row so the
+            current setting stays visible, but it is disabled: this model does
+            not declare it, and the selector must not offer what the model
+            cannot take. */}
+        {!known ? (
+          <option value={value} disabled>
+            {reasoningEffortLabel(value)}
+          </option>
+        ) : null}
       </select>
       {value !== "" && (
         <button

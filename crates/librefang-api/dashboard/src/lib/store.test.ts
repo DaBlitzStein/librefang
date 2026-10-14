@@ -282,15 +282,15 @@ describe("cross-window persistence", () => {
 describe("reasoning effort one-shot", () => {
   it("arms, clears, and is never written to localStorage", async () => {
     const { useUIStore } = await import("./store");
-    expect(useUIStore.getState().nextReasoningMode).toBeNull();
+    expect(useUIStore.getState().nextReasoningEffort).toBeNull();
 
-    useUIStore.getState().setNextReasoningMode("xhigh");
-    expect(useUIStore.getState().nextReasoningMode).toBe("xhigh");
+    useUIStore.getState().setNextReasoningEffort("xhigh");
+    expect(useUIStore.getState().nextReasoningEffort).toBe("xhigh");
 
-    useUIStore.getState().setNextReasoningMode(null);
-    expect(useUIStore.getState().nextReasoningMode).toBeNull();
+    useUIStore.getState().setNextReasoningEffort(null);
+    expect(useUIStore.getState().nextReasoningEffort).toBeNull();
 
-    useUIStore.getState().setNextReasoningMode("max");
+    useUIStore.getState().setNextReasoningEffort("max");
     const raw = localStorage.getItem("librefang-ui-storage");
     expect(raw).not.toBeNull();
     const persisted = JSON.parse(raw ?? "{}") as { state?: Record<string, unknown> };
@@ -298,6 +298,6 @@ describe("reasoning effort one-shot", () => {
     // preference — so the absence below is the one-shot being excluded, not
     // persistence failing to run.
     expect(persisted.state).toHaveProperty("deepThinking");
-    expect(persisted.state).not.toHaveProperty("nextReasoningMode");
+    expect(persisted.state).not.toHaveProperty("nextReasoningEffort");
   });
 });

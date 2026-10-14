@@ -63,12 +63,12 @@ export function useSetSessionReasoning() {
   return useMutation({
     mutationFn: ({
       sessionId,
-      reasoningMode,
+      reasoningEffort,
     }: {
       sessionId: string;
-      reasoningMode: string | null;
+      reasoningEffort: string | null;
       agentId: string | null;
-    }) => setSessionReasoningOverride(sessionId, reasoningMode),
+    }) => setSessionReasoningOverride(sessionId, reasoningEffort),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: sessionKeys.lists() });
       qc.invalidateQueries({ queryKey: sessionKeys.detail(variables.sessionId) });

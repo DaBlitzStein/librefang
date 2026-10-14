@@ -615,9 +615,11 @@ export interface SendAgentMessageOptions {
   /**
    * Per-message reasoning effort ("none"|"low"|"medium"|"high"|"xhigh"|"max"
    * as the model declares them). Omitted = the session pin or the agent
-   * manifest's default applies; never sent as `null`.
+   * manifest's default applies; never sent as `null`. The wire name is the
+   * ecosystem's `reasoning_effort` — `reasoning_mode` is deprecated and must
+   * not be emitted.
    */
-  reasoning_mode?: string | null;
+  reasoning_effort?: string | null;
   /** Whether to receive the model's reasoning trace. Defaults to true. */
   show_thinking?: boolean;
   /**
@@ -947,7 +949,7 @@ export interface SessionDetailResponse {
    * pinned and the agent manifest's default applies. Optional so the field can
    * land after the dashboard does.
    */
-  reasoning_mode?: string | null;
+  reasoning_effort?: string | null;
   active?: boolean;
   /** Aggregated from `usage_events`; `0` for a session with no metered calls. */
   total_tokens?: number;
@@ -2646,7 +2648,7 @@ export async function sendAgentMessage(
 ): Promise<AgentMessageResponse> {
   const body: Record<string, unknown> = { message };
   if (options?.thinking !== undefined) body.thinking = options.thinking;
-  if (options?.reasoning_mode) body.reasoning_mode = options.reasoning_mode;
+  if (options?.reasoning_effort) body.reasoning_effort = options.reasoning_effort;
   if (options?.show_thinking !== undefined) body.show_thinking = options.show_thinking;
   if (options?.session_id) body.session_id = options.session_id;
   if (options?.attachments && options.attachments.length > 0) body.attachments = options.attachments;
@@ -4805,14 +4807,15 @@ export async function setSessionModelOverride(
 /**
  * Pin a reasoning effort to the session, or clear it with `null`. The mirror of
  * {@link setSessionModelOverride}: session-scoped live config that applies
- * until it is changed back.
+ * until it is changed back. The body field is the ecosystem's
+ * `reasoning_effort`; the route keeps its short `/reasoning` path.
  */
 export async function setSessionReasoningOverride(
   sessionId: string,
-  reasoningMode: string | null
+  reasoningEffort: string | null
 ): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/reasoning`, {
-    reasoning_mode: reasoningMode
+    reasoning_effort: reasoningEffort
   });
 }
 

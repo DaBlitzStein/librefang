@@ -26,7 +26,7 @@ describe("useSetSessionReasoning", () => {
     const { result } = renderHook(() => useSetSessionReasoning(), { wrapper });
     await result.current.mutateAsync({
       sessionId: "sess-1",
-      reasoningMode: "xhigh",
+      reasoningEffort: "xhigh",
       agentId: "agent-1",
     });
 
@@ -46,7 +46,7 @@ describe("useSetSessionReasoning", () => {
     const { result } = renderHook(() => useSetSessionReasoning(), { wrapper });
     await result.current.mutateAsync({
       sessionId: "sess-1",
-      reasoningMode: null,
+      reasoningEffort: null,
       agentId: null,
     });
 

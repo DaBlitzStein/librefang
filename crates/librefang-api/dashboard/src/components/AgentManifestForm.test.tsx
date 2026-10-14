@@ -786,13 +786,13 @@ describe("AgentManifestForm — compact controls", () => {
   });
 });
 
-// The agent's default reasoning effort: `[thinking] reasoning_mode`, the level
+// The agent's default reasoning effort: `[thinking] reasoning_effort`, the level
 // the kernel applies to every automated turn this agent runs. The selector
 // lists what the chosen model declares and falls back to the canonical set —
 // an older daemon that declares nothing must not read as "no levels".
 describe("AgentManifestForm — reasoning effort default", () => {
   const stateWithModel = (
-    reasoningMode = "",
+    reasoningEffort = "",
     model = "claude-sonnet-5",
     provider = "anthropic",
   ): ManifestFormState => {
@@ -800,7 +800,7 @@ describe("AgentManifestForm — reasoning effort default", () => {
     state.model.provider = provider;
     state.model.model = model;
     state.thinking.enabled = true;
-    state.thinking.reasoning_mode = reasoningMode;
+    state.thinking.reasoning_effort = reasoningEffort;
     return state;
   };
 
@@ -809,7 +809,7 @@ describe("AgentManifestForm — reasoning effort default", () => {
   }
 
   const levelSelect = () =>
-    screen.getByRole("combobox", { name: "agents.form.reasoning_mode" });
+    screen.getByRole("combobox", { name: "agents.form.reasoning_effort" });
 
   const levelOptions = (): string[] => {
     const select = levelSelect();
@@ -838,18 +838,18 @@ describe("AgentManifestForm — reasoning effort default", () => {
     await user.selectOptions(levelSelect(), "xhigh");
 
     expect(latest).not.toBeNull();
-    expect(latest!.thinking.reasoning_mode).toBe("xhigh");
+    expect(latest!.thinking.reasoning_effort).toBe("xhigh");
 
     // What the daemon reads.
     const toml = serializeManifestForm(latest!);
     expect(toml).toContain("[thinking]");
-    expect(toml).toContain('reasoning_mode = "xhigh"');
+    expect(toml).toContain('reasoning_effort = "xhigh"');
 
     // And what comes back when the same manifest is opened again.
     const parsed = parseManifestToml(toml);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.form.thinking.reasoning_mode).toBe("xhigh");
+    expect(parsed.form.thinking.reasoning_effort).toBe("xhigh");
     expect(parsed.extras.thinking).toEqual({});
   });
 
@@ -866,11 +866,11 @@ describe("AgentManifestForm — reasoning effort default", () => {
 
     expect(levelSelect()).toHaveValue("max");
     await user.click(
-      screen.getByRole("button", { name: "agents.form.reasoning_mode_clear" }),
+      screen.getByRole("button", { name: "agents.form.reasoning_effort_clear" }),
     );
 
-    expect(latest!.thinking.reasoning_mode).toBe("");
-    expect(serializeManifestForm(latest!)).not.toContain("reasoning_mode");
+    expect(latest!.thinking.reasoning_effort).toBe("");
+    expect(serializeManifestForm(latest!)).not.toContain("reasoning_effort");
     expect(levelSelect()).toHaveValue("");
   });
 
@@ -885,7 +885,7 @@ describe("AgentManifestForm — reasoning effort default", () => {
     await openThinking(user);
 
     expect(levelOptions()).toEqual([
-      "agents.form.reasoning_mode_inherit",
+      "agents.form.reasoning_effort_inherit",
       "Minimal",
       "High",
     ]);
@@ -899,7 +899,7 @@ describe("AgentManifestForm — reasoning effort default", () => {
     await openThinking(user);
 
     expect(levelOptions()).toEqual([
-      "agents.form.reasoning_mode_inherit",
+      "agents.form.reasoning_effort_inherit",
       "None",
       "Low",
       "Medium",
@@ -909,7 +909,7 @@ describe("AgentManifestForm — reasoning effort default", () => {
     ]);
   });
 
-  it("keeps a stored level the catalog does not list selectable", async () => {
+  it("shows a stored level the catalog does not list without offering it", async () => {
     const user = userEvent.setup();
     let latest: ManifestFormState | null = null;
     render(
@@ -921,10 +921,17 @@ describe("AgentManifestForm — reasoning effort default", () => {
     await openThinking(user);
 
     expect(levelSelect()).toHaveValue("ultra");
-    expect(levelOptions()).toContain("Ultra");
+    // The row exists so the current value is visible, but the model does not
+    // declare it — it cannot be re-picked from this list.
+    const option = Array.from(levelSelect().querySelectorAll("option")).find(
+      (o) => o.value === "ultra",
+    );
+    expect(option?.textContent).toBe("Ultra");
+    expect(option).toBeDisabled();
+
     // Opening and saving without touching the control must not rewrite it.
     expect(serializeManifestForm(latest ?? stateWithModel("ultra"))).toContain(
-      'reasoning_mode = "ultra"',
+      'reasoning_effort = "ultra"',
     );
   });
 });

@@ -64,22 +64,31 @@ describe("ReasoningEffortMenu — level list", () => {
     expect(screen.queryByRole("menuitemradio", { name: "High" })).not.toBeInTheDocument();
   });
 
-  it("keeps a stored level the catalog does not list selectable", async () => {
+  // A stored level the catalog does not list still has a row — the operator
+  // must be able to see what is set — but it is not *offered*: the model does
+  // not declare it, so it is marked, disabled, and cannot be re-armed or
+  // pinned from here.
+  it("marks a stored level the catalog does not list without offering it", async () => {
     const user = userEvent.setup();
-    openMenu({ sessionReasoningMode: "ultra" });
+    const { onUseOnce, onPin } = openMenu({ sessionReasoningEffort: "ultra" });
     await openPopover(user);
 
-    expect(screen.getByRole("menuitemradio", { name: "Ultra" })).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
+    const row = screen.getByRole("menuitemradio", { name: "Ultra" });
+    expect(row).toHaveAttribute("aria-checked", "true");
+    expect(row).toBeDisabled();
+    await user.click(row);
+    expect(onUseOnce).not.toHaveBeenCalled();
+
+    expect(screen.getByTestId("reasoning-pin-ultra")).toBeDisabled();
+    await user.click(screen.getByTestId("reasoning-pin-ultra"));
+    expect(onPin).not.toHaveBeenCalled();
   });
 });
 
 describe("ReasoningEffortMenu — marks", () => {
   it("marks the session-pinned level as the effective one", async () => {
     const user = userEvent.setup();
-    openMenu({ sessionReasoningMode: "max" });
+    openMenu({ sessionReasoningEffort: "max" });
     await openPopover(user);
 
     expect(screen.getByRole("menuitemradio", { name: "Max" })).toHaveAttribute(
@@ -95,7 +104,7 @@ describe("ReasoningEffortMenu — marks", () => {
 
   it("lets the one-shot level outrank the pin, and says so on the pill", async () => {
     const user = userEvent.setup();
-    openMenu({ nextReasoningMode: "high", sessionReasoningMode: "max" });
+    openMenu({ nextReasoningEffort: "high", sessionReasoningEffort: "max" });
     await openPopover(user);
 
     expect(screen.getByRole("menuitemradio", { name: "High" })).toHaveAttribute(
@@ -129,7 +138,7 @@ describe("ReasoningEffortMenu — marks", () => {
 describe("ReasoningEffortMenu — actions", () => {
   it("arms a level for the next message only, and closes", async () => {
     const user = userEvent.setup();
-    const { onUseOnce, onPin } = openMenu({ sessionReasoningMode: "max" });
+    const { onUseOnce, onPin } = openMenu({ sessionReasoningEffort: "max" });
     await openPopover(user);
 
     await user.click(screen.getByRole("menuitemradio", { name: "High" }));
@@ -142,7 +151,7 @@ describe("ReasoningEffortMenu — actions", () => {
 
   it("clears the one-shot with Default", async () => {
     const user = userEvent.setup();
-    const { onUseOnce } = openMenu({ nextReasoningMode: "high" });
+    const { onUseOnce } = openMenu({ nextReasoningEffort: "high" });
     await openPopover(user);
 
     await user.click(screen.getByRole("menuitemradio", { name: "chat.reasoning_default" }));
@@ -164,7 +173,7 @@ describe("ReasoningEffortMenu — actions", () => {
 
   it("shows the pinned banner and unpins from it", async () => {
     const user = userEvent.setup();
-    const { onUnpin } = openMenu({ sessionReasoningMode: "max" });
+    const { onUnpin } = openMenu({ sessionReasoningEffort: "max" });
     await openPopover(user);
 
     expect(screen.getByText("chat.reasoning_pinned")).toBeInTheDocument();

@@ -10,11 +10,23 @@ import {
  * The composer's reasoning-effort control: a pill in the Deep Thinking row
  * that opens the levels the active model accepts.
  *
+ * Capability first: the list is exactly `reasoning_efforts` from the active
+ * model's catalog entry, and a level the model does not declare is never
+ * offered — not clickable, not pinnable. Only when the catalog declares
+ * nothing (older daemon, provider with no metadata) does the canonical set
+ * stand in, because an empty menu would read as "reasoning does not exist".
+ * A stored level outside the declared set still gets a row so the operator can
+ * see what is in effect, but it is marked and disabled.
+ * (When the catalog starts marking budget-only models — reasoning shaped by a
+ * token budget rather than a level enum — this control should render a budget
+ * input instead of a level list. Nothing marks that today; noted so the branch
+ * is deliberate when it lands.)
+ *
  * Two verbs, two affordances, both spelled out in the footer:
  *
  *   - clicking a level uses it for the **next message only** — a one-shot the
- *     send path consumes, so the turn after that falls back to the session or
- *     agent default on its own;
+ *     send path consumes (the turn carries `reasoning_effort` once), so the
+ *     turn after that falls back to the session or agent default on its own;
  *   - clicking a row's pin **fixes the level to the session** (`PATCH
  *     /api/sessions/{id}/reasoning`), where it survives reloads and applies to
  *     every turn until removed from the pinned banner.
@@ -33,9 +45,9 @@ export interface ReasoningEffortMenuProps {
   /** Model label shown as the menu's subtitle, when the caller knows it. */
   modelName?: string;
   /** One-shot level armed for the next message; `null` = none. */
-  nextReasoningMode?: string | null;
+  nextReasoningEffort?: string | null;
   /** Level pinned to the session; `null`/absent = unpinned. */
-  sessionReasoningMode?: string | null;
+  sessionReasoningEffort?: string | null;
   /** Arm (`level`) or clear (`null`) the one-shot. */
   onUseOnce?: (level: string | null) => void;
   /** Pin a level to the session. Absent hides the pin affordance entirely. */
@@ -50,8 +62,8 @@ export interface ReasoningEffortMenuProps {
 export function ReasoningEffortMenu({
   efforts,
   modelName,
-  nextReasoningMode = null,
-  sessionReasoningMode = null,
+  nextReasoningEffort = null,
+  sessionReasoningEffort = null,
   onUseOnce,
   onPin,
   onUnpin,
@@ -78,14 +90,14 @@ export function ReasoningEffortMenu({
     [efforts],
   );
 
-  const pinned = sessionReasoningMode ?? null;
+  const pinned = sessionReasoningEffort ?? null;
   // What the next message will actually use: the one-shot outranks the pin.
-  const effective = nextReasoningMode ?? pinned;
+  const effective = nextReasoningEffort ?? pinned;
 
   // A stored level the model's declared set does not list must still have a
-  // row — a kernel whose vocabulary ran ahead of the catalog would otherwise
-  // pin a level that the menu draws as nothing, and Default would claim the
-  // turn the operator can plainly see is pinned.
+  // row — the operator has to see what is in effect, or Default would claim a
+  // turn the pill says is pinned. It is drawn disabled: the model does not
+  // declare it, so it is not offered, re-armed, or pinned from here.
   const options = useMemo(
     () => (effective !== null && !levels.includes(effective) ? [...levels, effective] : levels),
     [levels, effective],
@@ -94,7 +106,7 @@ export function ReasoningEffortMenu({
   const canPin = typeof onPin === "function";
   const hasPinBanner = canPin && !!pinned;
 
-  const armed = nextReasoningMode !== null || pinned !== null;
+  const armed = nextReasoningEffort !== null || pinned !== null;
   const pillLabel = effective !== null ? reasoningEffortLabel(effective) : t("chat.reasoning");
 
   return (
@@ -114,7 +126,7 @@ export function ReasoningEffortMenu({
       >
         <Gauge className="h-3 w-3" aria-hidden="true" />
         <span>{pillLabel}</span>
-        {nextReasoningMode !== null && (
+        {nextReasoningEffort !== null && (
           <span
             data-testid="reasoning-next-badge"
             className="rounded-full bg-brand/15 px-1.5 text-[9px] font-semibold uppercase tracking-wide"
@@ -172,15 +184,26 @@ export function ReasoningEffortMenu({
           <div className={`max-h-64 overflow-y-auto scrollbar-thin p-1.5 space-y-0.5 ${pinPending ? "pointer-events-none opacity-60" : ""}`}>
             {options.map((level) => {
               const checked = effective === level;
+              // Offered = declared by the active model (or canonical fallback
+              // when it declared nothing). A stored value outside the set is
+              // shown, never offered.
+              const offered = levels.includes(level);
               return (
                 <div key={level} className="flex items-center gap-1">
                   <button
                     type="button"
                     role="menuitemradio"
                     aria-checked={checked}
-                    title={t("chat.reasoning_use_hint")}
+                    disabled={!offered}
+                    title={offered ? t("chat.reasoning_use_hint") : t("chat.reasoning_unsupported_hint")}
                     onClick={() => { onUseOnce?.(level); setOpen(false); }}
-                    className={`flex-1 flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left transition-colors ${checked ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
+                    className={`flex-1 flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left transition-colors disabled:cursor-not-allowed ${
+                      checked
+                        ? "bg-brand/10 text-brand"
+                        : offered
+                          ? "hover:bg-surface-hover text-text-dim"
+                          : "text-text-dim/40"
+                    }`}
                   >
                     <Check className={`h-3 w-3 shrink-0 ${checked ? "opacity-100" : "opacity-0"}`} aria-hidden="true" />
                     <span className="text-xs font-medium">{reasoningEffortLabel(level)}</span>
@@ -191,8 +214,8 @@ export function ReasoningEffortMenu({
                       data-testid={`reasoning-pin-${level}`}
                       aria-pressed={pinned === level}
                       aria-label={t("chat.reasoning_pin_hint", { level: reasoningEffortLabel(level) })}
-                      title={t("chat.reasoning_pin_hint", { level: reasoningEffortLabel(level) })}
-                      disabled={pinPending}
+                      title={offered ? t("chat.reasoning_pin_hint", { level: reasoningEffortLabel(level) }) : t("chat.reasoning_unsupported_hint")}
+                      disabled={pinPending || !offered}
                       onClick={() => { onPin?.(level); setOpen(false); }}
                       className={`p-1.5 rounded-lg transition-colors shrink-0 disabled:opacity-40 ${
                         pinned === level

@@ -519,8 +519,11 @@ export interface ManifestFormState {
      * model (or the global default) decides; an unrecognized stored value is
      * carried through rather than flattened, because the kernel's vocabulary
      * can grow ahead of this form.
+     *
+     * The deprecated `reasoning_mode` spelling is read into this same field on
+     * parse; the writer only ever emits `reasoning_effort`.
      */
-    reasoning_mode: string;
+    reasoning_effort: string;
   };
 
   autonomous: {
@@ -631,9 +634,10 @@ export interface ManifestExtras {
   model: TomlTable;
   resources: TomlTable;
   capabilities: TomlTable;
-  // `[thinking]` keys the form has no widget for. `reasoning_mode` (#7946)
-  // used to be the standing example here — the form now renders it, so what
-  // remains is whatever key a newer kernel adds before this editor learns it.
+  // `[thinking]` keys the form has no widget for. `reasoning_mode` (#7946, now
+  // `reasoning_effort`) used to be the standing example here — the form
+  // renders it, so what remains is whatever key a newer kernel adds before
+  // this editor learns it.
   // Without this slot the form re-emits the section from its known fields
   // alone, so opening an agent in the editor and saving it silently deletes
   // any newer key from that agent's agent.toml.
@@ -960,7 +964,7 @@ export const emptyManifestForm = (): ManifestFormState => ({
     video_generation: "",
     music_generation: "",
   },
-  thinking: { enabled: false, budget_tokens: "", stream_thinking: false, reasoning_mode: "" },
+  thinking: { enabled: false, budget_tokens: "", stream_thinking: false, reasoning_effort: "" },
   autonomous: {
     enabled: false,
     max_iterations: "",
@@ -1166,7 +1170,16 @@ const FORM_CAPABILITY_KEYS = new Set([
   "transcription",
   "speech",
 ]);
-const FORM_THINKING_KEYS = new Set(["budget_tokens", "stream_thinking", "reasoning_mode"]);
+// `reasoning_mode` is the deprecated spelling of `reasoning_effort`: claimed
+// here too so it can never be preserved as an opaque extra and re-emitted
+// alongside the canonical key — a `[thinking]` block with two spellings of one
+// setting.
+const FORM_THINKING_KEYS = new Set([
+  "budget_tokens",
+  "stream_thinking",
+  "reasoning_effort",
+  "reasoning_mode",
+]);
 const FORM_CHANNEL_OVERRIDE_KEYS = new Set([
   "model",
   "system_prompt",
@@ -2021,8 +2034,9 @@ export const serializeManifestForm = (
     // Written only when set: blank means the key is absent, so the model (or
     // the global default) decides — the same "blank = not declared" shape as
     // the rest of this writer. An unknown spelling is written as typed; the
-    // editor does not validate the kernel's vocabulary.
-    writeStringScalar(body, "reasoning_mode", form.thinking.reasoning_mode.trim());
+    // editor does not validate the kernel's vocabulary. The key is always the
+    // canonical `reasoning_effort`, even when the alias is how it got here.
+    writeStringScalar(body, "reasoning_effort", form.thinking.reasoning_effort.trim());
     lines.push("", "[thinking]", ...body, ...renderExtraScalars(safeThinkingExtras));
   }
 
@@ -3473,7 +3487,10 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     form.thinking.enabled = true;
     form.thinking.budget_tokens = asNumberString(parsed.thinking.budget_tokens);
     form.thinking.stream_thinking = asBoolean(parsed.thinking.stream_thinking, false);
-    form.thinking.reasoning_mode = asString(parsed.thinking.reasoning_mode);
+    // Canonical key first; the deprecated `reasoning_mode` alias fills the
+    // same field for a manifest that has not been saved since the rename.
+    form.thinking.reasoning_effort =
+      asString(parsed.thinking.reasoning_effort) || asString(parsed.thinking.reasoning_mode);
     extras.thinking = stripKnown(parsed.thinking, FORM_THINKING_KEYS);
   }
 
