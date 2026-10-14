@@ -44,11 +44,11 @@ describe("ReasoningEffortMenu — level list", () => {
     openMenu();
     await openPopover(user);
 
-    // The fallback set the agreed interface names.
-    for (const name of ["None", "Low", "Medium", "High", "xHigh", "Max"]) {
+    // The fallback vocabulary the agreed interface names.
+    for (const name of ["None", "Minimal", "Low", "Medium", "High", "xHigh", "Max"]) {
       expect(screen.getByRole("menuitemradio", { name })).toBeInTheDocument();
     }
-    expect(screen.getAllByRole("menuitemradio")).toHaveLength(7); // + Default
+    expect(screen.getAllByRole("menuitemradio")).toHaveLength(8); // + Default
   });
 
   it("offers the active model's declared levels instead", async () => {

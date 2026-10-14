@@ -2720,13 +2720,26 @@ export interface ModelItem {
   supports_streaming?: boolean;
   supports_thinking?: boolean;
   /**
-   * Reasoning effort levels this model accepts, e.g.
-   * `["none","low","medium","high","xhigh","max"]`. Absent on older daemons
-   * (and on providers that declare nothing) — callers fall back to the
-   * canonical set rather than rendering an empty menu, and any level the
-   * kernel accepts beyond the list stays displayable.
+   * The model's exact set of accepted reasoning levels, e.g.
+   * `["none","minimal","low","medium","high","xhigh","max"]`. Absent on older
+   * daemons (and on providers that declare nothing) — callers fall back to the
+   * canonical set rather than rendering an empty menu. A level outside this
+   * list is never offered; the backend coerces one that arrives anyway to the
+   * nearest supported level, with a warning.
    */
-  reasoning_efforts?: string[];
+  supported_efforts?: string[];
+  /**
+   * The level the provider uses when no explicit value is sent — what the
+   * "inherit/default" option resolves to.
+   */
+  default_effort?: string | null;
+  /**
+   * `false` = the model cannot be switched off (xAI, Kimi K3, Gemini 3+):
+   * `none` is not offered.
+   */
+  off_allowed?: boolean;
+  /** `true` = reasoning is mandatory; same effect as `off_allowed: false`. */
+  mandatory?: boolean;
   // Provenance of `supports_vision`, resolved through any operator override. Refs #7957.
   // "supported" / "unsupported" mean a source declared it; "unknown" means the boolean above was
   // inferred from the model's name, and the agent loop then keeps sending images rather than

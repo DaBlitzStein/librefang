@@ -211,11 +211,15 @@ interface AgentManifestFormProps {
     max_output_tokens?: number;
     limits_known?: boolean;
     /**
-     * Reasoning effort levels this model accepts (see `lib/reasoningEffort`).
-     * Absent = the canonical set; the form never blocks a level the kernel
-     * might accept just because an older daemon did not declare it.
+     * Reasoning capability metadata (see `lib/reasoningEffort`). All optional:
+     * an older daemon serves none of it, and the editor falls back to the
+     * canonical levels. When present, the model's own set wins and a model
+     * that cannot be switched off loses `none`.
      */
-    reasoning_efforts?: string[];
+    supported_efforts?: string[];
+    default_effort?: string | null;
+    off_allowed?: boolean;
+    mandatory?: boolean;
   }[];
   /**
    * State of the query that produced `models`. Without it a catalog that is

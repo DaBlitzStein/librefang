@@ -3,19 +3,29 @@
  * the agent editor and the wire.
  *
  * The wire spelling is the ecosystem's: `reasoning_effort` on the message
- * frame and on the session PATCH; the levels themselves are `"none" | "low" |
- * "medium" | "high" | "xhigh" | "max"`. `reasoning_mode` is the deprecated
- * alias of the field name — the dashboard reads it from old manifests but
- * never emits it.
+ * frame and on the session PATCH; the levels themselves are `"none" |
+ * "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`. `reasoning_mode`
+ * is the deprecated alias of the field name — the dashboard reads it from old
+ * manifests but never emits it.
  *
- * Capability is the rule: the levels offered come from the active model's
- * `reasoning_efforts` catalog field, and a level the model does not declare is
- * never offered — not armed, not pinned. The canonical six are only a
- * fallback for "nobody said" (older daemon, provider without metadata),
- * because an empty menu would read as "reasoning does not exist" rather than
- * as missing data. Unrecognized *stored* levels stay reachable for display for
- * the same reason — the kernel's vocabulary can grow ahead of the dashboard —
- * but they render disabled rather than offered.
+ * Capability is the rule, and it comes from the model's catalog metadata:
+ *
+ *   - `supported_efforts` is the model's exact set; a level outside it is
+ *     never offered — not armed, not pinned, not selectable in the editor. A
+ *     value that still arrives from elsewhere is coerced server-side with a
+ *     warning, so the UI shows it as current state, disabled, and never
+ *     suggests it.
+ *   - `off_allowed: false` (or `mandatory: true` — xAI, Kimi K3, Gemini 3 and
+ *     friends) means the model cannot be switched off: `none` is dropped from
+ *     the offered set, declared or canonical.
+ *   - `default_effort` is the level the provider uses when no explicit value
+ *     is sent — what the "inherit/default" option resolves to. Carried on the
+ *     source so a surface can name it; no surface does yet.
+ *
+ * The canonical seven are only a fallback for "nobody said" (older daemon,
+ * provider without metadata), because an empty menu would read as "reasoning
+ * does not exist" rather than as missing data — and the off-capability filter
+ * still applies to them.
  *
  * Noted for when the catalog learns to mark it: a model whose reasoning is
  * shaped by a token budget rather than a level enum should get a budget input
@@ -25,6 +35,7 @@
 /** The fallback set, and the levels every agreed surface understands. */
 export const CANONICAL_REASONING_EFFORTS = [
   "none",
+  "minimal",
   "low",
   "medium",
   "high",
@@ -60,21 +71,36 @@ export function reasoningEffortLabel(level: string): string {
 export interface ReasoningEffortSource {
   provider?: string;
   id?: string;
-  /** Levels the model accepts. Absent = the canonical set applies. */
-  reasoning_efforts?: string[];
+  /** The model's exact set of accepted levels. Absent = the canonical set. */
+  supported_efforts?: string[];
+  /**
+   * The level the provider uses when no explicit value is sent (what
+   * "inherit/default" resolves to). Presentational today.
+   */
+  default_effort?: string | null;
+  /** `false` = the model cannot be switched off, so `none` is not offered. */
+  off_allowed?: boolean;
+  /** `true` = reasoning is mandatory; same effect as `off_allowed: false`. */
+  mandatory?: boolean;
 }
+
+/** True when the model cannot be switched off, so `none` must not be offered. */
+const offDisallowed = (model?: ReasoningEffortSource | null): boolean =>
+  model?.off_allowed === false || model?.mandatory === true;
 
 /**
  * The levels a model accepts.
  *
  * Absent, empty, or cleaned-to-empty all mean "nobody said": the canonical set
  * applies. A declared list wins as given, minus blanks and duplicates, in the
- * declared order.
+ * declared order. Either way, `none` is dropped when the model cannot be
+ * switched off — the capability flags outrank a list that claims otherwise.
  */
 export function resolveReasoningEfforts(
   model?: ReasoningEffortSource | null,
 ): string[] {
-  const declared = model?.reasoning_efforts;
+  const declared = model?.supported_efforts;
+  let levels: string[];
   if (Array.isArray(declared)) {
     const cleaned: string[] = [];
     for (const level of declared) {
@@ -83,9 +109,13 @@ export function resolveReasoningEfforts(
       if (!trimmed || cleaned.includes(trimmed)) continue;
       cleaned.push(trimmed);
     }
-    if (cleaned.length > 0) return cleaned;
+    levels = cleaned.length > 0 ? cleaned : [...CANONICAL_REASONING_EFFORTS];
+  } else {
+    levels = [...CANONICAL_REASONING_EFFORTS];
   }
-  return [...CANONICAL_REASONING_EFFORTS];
+  return offDisallowed(model)
+    ? levels.filter((level) => level.toLowerCase() !== "none")
+    : levels;
 }
 
 /**
@@ -101,15 +131,30 @@ export function modelReasoningEfforts(
   model: string,
   provider: string,
 ): string[] {
+  return resolveReasoningEfforts(findReasoningModel(models, model, provider));
+}
+
+/**
+ * The catalog entry the agent's model resolves to, if any.
+ *
+ * Exported so a caller that needs more than the level list (`default_effort`
+ * for an "inherit resolves to" hint, say) reads the same match the list came
+ * from rather than re-implementing it.
+ */
+export function findReasoningModel(
+  models: readonly ReasoningEffortSource[],
+  model: string,
+  provider: string,
+): ReasoningEffortSource | undefined {
   const name = model?.trim() ?? "";
   const vendor = provider?.trim() ?? "";
-  if (!name) return resolveReasoningEfforts(undefined);
+  if (!name) return undefined;
 
   const bareName = name.includes("/") ? name.slice(name.lastIndexOf("/") + 1) : name;
-  const match =
+  return (
     models.find((m) => m.id === name && (!vendor || m.provider === vendor)) ??
     models.find((m) => m.id === bareName && (!vendor || m.provider === vendor)) ??
     models.find((m) => `${m.provider}/${m.id}` === name) ??
-    models.find((m) => m.id === bareName);
-  return resolveReasoningEfforts(match);
+    models.find((m) => m.id === bareName)
+  );
 }

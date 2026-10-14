@@ -10,13 +10,16 @@ import {
  * The composer's reasoning-effort control: a pill in the Deep Thinking row
  * that opens the levels the active model accepts.
  *
- * Capability first: the list is exactly `reasoning_efforts` from the active
- * model's catalog entry, and a level the model does not declare is never
- * offered — not clickable, not pinnable. Only when the catalog declares
- * nothing (older daemon, provider with no metadata) does the canonical set
- * stand in, because an empty menu would read as "reasoning does not exist".
- * A stored level outside the declared set still gets a row so the operator can
- * see what is in effect, but it is marked and disabled.
+ * Capability first: the list handed in is exactly what the active model's
+ * catalog entry allows (`supported_efforts`, with the `off_allowed`/
+ * `mandatory` filter applied by `lib/reasoningEffort` — a model that cannot be
+ * switched off never shows `none`), and the menu never widens it. Only when
+ * the caller hands in nothing (older daemon, provider with no metadata) does
+ * the canonical set stand in, because an empty menu would read as "reasoning
+ * does not exist". A stored level outside the offered set still gets a row so
+ * the operator can see what is in effect, but it is marked and disabled — the
+ * backend coerces such a value to the nearest supported level, and the UI must
+ * not suggest it.
  * (When the catalog starts marking budget-only models — reasoning shaped by a
  * token budget rather than a level enum — this control should render a budget
  * input instead of a level list. Nothing marks that today; noted so the branch
@@ -36,11 +39,11 @@ import {
  * with a `next` badge for a one-shot and a pin icon for a session pin.
  *
  * Presentational on purpose: the caller owns the session PATCH and the store
- * one-shot. Everything here degrades — no `reasoning_efforts` on the catalog,
- * no session field from an older daemon, no pin wiring — to a usable menu.
+ * one-shot. Everything here degrades — no catalog metadata, no session field
+ * from an older daemon, no pin wiring — to a usable menu.
  */
 export interface ReasoningEffortMenuProps {
-  /** Levels the active model accepts; absent/empty = the canonical set. */
+  /** Offered levels, capability-filtered by the caller; absent/empty = canonical. */
   efforts?: readonly string[] | null;
   /** Model label shown as the menu's subtitle, when the caller knows it. */
   modelName?: string;
@@ -86,7 +89,7 @@ export function ReasoningEffortMenu({
   }, [open]);
 
   const levels = useMemo(
-    () => resolveReasoningEfforts({ reasoning_efforts: efforts ? [...efforts] : undefined }),
+    () => resolveReasoningEfforts({ supported_efforts: efforts ? [...efforts] : undefined }),
     [efforts],
   );
 

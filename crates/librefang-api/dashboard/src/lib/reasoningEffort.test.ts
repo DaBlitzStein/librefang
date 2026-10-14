@@ -6,10 +6,11 @@ import {
   resolveReasoningEfforts,
 } from "./reasoningEffort";
 
-// The dashboard offers the levels a model declares (`reasoning_efforts` on the
-// catalog entry). An older daemon — or a provider that declares nothing — has
-// no such list, and an empty menu would read as "reasoning does not exist"
-// rather than "nobody said". The canonical set is the fallback contract.
+// The dashboard offers the levels a model declares (`supported_efforts` on the
+// catalog entry, alongside `default_effort`, `off_allowed` and `mandatory`).
+// An older daemon — or a provider that declares nothing — has no such list, and
+// an empty menu would read as "reasoning does not exist" rather than "nobody
+// said". The canonical set is the fallback contract.
 
 describe("resolveReasoningEfforts", () => {
   it("falls back to the canonical levels when the model declares none", () => {
@@ -18,17 +19,17 @@ describe("resolveReasoningEfforts", () => {
     expect(resolveReasoningEfforts({})).toEqual([...CANONICAL_REASONING_EFFORTS]);
     // An empty list is "nobody said", not "no levels allowed" — the same
     // absent-vs-empty reading the rest of the dashboard gives optional lists.
-    expect(resolveReasoningEfforts({ reasoning_efforts: [] })).toEqual([
+    expect(resolveReasoningEfforts({ supported_efforts: [] })).toEqual([
       ...CANONICAL_REASONING_EFFORTS,
     ]);
   });
 
   it("keeps the model's own levels, in the declared order", () => {
     expect(
-      resolveReasoningEfforts({ reasoning_efforts: ["minimal", "medium", "xhigh", "max"] }),
+      resolveReasoningEfforts({ supported_efforts: ["minimal", "medium", "xhigh", "max"] }),
     ).toEqual(["minimal", "medium", "xhigh", "max"]);
     // A model narrower than the canonical set narrows the menu.
-    expect(resolveReasoningEfforts({ reasoning_efforts: ["low", "high"] })).toEqual([
+    expect(resolveReasoningEfforts({ supported_efforts: ["low", "high"] })).toEqual([
       "low",
       "high",
     ]);
@@ -37,20 +38,60 @@ describe("resolveReasoningEfforts", () => {
   it("drops blanks, duplicates and non-strings from a declared list", () => {
     expect(
       resolveReasoningEfforts({
-        reasoning_efforts: ["low", "low", "", "   ", undefined as unknown as string],
+        supported_efforts: ["low", "low", "", "   ", undefined as unknown as string],
       }),
     ).toEqual(["low"]);
     // A list that cleans to nothing is the same as an absent one.
-    expect(resolveReasoningEfforts({ reasoning_efforts: ["", " "] })).toEqual([
+    expect(resolveReasoningEfforts({ supported_efforts: ["", " "] })).toEqual([
       ...CANONICAL_REASONING_EFFORTS,
     ]);
   });
 });
 
+// "Not thinking" is a capability of its own: when the catalog says the model
+// cannot be switched off (`off_allowed: false`, or `mandatory: true` — xAI,
+// Kimi K3, Gemini 3 and friends), `none` is not offered, in a declared list or
+// in the canonical fallback.
+describe("resolveReasoningEfforts — off is not always available", () => {
+  it("drops none from a declared list when off is disallowed", () => {
+    expect(
+      resolveReasoningEfforts({
+        supported_efforts: ["none", "low", "high"],
+        off_allowed: false,
+      }),
+    ).toEqual(["low", "high"]);
+    expect(
+      resolveReasoningEfforts({
+        supported_efforts: ["none", "low", "high"],
+        mandatory: true,
+      }),
+    ).toEqual(["low", "high"]);
+  });
+
+  it("drops none from the canonical fallback when off is disallowed", () => {
+    const withoutOff = CANONICAL_REASONING_EFFORTS.filter((level) => level !== "none");
+    expect(resolveReasoningEfforts({ off_allowed: false })).toEqual(withoutOff);
+    expect(resolveReasoningEfforts({ mandatory: true })).toEqual(withoutOff);
+  });
+
+  it("keeps none when the catalog allows it or says nothing", () => {
+    expect(
+      resolveReasoningEfforts({ supported_efforts: ["none", "max"], off_allowed: true }),
+    ).toEqual(["none", "max"]);
+    // Absent flags are not a statement — the canonical contract stands.
+    expect(resolveReasoningEfforts({})).toContain("none");
+  });
+});
+
 describe("modelReasoningEfforts", () => {
   const models = [
-    { provider: "openai", id: "gpt-5", reasoning_efforts: ["minimal", "low", "medium", "high"] },
-    { provider: "anthropic", id: "gpt-5", reasoning_efforts: ["low", "max"] },
+    {
+      provider: "openai",
+      id: "gpt-5",
+      supported_efforts: ["minimal", "low", "medium", "high"],
+    },
+    { provider: "anthropic", id: "gpt-5", supported_efforts: ["low", "max"] },
+    { provider: "xai", id: "grok-think", supported_efforts: ["none", "low", "high"], off_allowed: false },
     { provider: "openai", id: "gpt-4o" },
   ];
 
@@ -77,6 +118,12 @@ describe("modelReasoningEfforts", () => {
     expect(modelReasoningEfforts(models, "anthropic/gpt-5", "anthropic")).toEqual(["low", "max"]);
   });
 
+  it("carries the capability flags through the catalog lookup", () => {
+    // The model declares `none` but cannot be switched off — the menu must
+    // not offer it.
+    expect(modelReasoningEfforts(models, "grok-think", "xai")).toEqual(["low", "high"]);
+  });
+
   it("falls back to the canonical set when the model is not in the catalog", () => {
     expect(modelReasoningEfforts(models, "unknown-model", "openai")).toEqual([
       ...CANONICAL_REASONING_EFFORTS,
@@ -93,12 +140,12 @@ describe("modelReasoningEfforts", () => {
 describe("reasoningEffortLabel", () => {
   it("labels the canonical levels with their technical names", () => {
     expect(reasoningEffortLabel("none")).toBe("None");
+    expect(reasoningEffortLabel("minimal")).toBe("Minimal");
     expect(reasoningEffortLabel("low")).toBe("Low");
     expect(reasoningEffortLabel("medium")).toBe("Medium");
     expect(reasoningEffortLabel("high")).toBe("High");
     expect(reasoningEffortLabel("xhigh")).toBe("xHigh");
     expect(reasoningEffortLabel("max")).toBe("Max");
-    expect(reasoningEffortLabel("minimal")).toBe("Minimal");
   });
 
   it("is case-insensitive on the way in", () => {

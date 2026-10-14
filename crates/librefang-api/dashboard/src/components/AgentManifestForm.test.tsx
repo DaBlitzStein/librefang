@@ -48,7 +48,10 @@ interface HarnessModel {
   context_window?: number;
   max_output_tokens?: number;
   limits_known?: boolean;
-  reasoning_efforts?: string[];
+  supported_efforts?: string[];
+  default_effort?: string | null;
+  off_allowed?: boolean;
+  mandatory?: boolean;
 }
 
 function Harness({
@@ -827,7 +830,7 @@ describe("AgentManifestForm — reasoning effort default", () => {
           {
             provider: "anthropic",
             id: "claude-sonnet-5",
-            reasoning_efforts: ["none", "low", "medium", "high", "xhigh", "max"],
+            supported_efforts: ["none", "low", "medium", "high", "xhigh", "max"],
           },
         ]}
         onState={(next) => { latest = next; }}
@@ -879,7 +882,7 @@ describe("AgentManifestForm — reasoning effort default", () => {
     render(
       <Harness
         initialState={stateWithModel()}
-        models={[{ provider: "anthropic", id: "claude-sonnet-5", reasoning_efforts: ["minimal", "high"] }]}
+        models={[{ provider: "anthropic", id: "claude-sonnet-5", supported_efforts: ["minimal", "high"] }]}
       />,
     );
     await openThinking(user);
@@ -893,7 +896,7 @@ describe("AgentManifestForm — reasoning effort default", () => {
 
   it("falls back to the canonical levels when the catalog declares none", async () => {
     const user = userEvent.setup();
-    // The default harness model carries no `reasoning_efforts` — the shape an
+    // The default harness model carries no `supported_efforts` — the shape an
     // older daemon serves.
     render(<Harness initialState={stateWithModel("", "gpt-4o", "openai")} />);
     await openThinking(user);
@@ -901,11 +904,39 @@ describe("AgentManifestForm — reasoning effort default", () => {
     expect(levelOptions()).toEqual([
       "agents.form.reasoning_effort_inherit",
       "None",
+      "Minimal",
       "Low",
       "Medium",
       "High",
       "xHigh",
       "Max",
+    ]);
+  });
+
+  // "Not thinking" is a capability: a model the catalog marks as impossible to
+  // switch off must not be offered `none`, whether the level came in a declared
+  // list or from the canonical fallback.
+  it("drops None when the catalog says the model cannot be switched off", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        initialState={stateWithModel()}
+        models={[
+          {
+            provider: "anthropic",
+            id: "claude-sonnet-5",
+            supported_efforts: ["none", "low", "high"],
+            off_allowed: false,
+          },
+        ]}
+      />,
+    );
+    await openThinking(user);
+
+    expect(levelOptions()).toEqual([
+      "agents.form.reasoning_effort_inherit",
+      "Low",
+      "High",
     ]);
   });
 
