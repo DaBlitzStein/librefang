@@ -705,6 +705,13 @@ impl MemorySubstrate {
             .set_session_reasoning_effort(session_id, reasoning_effort)
     }
 
+    /// Materialize an empty session row for `(agent_id, session_id)` when one
+    /// does not exist yet (#8591), so a per-session pin set before the
+    /// conversation's first turn is not lost to the lazy creation path.
+    pub fn ensure_session(&self, agent_id: AgentId, session_id: SessionId) -> LibreFangResult<()> {
+        self.sessions.ensure_session(agent_id, session_id)
+    }
+
     /// Find a session by label for a given agent.
     pub fn find_session_by_label(
         &self,
