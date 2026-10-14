@@ -1420,6 +1420,39 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Materialize an empty session row for `(agent_id, session_id)` when one
+    /// does not exist yet (#8591).
+    ///
+    /// Per-session pins are stored with an UPDATE on the session row, but the
+    /// inbound resolver only creates that row lazily on a conversation's first
+    /// turn — and it builds it with `reasoning_effort = None`. A pin set before
+    /// the first message (a channel `/think high` on a fresh chat, a TUI pin on
+    /// a just-spawned agent) would silently vanish. Creating the row up front
+    /// makes the lazy path load it instead.
+    ///
+    /// Existing rows are never touched. The insert goes through
+    /// [`Self::save_session`], so the upsert and the FTS placeholder row keep
+    /// the invariants that path maintains.
+    pub fn ensure_session(&self, agent_id: AgentId, session_id: SessionId) -> LibreFangResult<()> {
+        if self.get_session(session_id)?.is_some() {
+            return Ok(());
+        }
+        let session = Session {
+            id: session_id,
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            parent_session_id: None,
+            model_override: None,
+            reasoning_effort: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        };
+        self.save_session(&session)
+    }
+
     /// Set the label on an existing session.
     pub fn set_session_label(
         &self,
@@ -2406,6 +2439,43 @@ mod tests {
         let store = setup();
         let result = store.get_session(SessionId::new()).unwrap();
         assert!(result.is_none());
+    }
+
+    /// `ensure_session` materializes a row for a not-yet-used derived session
+    /// id, and a second call must leave the row — and any per-session pin on
+    /// it — untouched (#8591).
+    #[test]
+    fn ensure_session_materializes_once_and_preserves_the_pin() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+
+        assert!(store.get_session(session_id).unwrap().is_none());
+        store.ensure_session(agent_id, session_id).unwrap();
+
+        let row = store
+            .get_session(session_id)
+            .unwrap()
+            .expect("ensure_session must create the row");
+        assert_eq!(row.agent_id, agent_id);
+        assert!(row.messages.is_empty());
+        assert!(row.reasoning_effort.is_none());
+
+        // A pin written after the materialization survives a repeat
+        // `ensure_session` (the early-return path must not touch the row).
+        store
+            .set_session_reasoning_effort(session_id, Some("high"))
+            .unwrap();
+        store.ensure_session(agent_id, session_id).unwrap();
+        assert_eq!(
+            store
+                .get_session(session_id)
+                .unwrap()
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("high"),
+        );
     }
 
     #[test]
