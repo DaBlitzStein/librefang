@@ -578,10 +578,12 @@ impl StandaloneChat {
     ///
     /// The session the pin lands on is the one the chat's turns resolve to: on
     /// the daemon the message stream carries no session override, so that is
-    /// the agent's canonical-active session (the id `GET /agents/{id}/session`
-    /// reports, materialized-if-needed by the route); in-process it is the
-    /// registry entry's session id. `None` clears the pin, `Some(token)` writes
-    /// it.
+    /// the agent's canonical-active session — read from
+    /// `GET /agents/{id}/session`, which materializes the row before answering
+    /// (#8591), so the `PATCH /api/sessions/{id}/reasoning` below always has a
+    /// row to update; in-process it is the registry entry's session id,
+    /// created-if-missing through the same `ensure_session` helper. `None`
+    /// clears the pin, `Some(token)` writes it.
     fn apply_reasoning_effort(&self, effort: Option<&str>) -> Result<(), String> {
         match &self.backend {
             Backend::Daemon { base_url } => {
