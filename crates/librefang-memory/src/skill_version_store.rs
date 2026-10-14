@@ -13,7 +13,7 @@
 //! conflate two different skills shadowing each other. A future schema can add
 //! a scope column without disturbing this one.
 //!
-//! Two writes are deliberately not covered: `live_file_write` in
+//! Two writes are deliberately not covered: `the clawhub install path` in
 //! `routes/skills/clawhub.rs` and the TUI/CLI paths, which do not go through
 //! the daemon's recording funnel yet.
 //!
