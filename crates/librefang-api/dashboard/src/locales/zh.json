@@ -4694,8 +4694,11 @@
   },
   "agentTypes": {
     "change_source": {
+      "agent-tool": "Agent tool",
       "create": "Created",
       "dashboard": "Dashboard edit",
+      "pre-registry-restore": "Pre-restore snapshot",
+      "registry-restore": "Restored from registry",
       "restore": "Restored",
       "toml": "Raw TOML edit",
       "unknown": "Unknown source"
