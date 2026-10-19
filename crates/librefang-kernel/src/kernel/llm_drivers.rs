@@ -36,10 +36,10 @@ fn should_use_managed_everyapi(
 /// any time (config `[default_model]`, or the WebUI's
 /// `default_model_override`), and a surviving pin would then send the previous
 /// vendor's credential to the new endpoint — the production incident: a
-/// `DEEPSEEK_API_KEY` pin on a manifest whose default had become a `strata1`
-/// gateway, 401 on primary and fallback alike. On the sentinel the effective
-/// default supplies provider, model, credential and endpoint; only an
-/// explicit provider owns its pins.
+/// `DEEPSEEK_API_KEY` pin on a manifest whose default had become an
+/// `othervendor` gateway, 401 on primary and fallback alike. On the sentinel
+/// the effective default supplies provider, model, credential and endpoint;
+/// only an explicit provider owns its pins.
 fn applied_pin<'a>(provider: &str, pin: Option<&'a str>) -> Option<&'a str> {
     if is_default_provider_sentinel(provider) {
         None
@@ -684,7 +684,7 @@ mod sentinel_pin_tests {
     /// A manifest credential/endpoint pin applies only for an explicit
     /// provider; on the `"default"`/empty sentinel the effective default owns
     /// those fields (production incident: stale `DEEPSEEK_API_KEY` pin sent to
-    /// a `strata1` default → 401 on primary and fallback alike).
+    /// an `othervendor` default → 401 on primary and fallback alike).
     #[test]
     fn sentinel_provider_drops_credential_and_endpoint_pins() {
         assert_eq!(applied_pin("default", Some("DEEPSEEK_API_KEY")), None);
@@ -696,10 +696,10 @@ mod sentinel_pin_tests {
 
         // An explicit provider keeps its operator override.
         assert_eq!(
-            applied_pin("strata1", Some("STRATA1_KEY")),
-            Some("STRATA1_KEY")
+            applied_pin("othervendor", Some("OTHERVENDOR_KEY")),
+            Some("OTHERVENDOR_KEY")
         );
-        assert_eq!(applied_pin("strata1", None), None);
+        assert_eq!(applied_pin("othervendor", None), None);
     }
 }
 

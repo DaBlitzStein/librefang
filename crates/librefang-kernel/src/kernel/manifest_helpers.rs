@@ -1375,19 +1375,20 @@ mod tests {
         assert_eq!(manifest.resources.max_cost_per_hour_usd, 1.0);
     }
 
-    /// The sentinel rule (production incident: agent `Paco` on `proteo`):
-    /// on the `"default"`/empty provider sentinel the effective default owns
-    /// provider, credential and endpoint; a stale manifest pin is REPLACED,
-    /// never preserved. An explicit provider keeps its pins untouched.
+    /// The sentinel rule (production incident: a production agent on an
+    /// instance): on the `"default"`/empty provider sentinel the effective
+    /// default owns provider, credential and endpoint; a stale manifest pin is
+    /// REPLACED, never preserved. An explicit provider keeps its pins
+    /// untouched.
     #[test]
     fn sentinel_inheritance_replaces_stale_credential_pins() {
         use librefang_types::config::DefaultModelConfig;
 
         let dm = DefaultModelConfig {
-            provider: "strata1".to_string(),
-            model: "qwen3.8-flash-next-iq3_s".to_string(),
-            api_key_env: "STRATA1_KEY".to_string(),
-            base_url: Some("https://strata1.internal/v1".to_string()),
+            provider: "othervendor".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OTHERVENDOR_KEY".to_string(),
+            base_url: Some("https://othervendor.example/v1".to_string()),
             ..DefaultModelConfig::default()
         };
 
@@ -1400,11 +1401,11 @@ mod tests {
             ..ModelConfig::default()
         };
         assert!(inherit_default_provider(&mut model, &dm));
-        assert_eq!(model.provider, "strata1");
-        assert_eq!(model.api_key_env.as_deref(), Some("STRATA1_KEY"));
+        assert_eq!(model.provider, "othervendor");
+        assert_eq!(model.api_key_env.as_deref(), Some("OTHERVENDOR_KEY"));
         assert_eq!(
             model.base_url.as_deref(),
-            Some("https://strata1.internal/v1")
+            Some("https://othervendor.example/v1")
         );
 
         // The empty provider is the same sentinel.
@@ -1414,13 +1415,13 @@ mod tests {
             ..ModelConfig::default()
         };
         assert!(inherit_default_provider(&mut empty, &dm));
-        assert_eq!(empty.provider, "strata1");
-        assert_eq!(empty.api_key_env.as_deref(), Some("STRATA1_KEY"));
+        assert_eq!(empty.provider, "othervendor");
+        assert_eq!(empty.api_key_env.as_deref(), Some("OTHERVENDOR_KEY"));
 
         // A default that declares no credential clears the stale pin instead
         // of letting it survive onto the new provider.
         let bare = DefaultModelConfig {
-            provider: "strata1".to_string(),
+            provider: "othervendor".to_string(),
             ..DefaultModelConfig::default()
         };
         let mut model = ModelConfig {
@@ -1454,7 +1455,7 @@ mod tests {
     fn provider_sentinel_detection_covers_empty_and_default() {
         assert!(is_default_provider_sentinel(""));
         assert!(is_default_provider_sentinel("default"));
-        assert!(!is_default_provider_sentinel("strata1"));
+        assert!(!is_default_provider_sentinel("othervendor"));
         assert!(!is_default_provider_sentinel("DEFAULT"));
     }
 

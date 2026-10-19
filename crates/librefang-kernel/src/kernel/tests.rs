@@ -14404,8 +14404,8 @@ async fn resolve_driver_for_owner_canonicalizes_alias_provider_in_fallback_slot(
     kernel.shutdown();
 }
 
-/// Sentinel-provider credential rule (production incident: agent `Paco` on
-/// instance `proteo`). A manifest with `provider = "default"` and a stale
+/// Sentinel-provider credential rule (production incident: a production agent
+/// on an instance). A manifest with `provider = "default"` and a stale
 /// `api_key_env` pin must take its credential from the EFFECTIVE default, not
 /// from the pin: the default had been hot-swapped to another vendor, so the
 /// pin sent the old vendor's key to the new endpoint and every turn 401'd
@@ -14439,7 +14439,7 @@ async fn sentinel_provider_ignores_manifest_credential_pin() {
         // no network, and its `api_key_env` is exactly the operator's choice.
         default_model: DefaultModelConfig {
             provider: "fx-sentinel-default".to_string(),
-            model: "qwen3.8-flash-next-iq3_s".to_string(),
+            model: "test-model".to_string(),
             api_key_env: "LIBREFANG_TEST_FX_SENTINEL_DEFAULT_KEY".to_string(),
             base_url: Some("http://127.0.0.1:9/v1".to_string()),
             ..DefaultModelConfig::default()
