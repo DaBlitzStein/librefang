@@ -1010,17 +1010,17 @@ fn is_dynamic_i18n_key(key: &str) -> bool {
         || (key.starts_with("tui-triggers-type-")
             && (key.ends_with("-name") || key.ends_with("-desc")))
         || key.starts_with("tui-skills-sort-")
-        // The manifest-source labels are one key per token in the store's closed inventory, built
-        // from `MANIFEST_CHANGE_SOURCES` in `screens/agents.rs` (#8604) rather than spelled out in
-        // callers, so no single literal carries these names. `collect_dynamic_required_locale_keys`
-        // derives the exact 16 from that const and requires them in every locale.
-        || key.starts_with("tui-agents-manifest-source-")
         // The template-source labels are one key per token in the template store's closed
         // inventory, built from `TEMPLATE_CHANGE_SOURCES` in `screens/templates.rs` (#8609)
         // rather than spelled out in callers, so no single literal carries these names.
         // `collect_dynamic_required_locale_keys` derives the exact keys from that const and
         // requires them in every locale.
         || key.starts_with("tui-templates-source-")
+        // The manifest-source labels are one key per token in the store's closed inventory, built
+        // from `MANIFEST_CHANGE_SOURCES` in `screens/agents.rs` (#8604) rather than spelled out in
+        // callers, so no single literal carries these names. `collect_dynamic_required_locale_keys`
+        // derives the exact 16 from that const and requires them in every locale.
+        || key.starts_with("tui-agents-manifest-source-")
 }
 
 fn extract_const_array_string_literals(content: &str, const_name: &str) -> Vec<String> {
