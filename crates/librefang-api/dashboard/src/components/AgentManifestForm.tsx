@@ -1702,6 +1702,7 @@ export function AgentManifestForm({
               value={value.schedule.conditions}
               onChange={(next) => update({ schedule: { mode: "proactive", conditions: next } })}
               placeholder={t("agents.form.conditions_placeholder")}
+              splitOnComma={false}
             />
           </Field>
         )}
@@ -2135,7 +2136,8 @@ export function AgentManifestForm({
               <div className="col-span-2"><Field label={t("agents.form.channel_overrides_group_trigger_patterns")}>
                   <ListField value={value.channel_overrides.group_trigger_patterns}
                     onChange={(next) => updateChannelOverrides({ group_trigger_patterns: next })}
-                    placeholder={t("agents.form.inherit_default")} />
+                    placeholder={t("agents.form.inherit_default")}
+                    splitOnComma={false} />
                 </Field></div>
               <div><Toggle label={t("agents.form.channel_overrides_reply_precheck")} checked={value.channel_overrides.reply_precheck}
                   onChange={(checked) => updateChannelOverrides({ reply_precheck: checked })} /></div>
@@ -2741,6 +2743,7 @@ export function AgentManifestForm({
                       updateContextEngine({ sidecar: { ...ce.sidecar, args: next } })
                     }
                     placeholder={t("agents.form.context_engine_sidecar_args_placeholder")}
+                    splitOnComma={false}
                   />
                 </Field>
               </div>

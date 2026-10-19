@@ -388,6 +388,7 @@ function ToolPolicyRow({
           <div className="flex-1">
             <ListField
               value={ruleSets}
+              ariaLabel="rule_sets"
               onChange={(next) => {
                 setRuleSets(next);
                 onChangeRuleSets(next);

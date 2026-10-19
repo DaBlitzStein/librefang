@@ -5,10 +5,13 @@ import { X } from "lucide-react";
 /**
  * Free-form list editor: a row of removable chips plus a text box.
  *
- * A value is committed on Enter, on comma, or when the field loses focus.
- * Pasting text splits it on commas, semicolons and newlines so a
- * comma-separated list lands as individual chips. Duplicates are dropped
- * while preserving the order they were entered in.
+ * A value is committed on Enter or when the field loses focus. Commas also
+ * commit (and separate pasted values) unless `splitOnComma` is false, which
+ * is for fields whose values may contain commas as data, such as regexes or
+ * command-line arguments. Semicolons and newlines always separate pasted
+ * values. Duplicates are dropped while preserving the order they were
+ * entered in; a `value` prop that already carries duplicates is only
+ * de-duplicated for rendering, not rewritten.
  */
 export function ListField({
   value,
@@ -17,6 +20,7 @@ export function ListField({
   disabled = false,
   id,
   ariaLabel,
+  splitOnComma = true,
 }: {
   value: string[];
   onChange: (next: string[]) => void;
@@ -24,20 +28,39 @@ export function ListField({
   disabled?: boolean;
   id?: string;
   ariaLabel?: string;
+  splitOnComma?: boolean;
 }) {
   const { t } = useTranslation();
   const [inputValue, setInputValue] = useState("");
 
-  const commit = (raw: string): void => {
-    const cleaned = splitList(raw);
-    if (cleaned.length === 0) return;
-    setInputValue("");
+  /** Merge the typed draft and the current value, keeping first occurrences. */
+  const mergePending = (pending: string): string[] => {
     const next = [...value];
-    for (const item of cleaned) {
+    for (const item of splitList(pending, splitOnComma)) {
       if (!next.includes(item)) next.push(item);
     }
+    return next;
+  };
+
+  const commit = (raw: string): void => {
+    if (splitList(raw, splitOnComma).length === 0) return;
+    setInputValue("");
+    const next = mergePending(raw);
     if (next.length !== value.length) onChange(next);
   };
+
+  const remove = (item: string): void => {
+    // The blur that precedes a click on the remove button commits the draft
+    // as a separate event. Fold that draft into this update so the click
+    // cannot overwrite it with a stale `value`.
+    const next = mergePending(inputValue).filter((v) => v !== item);
+    setInputValue("");
+    onChange(next);
+  };
+
+  // A `value` carrying duplicates is outside the contract, but rendering it
+  // verbatim would produce duplicate React keys. Collapse for display only.
+  const items = [...new Set(value)];
 
   return (
     <div
@@ -45,7 +68,7 @@ export function ListField({
         disabled ? "opacity-60" : ""
       }`}
     >
-      {value.map((item) => (
+      {items.map((item) => (
         <span
           key={item}
           className="inline-flex items-center gap-1 rounded-md bg-surface px-1.5 py-0.5 text-[11px] font-medium text-text"
@@ -54,7 +77,7 @@ export function ListField({
           {!disabled && (
             <button
               type="button"
-              onClick={() => onChange(value.filter((v) => v !== item))}
+              onClick={() => remove(item)}
               className="text-text-dim hover:text-error"
               aria-label={`${t("common.remove")} ${item}`}
             >
@@ -70,18 +93,19 @@ export function ListField({
         disabled={disabled}
         aria-label={ariaLabel}
         onChange={(e) => setInputValue(e.target.value)}
-        placeholder={value.length === 0 ? placeholder : undefined}
+        placeholder={items.length === 0 ? placeholder : undefined}
         onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === ",") {
+          if (e.key === "Enter" || (splitOnComma && e.key === ",")) {
             e.preventDefault();
             commit(inputValue);
-          } else if (e.key === "Backspace" && !inputValue && value.length > 0) {
-            onChange(value.slice(0, -1));
+          } else if (e.key === "Backspace" && !inputValue && items.length > 0) {
+            const last = items[items.length - 1];
+            onChange(value.filter((v) => v !== last));
           }
         }}
         onPaste={(e) => {
           const pasted = e.clipboardData.getData("text");
-          if (!/[,\n;]/.test(pasted)) return;
+          if (!hasSeparator(pasted, splitOnComma)) return;
           e.preventDefault();
           commit(inputValue + pasted);
         }}
@@ -96,10 +120,15 @@ export function ListField({
   );
 }
 
-/** Split a free-form list on commas, semicolons and newlines, dropping blanks. */
-function splitList(raw: string): string[] {
+/** Whether pasted text contains a separator this field splits on. */
+function hasSeparator(raw: string, splitOnComma: boolean): boolean {
+  return splitOnComma ? /[,\n;]/.test(raw) : /[\n;]/.test(raw);
+}
+
+/** Split a free-form list, dropping blanks. */
+function splitList(raw: string, splitOnComma: boolean): string[] {
   return raw
-    .split(/[,;\n]+/)
+    .split(splitOnComma ? /[,;\n]+/ : /[;\n]+/)
     .map((item) => item.trim())
     .filter(Boolean);
 }
