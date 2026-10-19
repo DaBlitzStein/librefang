@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatPage } from "./ChatPage";
 import { clearChatSessionCacheForAgent } from "../lib/chatSessionCache";
 import { useUIStore } from "../lib/store";
@@ -20,12 +20,6 @@ vi.mock("react-i18next", async () => {
 
 // Pinned to s2 so the tab strip, the dropdown and the active highlight all
 // agree on which conversation is being viewed.
-//
-// The search params are an external store rather than a frozen object: the
-// a11y tests drive the strip with the keyboard and must see the active tab
-// actually move, and the page only learns about a tab switch through
-// `navigate()`. A static mock would leave `aria-selected` forever on s2 and
-// the assertions would pass against a strip that ignores the arrow keys.
 const router = vi.hoisted(() => {
   type Search = { agentId?: string; sessionId?: string };
   let snapshot: Search = { agentId: "agent-a", sessionId: "s2" };
@@ -33,6 +27,18 @@ const router = vi.hoisted(() => {
   const notify = () => {
     for (const listener of listeners) listener();
   };
+  // `search` stays writable for the #8596 tests, which move the mocked search
+  // params between renders; the proxy routes those writes through the same
+  // snapshot the page subscribes to, so the a11y keyboard tests and the prune
+  // tests share one source of truth.
+  const search = new Proxy({} as Search, {
+    get: (_target, prop) => snapshot[prop as keyof Search],
+    set: (_target, prop, value) => {
+      snapshot = { ...snapshot, [prop as keyof Search]: value };
+      notify();
+      return true;
+    },
+  });
   return {
     navigate: vi.fn((options: { search?: Search }) => {
       if (options?.search) {
@@ -47,6 +53,7 @@ const router = vi.hoisted(() => {
       };
     },
     getSnapshot: () => snapshot,
+    search,
     reset: () => {
       snapshot = { agentId: "agent-a", sessionId: "s2" };
       notify();
@@ -84,8 +91,31 @@ const SESSIONS: SessionListItem[] = [
 ];
 
 // Mutable so individual tests can serve a stale session list (one the server
-// no longer returns in full), which is the input behind the prune tests.
-const sessionList = vi.hoisted(() => ({ data: [] as SessionListItem[] }));
+// no longer returns in full), which is the input behind the prune tests. The
+// `dataUpdatedAt` stands in for React Query's fetch timestamp, which the
+// session prune compares a tab's open time against (#8596).
+const sessionList = vi.hoisted(() => ({
+  data: [] as SessionListItem[],
+  dataUpdatedAt: 0,
+}));
+// What the agents query would answer: `truncated` models a server page whose
+// tail was cut off, which a prune must not read as "these agents are gone".
+const agentList = vi.hoisted(() => ({
+  data: [] as AgentItem[],
+  truncated: false,
+}));
+// The credential running the page. `principal: null` is the synthetic root
+// shape, so `whoamiPersonName` draws no person and rendering is unchanged
+// from before; the role is what the agent prune gates on (#8596).
+const whoami = vi.hoisted(() => ({
+  data: undefined as { name: string; role: string; principal?: string | null } | undefined,
+}));
+
+vi.mock("../lib/queries/authz", async () => {
+  const actual =
+    await vi.importActual<typeof import("../lib/queries/authz")>("../lib/queries/authz");
+  return { ...actual, useWhoami: () => ({ data: whoami.data }) };
+});
 
 vi.mock("../lib/queries/agents", () => ({
   agentQueries: {
@@ -104,8 +134,17 @@ vi.mock("../lib/queries/agents", () => ({
         Promise.resolve({ used_tokens: 10, max_context_tokens: 100, pct: 10, pressure: "low" }),
     }),
   },
-  useAgents: () => ({ data: AGENTS, refetch: vi.fn(), isFetching: false }),
-  useAgentSessions: () => ({ data: sessionList.data, refetch: vi.fn() }),
+  useAgents: () => ({
+    data: agentList.data,
+    truncated: agentList.truncated,
+    refetch: vi.fn(),
+    isFetching: false,
+  }),
+  useAgentSessions: () => ({
+    data: sessionList.data,
+    dataUpdatedAt: sessionList.dataUpdatedAt,
+    refetch: vi.fn(),
+  }),
   // `ChatPage` resolves the agent avatar through this hook since main grew the
   // avatar picker (#8371). This test neither asserts nor renders avatars, so a
   // stub that reports "no avatar" keeps the component mountable.
@@ -206,11 +245,15 @@ function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0, staleTime: 0 } },
   });
-  return render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <ChatPage />
     </QueryClientProvider>,
   );
+  // `rerender` shares this client: the #8596 session tests re-render the same
+  // tree after moving the mocked search params, and a second client would
+  // reset every query underneath the page.
+  return { ...view, queryClient };
 }
 
 const tabLabels = (tablist: HTMLElement) =>
@@ -221,8 +264,17 @@ describe("chat session tab strip order", () => {
     vi.clearAllMocks();
     vi.stubGlobal("WebSocket", MockWebSocket);
     sessionList.data = SESSIONS;
+    sessionList.dataUpdatedAt = 0;
+    agentList.data = AGENTS;
+    agentList.truncated = false;
+    whoami.data = { name: "root", role: "owner", principal: null };
     router.reset();
+    // The session cache is module-level and survives tests. Keyboard tests
+    // switch sessions faster than the mocked fetch resolves, so a test can
+    // unmount with an empty array stored for s2 — which the hook then serves
+    // as a cache hit, hiding the transcript for every later test.
     clearChatSessionCacheForAgent("agent-a");
+    localStorage.removeItem("librefang.chat.show_hand_agents");
     // The real store: this test is about the order the component renders from
     // `openChatTabs`, which is exactly the array the page subscribes to.
     useUIStore.setState({
@@ -304,6 +356,174 @@ describe("chat session tab strip order", () => {
   });
 });
 
+// Which set the page hands to `pruneChatTabAgents` is the whole question of
+// #8596: the agents list cannot always testify that an agent is gone. The
+// server owner-scopes it for every role below Admin, and past
+// `AGENT_LIST_LIMIT` it is a page whose tail was cut off. These drive the
+// page, not the store action — the store action may prune whatever set it is
+// handed; deciding *when* it is allowed to is the page's business.
+describe("chat tab agent prune (#8596)", () => {
+  const realPruneChatTabAgents = useUIStore.getState().pruneChatTabAgents;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    sessionList.data = SESSIONS;
+    sessionList.dataUpdatedAt = 0;
+    agentList.data = AGENTS;
+    agentList.truncated = false;
+    whoami.data = { name: "root", role: "owner", principal: null };
+    router.search.agentId = "agent-a";
+    router.search.sessionId = "s2";
+    // The agent prune only claims the list is authoritative when hand agents
+    // are included: with them hidden the query returns a subset by design.
+    localStorage.setItem("librefang.chat.show_hand_agents", "1");
+    useUIStore.setState({
+      openChatTabs: { "agent-a": ["s2"], "agent-gone": ["s9"] },
+      chatTabRecency: { "agent-a": ["s2"], "agent-gone": ["s9"] },
+      pruneChatTabAgents: realPruneChatTabAgents,
+    });
+  });
+
+  afterEach(() => {
+    localStorage.removeItem("librefang.chat.show_hand_agents");
+    useUIStore.setState({ pruneChatTabAgents: realPruneChatTabAgents });
+  });
+
+  it("prunes agents missing from a complete, unscoped list (admin/owner)", async () => {
+    const pruneSpy = vi.fn(realPruneChatTabAgents);
+    useUIStore.setState({ pruneChatTabAgents: pruneSpy });
+    renderPage();
+    await screen.findByText("hello there");
+
+    await vi.waitFor(() => expect(pruneSpy).toHaveBeenCalled());
+    expect(pruneSpy).toHaveBeenCalledWith(new Set(["agent-a"]));
+    expect(useUIStore.getState().openChatTabs).toEqual({ "agent-a": ["s2"] });
+  });
+
+  it("keeps tabs when the list is a truncated page", async () => {
+    agentList.truncated = true;
+    const pruneSpy = vi.fn(realPruneChatTabAgents);
+    useUIStore.setState({ pruneChatTabAgents: pruneSpy });
+    renderPage();
+    await screen.findByText("hello there");
+
+    // The missing agent may sit in the page's cut-off tail; a tab is cheap,
+    // a silently dropped one is not.
+    expect(pruneSpy).not.toHaveBeenCalled();
+    expect(useUIStore.getState().openChatTabs).toEqual({
+      "agent-a": ["s2"],
+      "agent-gone": ["s9"],
+    });
+  });
+
+  it("keeps tabs for a non-admin role, whose list is owner-scoped", async () => {
+    whoami.data = { name: "root", role: "user", principal: null };
+    const pruneSpy = vi.fn(realPruneChatTabAgents);
+    useUIStore.setState({ pruneChatTabAgents: pruneSpy });
+    renderPage();
+    await screen.findByText("hello there");
+
+    expect(pruneSpy).not.toHaveBeenCalled();
+    expect(useUIStore.getState().openChatTabs).toEqual({
+      "agent-a": ["s2"],
+      "agent-gone": ["s9"],
+    });
+  });
+
+  it("keeps tabs until whoami says which role is calling", async () => {
+    whoami.data = undefined;
+    const pruneSpy = vi.fn(realPruneChatTabAgents);
+    useUIStore.setState({ pruneChatTabAgents: pruneSpy });
+    renderPage();
+    await screen.findByText("hello there");
+
+    // Role unknown: a late prune is a stale tab, a wrong one is silent loss.
+    expect(pruneSpy).not.toHaveBeenCalled();
+  });
+});
+
+// The session half of #8596: the prune drops tabs the cached session list
+// omits, but a list fetched before the tab was opened never had a chance to
+// include it (sessions are created from other windows, the CLI, or the
+// Sessions page). A tab opened against such a snapshot survives until a fetch
+// that already knew about the visit answers; from then on the list is
+// authoritative again.
+describe("chat tab session prune (#8596)", () => {
+  const realPruneChatTabs = useUIStore.getState().pruneChatTabs;
+  const realPruneChatTabAgents = useUIStore.getState().pruneChatTabAgents;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    agentList.data = AGENTS;
+    agentList.truncated = false;
+    whoami.data = { name: "root", role: "owner", principal: null };
+    router.search.agentId = "agent-a";
+    localStorage.removeItem("librefang.chat.show_hand_agents");
+    // Start on s3, a session the cached snapshot does not contain.
+    router.search.sessionId = "s3";
+    sessionList.data = SESSIONS.filter((session) => session.session_id !== "s3");
+    sessionList.dataUpdatedAt = 1_000;
+    useUIStore.setState({
+      openChatTabs: { "agent-a": ["s1", "s2", "s3"] },
+      chatTabRecency: {},
+      pruneChatTabs: realPruneChatTabs,
+    });
+  });
+
+  afterEach(() => {
+    useUIStore.setState({
+      pruneChatTabs: realPruneChatTabs,
+      pruneChatTabAgents: realPruneChatTabAgents,
+    });
+  });
+
+  it("keeps a tab opened after the cached list was fetched, until a later list omits it", async () => {
+    const pruneSpy = vi.fn(realPruneChatTabs);
+    useUIStore.setState({ pruneChatTabs: pruneSpy });
+    const lastValid = () => {
+      const calls = pruneSpy.mock.calls;
+      return calls.length > 0 ? calls[calls.length - 1][1] : undefined;
+    };
+
+    const { rerender, queryClient } = renderPage();
+    await screen.findByText("hello there");
+
+    // The visit lands after the snapshot: s3 must be kept, not treated as a
+    // session the server no longer has.
+    await vi.waitFor(() => expect(lastValid()?.has("s3")).toBe(true));
+    expect(useUIStore.getState().openChatTabs["agent-a"]).toEqual(["s1", "s2", "s3"]);
+
+    // Switching away is the moment the old code dropped s3; the snapshot
+    // still predates the visit, so it must survive this prune too.
+    router.search.sessionId = "s2";
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <ChatPage />
+      </QueryClientProvider>,
+    );
+    await vi.waitFor(() => {
+      const valid = lastValid();
+      expect(valid?.has("s2")).toBe(true);
+      expect(valid?.has("s3")).toBe(true);
+    });
+    expect(useUIStore.getState().openChatTabs["agent-a"]).toEqual(["s1", "s2", "s3"]);
+
+    // A fresh snapshot that answered after the visit and still omits s3 is
+    // the server's answer: now the tab goes.
+    sessionList.dataUpdatedAt = Date.now() + 1_000;
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <ChatPage />
+      </QueryClientProvider>,
+    );
+    await vi.waitFor(() =>
+      expect(useUIStore.getState().openChatTabs["agent-a"]).toEqual(["s1", "s2"]),
+    );
+  });
+});
+
 // Issue #8597 — the strip carries `role="tablist"` but none of the tab
 // semantics behind it: no panel linkage, no roving tabindex, no arrow keys,
 // the new-session button inside the list, and a close target under 24 px.
@@ -312,6 +532,10 @@ describe("chat session tab strip semantics and keyboard model", () => {
     vi.clearAllMocks();
     vi.stubGlobal("WebSocket", MockWebSocket);
     sessionList.data = SESSIONS;
+    sessionList.dataUpdatedAt = 0;
+    agentList.data = AGENTS;
+    agentList.truncated = false;
+    whoami.data = { name: "root", role: "owner", principal: null };
     router.reset();
     // The session cache is module-level and survives tests. Keyboard tests
     // switch sessions faster than the mocked fetch resolves, so a test can
