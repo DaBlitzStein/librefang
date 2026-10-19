@@ -4691,6 +4691,62 @@ mod tests {
         assert_eq!(wire["thinking"], serde_json::json!({"type": "enabled"}));
     }
 
+    /// #8616 + #8639: the catalog-declared policy path and the
+    /// every-historical-turn echo must compose. The replayed text-only
+    /// assistant turn keeps its Thinking block on the wire, and the requested
+    /// `xhigh` is coerced into the declared set before it is attached to the
+    /// V4 request.
+    #[test]
+    fn deepseek_v4_policy_coercion_and_full_history_echo_compose() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let mut req =
+            build_catalog_policy_test_request("deepseek-v4-pro", ReasoningEchoPolicy::Echo);
+        // Text-only historical turn (no tool_calls) followed by the user turn
+        // that triggers the replay, as in the #8639 production repro.
+        let assistant = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Thinking {
+                    thinking: "prior reasoning".to_string(),
+                    provider_metadata: None,
+                },
+                ContentBlock::Text {
+                    text: "done".to_string(),
+                    provider_metadata: None,
+                },
+            ]),
+            pinned: false,
+            timestamp: None,
+        };
+        req.messages = std::sync::Arc::new(vec![assistant, Message::user("next")]);
+        req.reasoning_policy.supported_efforts = vec!["low".to_string(), "high".to_string()];
+        req.thinking = Some(ThinkingConfig {
+            reasoning_effort: Some(ReasoningMode::new("xhigh").unwrap()),
+            ..Default::default()
+        });
+
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert_eq!(
+            assistant_msg.reasoning_content.as_deref(),
+            Some("prior reasoning"),
+            "Echo policy must still replay every historical turn's reasoning"
+        );
+        let wire = serde_json::to_value(&oai).expect("serialize");
+        assert_eq!(
+            wire["reasoning_effort"], "high",
+            "xhigh must be coerced into the declared set: {wire}"
+        );
+        assert_eq!(wire["thinking"], serde_json::json!({"type": "enabled"}));
+    }
+
     /// An explicit mode wins over the `budget_tokens` bucket. `budget_tokens:
     /// 10_000` alone derives `medium`; asking for `low` must send `low`.
     #[test]
