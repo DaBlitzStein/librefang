@@ -1154,6 +1154,24 @@
       "manifest_history": "매니페스트 기록",
       "manifest_history_load_err": "매니페스트 기록을 불러오지 못했습니다.",
       "no_history": "아직 기록된 구성 변경 사항이 없습니다.",
+      "manifest_change_source": {
+        "api": "API edit",
+        "model": "Model change",
+        "skills": "Skills change",
+        "workspaces": "Workspaces change",
+        "channels": "Channels change",
+        "routing": "Routing change",
+        "schedule": "Schedule change",
+        "tool-filters": "Tool filters change",
+        "mcp-servers": "MCP servers change",
+        "provisioning": "Provisioned",
+        "restore": "Restored",
+        "suspend": "Suspended",
+        "resume": "Resumed",
+        "suspend-persist-failed": "Suspend write failed",
+        "resume-persist-failed": "Resume write failed",
+        "unknown": "Unknown source"
+      },
       "restore_title": "이 버전으로 복원할까요?",
       "restore_confirm": "'{{name}}'을(를) {{timestamp}}에 저장된 버전({{source}})으로 복원할까요? 에이전트의 현재 agent.toml을 덮어씁니다. 복원 후 기록되는 스냅샷에는 대체된 내용이 아니라 복원된 내용이 담깁니다.",
       "restore_btn": "복원",
@@ -3928,11 +3946,11 @@
       "help": "키보드 단축키",
       "help_title": "탭 단축키",
       "help_switch": "탭 전환",
-      "help_switch_key": "클릭",
+      "help_switch_key": "클릭 / ← →",
       "help_rename": "탭 이름 바꾸기",
       "help_rename_key": "두 번 클릭",
       "help_close": "탭 닫기",
-      "help_close_key": "마우스 가운데 버튼 클릭 / ✕",
+      "help_close_key": "마우스 가운데 버튼 / ✕ / Del",
       "help_new": "새 탭",
       "help_new_key": "＋"
     },
@@ -4321,7 +4339,10 @@
     "save_failed": "그룹을 저장하지 못했습니다",
     "delete_failed": "그룹을 삭제하지 못했습니다",
     "member_add_failed": "구성원을 추가하지 못했습니다",
-    "member_remove_failed": "구성원을 제거하지 못했습니다"
+    "member_remove_failed": "구성원을 제거하지 못했습니다",
+    "load_failed": "그룹을 불러올 수 없습니다",
+    "no_match_title": "일치하는 그룹 없음",
+    "no_match_desc": "이름, 설명, 멤버 또는 역할이 검색어와 일치하는 그룹이 없습니다."
   },
   "userBudget": {
     "fields": {
@@ -4696,8 +4717,11 @@
   },
   "agentTypes": {
     "change_source": {
+      "agent-tool": "Agent tool",
       "create": "Created",
       "dashboard": "Dashboard edit",
+      "pre-registry-restore": "Pre-restore snapshot",
+      "registry-restore": "Restored from registry",
       "restore": "Restored",
       "toml": "Raw TOML edit",
       "unknown": "Unknown source"

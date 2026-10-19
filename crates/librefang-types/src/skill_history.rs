@@ -21,7 +21,7 @@
 /// An operator filtering the history can therefore tell an interactive edit
 /// from an automated one.
 ///
-/// The schema default `unknown` (see `migration::migrate_v64`) covers rows
+/// The schema default `unknown` (see `migration::migrate_v65`) covers rows
 /// written by a writer that does not classify its persist; it deliberately has
 /// no variant here because no surface should *choose* it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
