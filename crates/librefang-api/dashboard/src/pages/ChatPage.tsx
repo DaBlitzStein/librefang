@@ -3846,6 +3846,20 @@ export function ChatPage() {
   // tabindex on the first tab so the strip is never keyboard-unreachable.
   const rovingSessionId =
     activeSessionId && agentTabs.includes(activeSessionId) ? activeSessionId : agentTabs[0];
+  // The panel belongs to the selected tab. When the active session has no tab
+  // (a prune window), nothing in the strip is selected, so fall back to the
+  // roving tab: the label must always point at an element that exists.
+  const panelLabelledBySessionId =
+    activeSessionId && agentTabs.includes(activeSessionId) ? activeSessionId : rovingSessionId;
+
+  // Session ids whose tab was opened while the loaded session list could not
+  // have contained them (#8596): the list on screen was fetched before the
+  // session existed — created in another window, by the CLI, or reached from
+  // the Sessions page — so its silence must not be read as "the server no
+  // longer has this session". Per agent and session id, the time the tab was
+  // opened; the session prune below only trusts a list for visits that
+  // predate that list's own fetch, i.e. that the list had a chance to answer.
+  const unconfirmedTabOpenedAt = useRef<Map<string, Map<string, number>>>(new Map());
 
   // Session ids whose tab was opened while the loaded session list could not
   // have contained them (#8596): the list on screen was fetched before the
@@ -4420,6 +4434,9 @@ export function ChatPage() {
                       role="tab"
                       aria-selected={isActive}
                       aria-controls={CHAT_SESSION_PANEL_ID}
+                      // The close button inside the tab is presentational to
+                      // AT, so Delete on the tab is the announced close path.
+                      aria-keyshortcuts="Delete"
                       tabIndex={isRoving ? 0 : -1}
                       onClick={() => { if (!isActive) void handleSwitchSession(sessionId); }}
                       onKeyDown={(event) => handleTabKeyDown(event, sessionId)}
@@ -4490,7 +4507,9 @@ export function ChatPage() {
             id={showSessionTabs ? CHAT_SESSION_PANEL_ID : undefined}
             role={showSessionTabs ? "tabpanel" : undefined}
             aria-labelledby={
-              showSessionTabs && rovingSessionId ? chatSessionTabId(rovingSessionId) : undefined
+              showSessionTabs && panelLabelledBySessionId
+                ? chatSessionTabId(panelLabelledBySessionId)
+                : undefined
             }
             className="flex-1 min-h-0 overflow-y-auto p-2 sm:p-4 scrollbar-thin"
             style={{ zoom: chatScale }}
