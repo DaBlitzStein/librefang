@@ -982,7 +982,9 @@ fn is_likely_i18n_key_literal(
 ) -> bool {
     // Not i18n keys: literals whose leading segment collides with a real key prefix.
     // `agent-types` is the operator agent-type directory name (`~/.librefang/agent-types`), not a message id.
-    const TECHNICAL_FALSE_POSITIVES: &[&str] = &["daemon-reload", "agent-types"];
+    // `mcp-servers` is a `manifest_versions.change_source` token in `MANIFEST_CHANGE_SOURCES`
+    // (`screens/agents.rs`, #8604); its label lives at `tui-agents-manifest-source-mcp-servers`.
+    const TECHNICAL_FALSE_POSITIVES: &[&str] = &["daemon-reload", "agent-types", "mcp-servers"];
 
     let Some((prefix, _)) = literal.split_once('-') else {
         return false;
@@ -1014,6 +1016,11 @@ fn is_dynamic_i18n_key(key: &str) -> bool {
         // `collect_dynamic_required_locale_keys` derives the exact keys from that const and
         // requires them in every locale.
         || key.starts_with("tui-templates-source-")
+        // The manifest-source labels are one key per token in the store's closed inventory, built
+        // from `MANIFEST_CHANGE_SOURCES` in `screens/agents.rs` (#8604) rather than spelled out in
+        // callers, so no single literal carries these names. `collect_dynamic_required_locale_keys`
+        // derives the exact 16 from that const and requires them in every locale.
+        || key.starts_with("tui-agents-manifest-source-")
 }
 
 fn extract_const_array_string_literals(content: &str, const_name: &str) -> Vec<String> {
@@ -1067,6 +1074,14 @@ fn collect_dynamic_required_locale_keys(manifest_dir: &Path) -> std::collections
         if matches!(literal.as_str(), "trending" | "popular" | "recent") {
             keys.insert(format!("tui-skills-sort-{literal}"));
         }
+    }
+
+    // The manifest-source labels (#8604) are built as `tui-agents-manifest-source-<token>` from
+    // this const, so the exact key set follows the token inventory: adding a token without adding
+    // its key in a locale fails `test_locales_cover_used_i18n_keys` instead of rendering `[key]`.
+    let agents_rs = fs::read_to_string(manifest_dir.join("src/tui/screens/agents.rs")).unwrap();
+    for token in extract_const_array_string_literals(&agents_rs, "MANIFEST_CHANGE_SOURCES") {
+        keys.insert(format!("tui-agents-manifest-source-{token}"));
     }
 
     keys
