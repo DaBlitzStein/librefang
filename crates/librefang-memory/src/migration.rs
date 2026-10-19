@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 65;
+const SCHEMA_VERSION: u32 = 64;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -328,25 +328,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // This wanted to be 62 but #7974 took that number first, so it renumbers
     // to 63 rather than skipping past it — same rule as the note above.
     run_step!(63, migrate_v63);
-    // v64 (#8591): per-session reasoning-mode override. Mirrors v39's
-    // `model_override` exactly — a nullable TEXT token, NULL meaning
-    // "inherit the agent/global level", which is what every pre-v64 row
-    // means, so no backfill is needed. The value is the open-vocabulary
-    // effort token (e.g. "xhigh", "medium", "minimal"); it is validated at
-    // the API boundary and stored as given.
+
+    // v64: indexes for the dashboard's polled listings (sessions by `created_at`, memories by `created_at`) and the `sessions_fts_map` rowid map that lets `save_session` replace its FTS row without scanning the whole index.
     run_step!(64, migrate_v64);
 
-    // v65 (#8021): skill version history. Full `skill.toml` +
-    // `prompt_context.md` snapshots so operators can see what changed over
-    // time and restore a prior state.
-    //
-    // The skill-history branch originally claimed v64, but the
-    // reasoning-effort PR (#8616) merged first and kept it, so this step
-    // renumbered to v65 on landing — same rule as the v62/v63 notes above:
-    // the ladder must stay contiguous, because `run_step!` gates on
-    // `current_version < N` read once at boot and a database that reaches N
-    // via a binary with a hole below it never runs the skipped step.
-    run_step!(65, migrate_v65);
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
     // applied DDL without recording its audit row — operator tooling
@@ -1642,77 +1627,62 @@ fn migrate_v63(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
     Ok(())
 }
-/// Version 64: add a nullable `reasoning_effort` TEXT column to `sessions`
-/// (#8591).
+
+/// v64: indexes and an FTS rowid map for hot read and write paths.
 ///
-/// The per-session rung of the reasoning resolution order
-/// (frame > session > agent > global > compiled default), shaped exactly like
-/// v39's `model_override`: a nullable token read back into
-/// [`Session::reasoning_effort`](crate::session::Session::reasoning_effort) and
-/// applied per turn by the kernel dispatchers. It is **not** written by
-/// `save_session`, for the same reason `model_override` is not — a routine
-/// history save must not clear a pin; only
-/// `set_session_reasoning_effort` writes it.
+/// `sessions(created_at)` serves `list_sessions_paginated`'s `ORDER BY created_at DESC LIMIT`, which `GET /api/sessions` runs on every dashboard poll, and the 24h window of `agents_stats_24h_bulk`.
+/// Without it every page was a full scan of `sessions` (whose rows carry the message blob) followed by a temp b-tree sort.
+/// `sessions(agent_id, created_at)` turns `agent_stats_24h`'s per-agent window counts into range seeks.
+/// `memories(deleted, agent_id, created_at)` and `memories(deleted, created_at)` let `SemanticStore::list_page` read one page in order instead of visiting every live memory and sorting.
 ///
-/// `NULL` means "inherit", which is exactly what every pre-v64 row means, so
-/// the column needs no backfill. The text is the provider's own effort token
-/// (`none` / `low` / `medium` / `high` / `xhigh` / `max` / `minimal`, or
-/// whatever the model's catalog entry declares), validated at the API
-/// boundary rather than here so an existing row can never fail to load.
+/// `sessions_fts_map` records which `sessions_fts` rowid holds each session's index row.
+/// `session_id` is `UNINDEXED` in the FTS5 table and an FTS5 table has no secondary index, so `DELETE FROM sessions_fts WHERE session_id = ?` is a full scan of the index; `save_session` ran it on every save, holding the write lock for time proportional to the total number of sessions.
+/// With the map, the row is addressed by rowid.
+/// Duplicate FTS rows for one session are collapsed first so the backfill maps every session to its only row, and the `AFTER DELETE` trigger drops a session's map entry with the session, whichever delete path removes it.
+/// Only rows of live sessions are mapped: an orphan FTS row's session can never be deleted, so its map entry would never be dropped by the trigger (`reconcile_fts_index` removes such orphans at boot).
+/// A stale or missing entry is harmless: `save_session` checks the mapped row still belongs to the session and falls back to the scan otherwise.
 fn migrate_v64(conn: &Connection) -> Result<(), rusqlite::Error> {
-    // `sessions` is created by `migrate_v1`, so it exists on every database
-    // that reaches this step; `try_column_exists` is the SQLite `ADD COLUMN
-    // IF NOT EXISTS` stand-in.
-    if !try_column_exists(conn, "sessions", "reasoning_effort")? {
-        conn.execute(
-            "ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT DEFAULT NULL",
-            [],
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
+        CREATE INDEX IF NOT EXISTS idx_sessions_agent_created ON sessions(agent_id, created_at);
+        CREATE TABLE IF NOT EXISTS sessions_fts_map (
+            session_id TEXT PRIMARY KEY,
+            fts_rowid  INTEGER NOT NULL
+        ) WITHOUT ROWID;
+        CREATE TRIGGER IF NOT EXISTS sessions_fts_map_ad AFTER DELETE ON sessions BEGIN
+            DELETE FROM sessions_fts_map WHERE session_id = old.id;
+        END;
+        ",
+    )?;
+    // Every real database has both of these from v1 / v12, but the guards keep the step honest against a database stamped above the step that created them (the ladder tests build such schemas by hand).
+    if try_column_exists(conn, "memories", "deleted")? {
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_memories_agent_created ON memories(deleted, agent_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(deleted, created_at);
+            ",
+        )?;
+    }
+    if try_table_exists(conn, "sessions_fts")? {
+        conn.execute_batch(
+            "
+            DELETE FROM sessions_fts
+                WHERE rowid NOT IN (SELECT MAX(rowid) FROM sessions_fts GROUP BY session_id);
+            INSERT OR REPLACE INTO sessions_fts_map (session_id, fts_rowid)
+                SELECT session_id, rowid FROM sessions_fts
+                WHERE session_id IN (SELECT id FROM sessions);
+            ",
         )?;
     }
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (64, datetime('now'), 'Add sessions.reasoning_effort for per-session reasoning-effort pin (#8591)')",
+         VALUES (64, datetime('now'), 'sessions/memories created_at indexes + sessions_fts_map rowid map')",
         [],
     )?;
     Ok(())
 }
 
-/// v65 (#8021): skill version history.
-///
-/// Records full `skill.toml` + `prompt_context.md` snapshots per skill so the
-/// dashboard can show how an installed skill changed over time and restore a
-/// prior state. Keyed by `skill_name` alone: v1 tracks skills under the global
-/// `~/.librefang/skills/` root; workspace and hand-scoped skills are out of
-/// scope until a scope column exists.
-///
-/// Pure `CREATE TABLE IF NOT EXISTS` + fresh index, so re-running is a no-op.
-/// The index is `(skill_name, timestamp DESC)` because every read is scoped to
-/// one skill and ordered newest-first; the trim and dedup-run
-/// `ORDER BY timestamp DESC, id DESC LIMIT 1` against the same prefix.
-///
-/// The branch originally claimed v64 (`sessions.reasoning_effort` is #8616's,
-/// which landed first), so this migration renumbered to v65 when it landed.
-fn migrate_v65(conn: &Connection) -> Result<(), rusqlite::Error> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS skill_versions (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            skill_name      TEXT NOT NULL,
-            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
-            manifest_toml   TEXT NOT NULL,
-            prompt_context  TEXT NOT NULL DEFAULT '',
-            author          TEXT NOT NULL DEFAULT '',
-            change_source   TEXT NOT NULL DEFAULT 'unknown'
-        );
-        CREATE INDEX IF NOT EXISTS idx_skill_versions_name
-            ON skill_versions(skill_name, timestamp DESC);",
-    )?;
-    conn.execute(
-        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (65, datetime('now'), 'Skill version history table (#8021)')",
-        [],
-    )?;
-    Ok(())
-}
 /// Rebuild `memories_fts` from `memories`, dropping whatever was there.
 ///
 /// Idempotent and safe to call at any time: the index is a pure derivative of
@@ -4668,83 +4638,6 @@ mod tests {
         assert!(cleared.is_none(), "clearing model_override to NULL failed");
     }
 
-    /// Regression for #8591: v64 adds `reasoning_effort TEXT` to `sessions`
-    /// (nullable, so pre-v64 rows inherit), round-trips an open-vocabulary
-    /// token, and is idempotent on rerun.
-    #[test]
-    fn migrate_v64_adds_reasoning_effort_column_nullable_and_round_trips() {
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-
-        assert!(
-            column_exists(&conn, "sessions", "reasoning_effort"),
-            "sessions.reasoning_effort column missing after migrate_v64"
-        );
-
-        // Minimal row: reasoning_effort must default to NULL.
-        let sid = uuid::Uuid::new_v4().to_string();
-        let aid = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO sessions (id, agent_id, messages, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))",
-            rusqlite::params![sid, aid, b"[]" as &[u8]],
-        )
-        .unwrap();
-        let stored: Option<String> = conn
-            .query_row(
-                "SELECT reasoning_effort FROM sessions WHERE id = ?1",
-                [&sid],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(
-            stored.is_none(),
-            "reasoning_effort must default to NULL for pre-migration rows: got {stored:?}"
-        );
-
-        // Open-vocabulary token round trip — `xhigh` is exactly the kind of
-        // rung the four-value enum could not store.
-        conn.execute(
-            "UPDATE sessions SET reasoning_effort = ?1 WHERE id = ?2",
-            rusqlite::params!["xhigh", sid],
-        )
-        .unwrap();
-        let stored: Option<String> = conn
-            .query_row(
-                "SELECT reasoning_effort FROM sessions WHERE id = ?1",
-                [&sid],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            stored.as_deref(),
-            Some("xhigh"),
-            "reasoning_effort round-trip failed"
-        );
-
-        // Clear back to NULL.
-        conn.execute(
-            "UPDATE sessions SET reasoning_effort = NULL WHERE id = ?1",
-            [&sid],
-        )
-        .unwrap();
-        let cleared: Option<String> = conn
-            .query_row(
-                "SELECT reasoning_effort FROM sessions WHERE id = ?1",
-                [&sid],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(
-            cleared.is_none(),
-            "clearing reasoning_effort to NULL failed"
-        );
-
-        // Rerun the step directly: `try_column_exists` must make it a no-op
-        // rather than a duplicate-column error.
-        migrate_v64(&conn).expect("migrate_v64 must be idempotent");
-    }
-
     /// Audit: sessions-missing-index. After v41 both
     /// `idx_sessions_agent_updated` (composite on sessions) and
     /// `idx_audit_agent_timestamp` (composite on audit_entries) must
@@ -5290,88 +5183,69 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // v65: skill version history (#8021)
+    // v64: created_at indexes + sessions_fts_map
     // ---------------------------------------------------------------------
 
-    /// The table has to arrive with the columns the store reads, on a database
-    /// that already holds skills (a migration that only works on a fresh file
-    /// has never run where it matters). A row written before the snapshot
-    /// exists is impossible by construction, so this only pins the shape.
+    /// An upgraded database must come out of v64 with exactly one FTS row per session and every one of them mapped, so `save_session` can address it by rowid.
+    /// Duplicate rows left by older drift are collapsed to the newest; otherwise the mapped delete would leave the other copy searchable.
     #[test]
-    fn migrate_v65_creates_skill_versions_with_the_shape_the_store_reads() {
+    fn migrate_v64_dedupes_and_maps_existing_fts_rows() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
-
-        assert!(
-            try_table_exists(&conn, "skill_versions").unwrap(),
-            "v65 must create skill_versions"
-        );
-        for column in [
-            "id",
-            "skill_name",
-            "timestamp",
-            "manifest_toml",
-            "prompt_context",
-            "author",
-            "change_source",
-        ] {
-            assert!(
-                column_exists(&conn, "skill_versions", column),
-                "skill_versions.{column} missing after migrate_v65"
-            );
-        }
-
-        // The default covers rows written by a writer that does not classify
-        // itself, and it has to be the same `unknown` the schema comment names.
-        conn.execute(
-            "INSERT INTO skill_versions (skill_name, manifest_toml) VALUES ('alpha', 'x')",
-            [],
+        // Simulate a pre-v64 database: no map, one session with two FTS rows, one with a single row, and an orphan FTS row whose session is gone.
+        conn.execute_batch(
+            "DROP TRIGGER sessions_fts_map_ad;
+             DROP TABLE sessions_fts_map;
+             INSERT INTO sessions (id, agent_id, messages, created_at, updated_at) VALUES ('s1', 'a', x'90', '2026-01-01', '2026-01-01');
+             INSERT INTO sessions (id, agent_id, messages, created_at, updated_at) VALUES ('s2', 'a', x'90', '2026-01-01', '2026-01-01');
+             INSERT INTO sessions_fts (session_id, agent_id, content) VALUES ('s1', 'a', 'old');
+             INSERT INTO sessions_fts (session_id, agent_id, content) VALUES ('s1', 'a', 'new');
+             INSERT INTO sessions_fts (session_id, agent_id, content) VALUES ('s2', 'a', 'only');
+             INSERT INTO sessions_fts (session_id, agent_id, content) VALUES ('gone', 'a', 'orphan');",
         )
         .unwrap();
-        let (prompt, author, source): (String, String, String) = conn
+
+        migrate_v64(&conn).unwrap();
+        migrate_v64(&conn).expect("v64 must survive a rerun");
+
+        let s1: Vec<(i64, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT rowid, content FROM sessions_fts WHERE session_id = 's1'")
+                .unwrap();
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(s1.len(), 1, "duplicates must be collapsed: {s1:?}");
+        assert_eq!(s1[0].1, "new", "the newest row is the one kept");
+        let mapped: i64 = conn
             .query_row(
-                "SELECT prompt_context, author, change_source FROM skill_versions \
-                 WHERE skill_name = 'alpha'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(prompt, "");
-        assert_eq!(author, "");
-        assert_eq!(source, "unknown");
-    }
-
-    #[test]
-    fn migrate_v65_is_idempotent_and_records_its_audit_row_once() {
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-
-        // The runner can legitimately replay a step after an interrupted
-        // upgrade; `CREATE TABLE/INDEX IF NOT EXISTS` is what makes the rerun
-        // a no-op. A database that has climbed past 65 through another caller,
-        // or a hand-run replay, issues it directly.
-        migrate_v65(&conn).expect("v65 must survive a rerun");
-        assert!(try_table_exists(&conn, "skill_versions").unwrap());
-
-        let audit_rows: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM migrations WHERE version = 65",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(audit_rows, 1, "v65 must record exactly one migrations row");
-
-        let description: String = conn
-            .query_row(
-                "SELECT description FROM migrations WHERE version = 65",
+                "SELECT fts_rowid FROM sessions_fts_map WHERE session_id = 's1'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(
-            description.contains("Skill version history"),
-            "version 65 must describe the skill-history step, got: {description}"
+        assert_eq!(mapped, s1[0].0);
+        let mapped_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions_fts_map", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mapped_count, 2,
+            "only live sessions are mapped; an orphan's entry would never be dropped by the delete trigger"
         );
+        for index in [
+            "idx_sessions_created",
+            "idx_sessions_agent_created",
+            "idx_memories_agent_created",
+            "idx_memories_created",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [index],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{index} must exist after v64");
+        }
     }
 }

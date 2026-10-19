@@ -626,7 +626,7 @@ pub async fn create_alias(
 pub async fn delete_alias(
     State(state): State<Arc<AppState>>,
     Path(alias): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // Snapshot the mapped model ID before removing so we can restore it if
     // the subsequent persist fails — keeps the in-memory catalog consistent
     // with disk across failure paths.
@@ -638,7 +638,8 @@ pub async fn delete_alias(
     });
     if !removed {
         return ApiErrorResponse::not_found(format!("Alias '{}' not found", alias))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     let aliases_path = state.kernel.home_dir().join("aliases.toml");
@@ -654,10 +655,12 @@ pub async fn delete_alias(
                 catalog.add_alias(&alias_for_rollback, &model_id);
             });
         }
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e)
+            .into_json_tuple()
+            .into_response();
     }
 
-    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[utoipa::path(get, path = "/api/models/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Model details", body = crate::types::JsonObject)))]
@@ -875,14 +878,16 @@ pub async fn set_model_overrides(
 pub async fn delete_model_overrides(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let overrides_path = state
         .kernel
         .home_dir()
         .join("data")
         .join("model_overrides.json");
     let id_for_closure = id.clone();
+    let mut previous = None;
     state.kernel.model_catalog_update(&mut |catalog| {
+        previous = catalog.get_overrides(&id_for_closure).cloned();
         let _ = catalog.remove_overrides(&id_for_closure);
     });
     if let Err(e) = state
@@ -890,9 +895,19 @@ pub async fn delete_model_overrides(
         .model_catalog_load()
         .save_overrides(&overrides_path)
     {
+        // Same contract as `set_model_overrides`: a removal that did not reach disk would silently come back on the next restart, so restore the in-memory entry and report the failure instead of a 204.
         tracing::warn!("Failed to persist model overrides: {e}");
+        if let Some(prev) = previous {
+            let id_for_rollback = id.clone();
+            state.kernel.model_catalog_update(&mut move |catalog| {
+                catalog.set_overrides(id_for_rollback.clone(), prev.clone());
+            });
+        }
+        return ApiErrorResponse::internal_scrub(e)
+            .into_json_tuple()
+            .into_response();
     }
-    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Attach local-provider probe results to a JSON entry and optionally merge
@@ -1691,7 +1706,7 @@ fn aliases_targeting(
 pub async fn remove_custom_model(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // Keep every removed entry so all of them can be restored if the subsequent persist fails, which keeps the in-memory catalog consistent with disk across failure paths.
     // The aliases pointing at this ID are kept too, because `remove_custom_model` prunes the ones it leaves without a target.
     let model_id_for_closure = model_id.clone();
@@ -1703,7 +1718,8 @@ pub async fn remove_custom_model(
     });
     if removed.is_empty() {
         return ApiErrorResponse::not_found(format!("Custom model '{}' not found", model_id))
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     let custom_path = state
@@ -1725,10 +1741,12 @@ pub async fn remove_custom_model(
                 catalog.add_alias(alias, target);
             }
         });
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e)
+            .into_json_tuple()
+            .into_response();
     }
 
-    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
+    StatusCode::NO_CONTENT.into_response()
 }
 
 // ── A2A (Agent-to-Agent) Protocol Endpoints ─────────────────────────
@@ -2111,13 +2129,15 @@ pub async fn set_provider_key(
 pub async fn delete_provider_key(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // Shape-check the path-supplied provider name BEFORE we derive an env
     // var from it. Mirrors `set_provider_key`; without this gate an admin
     // could ask the daemon to `remove_var("STRIPE_API_KEY")` (etc.) on the
     // live process. See `docs/issues/set-provider-key-arbitrary-names.md`.
     if let Err(msg) = crate::validation::check_provider_name_shape(&name) {
-        return ApiErrorResponse::bad_request(msg).into_json_tuple();
+        return ApiErrorResponse::bad_request(msg)
+            .into_json_tuple()
+            .into_response();
     }
 
     let env_var = {
@@ -2132,7 +2152,9 @@ pub async fn delete_provider_key(
                 // Custom/unknown provider — derive env var from convention.
                 let derived = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
                 if let Err(msg) = crate::validation::check_derived_env_var(&derived) {
-                    return ApiErrorResponse::bad_request(msg).into_json_tuple();
+                    return ApiErrorResponse::bad_request(msg)
+                        .into_json_tuple()
+                        .into_response();
                 }
                 derived
             }
@@ -2141,13 +2163,16 @@ pub async fn delete_provider_key(
 
     if env_var.is_empty() {
         return ApiErrorResponse::bad_request("Provider does not require an API key")
-            .into_json_tuple();
+            .into_json_tuple()
+            .into_response();
     }
 
     // Remove from secrets.env
     let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = remove_secret_env(&secrets_path, &env_var) {
-        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
+        return ApiErrorResponse::internal_scrub(e)
+            .into_json_tuple()
+            .into_response();
     }
 
     // Remove from process environment. `std::env::remove_var` carries the
@@ -2172,7 +2197,7 @@ pub async fn delete_provider_key(
         });
     }
 
-    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// POST /api/providers/{name}/enable — Re-enable a previously suppressed
