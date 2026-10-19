@@ -5685,7 +5685,7 @@ mod tests {
         {
             let conn = pool.get().unwrap();
             run_migrations(&conn).unwrap();
-            conn.execute("DELETE FROM migrations WHERE version = 65", [])
+            conn.execute("DELETE FROM migrations WHERE version > 64", [])
                 .unwrap();
             conn.execute("ALTER TABLE sessions DROP COLUMN reasoning_effort", [])
                 .unwrap();
@@ -5716,8 +5716,8 @@ mod tests {
             let conn = pool.get().unwrap();
             run_migrations(&conn).unwrap();
             simulate_pre_renumber_footprint(&conn, true);
-            // The pre-renumber build had no v65 audit row.
-            conn.execute("DELETE FROM migrations WHERE version = 65", [])
+            // The pre-renumber build had no v65/v66 audit rows.
+            conn.execute("DELETE FROM migrations WHERE version > 64", [])
                 .unwrap();
             conn.pragma_update(None, "user_version", 64i64).unwrap();
             assert!(
