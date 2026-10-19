@@ -873,12 +873,24 @@ pub async fn patch_session_reasoning(
     // vocabulary is declared per model in the catalog, so rejecting an
     // unknown-but-well-formed token here would reject exactly the rungs
     // (#8591) this endpoint exists to set.
-    if let Some(token) = reasoning_effort {
-        if let Err(e) = librefang_types::config::ReasoningMode::new(token) {
-            return ApiErrorResponse::bad_request(t.t_args("api-error-generic", &[("error", &e)]))
+    //
+    // Keep the *validated* value, not the raw slice: `ReasoningMode::new`
+    // trims surrounding whitespace, and `" high "` must be stored (and echoed)
+    // as `high` rather than bypassing the normalisation every other wire path
+    // applies.
+    let reasoning_effort: Option<librefang_types::config::ReasoningMode> = match reasoning_effort {
+        Some(token) => match librefang_types::config::ReasoningMode::new(token) {
+            Ok(mode) => Some(mode),
+            Err(e) => {
+                return ApiErrorResponse::bad_request(
+                    t.t_args("api-error-generic", &[("error", &e)]),
+                )
                 .into_json_tuple();
-        }
-    }
+            }
+        },
+        None => None,
+    };
+    let reasoning_effort = reasoning_effort.as_ref().map(|m| m.as_str());
 
     // Verify session exists before writing (same contract as /model).
     match state.kernel.memory_substrate().get_session(session_id) {
