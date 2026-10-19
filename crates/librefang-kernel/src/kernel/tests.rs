@@ -4114,6 +4114,114 @@ async fn session_model_override_beats_model_selection_on_both_paths() {
     kernel.shutdown();
 }
 
+/// A per-session reasoning pin (#8591) must reach the wire on the streaming
+/// dispatch path, not just the blocking one. Mirrors
+/// [`session_model_override_beats_model_selection_on_both_paths`]: the session
+/// row is seeded, the pin is written through the same substrate update the
+/// `PATCH /api/sessions/{id}/reasoning` route uses, and the streamed turn must
+/// carry the pin — not the agent-level `[thinking]` default it overrides.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_reasoning_effort_pin_reaches_the_streaming_path() {
+    use librefang_memory::session::Session as MemSession;
+    use librefang_types::config::{ReasoningMode, ThinkingConfig};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let backend = MockServer::start().await;
+    // OpenAI-compatible SSE: one content delta, a finish frame, then [DONE].
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\
+             data: [DONE]\n",
+            "text/event-stream",
+        ))
+        .mount(&backend)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"));
+    kernel.set_self_handle();
+
+    // An unrecognised provider plus a custom `base_url` builds the
+    // OpenAI-compatible driver against the mock without a credential. The
+    // agent level pins `low`; the session pin must win.
+    let mut manifest = test_manifest("reasoning-pin", "session reasoning precedence", vec![]);
+    manifest.model.provider = "reasoning-test".to_string();
+    manifest.model.model = "mock-reasoning-model".to_string();
+    manifest.model.base_url = Some(backend.uri());
+    manifest.thinking = Some(ThinkingConfig {
+        reasoning_effort: Some(ReasoningMode::low()),
+        ..Default::default()
+    });
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+    let session_id = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry")
+        .session_id;
+    kernel
+        .memory
+        .substrate
+        .save_session(&MemSession {
+            id: session_id,
+            agent_id,
+            parent_session_id: None,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            reasoning_effort: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        })
+        .expect("seeding the session should succeed");
+    // `save_session` deliberately does not write the pin; the reasoning route
+    // sets it through this dedicated update.
+    kernel
+        .memory
+        .substrate
+        .set_session_reasoning_effort(session_id, Some("xhigh"))
+        .expect("setting the session reasoning pin should succeed");
+
+    let (mut rx, join) = kernel
+        .send_message_streaming(agent_id, "streamed turn", None)
+        .expect("the streaming turn must start");
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    join.await
+        .expect("the streaming task joins")
+        .expect("the streamed turn must not error");
+    drain.await.expect("the drain task joins");
+
+    let requests = backend
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the streamed turn must reach the backend"
+    );
+    let body: serde_json::Value = requests[0].body_json().expect("valid JSON body");
+    assert_eq!(
+        body["reasoning_effort"], "xhigh",
+        "the streamed turn must run the session reasoning pin over the agent-level low: {body}"
+    );
+
+    kernel.shutdown();
+}
+
 /// The fourth dispatcher: the **ephemeral worker spawn**.
 ///
 /// `ephemeral_spawn::spawn_ephemeral_worker` derives the worker's manifest from
