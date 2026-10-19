@@ -1696,11 +1696,11 @@ func (r *SkillsResource) GetSupportingFile(name string, query map[string]string)
 }
 
 func (r *SkillsResource) ListSkillHistory(name string, query map[string]string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/skills/%s/history", name), nil, query)
+	return r.client.request("GET", fmt.Sprintf("/api/skills/%s/history", url.PathEscape(name)), nil, query)
 }
 
 func (r *SkillsResource) RestoreSkillVersion(name string, version_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/history/%s/restore", name, version_id), nil, nil)
+	return r.client.request("POST", fmt.Sprintf("/api/skills/%s/history/%s/restore", url.PathEscape(name), url.PathEscape(version_id)), nil, nil)
 }
 
 func (r *SkillsResource) ProposeSkillToRegistry(name string) (interface{}, error) {

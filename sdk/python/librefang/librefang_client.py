@@ -1281,10 +1281,10 @@ class _SkillsResource(_Resource):
         return self._c._request("GET", f"/api/skills/{quote(str(name), safe='')}/file", None, query={"path": path})
 
     def list_skill_history(self, name: str, limit: Any = None):
-        return self._c._request("GET", f"/api/skills/{name}/history", None, query={"limit": limit})
+        return self._c._request("GET", f"/api/skills/{quote(str(name), safe='')}/history", None, query={"limit": limit})
 
     def restore_skill_version(self, name: str, version_id: str):
-        return self._c._request("POST", f"/api/skills/{name}/history/{version_id}/restore")
+        return self._c._request("POST", f"/api/skills/{quote(str(name), safe='')}/history/{quote(str(version_id), safe='')}/restore")
 
     def propose_skill_to_registry(self, name: str):
         return self._c._request("POST", f"/api/skills/{quote(str(name), safe='')}/propose")
