@@ -36,23 +36,6 @@ export function changeSourceLabel(t: TFunction, source: string): string {
 }
 
 /**
- * Operator-facing label for a stored manifest version's `change_source` (#8601).
- *
- * Same contract as [`changeSourceLabel`], against the manifest store's own vocabulary: the kernel
- * writes free-text tags (`model`, `skills`, `suspend`, …), and a raw token spliced into the
- * destructive restore sentence reads as neither language.
- * A value outside `MANIFEST_CHANGE_SOURCES` — a producer the dashboard has not been taught, or a
- * row from an older database — comes back verbatim, because provenance in a destructive-confirm
- * dialog is worth more than a tidy blank.
- * Membership is checked before calling `t` so a dotted token is never resolved as a nested locale path.
- */
-export function manifestChangeSourceLabel(t: TFunction, source: string): string {
-  return isManifestChangeSource(source)
-    ? t(`agents.detail.manifest_change_source.${source}`)
-    : source;
-}
-
-/**
  * Operator-facing label for a stored skill version's `change_source` (#8021).
  *
  * Same contract as [`changeSourceLabel`], against the skill version store's own vocabulary — which
@@ -67,5 +50,22 @@ export function manifestChangeSourceLabel(t: TFunction, source: string): string 
 export function skillChangeSourceLabel(t: TFunction, source: string): string {
   return isSkillChangeSource(source)
     ? t(`skills.change_source.${source}`)
+    : source;
+}
+
+/**
+ * Operator-facing label for a stored manifest version's `change_source` (#8601).
+ *
+ * Same contract as [`changeSourceLabel`], against the manifest store's own vocabulary: the kernel
+ * writes free-text tags (`model`, `skills`, `suspend`, …), and a raw token spliced into the
+ * destructive restore sentence reads as neither language.
+ * A value outside `MANIFEST_CHANGE_SOURCES` — a producer the dashboard has not been taught, or a
+ * row from an older database — comes back verbatim, because provenance in a destructive-confirm
+ * dialog is worth more than a tidy blank.
+ * Membership is checked before calling `t` so a dotted token is never resolved as a nested locale path.
+ */
+export function manifestChangeSourceLabel(t: TFunction, source: string): string {
+  return isManifestChangeSource(source)
+    ? t(`agents.detail.manifest_change_source.${source}`)
     : source;
 }

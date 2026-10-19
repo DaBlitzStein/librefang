@@ -54,6 +54,50 @@ describe("changeSourceLabel", () => {
   });
 });
 
+describe("skillChangeSourceLabel", () => {
+  // The skill store's vocabulary is distinct from the template and manifest ones (#8021), so every token is pinned here: a row in the history list and the destructive restore dialog both read from this map.
+  it.each([
+    ["create", "Created"],
+    ["update", "Updated"],
+    ["evolve", "Evolved"],
+    ["patch", "Patched"],
+    ["rollback", "Rolled back"],
+    ["install", "Installed"],
+    ["uninstall", "Uninstalled"],
+    ["delete", "Deleted"],
+    ["file-write", "File written"],
+    ["file-remove", "File removed"],
+    ["restore", "Restored"],
+    ["unknown", "Unknown source"],
+  ] as const)("labels the skill source %s as %s", (source, label) => {
+    expect(skillChangeSourceLabel(translate, source)).toBe(label);
+  });
+
+  it.each(SKILL_CHANGE_SOURCES)(
+    "gives the known skill source %s a catalog label",
+    (source) => {
+      const label = skillChangeSourceLabel(translate, source);
+      expect(label).not.toBe(`skills.change_source.${source}`);
+      expect(label).not.toBe(source);
+      expect(label.trim()).not.toBe("");
+    },
+  );
+
+  // A producer the dashboard has not been taught, or a row from an older database, must still say where it came from.
+  it("returns an unmapped skill source verbatim", () => {
+    expect(skillChangeSourceLabel(translate, "some_future_source")).toBe(
+      "some_future_source",
+    );
+  });
+
+  // Same guard as the other vocabularies: a dotted token checked against the map first cannot become a locale path.
+  it("does not resolve an unmapped dotted skill source as a locale key", () => {
+    expect(skillChangeSourceLabel(translate, "skills.evo_history")).toBe(
+      "skills.evo_history",
+    );
+  });
+});
+
 describe("manifestChangeSourceLabel", () => {
   // The closed inventory of `manifest_versions.change_source` values the kernel can write, each
   // pinned to its exact label: a source added to the store without a label fails here, and so does
@@ -100,50 +144,6 @@ describe("manifestChangeSourceLabel", () => {
   it("does not resolve an unmapped dotted manifest source as a locale key", () => {
     expect(manifestChangeSourceLabel(translate, "agents.detail.manifest_history")).toBe(
       "agents.detail.manifest_history",
-    );
-  });
-});
-
-describe("skillChangeSourceLabel", () => {
-  // The skill store's vocabulary is distinct from the template and manifest ones (#8021), so every token is pinned here: a row in the history list and the destructive restore dialog both read from this map.
-  it.each([
-    ["create", "Created"],
-    ["update", "Updated"],
-    ["evolve", "Evolved"],
-    ["patch", "Patched"],
-    ["rollback", "Rolled back"],
-    ["install", "Installed"],
-    ["uninstall", "Uninstalled"],
-    ["delete", "Deleted"],
-    ["file-write", "File written"],
-    ["file-remove", "File removed"],
-    ["restore", "Restored"],
-    ["unknown", "Unknown source"],
-  ] as const)("labels the skill source %s as %s", (source, label) => {
-    expect(skillChangeSourceLabel(translate, source)).toBe(label);
-  });
-
-  it.each(SKILL_CHANGE_SOURCES)(
-    "gives the known skill source %s a catalog label",
-    (source) => {
-      const label = skillChangeSourceLabel(translate, source);
-      expect(label).not.toBe(`skills.change_source.${source}`);
-      expect(label).not.toBe(source);
-      expect(label.trim()).not.toBe("");
-    },
-  );
-
-  // A producer the dashboard has not been taught, or a row from an older database, must still say where it came from.
-  it("returns an unmapped skill source verbatim", () => {
-    expect(skillChangeSourceLabel(translate, "some_future_source")).toBe(
-      "some_future_source",
-    );
-  });
-
-  // Same guard as the other vocabularies: a dotted token checked against the map first cannot become a locale path.
-  it("does not resolve an unmapped dotted skill source as a locale key", () => {
-    expect(skillChangeSourceLabel(translate, "skills.evo_history")).toBe(
-      "skills.evo_history",
     );
   });
 });

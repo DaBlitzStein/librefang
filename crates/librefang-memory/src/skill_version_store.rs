@@ -13,9 +13,10 @@
 //! conflate two different skills shadowing each other. A future schema can add
 //! a scope column without disturbing this one.
 //!
-//! Two writes are deliberately not covered: `the clawhub install path` in
-//! `routes/skills/clawhub.rs` and the TUI/CLI paths, which do not go through
-//! the daemon's recording funnel yet.
+//! The marketplace install paths (`clawhub.rs`, `skillhub.rs`) record an
+//! `install` version once the skill lands globally. Two writes remain outside
+//! this store by design: direct CLI/TUI edits (no daemon funnel) and
+//! hand-scoped installs (excluded by the global-root scope above).
 //!
 //! Retention is per-skill, capped at [`MAX_VERSIONS_PER_SKILL`] most recent
 //! snapshots, trimmed on insert inside the same transaction. Deduplication
@@ -55,7 +56,7 @@ pub struct SkillVersionRow {
 /// Persistent skill-version store backed by SQLite.
 ///
 /// Shares the connection pool every other store in `MemorySubstrate` uses.
-/// The `skill_versions` table is created by `migration::migrate_v65`.
+/// The `skill_versions` table is created by `migration::migrate_v66`.
 #[derive(Clone)]
 pub struct SkillVersionStore {
     pool: Pool<SqliteConnectionManager>,

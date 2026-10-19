@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 65;
+const SCHEMA_VERSION: u32 = 66;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -339,20 +339,35 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // the API boundary and stored as given.
     run_step!(65, migrate_v65);
 
-    // Reconcile the pre-renumber reasoning footprint (#8616). A build of this
-    // branch that carried the reasoning-effort step as v64 stamped databases
-    // at 64 (without main's v64 indexes/`sessions_fts_map`), and the deployed
-    // integration fold (`8b7bc4c22`) stamped them at 65 with reasoning at 64
-    // and skill versions at 65. `run_step!` only runs steps above the stamp,
-    // so neither database will ever execute the real v64 — and `reconcile_fts_index`
-    // cannot repair it because it only logs a missing map. Run the same
-    // idempotent v64 here, outside the ladder, so those databases converge.
+    // v66 (#8021): skill version history. Full `skill.toml` +
+    // `prompt_context.md` snapshots so operators can see what changed over
+    // time and restore a prior state.
     //
-    // Not a numbered step on purpose: a v66 step would renumber the skill
-    // version migration the fold is about to land as v66, and would still be
-    // too late for a database already stamped at 65. This is the v62→v61
-    // repair shape, moved to boot because the footprint's stamp is above the
-    // step it skipped.
+    // Both open PRs originally claimed v65: reasoning-effort landed first on
+    // the train and kept it, so this step renumbers once more to 66. The
+    // deployed integration fold (`8b7bc4c22`) had already stamped skill
+    // versions at 65, which is why the reconciliation below rewrites that
+    // audit row before this step runs. Same rule as the v62/v63 notes above:
+    // the ladder must stay contiguous, because `run_step!` gates on
+    // `current_version < N` read once at boot and a database that reaches N
+    // via a binary with a hole below it never runs the skipped step.
+    run_step!(66, migrate_v66);
+
+    // Reconcile the pre-renumber reasoning/skill footprint (#8616, #8021). A
+    // build of this branch that carried the reasoning-effort step as v64
+    // stamped databases at 64 (without main's v64 indexes/`sessions_fts_map`),
+    // and the deployed integration fold (`8b7bc4c22`) stamped them at 65 with
+    // reasoning at 64 and skill versions at 65. `run_step!` only runs steps
+    // above the stamp, so neither database will ever execute the real v64 —
+    // and `reconcile_fts_index` cannot repair it because it only logs a
+    // missing map. Run the same idempotent v64 here, outside the ladder, so
+    // those databases converge.
+    //
+    // A numbered step would still be too late for a database already stamped
+    // above the step it skipped; v66 above is the skill table itself, and the
+    // reconciliation only repairs the audit rows a pre-renumber build wrote
+    // under the same numbers. This is the v62→v61 repair shape, moved to boot
+    // because the footprint's stamp is above the step it skipped.
     reconcile_pre_renumber_reasoning_footprint(conn)?;
 
     // Audit-trail consistency (#3538): user_version must match the count
@@ -1740,14 +1755,54 @@ fn migrate_v65(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// Reconcile databases a pre-renumber reasoning-effort build stamped at 64 or
-/// 65 without main's v64 indexes / `sessions_fts_map` (#8616).
+/// v66 (#8021): skill version history.
+///
+/// Records full `skill.toml` + `prompt_context.md` snapshots per skill so the
+/// dashboard can show how an installed skill changed over time and restore a
+/// prior state. Keyed by `skill_name` alone: v1 tracks skills under the global
+/// `~/.librefang/skills/` root; workspace and hand-scoped skills are out of
+/// scope until a scope column exists.
+///
+/// Pure `CREATE TABLE IF NOT EXISTS` + fresh index, so re-running is a no-op.
+/// That matters twice over: the deployed integration fold (`8b7bc4c22`) already
+/// created this table while calling it v65, so on those databases this step
+/// adopts the existing table and only records the audit row under the final
+/// number. The index is `(skill_name, timestamp DESC)` because every read is
+/// scoped to one skill and ordered newest-first; the trim and dedup-run
+/// `ORDER BY timestamp DESC, id DESC LIMIT 1` against the same prefix.
+///
+/// Both open PRs originally claimed v65; reasoning-effort (#8616) landed first
+/// on the train and kept it, so this migration renumbers to 66 on landing.
+fn migrate_v66(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS skill_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill_name      TEXT NOT NULL,
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            manifest_toml   TEXT NOT NULL,
+            prompt_context  TEXT NOT NULL DEFAULT '',
+            author          TEXT NOT NULL DEFAULT '',
+            change_source   TEXT NOT NULL DEFAULT 'unknown'
+        );
+        CREATE INDEX IF NOT EXISTS idx_skill_versions_name
+            ON skill_versions(skill_name, timestamp DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (66, datetime('now'), 'Skill version history table (#8021)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Reconcile databases a pre-renumber reasoning/skill build stamped at 64 or
+/// 65 without main's v64 indexes / `sessions_fts_map` (#8616, #8021).
 ///
 /// Two real footprints exist in the field:
 ///
-/// * a head build of this branch before the main merge (`5c11a777c`) ran the
-///   reasoning step as **v64**, so the database is stamped at 64 and never
-///   ran main's v64 (indexes + `sessions_fts_map`);
+/// * a head build of the reasoning branch before the main merge (`5c11a777c`)
+///   ran the reasoning step as **v64**, so the database is stamped at 64 and
+///   never ran main's v64 (indexes + `sessions_fts_map`);
 /// * the deployed integration fold (`8b7bc4c22`) ran reasoning at **v64** and
 ///   skill versions at **v65**, so the database is stamped at 65 and the
 ///   ladder will never revisit 64.
@@ -1756,19 +1811,18 @@ fn migrate_v65(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// repair either stamp: the first still skips 64, the second skips both. The
 /// repair therefore runs once per boot as a single table-existence check on
 /// converged databases and calls the idempotent [`migrate_v64`] when the map
-/// is missing. [`migrate_v65`] is also applied, for the same reason, so a
-/// database stamped above 64 by a build that skipped the column still gets it.
+/// is missing. [`migrate_v65`] and [`migrate_v66`] are also applied, so a
+/// database stamped above a step by a build that skipped it still gets the
+/// column/table.
 ///
-/// The audit row at 64 must move with the repair: on both footprints it
-/// describes the reasoning step, but after renumbering 64 is main's index /
-/// FTS-map step. Rewriting it is what makes `SELECT * FROM migrations` tell
-/// the truth about which DDL owns the number; `migrate_v64` cannot fix it
-/// because the row already exists and its insert is `OR IGNORE`.
-///
-/// This is deliberately *not* numbered 66: skill version history lands as v66
-/// in the fold, and it is already `CREATE TABLE IF NOT EXISTS`-idempotent so
-/// the deployed database (which has `skill_versions` at 65) survives it
-/// unchanged.
+/// The audit rows move with the repair. On the deployed footprint, row 64
+/// describes reasoning and row 65 describes skill versions, but after the
+/// renumber 64 is main's index/FTS-map step and 65 is reasoning. Rewriting
+/// both is what makes `SELECT * FROM migrations` tell the truth about which
+/// DDL owns each number; the idempotent migration functions cannot fix them
+/// because the rows already exist and their insert is `OR IGNORE`. The skill
+/// row then lands at 66, either here (idempotently) or through the ladder's
+/// `run_step!(66, migrate_v66)`.
 fn reconcile_pre_renumber_reasoning_footprint(conn: &Connection) -> Result<(), rusqlite::Error> {
     if try_table_exists(conn, "sessions_fts_map")? {
         return Ok(());
@@ -1781,13 +1835,23 @@ fn reconcile_pre_renumber_reasoning_footprint(conn: &Connection) -> Result<(), r
     migrate_v64(&tx)?;
     // Keep the reasoning column/audit row idempotent too: on the production
     // footprint (`8b7bc4c22`) the column exists and row 65 belongs to skill
-    // versions, so this is a no-op; on a partially repaired or hand-edited
-    // database it is the only remaining route to the column.
+    // versions, so the insert is a no-op; on a partially repaired or
+    // hand-edited database it is the only remaining route to the column.
     migrate_v65(&tx)?;
+    // The skill table also arrives under its final number. `CREATE TABLE IF
+    // NOT EXISTS` makes this a no-op for the deployed table; the audit row is
+    // the part that has to move from 65 to 66.
+    migrate_v66(&tx)?;
     tx.execute(
         "UPDATE migrations SET description = \
          'sessions/memories created_at indexes + sessions_fts_map rowid map' \
          WHERE version = 64 AND description LIKE '%reasoning_effort%'",
+        [],
+    )?;
+    tx.execute(
+        "UPDATE migrations SET description = \
+         'Add sessions.reasoning_effort for per-session reasoning-effort pin (#8591)' \
+         WHERE version = 65 AND description LIKE '%Skill version history%'",
         [],
     )?;
     tx.commit()?;
@@ -5371,6 +5435,92 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
+    // v66: skill version history (#8021)
+    // ---------------------------------------------------------------------
+
+    /// The table has to arrive with the columns the store reads, on a database
+    /// that already holds skills (a migration that only works on a fresh file
+    /// has never run where it matters). A row written before the snapshot
+    /// exists is impossible by construction, so this only pins the shape.
+    #[test]
+    fn migrate_v66_creates_skill_versions_with_the_shape_the_store_reads() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(
+            try_table_exists(&conn, "skill_versions").unwrap(),
+            "v66 must create skill_versions"
+        );
+        for column in [
+            "id",
+            "skill_name",
+            "timestamp",
+            "manifest_toml",
+            "prompt_context",
+            "author",
+            "change_source",
+        ] {
+            assert!(
+                column_exists(&conn, "skill_versions", column),
+                "skill_versions.{column} missing after migrate_v66"
+            );
+        }
+
+        // The default covers rows written by a writer that does not classify
+        // itself, and it has to be the same `unknown` the schema comment names.
+        conn.execute(
+            "INSERT INTO skill_versions (skill_name, manifest_toml) VALUES ('alpha', 'x')",
+            [],
+        )
+        .unwrap();
+        let (prompt, author, source): (String, String, String) = conn
+            .query_row(
+                "SELECT prompt_context, author, change_source FROM skill_versions \
+                 WHERE skill_name = 'alpha'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(prompt, "");
+        assert_eq!(author, "");
+        assert_eq!(source, "unknown");
+    }
+
+    #[test]
+    fn migrate_v66_is_idempotent_and_records_its_audit_row_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // The runner can legitimately replay a step after an interrupted
+        // upgrade; `CREATE TABLE/INDEX IF NOT EXISTS` is what makes the rerun
+        // a no-op. A database that has climbed past 66 through another caller,
+        // or a hand-run replay, issues it directly.
+        migrate_v66(&conn).expect("v66 must survive a rerun");
+        assert!(try_table_exists(&conn, "skill_versions").unwrap());
+
+        let audit_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE version = 66",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_rows, 1, "v66 must record exactly one migrations row");
+
+        let description: String = conn
+            .query_row(
+                "SELECT description FROM migrations WHERE version = 66",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            description.contains("Skill version history"),
+            "version 66 must describe the skill-history step, got: {description}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
     // v64: created_at indexes + sessions_fts_map
     // ---------------------------------------------------------------------
 
@@ -5590,9 +5740,13 @@ mod tests {
         assert_save_session_works(&pool);
     }
 
-    /// Footprint (c): the deployed integration build (`8b7bc4c22`) stamped
-    /// reasoning at v64 and skill versions at v65, so the ladder skips both on
-    /// next boot. This is the production shape of proteo/rodela/rebeca.
+    /// Footprint (c): the exact deployed integration shape (`8b7bc4c22`) —
+    /// `user_version = 65`, `sessions.reasoning_effort` present,
+    /// `skill_versions` present, no `sessions_fts_map`, row 64 describing
+    /// reasoning and row 65 describing skill versions. The ladder skips 64,
+    /// sees 65 → 66, and the reconciliation has to correct both audit rows and
+    /// land the skill row at 66 while leaving the deployed table untouched.
+    /// This is the production shape of proteo/rodela/rebeca.
     #[test]
     fn pre_renumber_reconcile_repairs_the_deployed_v65_footprint() {
         let pool = memory_pool();
@@ -5622,6 +5776,10 @@ mod tests {
                 [],
             )
             .unwrap();
+            // The deployed database stopped at 65: no skill audit row existed
+            // under the final number, and no row 66 of any kind.
+            conn.execute("DELETE FROM migrations WHERE version = 66", [])
+                .unwrap();
             // A real deployed row, so the trigger/map rebuild has something to
             // map and `save_session` has a row to update.
             conn.execute(
@@ -5635,6 +5793,14 @@ mod tests {
             assert!(!try_table_exists(&conn, "sessions_fts_map").unwrap());
             assert!(try_column_exists(&conn, "sessions", "reasoning_effort").unwrap());
             assert!(try_table_exists(&conn, "skill_versions").unwrap());
+            let rows: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM migrations WHERE version = 66",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(rows, 0, "the deployed footprint has no row 66");
         }
 
         run_migrations(&pool.get().unwrap())
@@ -5651,16 +5817,38 @@ mod tests {
             try_table_exists(&conn, "skill_versions").unwrap(),
             "the skill version table at 65 must survive"
         );
-        let d65: String = conn
-            .query_row(
-                "SELECT description FROM migrations WHERE version = 65",
-                [],
+        let description = |version: u32| -> String {
+            conn.query_row(
+                "SELECT description FROM migrations WHERE version = ?1",
+                [version],
                 |r| r.get(0),
             )
-            .unwrap();
+            .unwrap_or_else(|e| panic!("no audit row for v{version}: {e}"))
+        };
         assert_eq!(
-            d65, "Skill version history table (#8021)",
-            "row 65 belongs to the deployed skill migration and must not be rewritten"
+            description(64),
+            "sessions/memories created_at indexes + sessions_fts_map rowid map",
+            "row 64 must describe main's index/FTS-map step after the renumber"
+        );
+        assert_eq!(
+            description(65),
+            "Add sessions.reasoning_effort for per-session reasoning-effort pin (#8591)",
+            "row 65 must describe reasoning after the renumber, not the deployed skill step"
+        );
+        assert_eq!(
+            description(66),
+            "Skill version history table (#8021)",
+            "the skill step must land at 66"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM migrations WHERE version = 66",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1,
+            "v66 must record exactly one audit row"
         );
         drop(conn);
         assert_save_session_works(&pool);
