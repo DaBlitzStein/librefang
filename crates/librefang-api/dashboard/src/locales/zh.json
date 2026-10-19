@@ -1157,6 +1157,24 @@
       "manifest_history": "清单历史",
       "manifest_history_load_err": "加载清单历史失败。",
       "no_history": "尚未记录配置更改。",
+      "manifest_change_source": {
+        "api": "API edit",
+        "model": "Model change",
+        "skills": "Skills change",
+        "workspaces": "Workspaces change",
+        "channels": "Channels change",
+        "routing": "Routing change",
+        "schedule": "Schedule change",
+        "tool-filters": "Tool filters change",
+        "mcp-servers": "MCP servers change",
+        "provisioning": "Provisioned",
+        "restore": "Restored",
+        "suspend": "Suspended",
+        "resume": "Resumed",
+        "suspend-persist-failed": "Suspend write failed",
+        "resume-persist-failed": "Resume write failed",
+        "unknown": "Unknown source"
+      },
       "restore_title": "恢复到此版本？",
       "restore_confirm": "将 '{{name}}' 恢复到 {{timestamp}} 保存的版本（{{source}}）？这会覆盖该智能体当前的 agent.toml；之后记录的快照保存的是恢复后的内容，而不是被替换的内容。",
       "restore_btn": "恢复",
@@ -3908,11 +3926,11 @@
       "help": "快捷操作说明",
       "help_title": "标签页快捷操作",
       "help_switch": "切换标签",
-      "help_switch_key": "单击",
+      "help_switch_key": "单击 / ← →",
       "help_rename": "重命名标签",
       "help_rename_key": "双击",
       "help_close": "关闭标签",
-      "help_close_key": "中键单击 / ✕",
+      "help_close_key": "中键单击 / ✕ / Del",
       "help_new": "新建标签",
       "help_new_key": "＋"
     },
@@ -4301,7 +4319,10 @@
     "save_failed": "无法保存用户组",
     "delete_failed": "无法删除用户组",
     "member_add_failed": "无法添加成员",
-    "member_remove_failed": "无法移除成员"
+    "member_remove_failed": "无法移除成员",
+    "load_failed": "无法加载用户组",
+    "no_match_title": "没有匹配的用户组",
+    "no_match_desc": "没有用户组的名称、描述、成员或角色与搜索内容匹配。"
   },
   "userBudget": {
     "fields": {
@@ -4676,8 +4697,11 @@
   },
   "agentTypes": {
     "change_source": {
+      "agent-tool": "Agent tool",
       "create": "Created",
       "dashboard": "Dashboard edit",
+      "pre-registry-restore": "Pre-restore snapshot",
+      "registry-restore": "Restored from registry",
       "restore": "Restored",
       "toml": "Raw TOML edit",
       "unknown": "Unknown source"

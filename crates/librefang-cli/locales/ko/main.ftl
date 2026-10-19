@@ -434,6 +434,8 @@ config-test-unverified = 검증할 수 없음 (정상 동작할 수도 있음)
 
 # --- Hand commands ---
 hand-install-deps-success = 핸드 '{ $id }'의 의존성이 설치되었습니다.
+hand-install-deps-dep-failed = { $key } (상태: { $status }): { $message }
+hand-install-deps-dep-still-missing = { $key }: 필수 의존성이 아직 없습니다
 hand-paused = 핸드 인스턴스 '{ $label } (instance: { $instance_id })'가 일시 중지되었습니다.
 hand-resumed = 핸드 인스턴스 '{ $label } (instance: { $instance_id })'가 재개되었습니다.
 
@@ -2226,6 +2228,22 @@ tui-agents-title-manifest-history = 설정 기록
 tui-agents-label-manifest-history-loading = 설정 기록을 불러오는 중...
 tui-agents-label-manifest-history-empty = 이 에이전트에 기록된 설정 변경이 아직 없습니다.
 tui-agents-hints-manifest-history =   [↑↓/jk] 버전 탐색  [PgUp/PgDn] 스크롤  [Esc] 뒤로
+tui-agents-manifest-source-model = 모델 변경
+tui-agents-manifest-source-skills = 스킬 변경
+tui-agents-manifest-source-workspaces = 워크스페이스 변경
+tui-agents-manifest-source-channels = 채널 변경
+tui-agents-manifest-source-routing = 라우팅 변경
+tui-agents-manifest-source-schedule = 일정 변경
+tui-agents-manifest-source-tool-filters = 도구 필터 변경
+tui-agents-manifest-source-mcp-servers = MCP 서버 변경
+tui-agents-manifest-source-api = API 편집
+tui-agents-manifest-source-provisioning = 프로비저닝됨
+tui-agents-manifest-source-restore = 복원됨
+tui-agents-manifest-source-suspend = 일시 중지됨
+tui-agents-manifest-source-resume = 재개됨
+tui-agents-manifest-source-suspend-persist-failed = 일시 중지 쓰기 실패
+tui-agents-manifest-source-resume-persist-failed = 재개 쓰기 실패
+tui-agents-manifest-source-unknown = 알 수 없는 출처
 tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [w] 공유 폴더  [p] 모델 파라미터  [$] 토큰  [h] 설정 기록  [c] 채팅  [k] 종료  [Esc] 뒤로
 tui-agents-title-model-params = 모델 파라미터
 tui-agents-prompt-model-params = 이 에이전트의 설정이 모델 설정보다 우선합니다. `inherit`는 모델 설정을 따릅니다.
