@@ -207,6 +207,8 @@ pub struct SessionMeta {
     pub agent_id: AgentId,
     /// Per-session model override (issue #4898).
     pub model_override: Option<String>,
+    /// Per-session reasoning-effort override (#8591); `None` inherits.
+    pub reasoning_effort: Option<String>,
     /// Estimated token count for the context window.
     pub context_window_tokens: u64,
     /// Conversation identifier for contact-scoped sessions; see [`Session::peer_id`].
@@ -404,25 +406,27 @@ impl SessionStore {
     pub fn session_meta(&self, session_id: SessionId) -> LibreFangResult<Option<SessionMeta>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let result = conn.query_row(
-            "SELECT agent_id, model_override, context_window_tokens, peer_id FROM sessions WHERE id = ?1",
+            "SELECT agent_id, model_override, reasoning_effort, context_window_tokens, peer_id FROM sessions WHERE id = ?1",
             rusqlite::params![session_id.0.to_string()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1).unwrap_or(None),
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Option<String>>(3).unwrap_or(None),
+                    row.get::<_, Option<String>>(2).unwrap_or(None),
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4).unwrap_or(None),
                 ))
             },
         );
         match result {
-            Ok((agent_str, model_override, tokens, peer_id)) => {
+            Ok((agent_str, model_override, reasoning_effort, tokens, peer_id)) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
                     .map_err(LibreFangError::memory)?;
                 Ok(Some(SessionMeta {
                     agent_id,
                     model_override,
+                    reasoning_effort,
                     context_window_tokens: tokens as u64,
                     peer_id,
                 }))
@@ -3165,6 +3169,7 @@ mod tests {
             SessionMeta {
                 agent_id,
                 model_override: Some("openai/gpt-4o".to_string()),
+                reasoning_effort: None,
                 context_window_tokens: 1234,
                 peer_id: Some("chat-1".to_string()),
             }

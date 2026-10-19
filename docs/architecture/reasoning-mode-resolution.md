@@ -53,7 +53,7 @@ Mechanically, in the order the kernel performs it:
 
 1. The manifest carries the agent's own `[thinking]` table, or `None`.
 2. `messaging.rs` / `agent_execution.rs` backfill the global `[thinking]` table into the manifest **only when the manifest has none**, so a per-agent table beats the global one by suppressing the backfill entirely rather than by merging field-by-field.
-3. The session snapshot's `reasoning_effort` (stored in the `sessions.reasoning_effort` column, migration v64) is stamped on via `manifest_helpers::apply_session_reasoning_effort`, after the backfill so it beats the agent/global level.
+3. The session snapshot's `reasoning_effort` (stored in the `sessions.reasoning_effort` column, migration v65) is stamped on via `manifest_helpers::apply_session_reasoning_effort`, after the backfill so it beats the agent/global level.
 4. `manifest_helpers::apply_thinking_override` stamps the per-message override on top of whatever survived.
 5. **Coercion runs last**, against the effective model: `lookup_reasoning_policy(&manifest.model.model)` then `coerce_reasoning_effort_to_model`. `ReasoningEffortPolicy::coerce` maps a token outside the declared set to the nearest supported rung (ties resolve downward — `xhigh` → `high`) and `none` to the floor when the model forbids off, logging a `warn!` whenever the token changed. An undeclared policy passes everything through.
 6. Whatever is left in `manifest.thinking` is copied onto the `CompletionRequest`, together with the effective policy, and each driver re-applies the same coercion as a wire-side backstop for callers that build requests directly.

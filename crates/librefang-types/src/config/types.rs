@@ -2914,11 +2914,19 @@ impl ReasoningEffortPolicy {
     }
 
     /// The graded tokens (everything but `none`), in declared order.
+    ///
+    /// Structurally invalid declarations are skipped. `supported_efforts` is
+    /// operator/catalog data and may come from a hand-edited
+    /// `model_overrides.json` or a custom model; a token such as
+    /// `"high effort"` cannot be put on the wire at all, so treating it as a
+    /// rung would only panic the coercion or emit a malformed request. This
+    /// is non-destructive: the raw declaration is left for display, while the
+    /// selection surface offers only tokens the wire can carry.
     pub fn graded_efforts(&self) -> Vec<&str> {
         self.supported_efforts
             .iter()
             .map(String::as_str)
-            .filter(|t| *t != "none")
+            .filter(|t| *t != "none" && ReasoningMode::new(*t).is_ok())
             .collect()
     }
 
@@ -2938,11 +2946,13 @@ impl ReasoningEffortPolicy {
         if !self.is_declared() {
             return Vec::new();
         }
+        // Only tokens that pass the same structural validation every request
+        // token must pass: offering `"high effort"` in a picker would only
+        // produce a request the API boundary rejects.
         let mut out: Vec<String> = self
-            .supported_efforts
-            .iter()
-            .filter(|t| t.as_str() != "none")
-            .cloned()
+            .graded_efforts()
+            .into_iter()
+            .map(str::to_string)
             .collect();
         if self.none_allowed() {
             out.insert(0, "none".to_string());
@@ -2973,9 +2983,17 @@ impl ReasoningEffortPolicy {
             effective: r.clone(),
             coerced_from: None,
         };
-        let coerced = |to: &str, from: &ReasoningMode| EffortCoercion {
-            effective: ReasoningMode::new(to).expect("declared tokens are validated"),
-            coerced_from: Some(from.as_str().to_string()),
+        // `to` comes from `supported_efforts`, which is operator/catalog data:
+        // a custom model or `model_overrides.json` can declare a string that
+        // is not a token (`"high effort"`). Coercion must never panic on that
+        // input — a malformed declaration degrades to the requested token,
+        // which is itself structurally valid by construction.
+        let coerced = |to: &str, from: &ReasoningMode| match ReasoningMode::new(to) {
+            Ok(effective) => EffortCoercion {
+                effective,
+                coerced_from: Some(from.as_str().to_string()),
+            },
+            Err(_) => verbatim(from),
         };
 
         if requested.is_none() {

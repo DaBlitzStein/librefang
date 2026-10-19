@@ -1942,6 +1942,42 @@ admin_role = "admin"
         );
     }
 
+    /// A custom model or `model_overrides.json` may declare a string that is
+    /// not a structural token (`"high effort"`). Coercion must degrade, not
+    /// panic — the media audit's reproducer is `off_allowed = false` plus a
+    /// `none` request, whose floor used to be `ReasoningMode::new(...).expect`.
+    #[test]
+    fn test_reasoning_policy_tolerates_invalid_declared_tokens() {
+        use crate::config::ReasoningEffortPolicy;
+
+        let invalid_only = ReasoningEffortPolicy {
+            supported_efforts: vec!["high effort".to_string()],
+            off_allowed: false,
+            ..Default::default()
+        };
+        // No usable graded rung: `none` stays verbatim (it is a valid token),
+        // and nothing is offered that the API boundary would reject.
+        let c = invalid_only.coerce(&ReasoningMode::none());
+        assert_eq!(c.effective.as_str(), "none");
+        assert_eq!(c.coerced_from, None);
+        assert!(
+            invalid_only.offered().is_empty(),
+            "an invalid declaration must not be offered as a rung"
+        );
+        assert_eq!(invalid_only.min_graded(), None);
+
+        // A mixed declaration keeps the valid rungs and ignores the invalid one.
+        let mixed = ReasoningEffortPolicy {
+            supported_efforts: vec!["high effort".to_string(), "low".to_string()],
+            off_allowed: false,
+            ..Default::default()
+        };
+        let c = mixed.coerce(&ReasoningMode::none());
+        assert_eq!(c.effective.as_str(), "low");
+        assert_eq!(c.coerced_from.as_deref(), Some("none"));
+        assert_eq!(mixed.offered(), vec!["low"]);
+    }
+
     /// The offer surface: graded tokens plus `none` where the model allows it.
     #[test]
     fn test_reasoning_policy_offered_set() {

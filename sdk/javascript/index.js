@@ -1463,7 +1463,7 @@ class SessionsResource {
   }
 
   async patchSessionReasoning(id, data) {
-    return this._c._request("PATCH", `/api/sessions/${id}/reasoning`, data, undefined);
+    return this._c._request("PATCH", `/api/sessions/${encodeURIComponent(String(id))}/reasoning`, data, undefined);
   }
 }
 
