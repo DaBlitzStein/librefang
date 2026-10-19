@@ -3861,24 +3861,6 @@ export function ChatPage() {
   // predate that list's own fetch, i.e. that the list had a chance to answer.
   const unconfirmedTabOpenedAt = useRef<Map<string, Map<string, number>>>(new Map());
 
-  // Session ids whose tab was opened while the loaded session list could not
-  // have contained them (#8596): the list on screen was fetched before the
-  // session existed — created in another window, by the CLI, or reached from
-  // the Sessions page — so its silence must not be read as "the server no
-  // longer has this session". Per agent and session id, the time the tab was
-  // opened; the session prune below only trusts a list for visits that
-  // predate that list's own fetch, i.e. that the list had a chance to answer.
-  const unconfirmedTabOpenedAt = useRef<Map<string, Map<string, number>>>(new Map());
-
-  // Session ids whose tab was opened while the loaded session list could not
-  // have contained them (#8596): the list on screen was fetched before the
-  // session existed — created in another window, by the CLI, or reached from
-  // the Sessions page — so its silence must not be read as "the server no
-  // longer has this session". Per agent and session id, the time the tab was
-  // opened; the session prune below only trusts a list for visits that
-  // predate that list's own fetch, i.e. that the list had a chance to answer.
-  const unconfirmedTabOpenedAt = useRef<Map<string, Map<string, number>>>(new Map());
-
   useEffect(() => {
     if (!selectedAgentId || !activeSessionId) return;
     // `agentTabs` is in the dependencies on purpose, not only navigation: a

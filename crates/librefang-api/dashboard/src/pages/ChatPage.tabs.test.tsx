@@ -169,6 +169,7 @@ vi.mock("../lib/queries/approvals", () => ({
 
 vi.mock("../lib/queries/sessions", () => ({
   useSessionStream: () => ({ events: [], isAttached: false, lastError: null }),
+  useSessionDetails: () => ({ data: undefined, isPending: false }),
 }));
 
 vi.mock("../lib/queries/hands", () => ({
