@@ -1,1 +1,2 @@
-Bump `quinn-proto` 0.11.15 → 0.11.18 (RUSTSEC-2026-0338–0343: remote-triggerable panics, receive-buffer-limit bypass, ACK-delay panic) and `lru` 0.18.0 → 0.18.2 (RUSTSEC-2026-0253: use-after-free in `LruCache::pop()`), and ignore RUSTSEC-2024-0449 (`unsafe-libyaml` unmaintained, no safe upgrade available, transitive via `serde_yaml_ng`) in `deny.toml` so the cargo-deny advisory gate can pass again on lockfile-touching PRs. (#8610) (@DaBlitzStein)
+Bump `lru` 0.18.0 → 0.18.2 (RUSTSEC-2026-0253: use-after-free in `LruCache::pop()`).
+  `quinn-proto` 0.11.18 (RUSTSEC-2026-0338–0343) and the RUSTSEC-2024-0449 (`unsafe-libyaml`) ignore in `deny.toml` already landed on `main` independently, so this change carries only the remaining `lru` bump. (#8610) (@DaBlitzStein)
