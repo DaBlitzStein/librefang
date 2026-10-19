@@ -9818,8 +9818,8 @@ mod tests {
             "a typo must not silently pin anything"
         );
 
-        // Bare `/think` still means "on": clear the pin back to the
-        // agent/global default.
+        // Bare `/think` clears the pin back to the agent/global default; it
+        // no longer forces thinking on (the test below pins `None`).
         let result = handle_command(
             "think",
             &[],

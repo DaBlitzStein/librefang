@@ -635,8 +635,8 @@ pub fn lookup(name_or_alias: &str) -> Option<&'static CommandDef> {
 /// bridge and TUI chat runner), so the accepted vocabulary cannot drift
 /// between them:
 /// - no argument, or `on` / `true` / `enable` / `enabled` → `Ok(None)` — clear
-///   the pin and let the agent / global / compiled default decide. Bare
-///   `/think` keeps its historical "on" meaning.
+///   the pin and let the agent / global / compiled default decide. A bare
+///   `/think` therefore inherits rather than forcing thinking on.
 /// - `off` / `false` / `disable` / `disabled` → `Ok(Some("none"))` — the
 ///   explicit non-think toggle.
 /// - a canonical rung (`none` / `minimal` / `low` / `medium` / `high` /
