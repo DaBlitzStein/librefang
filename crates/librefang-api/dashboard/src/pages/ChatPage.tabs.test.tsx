@@ -576,7 +576,40 @@ describe("chat session tab strip semantics and keyboard model", () => {
     expect(panel).toHaveAttribute("aria-labelledby", selected!.id);
   });
 
-  it("keeps invalid children out of the tablist: tabs only, no + or close", async () => {
+  it("labels the panel by the active session's tab", async () => {
+    const tablist = await renderStrip();
+    const all = tabs(tablist); // One, Two (active), Three
+    const selected = all.find((tab) => tab.getAttribute("aria-selected") === "true");
+    expect(selected).toBeDefined();
+    expect(selected!.textContent).toBe("Two");
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", selected!.id);
+  });
+
+  it("labels the panel by the roving tab when the active session is outside the strip", async () => {
+    // A prune can drop the active session's tab for a render before the open
+    // effect adds it back. Hold that window open by neutering the effect's
+    // `openChatTab`: the strip still has tabs, but none of them is selected.
+    const realOpenChatTab = useUIStore.getState().openChatTab;
+    useUIStore.setState({
+      openChatTab: vi.fn(),
+      openChatTabs: { "agent-a": ["s1", "s3"] },
+      chatTabRecency: {},
+    });
+    try {
+      const tablist = await renderStrip();
+      const all = tabs(tablist);
+      expect(all).toHaveLength(2);
+      expect(all.every((tab) => tab.getAttribute("aria-selected") !== "true")).toBe(true);
+      // The panel cannot name a selected tab when there is none; it falls
+      // back to the tab that owns the roving tab stop.
+      expect(all[0].tabIndex).toBe(0);
+      expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", all[0].id);
+    } finally {
+      useUIStore.setState({ openChatTab: realOpenChatTab });
+    }
+  });
+
+  it("keeps the tablist's direct children tabs and the new-session control outside it", async () => {
     const tablist = await renderStrip();
     for (const child of Array.from(tablist.children)) {
       expect(child).toHaveAttribute("role", "tab");
@@ -658,6 +691,50 @@ describe("chat session tab strip semantics and keyboard model", () => {
     expect(screen.queryByRole("tablist")).toBeNull();
     expect(screen.queryByRole("tabpanel")).toBeNull();
     expect(screen.getByTestId("chat-message-area")).not.toHaveAttribute("role");
+  });
+
+  it("activates the focused tab with Enter and Space", async () => {
+    const tablist = await renderStrip();
+    const all = tabs(tablist); // One, Two (active), Three
+    all[0].focus();
+    expect(document.activeElement).toBe(all[0]);
+
+    fireEvent.keyDown(all[0], { key: "Enter" });
+    await vi.waitFor(() => {
+      expect(tabs(tablist)[0]).toHaveAttribute("aria-selected", "true");
+    });
+    expect(document.activeElement).toBe(tabs(tablist)[0]);
+    expect(router.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({ search: expect.objectContaining({ sessionId: "s1" }) }),
+    );
+
+    tabs(tablist)[2].focus();
+    fireEvent.keyDown(tabs(tablist)[2], { key: " " });
+    await vi.waitFor(() => {
+      expect(tabs(tablist)[2]).toHaveAttribute("aria-selected", "true");
+    });
+    expect(document.activeElement).toBe(tabs(tablist)[2]);
+    expect(router.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({ search: expect.objectContaining({ sessionId: "s3" }) }),
+    );
+  });
+
+  it("closes a non-selected tab with Delete and lands focus on the neighbour", async () => {
+    const tablist = await renderStrip();
+    const all = tabs(tablist); // One, Two (active), Three
+    for (const tab of all) {
+      // The close control inside a tab is presentational to AT, so the tab
+      // must announce Delete as the keyboard path that replaces it.
+      expect(tab).toHaveAttribute("aria-keyshortcuts", "Delete");
+    }
+    all[0].focus();
+
+    fireEvent.keyDown(all[0], { key: "Delete" });
+    await vi.waitFor(() => expect(tabLabels(tablist)).toEqual(["Two", "Three"]));
+    // Closing a tab the user is not looking at does not switch sessions: the
+    // active tab stays selected and receives focus from the removed tab.
+    expect(tabs(tablist)[0]).toHaveAttribute("aria-selected", "true");
+    expect(document.activeElement).toBe(tabs(tablist)[0]);
   });
 
   it("closes the selected tab with Delete and hands focus to the neighbour", async () => {
