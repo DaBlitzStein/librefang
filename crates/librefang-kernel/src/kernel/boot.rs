@@ -4076,11 +4076,11 @@ key_required = true
         let home = fake_home_with_strata1();
         let catalog = ModelCatalog::new(home.path());
         let mut config = strata1_config(home.path());
-        config.default_model.api_key_env = "EXPLICIT_STRATA1_KEY".to_string();
+        config.default_model.api_key_env = "EXPLICIT_KEY".to_string();
 
         let resolved = resolve_default_provider_endpoint(&config, &catalog);
 
-        assert_eq!(resolved.api_key_env, "EXPLICIT_STRATA1_KEY");
+        assert_eq!(resolved.api_key_env, "EXPLICIT_KEY");
     }
 
     #[test]
