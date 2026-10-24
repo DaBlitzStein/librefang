@@ -99,15 +99,10 @@ mod identity_file_list_tests {
 
     /// Serializes the two tests below that hold the kernel's front-matter lock.
     ///
-    /// Each of them holds `IDENTITY_FRONT_MATTER_LOCK` in the test thread while a
-    /// spawned helper takes `IDENTITY_FILE_MUTATION_LOCK` (the `IDENTITY.md` write
-    /// and delete take it *before* the front-matter lock, in production order).
-    /// Run in parallel, the two can chain into a cycle: one test's helper holds the
-    /// mutation lock and waits for the front-matter lock while the other test's
-    /// thread holds the front-matter lock and waits for a SOUL.md helper that needs
-    /// the mutation lock. Both then stall until their 10s timeouts. Serializing the
-    /// two tests keeps the process-global locks in one order without changing the
-    /// behaviour either of them covers.
+    /// Each of them holds `IDENTITY_FRONT_MATTER_LOCK` in the test thread while a spawned helper takes `IDENTITY_FILE_MUTATION_LOCK` (the `IDENTITY.md` write and delete take it *before* the front-matter lock, in production order).
+    /// Run in parallel, the two can chain into a cycle: one test's helper holds the mutation lock and waits for the front-matter lock while the other test's thread holds the front-matter lock and waits for a SOUL.md helper that needs the mutation lock.
+    /// Both then stall until their 10s timeouts.
+    /// Serializing the two tests keeps the process-global locks in one order without changing the behaviour either of them covers.
     static FRONT_MATTER_LOCK_TESTS_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Hold for the whole test, before any lock a helper could take.
