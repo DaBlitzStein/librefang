@@ -1616,7 +1616,26 @@ impl ModelCatalog {
             }
         };
         match serde_json::from_str::<HashMap<String, ModelOverrides>>(&data) {
-            Ok(map) => self.overrides = map,
+            Ok(mut map) => {
+                // The reasoning-policy tokens are hand-editable and go to the
+                // wire verbatim (#8616 review): drop an unspellable one with a
+                // warning instead of failing the whole file or letting it
+                // reach a provider request. `validate()` on the catalog entry
+                // rejects the same shape at load time; this is the overrides
+                // layer's equivalent.
+                for (key, overrides) in map.iter_mut() {
+                    let dropped = overrides.sanitize_reasoning();
+                    if !dropped.is_empty() {
+                        tracing::warn!(
+                            path = %path.display(),
+                            model = %key,
+                            tokens = ?dropped,
+                            "model-overrides file declares invalid reasoning tokens; dropped"
+                        );
+                    }
+                }
+                self.overrides = map;
+            }
             Err(e) => {
                 // A syntax error previously reverted to defaults with no log,
                 // silently dropping the operator's per-model tuning.
@@ -2233,6 +2252,19 @@ impl ModelCatalog {
             }
         };
         for entry in entries {
+            // Same schema gate the TOML loaders apply: a hand-edited file can
+            // carry a zero window or an unspellable reasoning token, and both
+            // would otherwise reach request-building (#8616 review).
+            if let Err(e) = entry.validate() {
+                tracing::warn!(
+                    path = %path.display(),
+                    model = %entry.id,
+                    provider = %entry.provider,
+                    error = %e,
+                    "Skipping invalid custom model entry"
+                );
+                continue;
+            }
             self.add_custom_model(entry);
         }
     }

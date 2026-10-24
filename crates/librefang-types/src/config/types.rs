@@ -2703,6 +2703,15 @@ pub enum TypingMode {
 pub const CANONICAL_REASONING_EFFORTS: [&str; 7] =
     ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// The tokens every driver knew before #8591 introduced the open vocabulary.
+///
+/// A request may safely keep one of these when it is re-targeted at a model
+/// whose catalog entry declares nothing, because each driver already has a
+/// wire spelling for them. The newer rungs (`minimal`, `medium`, `xhigh`) are
+/// only meaningful against a model that *declared* them, so they must not leak
+/// across a failover onto an undeclared model (#8616 review).
+pub const LEGACY_REASONING_EFFORTS: [&str; 4] = ["none", "low", "high", "max"];
+
 /// How hard the model should reason on a turn (#7946, #8591).
 ///
 /// `budget_tokens` cannot express two things operators need.
@@ -2749,7 +2758,9 @@ impl ReasoningMode {
     /// catalog-declared, so this deliberately does not reject a token merely
     /// because LibreFang has never heard of it. What it does reject is input
     /// that cannot be a token: empty, over-long, or carrying whitespace /
-    /// control characters.
+    /// control characters. Accepted tokens are trimmed and ASCII-lowercased,
+    /// because every provider effort vocabulary this type spells on the wire
+    /// is lowercase.
     pub fn new(token: impl Into<String>) -> Result<Self, String> {
         let token = token.into();
         let trimmed = token.trim();
@@ -2770,7 +2781,10 @@ impl ReasoningMode {
                 "reasoning mode {trimmed:?} must be a single token (ASCII letters, digits, '-', '_', '.')"
             ));
         }
-        Ok(Self(trimmed.to_string()))
+        // Provider effort vocabularies are lowercase (#8616 review): `"High"`
+        // must land on the same rung as `"high"` rather than rank as a
+        // non-canonical token and fall to the floor during coercion.
+        Ok(Self(trimmed.to_ascii_lowercase()))
     }
 
     /// The mode's canonical string, identical to its serde representation.
@@ -3050,6 +3064,27 @@ impl ReasoningEffortPolicy {
             .filter_map(|t| canonical_reasoning_rank(t).map(|r| (t, r)))
             .min_by_key(|(_, r)| (r.abs_diff(rank), *r))
             .map(|(t, _)| t)
+    }
+
+    /// Resolve the effort to send after a request is re-targeted at another
+    /// model — a failover slot, a session model switch (#8616 review).
+    ///
+    /// Reusing the primary model's token is wrong in both directions: the
+    /// fallback may declare a narrower set (so the token must be coerced), and
+    /// an undeclared fallback has no vocabulary at all, so a rung the primary
+    /// declared (`xhigh`, `medium`, `minimal`) must not leak onto its wire.
+    ///
+    /// * A declared policy behaves exactly like [`Self::coerce`].
+    /// * An undeclared policy keeps the four pre-#8591 spellings, which every
+    ///   driver can carry, and returns `None` for anything else — the caller
+    ///   clears the explicit mode, leaving "provider default".
+    pub fn resolve_for_model_switch(&self, requested: &ReasoningMode) -> Option<ReasoningMode> {
+        if self.is_declared() {
+            return Some(self.coerce(requested).effective);
+        }
+        LEGACY_REASONING_EFFORTS
+            .contains(&requested.as_str())
+            .then(|| requested.clone())
     }
 }
 

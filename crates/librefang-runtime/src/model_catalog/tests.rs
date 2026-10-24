@@ -3068,6 +3068,81 @@ fn load_overrides_keeps_existing_on_parse_failure() {
     );
 }
 
+/// #8616 review: the reasoning tokens in a hand-edited `model_overrides.json`
+/// go to the provider wire verbatim, so an unspellable one is dropped with a
+/// warning instead of panicking or failing the whole file. The operator's
+/// unrelated tuning in the same entry survives.
+#[test]
+fn load_overrides_drops_invalid_reasoning_tokens_without_panicking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("overrides.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "openai:gpt-4o-mini": {
+                "temperature": 0.3,
+                "supported_efforts": ["low", "extra high", "high low"],
+                "default_effort": "high low"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut catalog = test_catalog();
+    catalog.load_overrides(&path);
+
+    let overrides = catalog
+        .get_overrides("openai:gpt-4o-mini")
+        .expect("the entry, and the fields around the bad token, survive");
+    assert_eq!(overrides.temperature, Some(0.3));
+    assert_eq!(
+        overrides.supported_efforts,
+        Some(vec!["low".to_string()]),
+        "only the structurally invalid tokens are dropped"
+    );
+    assert_eq!(
+        overrides.default_effort, None,
+        "an invalid default defers to the catalog entry"
+    );
+}
+
+/// A catalog entry carries the same declaration, so it is rejected at load
+/// time rather than skipped silently: the error names the offending token.
+#[test]
+fn a_catalog_entry_with_an_invalid_reasoning_token_is_rejected() {
+    let base = ModelCatalogEntry {
+        id: "gateway-model".to_string(),
+        display_name: "Gateway model".to_string(),
+        provider: "openai".to_string(),
+        context_window: 64_000,
+        max_output_tokens: 8_192,
+        ..Default::default()
+    };
+    assert!(base.clone().validate().is_ok());
+
+    let wide = ModelCatalogEntry {
+        supported_efforts: vec!["low".to_string(), "high".to_string()],
+        default_effort: Some("low".to_string()),
+        ..base.clone()
+    };
+    assert!(wide.validate().is_ok());
+
+    let bad_set = ModelCatalogEntry {
+        supported_efforts: vec!["extra high".to_string()],
+        ..base.clone()
+    };
+    let err = bad_set.validate().expect_err("must be rejected");
+    assert!(err.contains("extra high"), "{err}");
+
+    let bad_default = ModelCatalogEntry {
+        default_effort: Some("high low".to_string()),
+        ..base
+    };
+    let err = bad_default.validate().expect_err("must be rejected");
+    assert!(err.contains("high low"), "{err}");
+}
+
 #[test]
 fn model_overrides_context_window_and_max_output_tokens_survive_a_registry_resync() {
     let mut catalog = ModelCatalog::from_entries(

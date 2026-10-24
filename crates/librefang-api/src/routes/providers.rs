@@ -822,6 +822,14 @@ pub async fn set_model_overrides(
     Path(id): Path<String>,
     Json(body): Json<librefang_types::model_catalog::ModelOverrides>,
 ) -> impl IntoResponse {
+    // The four reasoning-policy overrides (#8591) are written to the provider
+    // wire verbatim, so a structurally invalid token must be refused at the
+    // boundary rather than persisted (#8616 review). This is the same gate the
+    // catalog entry applies to its own declaration.
+    if let Err(e) = body.validate_reasoning() {
+        return ApiErrorResponse::bad_request(format!("Invalid reasoning override: {e}"))
+            .into_json_tuple();
+    }
     let overrides_path = state
         .kernel
         .home_dir()
