@@ -1213,6 +1213,24 @@ async fn get_agent_session_materializes_the_row_the_reasoning_patch_addresses() 
         "the pin must be persisted on the session row"
     );
 
+    // The row now exists, so this GET takes the existing-row branch. It must
+    // report the same key — and the pin just written — rather than dropping
+    // the field once the session is materialized.
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session",
+            server.base_url, agent_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["reasoning_effort"], "high",
+        "existing-session GET must report the pin: {body:?}"
+    );
+
     // Half three: an id no route ever reported still 404s. GET-side
     // materialization must not have made the PATCH an upsert.
     let resp = client
@@ -1392,6 +1410,17 @@ async fn test_get_agent_session_reuses_materialized_history_images() {
         .as_str()
         .unwrap();
     assert_eq!(first_id, second_id);
+    // The existing-row branch must expose `reasoning_effort` exactly like the
+    // materializing branch: absent here, clients see the key appear only after
+    // a session is deleted or before an agent's first turn.
+    assert!(
+        first.get("reasoning_effort").is_some(),
+        "existing-session GET must carry reasoning_effort: {first:?}"
+    );
+    assert!(
+        first["reasoning_effort"].is_null(),
+        "an unpinned existing session reports null: {first:?}"
+    );
 
     let download = client
         .get(format!("{}/api/uploads/{first_id}", server.base_url))

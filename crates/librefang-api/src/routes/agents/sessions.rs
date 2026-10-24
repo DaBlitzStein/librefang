@@ -381,6 +381,11 @@ pub async fn get_agent_session(
                             "context_window_tokens": session.context_window_tokens,
                             "label": session.label,
                             "messages": messages,
+                            // Same key as the materializing branch below, so
+                            // the field does not appear only while a session
+                            // is unmaterialized. An existing row reports its
+                            // pin, or null when it inherits.
+                            "reasoning_effort": session.reasoning_effort,
                             "compacted_summary": compacted_summary,
                         })),
                     ),
