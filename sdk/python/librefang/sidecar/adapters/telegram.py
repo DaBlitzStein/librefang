@@ -84,6 +84,9 @@ LONGPOLL_CLIENT_SECS = 35
 # is not mistaken for a wedged thread. A module constant so tests can shorten
 # it.
 POLL_DEADLINE_SECS = LONGPOLL_CLIENT_SECS + 15
+# Small yield between polls: caps a fast-failing poll at ~100/s instead of
+# spinning the loop, and gives other tasks a turn.
+POLL_YIELD_SECS = 0.01
 # Consecutive over-deadline polls before the producer crashes on purpose.
 # A worker thread stuck in urlopen() cannot be reclaimed in-process, so the
 # supervisor restart is the only recovery; 3 leaves room for one slow but
@@ -1012,7 +1015,7 @@ class _LongPollExpired(Exception):
 
     Kept as its own class because on Python 3.11+ ``asyncio.TimeoutError``
     *is* the builtin ``TimeoutError``: without this marker the deadline
-    enforced by ``asyncio.wait_for`` in ``produce()`` could not be told
+    enforced by the ``asyncio.wait`` deadline in ``produce()`` could not be told
     apart from a healthy long-poll timing out, which must stay silent and
     must not count as a wedged poll.
     """
@@ -1936,7 +1939,7 @@ class TelegramAdapter(SidecarAdapter):
         """Translate the normal socket timeout into ``_LongPollExpired``.
 
         Runs in the executor thread, so ``produce()`` can distinguish a
-        healthy long-poll expiry from its own ``asyncio.wait_for`` deadline
+        healthy long-poll expiry from its own ``asyncio.wait`` deadline
         even on Python versions where both errors are the same class.
         """
         try:
@@ -2009,17 +2012,24 @@ class TelegramAdapter(SidecarAdapter):
                     "still retrying",
                     seconds_since_success=int(since_success),
                     retries_in_a_row=retries_in_a_row)
+            poll = loop.run_in_executor(
+                None, self._poll_once_guarded, emit, state)
             try:
-                await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None, self._poll_once_guarded, emit, state),
-                    timeout=POLL_DEADLINE_SECS,
-                )
-            except asyncio.TimeoutError:
+                # `asyncio.wait` rather than `wait_for`: on 3.11 `wait_for`
+                # cancels the executor future and then awaits it, which can
+                # leave the task un-cancellable when polls fail instantly.
+                # Here cancellation just drops the future and re-raises.
+                done, _pending = await asyncio.wait(
+                    {poll}, timeout=POLL_DEADLINE_SECS)
+            except asyncio.CancelledError:
+                poll.cancel()
+                raise
+            if not done:
                 # The executor thread is still inside urlopen(); it cannot
                 # be reclaimed, so this loop is now polling nothing. Warn
                 # (rate-limited, with the count) and give the thread a
                 # couple of chances to return before exiting for a restart.
+                poll.cancel()
                 wedged_polls_in_a_row += 1
                 _warn_rate_limited(
                     last_warned, "wedged",
@@ -2033,7 +2043,10 @@ class TelegramAdapter(SidecarAdapter):
                         f"{wedged_polls_in_a_row} times in a row "
                         f"(deadline {POLL_DEADLINE_SECS}s); "
                         "restarting to recover the polling thread")
+                await asyncio.sleep(POLL_YIELD_SECS)
                 continue
+            try:
+                poll.result()
             except _LongPollExpired:
                 # Normal protocol behaviour: reset backoff and re-enter
                 # immediately. Still surface repeated expiries — a proxy
@@ -2046,6 +2059,9 @@ class TelegramAdapter(SidecarAdapter):
                     "telegram long-poll client timeout; re-polling",
                     retries_in_a_row=timeouts_in_a_row,
                     timeout_secs=LONGPOLL_CLIENT_SECS)
+                # A small real yield keeps a fast-failing poll (refused
+                # connection, test double) from starving the event loop.
+                await asyncio.sleep(POLL_YIELD_SECS)
                 continue
             except asyncio.CancelledError:
                 raise
