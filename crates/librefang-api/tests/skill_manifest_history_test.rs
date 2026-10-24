@@ -115,6 +115,20 @@ async fn get_history(h: &Harness, name: &str) -> (StatusCode, serde_json::Value)
     send(h, Method::GET, &format!("/api/skills/{name}/history"), None).await
 }
 
+/// Whether the kernel's live skill registry currently serves `name`.
+///
+/// The history endpoints fall back to disk, so a 200 there does not prove the
+/// reloaded registry accepted the skill; this reads the registry directly.
+fn registry_serves(h: &Harness, name: &str) -> bool {
+    h.state
+        .kernel
+        .skill_registry_ref()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(name)
+        .is_some()
+}
+
 /// Drop a skill on disk the way a manual install would (no history row), so
 /// the frozen and corrupt tests can reach the store without going through a
 /// mutation endpoint.
@@ -436,9 +450,117 @@ async fn restore_accepts_a_benign_tool_description() {
 
     // The reloaded registry still serves the skill (the load-boundary scan
     // accepted it) and the restore is the newest row.
+    assert!(
+        registry_serves(&h, "hist_tool_ok"),
+        "the reloaded registry must still serve the restored skill"
+    );
     let (status, body) = get_history(&h, "hist_tool_ok").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["versions"][0]["change_source"], "restore", "{body}");
+}
+
+/// Rewrite a stored manifest's `skill.description`.
+fn manifest_with_description(manifest: &str, description: &str) -> String {
+    let mut parsed: librefang_skills::SkillManifest =
+        toml::from_str(manifest).expect("parse stored manifest");
+    parsed.skill.description = description.to_string();
+    toml::to_string_pretty(&parsed).expect("serialize manifest with description")
+}
+
+/// `skill.description` is inlined into the system prompt, so every forward
+/// writer caps it at the same 160,000-character limit as prompt content. A
+/// restore must not be the way around that cap.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_rejects_an_oversized_description_and_leaves_disk_untouched() {
+    let h = boot();
+    create_skill(&h, "hist_desc_huge", "prompt v1").await;
+
+    let skill_dir = h.skill_dir("hist_desc_huge");
+    let toml_before = std::fs::read(skill_dir.join("skill.toml")).expect("read skill.toml");
+    let prompt_before =
+        std::fs::read(skill_dir.join("prompt_context.md")).expect("read prompt_context.md");
+    let manifest = String::from_utf8(toml_before.clone()).expect("utf-8 manifest");
+
+    // One byte past the cap the evolution writers enforce.
+    let stored = manifest_with_description(&manifest, &"x".repeat(160_001));
+    h.store()
+        .record_version("hist_desc_huge", &stored, "prompt v1", "test", "create")
+        .expect("insert oversized-description row");
+    let version_id = h.store().list_for_skill("hist_desc_huge", 10).unwrap()[0].id;
+
+    let (status, body) = send(
+        &h,
+        Method::POST,
+        &format!("/api/skills/hist_desc_huge/history/{version_id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("too large")),
+        "the refusal must name the oversized description: {body}"
+    );
+
+    assert_eq!(
+        std::fs::read(skill_dir.join("skill.toml")).expect("reread skill.toml"),
+        toml_before,
+        "a rejected restore must leave skill.toml untouched"
+    );
+    assert_eq!(
+        std::fs::read(skill_dir.join("prompt_context.md")).expect("reread prompt"),
+        prompt_before,
+        "a rejected restore must leave prompt_context.md untouched"
+    );
+    assert!(
+        !h.store()
+            .list_for_skill("hist_desc_huge", 10)
+            .unwrap()
+            .iter()
+            .any(|version| version.change_source == "restore"),
+        "a rejected restore must not record a restore row"
+    );
+}
+
+/// The boundary itself is accepted: exactly 160,000 bytes restores, lands on
+/// disk, and the reloaded registry serves it.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_accepts_a_description_at_the_cap() {
+    let h = boot();
+    create_skill(&h, "hist_desc_cap", "prompt v1").await;
+
+    let skill_dir = h.skill_dir("hist_desc_cap");
+    let manifest = std::fs::read_to_string(skill_dir.join("skill.toml")).expect("read skill.toml");
+    let description = "y".repeat(160_000);
+    let stored = manifest_with_description(&manifest, &description);
+    h.store()
+        .record_version("hist_desc_cap", &stored, "prompt v1", "test", "create")
+        .expect("insert cap-description row");
+    let version_id = h.store().list_for_skill("hist_desc_cap", 10).unwrap()[0].id;
+
+    let (status, body) = send(
+        &h,
+        Method::POST,
+        &format!("/api/skills/hist_desc_cap/history/{version_id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let restored: librefang_skills::SkillManifest = toml::from_str(
+        &std::fs::read_to_string(skill_dir.join("skill.toml")).expect("reread skill.toml"),
+    )
+    .expect("parse restored manifest");
+    assert_eq!(
+        restored.skill.description.len(),
+        160_000,
+        "the restored description must be the stored one, at the cap"
+    );
+    assert!(
+        registry_serves(&h, "hist_desc_cap"),
+        "a description at the cap must still load"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
