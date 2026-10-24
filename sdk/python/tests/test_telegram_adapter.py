@@ -941,7 +941,7 @@ async def test_produce_backoff_is_capped_at_max(monkeypatch):
 async def test_produce_treats_longpoll_timeout_as_normal(monkeypatch):
     """Long-poll timeouts (LONGPOLL_SERVER_SECS expiring with no
     updates) are normal Telegram protocol behaviour, NOT a transport
-    failure. They must reset backoff, skip the sleep, and re-enter
+    failure. They must reset backoff (no backoff-sized sleep) and re-enter
     the loop immediately — otherwise an idle channel would slowly
     push backoff to MAX over a few minutes."""
     import asyncio
@@ -983,7 +983,10 @@ async def test_produce_treats_longpoll_timeout_as_normal(monkeypatch):
     assert calls["n"] >= 4, (
         f"produce() must re-poll after a TimeoutError; only saw "
         f"{calls['n']} polls")
-    assert sleep_calls == [], (
+    # A normal long-poll expiry must not trigger the exponential backoff
+    # (which starts at 1 s). A small scheduling yield is allowed and is not
+    # a backoff: 3.11's wait_for can otherwise never deliver cancellation.
+    assert all(s <= tg.POLL_YIELD_SECS for s in sleep_calls), (
         "TimeoutError must NOT trigger the backoff sleep; got "
         f"sleeps={sleep_calls}")
 
