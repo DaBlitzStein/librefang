@@ -556,6 +556,26 @@ impl LibreFangKernel {
                     Some(store) => fb.with_exhaustion_store(store),
                     None => fb,
                 };
+                // A failover rewrites `req.model`, so the fallback slot must
+                // re-resolve the reasoning policy and echo policy for the model
+                // it will actually call (#8616 review). The snapshot is taken
+                // per `resolve_driver` call, i.e. per turn, so a catalog or
+                // override edit is picked up on the next turn.
+                let reasoning_catalog = self.llm.model_catalog.load_full();
+                let fb = fb.with_reasoning_resolver(std::sync::Arc::new(
+                    move |provider: &str, model: &str| match reasoning_catalog
+                        .find_model_for_manifest(provider, model)
+                    {
+                        Some(entry) => (
+                            reasoning_catalog.effective_reasoning_policy(entry),
+                            entry.reasoning_echo_policy,
+                        ),
+                        None => (
+                            librefang_types::config::ReasoningEffortPolicy::default(),
+                            librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+                        ),
+                    },
+                ));
                 return Ok(Arc::new(fb));
             }
         }
