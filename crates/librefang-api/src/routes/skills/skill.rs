@@ -1545,6 +1545,36 @@ fn record_skill_version_at_dir(
     }
 }
 
+/// Record a snapshot a versioned writer captured under the per-skill lock.
+///
+/// The writer returns the exact bytes it wrote, so this never re-reads disk —
+/// a concurrent write that lands between the mutation and the record cannot
+/// put its content in this row.
+fn record_captured_skill_version(
+    state: &AppState,
+    skill_name: &str,
+    snapshot: librefang_skills::evolution::SkillWriteSnapshot,
+    source: SkillWrite,
+    author: &str,
+) {
+    match snapshot {
+        Some((manifest_toml, prompt_context)) => {
+            let _ = record_skill_version(
+                state,
+                skill_name,
+                &manifest_toml,
+                &prompt_context,
+                source,
+                author,
+            );
+        }
+        None => tracing::warn!(
+            skill = skill_name,
+            "skill history: writer could not capture skill.toml; snapshot skipped"
+        ),
+    }
+}
+
 /// Record an `install` snapshot for a skill that was just copied into
 /// `skills_dir` by a marketplace install (FangHub / ClawHub / Skillhub).
 ///
@@ -1597,7 +1627,7 @@ fn create_skill_versioned(
     author: &str,
 ) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
     use librefang_skills::evolution;
-    let result = evolution::create_skill(
+    let (result, snapshot) = evolution::create_skill_with_snapshot(
         skills_dir,
         name,
         description,
@@ -1605,10 +1635,10 @@ fn create_skill_versioned(
         tags,
         Some("dashboard"),
     )?;
-    record_skill_version_at_dir(
+    record_captured_skill_version(
         state,
-        &skills_dir.join(&result.skill_name),
         &result.skill_name,
+        snapshot,
         SkillWrite::Create,
         author,
     );
@@ -1624,11 +1654,12 @@ fn update_skill_versioned(
     author: &str,
 ) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
     use librefang_skills::evolution;
-    let result = evolution::update_skill(skill, prompt_context, changelog, Some("dashboard"))?;
-    record_skill_version_at_dir(
+    let (result, snapshot) =
+        evolution::update_skill_with_snapshot(skill, prompt_context, changelog, Some("dashboard"))?;
+    record_captured_skill_version(
         state,
-        &skill.path,
         &result.skill_name,
+        snapshot,
         SkillWrite::Evolve,
         author,
     );
@@ -1646,7 +1677,7 @@ fn patch_skill_versioned(
     author: &str,
 ) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
     use librefang_skills::evolution;
-    let result = evolution::patch_skill(
+    let (result, snapshot) = evolution::patch_skill_with_snapshot(
         skill,
         old_string,
         new_string,
@@ -1654,10 +1685,10 @@ fn patch_skill_versioned(
         replace_all,
         Some("dashboard"),
     )?;
-    record_skill_version_at_dir(
+    record_captured_skill_version(
         state,
-        &skill.path,
         &result.skill_name,
+        snapshot,
         SkillWrite::Patch,
         author,
     );
@@ -1672,11 +1703,11 @@ fn rollback_skill_versioned(
     author: &str,
 ) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
     use librefang_skills::evolution;
-    let result = evolution::rollback_skill(skill, Some("dashboard"))?;
-    record_skill_version_at_dir(
+    let (result, snapshot) = evolution::rollback_skill_with_snapshot(skill, Some("dashboard"))?;
+    record_captured_skill_version(
         state,
-        &skill.path,
         &result.skill_name,
+        snapshot,
         SkillWrite::Rollback,
         author,
     );
@@ -1685,9 +1716,10 @@ fn rollback_skill_versioned(
 
 /// Delete a locally-evolved skill and record the content the delete removed.
 ///
-/// The snapshot is read *before* the delete — the files cannot be read
-/// afterwards — but it is only written once the delete has succeeded, so a
-/// failed delete leaves no history row claiming it happened.
+/// The snapshot is read inside `delete_skill_with_snapshot`'s locked region —
+/// the files cannot be read afterwards — but the row is only written once the
+/// delete has succeeded, so a failed delete leaves no history row claiming it
+/// happened.
 fn delete_skill_versioned(
     state: &AppState,
     skills_dir: &std::path::Path,
@@ -1695,20 +1727,14 @@ fn delete_skill_versioned(
     author: &str,
 ) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
     use librefang_skills::evolution;
-    let snapshot = evolution::load_installed_skill_from_disk(skills_dir, name)
-        .ok()
-        .and_then(|skill| read_skill_snapshot(&skill.path));
-    let result = evolution::delete_skill(skills_dir, name)?;
-    if let Some((manifest_toml, prompt_context)) = snapshot {
-        let _ = record_skill_version(
-            state,
-            &result.skill_name,
-            &manifest_toml,
-            &prompt_context,
-            SkillWrite::Delete,
-            author,
-        );
-    }
+    let (result, snapshot) = evolution::delete_skill_with_snapshot(skills_dir, name)?;
+    record_captured_skill_version(
+        state,
+        &result.skill_name,
+        snapshot,
+        SkillWrite::Delete,
+        author,
+    );
     Ok(result)
 }
 
@@ -1721,11 +1747,11 @@ fn write_supporting_file_versioned(
     author: &str,
 ) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
     use librefang_skills::evolution;
-    let result = evolution::write_supporting_file(skill, path, content)?;
-    record_skill_version_at_dir(
+    let (result, snapshot) = evolution::write_supporting_file_with_snapshot(skill, path, content)?;
+    record_captured_skill_version(
         state,
-        &skill.path,
         &result.skill_name,
+        snapshot,
         SkillWrite::FileWrite,
         author,
     );
@@ -1740,11 +1766,11 @@ fn remove_supporting_file_versioned(
     author: &str,
 ) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
     use librefang_skills::evolution;
-    let result = evolution::remove_supporting_file(skill, path)?;
-    record_skill_version_at_dir(
+    let (result, snapshot) = evolution::remove_supporting_file_with_snapshot(skill, path)?;
+    record_captured_skill_version(
         state,
-        &skill.path,
         &result.skill_name,
+        snapshot,
         SkillWrite::FileRemove,
         author,
     );
@@ -1765,17 +1791,19 @@ fn install_local_skill_versioned(
     hand_scoped: bool,
     author: &str,
 ) -> Result<(), librefang_skills::SkillError> {
-    librefang_skills::evolution::install_local_skill(registry_src, dest)?;
+    use librefang_skills::evolution;
+    let snapshot = evolution::install_local_skill_with_snapshot(registry_src, dest)?;
     if !hand_scoped {
-        record_skill_version_at_dir(state, dest, skill_name, SkillWrite::Install, author);
+        record_captured_skill_version(state, skill_name, snapshot, SkillWrite::Install, author);
     }
     Ok(())
 }
 
 /// Uninstall any installed skill and record the content the uninstall removed.
 ///
-/// Like [`delete_skill_versioned`], the snapshot is read before the removal and
-/// written after it succeeded.
+/// Like [`delete_skill_versioned`], the snapshot is captured inside the
+/// evolution writer's locked region and written only after the removal
+/// succeeded.
 fn uninstall_skill_versioned(
     state: &AppState,
     skills_dir: &std::path::Path,
@@ -1783,20 +1811,14 @@ fn uninstall_skill_versioned(
     author: &str,
 ) -> Result<librefang_skills::evolution::EvolutionResult, librefang_skills::SkillError> {
     use librefang_skills::evolution;
-    let snapshot = evolution::load_installed_skill_from_disk(skills_dir, name)
-        .ok()
-        .and_then(|skill| read_skill_snapshot(&skill.path));
-    let result = evolution::uninstall_skill(skills_dir, name)?;
-    if let Some((manifest_toml, prompt_context)) = snapshot {
-        let _ = record_skill_version(
-            state,
-            &result.skill_name,
-            &manifest_toml,
-            &prompt_context,
-            SkillWrite::Uninstall,
-            author,
-        );
-    }
+    let (result, snapshot) = evolution::uninstall_skill_with_snapshot(skills_dir, name)?;
+    record_captured_skill_version(
+        state,
+        &result.skill_name,
+        snapshot,
+        SkillWrite::Uninstall,
+        author,
+    );
     Ok(result)
 }
 
@@ -2257,6 +2279,13 @@ pub async fn restore_skill_version(
         &version.prompt_context,
     ) {
         Ok(()) => {
+            audit_evolve(
+                &state,
+                api_user.as_ref().map(|u| u.0.user_id),
+                "restore",
+                &name,
+                &format!("restored version {version_id}"),
+            );
             state.kernel.reload_skills();
             // The restore itself is the newest snapshot, recorded under its
             // own `restore` source so it is distinguishable from what it put
@@ -2308,25 +2337,40 @@ mod raw_writer_drift_guard {
     /// Every evolution writer, paired with the one function allowed to call
     /// it.
     const FUNNELS: &[(&str, &str)] = &[
-        ("evolution::create_skill", "fn create_skill_versioned("),
-        ("evolution::update_skill", "fn update_skill_versioned("),
-        ("evolution::patch_skill", "fn patch_skill_versioned("),
-        ("evolution::rollback_skill", "fn rollback_skill_versioned("),
-        ("evolution::delete_skill", "fn delete_skill_versioned("),
         (
-            "evolution::write_supporting_file",
+            "evolution::create_skill_with_snapshot",
+            "fn create_skill_versioned(",
+        ),
+        (
+            "evolution::update_skill_with_snapshot",
+            "fn update_skill_versioned(",
+        ),
+        (
+            "evolution::patch_skill_with_snapshot",
+            "fn patch_skill_versioned(",
+        ),
+        (
+            "evolution::rollback_skill_with_snapshot",
+            "fn rollback_skill_versioned(",
+        ),
+        (
+            "evolution::delete_skill_with_snapshot",
+            "fn delete_skill_versioned(",
+        ),
+        (
+            "evolution::write_supporting_file_with_snapshot",
             "fn write_supporting_file_versioned(",
         ),
         (
-            "evolution::remove_supporting_file",
+            "evolution::remove_supporting_file_with_snapshot",
             "fn remove_supporting_file_versioned(",
         ),
         (
-            "evolution::install_local_skill",
+            "evolution::install_local_skill_with_snapshot",
             "fn install_local_skill_versioned(",
         ),
         (
-            "evolution::uninstall_skill",
+            "evolution::uninstall_skill_with_snapshot",
             "fn uninstall_skill_versioned(",
         ),
     ];

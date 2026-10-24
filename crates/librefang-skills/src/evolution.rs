@@ -257,6 +257,18 @@ fn acquire_skill_lock(skill_dir: &Path) -> Result<std::fs::File, SkillError> {
 ///
 /// The destination existence check is deliberately performed after locking so two concurrent installers cannot both pass the check and copy into the same partially populated directory.
 pub fn install_local_skill(source: &Path, skill_dir: &Path) -> Result<(), SkillError> {
+    install_local_skill_with_snapshot(source, skill_dir).map(|_| ())
+}
+
+/// [`install_local_skill`], additionally returning the installed snapshot.
+///
+/// The snapshot is read before the install lock is released so the history row
+/// records the content this install produced even if another writer mutates
+/// the skill immediately afterwards.
+pub fn install_local_skill_with_snapshot(
+    source: &Path,
+    skill_dir: &Path,
+) -> Result<SkillWriteSnapshot, SkillError> {
     let _lock = acquire_skill_lock(skill_dir)?;
     if skill_dir.exists() {
         let name = skill_dir
@@ -270,7 +282,7 @@ pub fn install_local_skill(source: &Path, skill_dir: &Path) -> Result<(), SkillE
     if result.is_err() {
         let _ = std::fs::remove_dir_all(skill_dir);
     }
-    result
+    result.map(|()| read_skill_snapshot(skill_dir))
 }
 
 fn copy_local_skill_recursive(source: &Path, destination: &Path) -> Result<(), SkillError> {
@@ -913,6 +925,27 @@ pub fn bump_patch_version(version: &str) -> String {
 ///   - `None` when origin is genuinely unknown (legacy call sites).
 pub type EvolutionAuthor<'a> = Option<&'a str>;
 
+/// The `(skill.toml, prompt_context.md)` pair a mutation wrote, captured
+/// while the per-skill lock is still held.
+///
+/// `None` when the manifest could not be read (removal paths); the caller
+/// then skips the history row rather than storing a snapshot it cannot
+/// restore.
+pub type SkillWriteSnapshot = Option<(String, String)>;
+
+/// Read the v1 snapshot (`skill.toml` + `prompt_context.md`) from a skill
+/// directory.
+///
+/// `None` when the manifest is missing or unreadable. A missing
+/// `prompt_context.md` reads as an empty string — inline-prompt and
+/// prompt-less skills are legal shapes.
+fn read_skill_snapshot(skill_dir: &Path) -> Option<(String, String)> {
+    let manifest_toml = std::fs::read_to_string(skill_dir.join("skill.toml")).ok()?;
+    let prompt_context =
+        std::fs::read_to_string(skill_dir.join("prompt_context.md")).unwrap_or_default();
+    Some((manifest_toml, prompt_context))
+}
+
 /// Save a version snapshot. Keeps only the last N versions.
 ///
 /// `is_mutation` distinguishes the initial creation (`false`) from
@@ -1014,6 +1047,20 @@ pub fn create_skill(
     tags: Vec<String>,
     author: EvolutionAuthor<'_>,
 ) -> Result<EvolutionResult, SkillError> {
+    create_skill_with_snapshot(skills_dir, name, description, prompt_context, tags, author)
+        .map(|(result, _)| result)
+}
+
+/// [`create_skill`], additionally returning the snapshot it wrote under the
+/// per-skill lock.
+pub fn create_skill_with_snapshot(
+    skills_dir: &Path,
+    name: &str,
+    description: &str,
+    prompt_context: &str,
+    tags: Vec<String>,
+    author: EvolutionAuthor<'_>,
+) -> Result<(EvolutionResult, SkillWriteSnapshot), SkillError> {
     validate_name(name)?;
     validate_prompt_content(prompt_context)?;
 
@@ -1107,16 +1154,19 @@ pub fn create_skill(
     info!(skill = name, "Created evolved skill");
 
     let (evolution_count, mutation_count, use_count) = counters_for(&skill_dir);
-    Ok(EvolutionResult {
-        success: true,
-        message: format!("Skill '{name}' created successfully"),
-        skill_name: name.to_string(),
-        version: Some("0.1.0".to_string()),
-        evolution_count,
-        mutation_count,
-        use_count,
-        ..Default::default()
-    })
+    Ok((
+        EvolutionResult {
+            success: true,
+            message: format!("Skill '{name}' created successfully"),
+            skill_name: name.to_string(),
+            version: Some("0.1.0".to_string()),
+            evolution_count,
+            mutation_count,
+            use_count,
+            ..Default::default()
+        },
+        Some((toml_str, prompt_context.to_string())),
+    ))
 }
 
 /// Update a skill's prompt_context entirely (full rewrite).
@@ -1126,6 +1176,18 @@ pub fn update_skill(
     changelog: &str,
     author: EvolutionAuthor<'_>,
 ) -> Result<EvolutionResult, SkillError> {
+    update_skill_with_snapshot(skill, new_prompt_context, changelog, author)
+        .map(|(result, _)| result)
+}
+
+/// [`update_skill`], additionally returning the snapshot it wrote under the
+/// per-skill lock.
+pub fn update_skill_with_snapshot(
+    skill: &InstalledSkill,
+    new_prompt_context: &str,
+    changelog: &str,
+    author: EvolutionAuthor<'_>,
+) -> Result<(EvolutionResult, SkillWriteSnapshot), SkillError> {
     validate_prompt_content(new_prompt_context)?;
 
     let name = &skill.manifest.skill.name;
@@ -1195,16 +1257,19 @@ pub fn update_skill(
     info!(skill = %name, version = %new_version, "Updated evolved skill");
 
     let (evolution_count, mutation_count, use_count) = counters_for(skill_dir);
-    Ok(EvolutionResult {
-        success: true,
-        message: format!("Skill '{name}' updated to v{new_version}"),
-        skill_name: name.to_string(),
-        version: Some(new_version),
-        evolution_count,
-        mutation_count,
-        use_count,
-        ..Default::default()
-    })
+    Ok((
+        EvolutionResult {
+            success: true,
+            message: format!("Skill '{name}' updated to v{new_version}"),
+            skill_name: name.to_string(),
+            version: Some(new_version),
+            evolution_count,
+            mutation_count,
+            use_count,
+            ..Default::default()
+        },
+        Some((toml_str, new_prompt_context.to_string())),
+    ))
 }
 
 /// Patch a skill's prompt_context using fuzzy find-and-replace.
@@ -1216,6 +1281,20 @@ pub fn patch_skill(
     replace_all: bool,
     author: EvolutionAuthor<'_>,
 ) -> Result<EvolutionResult, SkillError> {
+    patch_skill_with_snapshot(skill, old_str, new_str, changelog, replace_all, author)
+        .map(|(result, _)| result)
+}
+
+/// [`patch_skill`], additionally returning the snapshot it wrote under the
+/// per-skill lock.
+pub fn patch_skill_with_snapshot(
+    skill: &InstalledSkill,
+    old_str: &str,
+    new_str: &str,
+    changelog: &str,
+    replace_all: bool,
+    author: EvolutionAuthor<'_>,
+) -> Result<(EvolutionResult, SkillWriteSnapshot), SkillError> {
     let name = &skill.manifest.skill.name;
     let skill_dir = &skill.path;
 
@@ -1298,20 +1377,23 @@ pub fn patch_skill(
     );
 
     let (evolution_count, mutation_count, use_count) = counters_for(skill_dir);
-    Ok(EvolutionResult {
-        success: true,
-        message: format!(
-            "Skill '{name}' patched to v{new_version} ({:?}, {} match(es))",
-            result.strategy, result.match_count
-        ),
-        skill_name: name.to_string(),
-        version: Some(new_version),
-        match_strategy: Some(result.strategy),
-        match_count: Some(result.match_count),
-        evolution_count,
-        mutation_count,
-        use_count,
-    })
+    Ok((
+        EvolutionResult {
+            success: true,
+            message: format!(
+                "Skill '{name}' patched to v{new_version} ({:?}, {} match(es))",
+                result.strategy, result.match_count
+            ),
+            skill_name: name.to_string(),
+            version: Some(new_version),
+            match_strategy: Some(result.strategy),
+            match_count: Some(result.match_count),
+            evolution_count,
+            mutation_count,
+            use_count,
+        },
+        Some((toml_str, result.new_content.clone())),
+    ))
 }
 
 /// Resolve the directory that holds the installed skill known as `name`.
@@ -1387,6 +1469,15 @@ fn manifest_declares_name(skill_dir: &Path, name: &str) -> bool {
 /// these are user-initiated and the operator has decided to remove the
 /// skill even if it came from ClawHub / Skillhub / OpenClaw.
 pub fn uninstall_skill(skills_dir: &Path, name: &str) -> Result<EvolutionResult, SkillError> {
+    uninstall_skill_with_snapshot(skills_dir, name).map(|(result, _)| result)
+}
+
+/// [`uninstall_skill`], additionally returning the snapshot the uninstall
+/// removed, captured under the per-skill lock.
+pub fn uninstall_skill_with_snapshot(
+    skills_dir: &Path,
+    name: &str,
+) -> Result<(EvolutionResult, SkillWriteSnapshot), SkillError> {
     // Reject path-traversal attempts in the skill name before anything else.
     // Names are validated on create, but the uninstall path accepts any
     // existing name, so harden here too.
@@ -1411,19 +1502,34 @@ pub fn uninstall_skill(skills_dir: &Path, name: &str) -> Result<EvolutionResult,
         return Err(SkillError::NotFound(name.to_string()));
     }
 
+    // The files this row records are what the uninstall is about to remove;
+    // they cannot be read once `remove_dir_all` has run.
+    let snapshot = read_skill_snapshot(&skill_dir);
     std::fs::remove_dir_all(&skill_dir)?;
     info!(skill = name, dir = %skill_dir.display(), "Uninstalled skill");
 
-    Ok(EvolutionResult {
-        success: true,
-        message: format!("Skill '{name}' uninstalled"),
-        skill_name: name.to_string(),
-        version: None,
-        ..Default::default()
-    })
+    Ok((
+        EvolutionResult {
+            success: true,
+            message: format!("Skill '{name}' uninstalled"),
+            skill_name: name.to_string(),
+            version: None,
+            ..Default::default()
+        },
+        snapshot,
+    ))
 }
 
 pub fn delete_skill(skills_dir: &Path, name: &str) -> Result<EvolutionResult, SkillError> {
+    delete_skill_with_snapshot(skills_dir, name).map(|(result, _)| result)
+}
+
+/// [`delete_skill`], additionally returning the snapshot the delete removed,
+/// captured under the per-skill lock.
+pub fn delete_skill_with_snapshot(
+    skills_dir: &Path,
+    name: &str,
+) -> Result<(EvolutionResult, SkillWriteSnapshot), SkillError> {
     // Reject path-traversal attempts in the skill name before constructing
     // the filesystem path. Without this, `name = "../etc"` would resolve
     // `skills_dir/../etc` and (subject to source-field checks below) let an
@@ -1486,16 +1592,22 @@ pub fn delete_skill(skills_dir: &Path, name: &str) -> Result<EvolutionResult, Sk
         return Err(SkillError::NotFound(name.to_string()));
     }
 
+    // The files this row records are what the delete is about to remove; they
+    // cannot be read once `remove_dir_all` has run.
+    let snapshot = read_skill_snapshot(&skill_dir);
     std::fs::remove_dir_all(&skill_dir)?;
     info!(skill = name, "Deleted evolved skill");
 
-    Ok(EvolutionResult {
-        success: true,
-        message: format!("Skill '{name}' deleted"),
-        skill_name: name.to_string(),
-        version: None,
-        ..Default::default()
-    })
+    Ok((
+        EvolutionResult {
+            success: true,
+            message: format!("Skill '{name}' deleted"),
+            skill_name: name.to_string(),
+            version: None,
+            ..Default::default()
+        },
+        snapshot,
+    ))
 }
 
 // ── Supporting file management ──────────────────────────────────────
@@ -1552,6 +1664,18 @@ pub fn write_supporting_file(
     rel_path: &str,
     content: &str,
 ) -> Result<EvolutionResult, SkillError> {
+    write_supporting_file_with_snapshot(skill, rel_path, content).map(|(result, _)| result)
+}
+
+/// [`write_supporting_file`], additionally returning the skill's unchanged
+/// `(skill.toml, prompt_context.md)` snapshot read under the per-skill lock —
+/// the supporting file is not part of the v1 snapshot, so the row pins the
+/// event against the content it happened at.
+pub fn write_supporting_file_with_snapshot(
+    skill: &InstalledSkill,
+    rel_path: &str,
+    content: &str,
+) -> Result<(EvolutionResult, SkillWriteSnapshot), SkillError> {
     validate_supporting_path(rel_path)?;
 
     if content.len() > MAX_SUPPORTING_FILE_SIZE {
@@ -1625,16 +1749,19 @@ pub fn write_supporting_file(
     info!(skill = %name, path = rel_path, "Wrote supporting file");
 
     let (evolution_count, mutation_count, use_count) = counters_for(&skill.path);
-    Ok(EvolutionResult {
-        success: true,
-        message: format!("File '{rel_path}' written to skill '{name}'"),
-        skill_name: name.to_string(),
-        version: None,
-        evolution_count,
-        mutation_count,
-        use_count,
-        ..Default::default()
-    })
+    Ok((
+        EvolutionResult {
+            success: true,
+            message: format!("File '{rel_path}' written to skill '{name}'"),
+            skill_name: name.to_string(),
+            version: None,
+            evolution_count,
+            mutation_count,
+            use_count,
+            ..Default::default()
+        },
+        read_skill_snapshot(&skill.path),
+    ))
 }
 
 /// Remove a supporting file from a skill's subdirectory.
@@ -1644,6 +1771,15 @@ pub fn remove_supporting_file(
     skill: &InstalledSkill,
     rel_path: &str,
 ) -> Result<EvolutionResult, SkillError> {
+    remove_supporting_file_with_snapshot(skill, rel_path).map(|(result, _)| result)
+}
+
+/// [`remove_supporting_file`], additionally returning the skill's unchanged
+/// `(skill.toml, prompt_context.md)` snapshot read under the per-skill lock.
+pub fn remove_supporting_file_with_snapshot(
+    skill: &InstalledSkill,
+    rel_path: &str,
+) -> Result<(EvolutionResult, SkillWriteSnapshot), SkillError> {
     validate_supporting_path(rel_path)?;
 
     let name = &skill.manifest.skill.name;
@@ -1723,16 +1859,19 @@ pub fn remove_supporting_file(
     info!(skill = %name, path = rel_path, "Removed supporting file");
 
     let (evolution_count, mutation_count, use_count) = counters_for(&skill.path);
-    Ok(EvolutionResult {
-        success: true,
-        message: format!("File '{rel_path}' removed from skill '{name}'"),
-        skill_name: name.to_string(),
-        version: None,
-        evolution_count,
-        mutation_count,
-        use_count,
-        ..Default::default()
-    })
+    Ok((
+        EvolutionResult {
+            success: true,
+            message: format!("File '{rel_path}' removed from skill '{name}'"),
+            skill_name: name.to_string(),
+            version: None,
+            evolution_count,
+            mutation_count,
+            use_count,
+            ..Default::default()
+        },
+        read_skill_snapshot(&skill.path),
+    ))
 }
 
 /// List all supporting files in a skill directory (references/, templates/,
@@ -1805,6 +1944,15 @@ pub fn rollback_skill(
     skill: &InstalledSkill,
     author: EvolutionAuthor<'_>,
 ) -> Result<EvolutionResult, SkillError> {
+    rollback_skill_with_snapshot(skill, author).map(|(result, _)| result)
+}
+
+/// [`rollback_skill`], additionally returning the snapshot it wrote under the
+/// per-skill lock.
+pub fn rollback_skill_with_snapshot(
+    skill: &InstalledSkill,
+    author: EvolutionAuthor<'_>,
+) -> Result<(EvolutionResult, SkillWriteSnapshot), SkillError> {
     let name = &skill.manifest.skill.name;
     let skill_dir = &skill.path;
 
@@ -1885,16 +2033,19 @@ pub fn rollback_skill(
     info!(skill = %name, version = %new_version, "Rolled back skill");
 
     let (evolution_count, mutation_count, use_count) = counters_for(skill_dir);
-    Ok(EvolutionResult {
-        success: true,
-        message: format!("Skill '{name}' rolled back to v{new_version}"),
-        skill_name: name.to_string(),
-        version: Some(new_version),
-        evolution_count,
-        mutation_count,
-        use_count,
-        ..Default::default()
-    })
+    Ok((
+        EvolutionResult {
+            success: true,
+            message: format!("Skill '{name}' rolled back to v{new_version}"),
+            skill_name: name.to_string(),
+            version: Some(new_version),
+            evolution_count,
+            mutation_count,
+            use_count,
+            ..Default::default()
+        },
+        Some((toml_str, old_content)),
+    ))
 }
 
 /// Get evolution metadata for a skill (usage stats, version history).
@@ -1931,7 +2082,19 @@ pub fn restore_skill_snapshot(
     validate_name(name)?;
     // The snapshot must be a parseable manifest before anything is written; a
     // corrupt row has to fail as a 500 on the API side, not half-apply.
-    toml::from_str::<SkillManifest>(manifest_toml).map_err(SkillError::from)?;
+    let manifest: SkillManifest = toml::from_str(manifest_toml).map_err(SkillError::from)?;
+
+    // Every other writer scans prompt content before it reaches disk. A
+    // restore writes a historical snapshot verbatim, so without the same
+    // validation it would be a way to land blocked content (or an oversized
+    // prompt) that every forward path refuses — and then the reload drops the
+    // skill from the registry while the request returned 200. Scan the
+    // external prompt and both manifest-carried prompt fields.
+    validate_prompt_content(prompt_context)?;
+    if let Some(inline_prompt) = manifest.prompt_context.as_deref() {
+        validate_prompt_content(inline_prompt)?;
+    }
+    validate_prompt_content(&manifest.skill.description)?;
 
     // Resolve through the manifest when the directory is not named after the
     // skill (slug ≠ `[skill] name`) — same resolution as update/delete.

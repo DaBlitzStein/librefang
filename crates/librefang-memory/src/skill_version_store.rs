@@ -14,18 +14,19 @@
 //! a scope column without disturbing this one.
 //!
 //! The marketplace install paths (`clawhub.rs`, `skillhub.rs`) record an
-//! `install` version once the skill lands globally. Two writes remain outside
-//! this store by design: direct CLI/TUI edits (no daemon funnel) and
-//! hand-scoped installs (excluded by the global-root scope above).
+//! `install` version once the skill lands globally. Direct CLI/TUI edits are
+//! the only in-scope write path that remains unrecorded (no daemon funnel yet).
 //!
 //! Retention is per-skill, capped at [`MAX_VERSIONS_PER_SKILL`] most recent
 //! snapshots, trimmed on insert inside the same transaction. Deduplication
-//! compares `(manifest_toml, prompt_context, change_source)`: a `restore` of
-//! content identical to the current version is still recorded as its own
-//! event, while a no-op persist that re-writes the same bytes under the same
-//! source is skipped.
+//! compares `(manifest_toml, prompt_context, change_source)`: a no-op persist
+//! that re-writes the same bytes under the same source is skipped. Event-only
+//! sources (`file-write`, `file-remove`, `restore`) are exempt: their snapshot
+//! does not change, so the row is the event, and consecutive identical rows
+//! must both land.
 
 use librefang_types::error::{LibreFangError, LibreFangResult};
+use librefang_types::skill_history::SkillWrite;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::OptionalExtension;
@@ -76,8 +77,9 @@ impl SkillVersionStore {
     ///
     /// Skips the insert when the manifest, the prompt context and the
     /// `change_source` are all identical to the most recent stored version for
-    /// this skill. Comparing `change_source` too means a `restore` of content
-    /// identical to the current version is still recorded as its own event.
+    /// this skill. Event-only sources (`file-write`, `file-remove`, `restore`)
+    /// are exempt and always insert, because their snapshot is unchanged by
+    /// definition and the row records the event itself.
     pub fn record_version(
         &self,
         skill_name: &str,
@@ -100,6 +102,18 @@ impl SkillVersionStore {
         // `.optional()` distinguishes "no rows" from a real read failure;
         // `.ok()` would read a missing table or I/O error as "no previous
         // version" and fall through to a much less useful insert error.
+        //
+        // Event-only sources are exempt: a supporting-file write/remove does
+        // not change the v1 snapshot, and a restore of content identical to
+        // the current state is still its own event, so the row is the only
+        // record. Deduping them would collapse consecutive events into one.
+        let event_only = [
+            SkillWrite::FileWrite,
+            SkillWrite::FileRemove,
+            SkillWrite::Restore,
+        ]
+        .iter()
+        .any(|write| write.as_str() == change_source);
         let latest: Option<(String, String, String)> = tx
             .query_row(
                 "SELECT manifest_toml, prompt_context, change_source FROM skill_versions
@@ -113,10 +127,11 @@ impl SkillVersionStore {
             .map_err(|e| {
                 LibreFangError::memory_msg(format!("skill version dedup read failed: {e}"))
             })?;
-        if latest
-            .as_ref()
-            .map(|(t, p, s)| (t.as_str(), p.as_str(), s.as_str()))
-            == Some((manifest_toml, prompt_context, change_source))
+        if !event_only
+            && latest
+                .as_ref()
+                .map(|(t, p, s)| (t.as_str(), p.as_str(), s.as_str()))
+                == Some((manifest_toml, prompt_context, change_source))
         {
             tx.commit().map_err(LibreFangError::memory)?;
             return Ok(());
@@ -297,6 +312,29 @@ mod tests {
         // change are what define the event.
         let versions = store.list_for_skill("alpha", 10).unwrap();
         assert_eq!(versions.len(), 1);
+    }
+
+    /// Event-only sources pin an event, not a content change: their snapshot
+    /// is identical by definition, so consecutive rows must both land rather
+    /// than dedupe into one. Two `file-write` calls touching different files
+    /// are two distinct history events.
+    #[test]
+    fn consecutive_event_only_rows_are_never_deduped() {
+        let store = SkillVersionStore::new(test_pool());
+        for source in ["file-write", "file-remove", "restore"] {
+            let skill = format!("alpha-{source}");
+            store
+                .record_version(&skill, "same", "same prompt", "agent", source)
+                .unwrap();
+            store
+                .record_version(&skill, "same", "same prompt", "agent", source)
+                .unwrap();
+            assert_eq!(
+                store.list_for_skill(&skill, 10).unwrap().len(),
+                2,
+                "two consecutive `{source}` events must both be recorded"
+            );
+        }
     }
 
     /// The change_source participates in the dedupe key — re-recording the
