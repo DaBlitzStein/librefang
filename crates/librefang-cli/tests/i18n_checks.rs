@@ -984,7 +984,10 @@ fn is_likely_i18n_key_literal(
     // `agent-types` is the operator agent-type directory name (`~/.librefang/agent-types`), not a message id.
     // `mcp-servers` is a `manifest_versions.change_source` token in `MANIFEST_CHANGE_SOURCES`
     // (`screens/agents.rs`, #8604); its label lives at `tui-agents-manifest-source-mcp-servers`.
-    const TECHNICAL_FALSE_POSITIVES: &[&str] = &["daemon-reload", "agent-types", "mcp-servers"];
+    // `agent-tool` is the same kind of token in `TEMPLATE_CHANGE_SOURCES` (`screens/templates.rs`,
+    // #8609); its label lives at `tui-templates-source-agent-tool`.
+    const TECHNICAL_FALSE_POSITIVES: &[&str] =
+        &["daemon-reload", "agent-types", "mcp-servers", "agent-tool"];
 
     let Some((prefix, _)) = literal.split_once('-') else {
         return false;
