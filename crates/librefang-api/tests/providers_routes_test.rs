@@ -481,7 +481,10 @@ async fn add_custom_model_carries_the_reasoning_policy() {
 
 /// #8616 review: `supported_efforts` / `default_effort` are written to the
 /// provider wire verbatim, so a structurally invalid token must be refused at
-/// the ingress instead of entering the catalog.
+/// the ingress instead of entering the catalog. Shape mismatches are rejected
+/// too: `["high", 5]` must not silently become `["high"]`, and the wrong JSON
+/// type must not silently become "no declaration" (finding 1 was about silent
+/// acceptance).
 #[tokio::test(flavor = "multi_thread")]
 async fn add_custom_model_rejects_invalid_reasoning_tokens() {
     let h = boot();
@@ -489,6 +492,8 @@ async fn add_custom_model_rejects_invalid_reasoning_tokens() {
     for bad in [
         serde_json::json!(["extra high"]),
         serde_json::json!(["high low"]),
+        serde_json::json!(["high", 5]),
+        serde_json::json!("extra high"),
     ] {
         let (status, body) = json_request(
             &h,
@@ -513,6 +518,30 @@ async fn add_custom_model_rejects_invalid_reasoning_tokens() {
             "the 400 must name the offending field: {body:?}"
         );
     }
+
+    // `default_effort` has the same shape gate.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/models/custom",
+        Some(serde_json::json!({
+            "id": "test-custom-invalid-effort-8616",
+            "provider": "openai",
+            "context_window": 64_000,
+            "max_output_tokens": 4_096,
+            "default_effort": 5,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a non-string default_effort must be rejected: {body:?}"
+    );
+    assert!(
+        body.to_string().contains("default_effort"),
+        "the 400 must name the offending field: {body:?}"
+    );
 
     // The rejected id never entered the catalog.
     let (status, _body) = json_request(
