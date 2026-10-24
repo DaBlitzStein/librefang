@@ -27,6 +27,16 @@ const router = vi.hoisted(() => {
   const notify = () => {
     for (const listener of listeners) listener();
   };
+  const commit = (next: Search) => {
+    snapshot = { ...next };
+    notify();
+  };
+  // A real router commits its search params after the event handler returns,
+  // so the render immediately after a close still carries the closed session
+  // in the URL. `hold()` parks commits until `release()`, making that window
+  // observable; a synchronous mock hides it and the race with it.
+  let holding = false;
+  const pending: Array<() => void> = [];
   // `search` stays writable for the #8596 tests, which move the mocked search
   // params between renders; the proxy routes those writes through the same
   // snapshot the page subscribes to, so the a11y keyboard tests and the prune
@@ -41,11 +51,24 @@ const router = vi.hoisted(() => {
   });
   return {
     navigate: vi.fn((options: { search?: Search }) => {
-      if (options?.search) {
-        snapshot = { ...options.search };
-        notify();
+      const next = options?.search;
+      if (!next) return;
+      if (holding) {
+        pending.push(() => commit(next));
+        return;
       }
+      commit(next);
     }),
+    hold: () => {
+      holding = true;
+    },
+    release: async () => {
+      holding = false;
+      while (pending.length > 0) pending.shift()!();
+      // Let effects from the committed navigation render before the caller
+      // asserts on the settled strip.
+      await Promise.resolve();
+    },
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => {
@@ -55,6 +78,8 @@ const router = vi.hoisted(() => {
     getSnapshot: () => snapshot,
     search,
     reset: () => {
+      holding = false;
+      pending.length = 0;
       snapshot = { agentId: "agent-a", sessionId: "s2" };
       notify();
     },
@@ -748,5 +773,36 @@ describe("chat session tab strip semantics and keyboard model", () => {
     // place, so the tab key path never drops the user on <body>.
     expect(tabs(tablist)[1]).toHaveAttribute("aria-selected", "true");
     expect(document.activeElement).toBe(tabs(tablist)[1]);
+  });
+
+  it("does not reopen the selected tab while its close is still navigating", async () => {
+    const tablist = await renderStrip();
+    expect(tabLabels(tablist)).toEqual(["One", "Two", "Three"]);
+
+    // A real router commits its search params after the click handler returns,
+    // so the first render after the close still carries ?sessionId=s2 — the
+    // id the store just dropped. Parking the commit reproduces that window
+    // instead of hiding it behind a synchronous mock.
+    router.hold();
+    fireEvent.click(
+      within(tablist).getAllByRole("button", { name: "Close this tab" })[1],
+    );
+
+    // The open effect must not read the stale URL as "user opened this" and
+    // append the closed conversation back at the end of the strip.
+    expect(tabLabels(tablist)).toEqual(["One", "Three"]);
+
+    await act(async () => {
+      await router.release();
+    });
+
+    // Exactly one navigation, to the neighbour at the closed index — never a
+    // destination that is the closed tab itself.
+    expect(router.navigate).toHaveBeenCalledTimes(1);
+    expect(router.navigate).toHaveBeenCalledWith(
+      expect.objectContaining({ search: { agentId: "agent-a", sessionId: "s3" } }),
+    );
+    expect(tabLabels(tablist)).toEqual(["One", "Three"]);
+    expect(tabs(tablist)[1]).toHaveAttribute("aria-selected", "true");
   });
 });

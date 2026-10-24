@@ -3715,7 +3715,26 @@ export function ChatPage() {
   // predate that list's own fetch, i.e. that the list had a chance to answer.
   const unconfirmedTabOpenedAt = useRef<Map<string, Map<string, number>>>(new Map());
 
+  // The session whose tab the user just closed, while its close is still
+  // navigating to the neighbour (#8326 review). Until that navigation lands,
+  // the URL still names the closed session, and the open effect below trusts
+  // the URL. Without this gate it reads the stale param as a visit, appends
+  // the closed tab back at the end of the strip, and the close silently
+  // becomes a move.
+  const closingTabRef = useRef<{ agentId: string; sessionId: string } | null>(null);
+
   useEffect(() => {
+    const closing = closingTabRef.current;
+    if (
+      closing &&
+      closing.agentId === selectedAgentId &&
+      closing.sessionId === activeSessionId
+    ) {
+      return;
+    }
+    // Any other active session (or none) means the close's navigation has
+    // landed, or the user moved on; the gate has served its purpose.
+    closingTabRef.current = null;
     if (!selectedAgentId || !activeSessionId) return;
     // `agentTabs` is in the dependencies on purpose, not only navigation: a
     // prune against a list that is stale (10 s `staleTime`), or another
@@ -3809,11 +3828,18 @@ export function ChatPage() {
       // Resolve the landing spot before the store drops the tab: the neighbour
       // at the closed tab's index, not the most recently visited tab.
       const nextSessionId = sessionAfterClose(agentTabs, sessionId);
+      const closingActiveTab = sessionId === activeSessionId;
+      // Park the id across the close's own render: the store drops it now,
+      // but the URL still names it until the navigation below lands. The open
+      // effect would otherwise re-add it at the end (#8326 review).
+      if (closingActiveTab && nextSessionId) {
+        closingTabRef.current = { agentId: selectedAgentId, sessionId };
+      }
       closeChatTab(selectedAgentId, sessionId);
       // Closing the one you are looking at has to land somewhere. The
       // neighbour, not "no session" — dropping the param would re-derive the
       // server-active session and could reopen the tab just closed.
-      if (sessionId === activeSessionId && nextSessionId) {
+      if (closingActiveTab && nextSessionId) {
         navigate({
           to: "/chat",
           search: { agentId: selectedAgentId, sessionId: nextSessionId },
