@@ -1504,27 +1504,70 @@ impl SessionStore {
     /// a just-spawned agent) would silently vanish. Creating the row up front
     /// makes the lazy path load it instead.
     ///
-    /// Existing rows are never touched. The insert goes through
-    /// [`Self::save_session`], so the upsert and the FTS placeholder row keep
-    /// the invariants that path maintains.
+    /// Existing rows are never touched, and that guarantee is enforced by the
+    /// statement itself rather than by a read-then-write check: the insert is
+    /// `ON CONFLICT(id) DO NOTHING`, so a row created concurrently — a first
+    /// turn committing between this call's check and its write in the previous
+    /// shape — survives with its `messages`, `message_count`,
+    /// `messages_generation` and `peer_id` intact. Writing through
+    /// [`Self::save_session`] here would run its `DO UPDATE` clause and erase
+    /// exactly that history; it must never be used on this path.
+    ///
+    /// Only the call that actually inserted the row (`changes() == 1`) writes
+    /// the FTS placeholder row, in the same transaction. That keeps a session
+    /// created by this method visible to the index. It does **not** make the
+    /// invariant global: a row that already existed without an FTS row stays
+    /// unindexed here, because the conflict path does nothing — that gap is
+    /// closed only by [`Self::reconcile_fts_index`] at boot.
     pub fn ensure_session(&self, agent_id: AgentId, session_id: SessionId) -> LibreFangResult<()> {
-        if self.get_session(session_id)?.is_some() {
-            return Ok(());
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let session_id_str = session_id.0.to_string();
+        let agent_id_str = agent_id.0.to_string();
+        let now = Utc::now().to_rfc3339();
+        // `rmp_serde` encodes the empty message list as a one-byte array
+        // marker, not an empty blob: `get_session` deserialises this column,
+        // and a zero-length blob is not valid MessagePack.
+        let empty_messages = rmp_serde::to_vec_named(&Vec::<Message>::new())
+            .map_err(LibreFangError::serialization)?;
+
+        // BEGIN IMMEDIATE for the same reason as `save_session`: the first
+        // statement is a write, and a deferred transaction that another
+        // connection beats to the lock fails with SQLITE_BUSY_SNAPSHOT, which
+        // the busy timeout does not retry.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(LibreFangError::memory)?;
+
+        tx.execute(
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, messages_generation, peer_id, parent_session_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 0, NULL, 0, 0, NULL, NULL, ?4, ?4)
+             ON CONFLICT(id) DO NOTHING",
+            rusqlite::params![session_id_str, agent_id_str, empty_messages, now],
+        )
+        .map_err(LibreFangError::memory)?;
+
+        if tx.changes() == 1 {
+            // This call created the `sessions` row, but an orphaned FTS row
+            // for the same id may still exist — a session deleted without its
+            // index row, or a writer that died between the two before v64.
+            // Sweep by id with the fallback scan enabled so the placeholder
+            // below is the only row and search cannot resolve to a duplicate.
+            delete_session_fts_row(&tx, &session_id_str, true)
+                .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
+            tx.execute(
+                "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, '')",
+                rusqlite::params![session_id_str, agent_id_str],
+            )
+            .map_err(|e| LibreFangError::memory_msg(format!("FTS insert failed: {e}")))?;
+            tx.execute(
+                "INSERT OR REPLACE INTO sessions_fts_map (session_id, fts_rowid) VALUES (?1, ?2)",
+                rusqlite::params![session_id_str, tx.last_insert_rowid()],
+            )
+            .map_err(|e| LibreFangError::memory_msg(format!("FTS map update failed: {e}")))?;
         }
-        let session = Session {
-            id: session_id,
-            agent_id,
-            messages: Vec::new(),
-            context_window_tokens: 0,
-            label: None,
-            parent_session_id: None,
-            model_override: None,
-            reasoning_effort: None,
-            messages_generation: 0,
-            last_repaired_generation: None,
-            peer_id: None,
-        };
-        self.save_session(&session)
+
+        tx.commit().map_err(LibreFangError::memory)?;
+        Ok(())
     }
 
     /// Set the label on an existing session.
@@ -2633,6 +2676,249 @@ mod tests {
                 .as_deref(),
             Some("high"),
         );
+    }
+
+    /// Pins that the insert path does not touch a row that already exists.
+    ///
+    /// The row is populated first (history, generation, peer, FTS content),
+    /// then `ensure_session` runs against it. Every one of those columns must
+    /// survive, and the FTS row must still be searchable rather than replaced
+    /// by the empty placeholder.
+    ///
+    /// This is the documented intent, not a discriminating regression: the
+    /// old shape started with a `get_session` early return, so it also passed
+    /// here — the wiping required the row to appear between that check and
+    /// `save_session`, which a single thread cannot reproduce. The old/new
+    /// gap that *is* deterministic is the orphan-FTS case pinned by
+    /// `ensure_session_sweeps_an_orphaned_fts_row` below.
+    #[test]
+    fn ensure_session_never_clobbers_an_existing_session_row() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+        store.ensure_session(agent_id, session_id).unwrap();
+
+        // Populate the row the way a first turn does.
+        let mut session = store.get_session(session_id).unwrap().unwrap();
+        session.push_message(Message::user("first turn secret"));
+        session.push_message(Message::assistant("reply"));
+        session.mark_messages_mutated();
+        session.peer_id = Some("telegram:12345".to_string());
+        let generation = session.messages_generation;
+        store.save_session(&session).unwrap();
+
+        // The racing materialization: must find the row and leave it alone.
+        store.ensure_session(agent_id, session_id).unwrap();
+
+        let row = store
+            .get_session(session_id)
+            .unwrap()
+            .expect("the racing call must not delete the row");
+        assert_eq!(
+            row.messages.len(),
+            2,
+            "history written by the winning turn must survive"
+        );
+        assert_eq!(
+            row.messages[0].content.text_content(),
+            session.messages[0].content.text_content()
+        );
+        assert_eq!(
+            row.messages_generation, generation,
+            "messages_generation must survive"
+        );
+        assert_eq!(
+            row.peer_id.as_deref(),
+            Some("telegram:12345"),
+            "peer_id must survive"
+        );
+        let listed = store.list_sessions().unwrap();
+        let listed_row = listed
+            .iter()
+            .find(|s| s["session_id"] == session_id.0.to_string())
+            .expect("session must be listed");
+        assert_eq!(
+            listed_row["message_count"].as_u64(),
+            Some(2),
+            "the denormalised message_count must survive"
+        );
+
+        // The FTS row must still carry the history too: a placeholder
+        // replacing it would silently drop the session from search.
+        let hits = store.search_sessions("secret", None).unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "the racing call must not overwrite the FTS row: {hits:?}"
+        );
+        assert_eq!(hits[0].session_id, session_id.0.to_string());
+    }
+
+    /// A materialized row is immediately visible to the FTS index (the
+    /// placeholder-row invariant `save_session` maintains), and repeating the
+    /// call neither duplicates that row nor rewrites the session.
+    #[test]
+    fn ensure_session_indexes_once_and_is_idempotent() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+
+        store.ensure_session(agent_id, session_id).unwrap();
+        store.ensure_session(agent_id, session_id).unwrap();
+
+        let conn = store.pool.get().unwrap();
+        let (fts_rows, map_rows): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1),
+                        (SELECT COUNT(*) FROM sessions_fts_map WHERE session_id = ?1)",
+                [session_id.0.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(fts_rows, 1, "exactly one FTS row per session");
+        assert_eq!(map_rows, 1, "exactly one rowid mapping per session");
+        drop(conn);
+        assert_eq!(store.count_sessions().unwrap(), 1);
+    }
+
+    /// The deterministic old/new gap: an FTS row for the id survives while the
+    /// `sessions` row (and, as a pre-v64 writer could leave it, its rowid
+    /// mapping) is gone.
+    ///
+    /// The old body called `save_session` for this state. That function
+    /// computes `session_existed` from the *sessions* table, sees `false`, and
+    /// skips its unmapped-FTS fallback scan — so it inserted a second index
+    /// row and left the orphan in place. The insert-only body sweeps by id on
+    /// every row it creates, so the orphan is replaced by the placeholder.
+    /// Red on the old body: `fts_rows` was 2; green here: 1.
+    #[test]
+    fn ensure_session_sweeps_an_orphaned_fts_row() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        let session_id = session.id;
+        let sid = session_id.0.to_string();
+        session.push_message(Message::user("orphan secret"));
+        store.save_session(&session).unwrap();
+
+        // Reproduce the partial state: sessions row and rowid mapping gone,
+        // the content-bearing FTS row left behind (and still searchable —
+        // `search_sessions` does not join `sessions`).
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute("DELETE FROM sessions WHERE id = ?1", [&sid])
+                .unwrap();
+            conn.execute("DELETE FROM sessions_fts_map WHERE session_id = ?1", [&sid])
+                .unwrap();
+            let orphaned: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                    [&sid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(orphaned, 1, "pre-condition: one orphaned FTS row");
+        }
+        assert_eq!(
+            store.search_sessions("secret", None).unwrap().len(),
+            1,
+            "pre-condition: the orphan is still searchable"
+        );
+
+        store.ensure_session(agent_id, session_id).unwrap();
+
+        let conn = store.pool.get().unwrap();
+        let (session_rows, fts_rows, map_rows): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM sessions WHERE id = ?1),
+                        (SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1),
+                        (SELECT COUNT(*) FROM sessions_fts_map WHERE session_id = ?1)",
+                [&sid],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(session_rows, 1);
+        assert_eq!(
+            fts_rows, 1,
+            "the orphaned FTS row must be swept, not duplicated"
+        );
+        assert_eq!(map_rows, 1, "the fresh row must be mapped");
+        drop(conn);
+
+        // The orphan's content must be gone with it, not left as a second hit
+        // pointing at an id whose row is now empty.
+        assert!(
+            store.search_sessions("secret", None).unwrap().is_empty(),
+            "the orphan's content must not survive the sweep"
+        );
+    }
+
+    /// The race the insert-only statement exists for: several connections
+    /// materialize the same `(agent, session)` at once against a file-backed
+    /// pool. Every call must return `Ok`, and the transaction must leave
+    /// exactly one session row, one FTS row, and one rowid mapping.
+    ///
+    /// This is the shape that exposed the primitive, not a red/green test:
+    /// the old read-then-write also usually finished with one row because its
+    /// `save_session` upsert serialised on the write lock — what it could lose
+    /// was the *content* of a turn that committed in between, which needs a
+    /// writer interleaved at a specific point. The barrier only forces the
+    /// materializations to collide.
+    #[test]
+    fn ensure_session_is_safe_under_concurrent_first_calls() {
+        use std::sync::{Arc, Barrier};
+
+        const THREADS: usize = 8;
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(dir.path().join("sessions.db"))
+            .with_init(|c| c.execute_batch(crate::substrate::DEFAULT_CONNECTION_PRAGMAS));
+        let pool = r2d2::Pool::builder()
+            .max_size(THREADS as u32)
+            .build(manager)
+            .unwrap();
+        run_migrations(&pool.get().unwrap()).unwrap();
+        let store = Arc::new(SessionStore::new(pool));
+
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.ensure_session(agent_id, session_id)
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle
+                .join()
+                .expect("worker panicked")
+                .expect("every concurrent ensure_session must succeed");
+        }
+
+        let sid = session_id.0.to_string();
+        let conn = store.pool.get().unwrap();
+        let (session_rows, fts_rows, map_rows): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM sessions WHERE id = ?1),
+                        (SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1),
+                        (SELECT COUNT(*) FROM sessions_fts_map WHERE session_id = ?1)",
+                [&sid],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(session_rows, 1, "exactly one sessions row");
+        assert_eq!(fts_rows, 1, "exactly one FTS row");
+        assert_eq!(map_rows, 1, "exactly one rowid mapping");
+        drop(conn);
+
+        let row = store.get_session(session_id).unwrap().unwrap();
+        assert_eq!(row.agent_id, agent_id);
+        assert!(row.messages.is_empty());
     }
 
     #[test]
