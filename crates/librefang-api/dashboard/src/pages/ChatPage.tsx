@@ -3633,31 +3633,60 @@ export function ChatPage() {
   const activeSessionId = deriveDropdownActiveSessionId(urlSessionId);
 
   // ── Reasoning effort ─────────────────────────────────────────────────────
-  // Which levels the composer offers: the active model's own list when the
-  // catalog has one, the canonical six otherwise. Same cache entry as the
-  // header's model popover (`available: true`), so opening either warms both.
+  // The pin control only exists for an explicit session on a thinking-capable
+  // model; that is exactly when the level list and the session record are
+  // worth reading.
+  const canPinReasoning = !!selectedAgentId && !!activeSessionId;
+  // The active model's levels. Same cache entry as the header's model popover
+  // (`available: true`), so opening either warms both.
   const reasoningModelsQuery = useModels(
     { available: true },
     { enabled: !!selectedAgentId && !!selectedAgent?.supports_thinking },
   );
+  // The session's pinned level — server state, read back from the session
+  // record (the same `GET /api/sessions/{id}` the Sessions page uses). Absent
+  // on a daemon that predates the field, which the merge below reads as "the
+  // echo is silent", not as "nothing is pinned". Requested only while the
+  // composer's control can be shown: the control is hidden otherwise, and this
+  // read duplicates the initial history fetch until #8616 can expose the
+  // scalar on the agent-session payload.
+  const sessionReasoningQuery = useSessionDetails(activeSessionId ?? "", {
+    enabled: canPinReasoning && !!selectedAgent?.supports_thinking,
+  });
+  // A session pinned to another model reasons on THAT model's terms, not the
+  // agent's: `model_override` is stored as `provider/model` (splitn(2, '/') —
+  // a qualified id may itself contain a slash), or as a bare model name when
+  // only the model was pinned.
+  const reasoningModel = useMemo(() => {
+    const override = sessionReasoningQuery.data?.model_override?.trim() ?? "";
+    if (override) {
+      const slash = override.indexOf("/");
+      if (slash > 0 && slash < override.length - 1) {
+        return {
+          provider: override.slice(0, slash),
+          model: override.slice(slash + 1),
+        };
+      }
+      return { provider: "", model: override };
+    }
+    return {
+      provider: selectedAgent?.model_provider ?? "",
+      model: selectedAgent?.model_name ?? "",
+    };
+  }, [
+    sessionReasoningQuery.data?.model_override,
+    selectedAgent?.model_provider,
+    selectedAgent?.model_name,
+  ]);
   const reasoningEfforts = useMemo(
     () =>
       modelReasoningEfforts(
         reasoningModelsQuery.data?.models ?? [],
-        selectedAgent?.model_name ?? "",
-        selectedAgent?.model_provider ?? "",
+        reasoningModel.model,
+        reasoningModel.provider,
       ),
-    [reasoningModelsQuery.data?.models, selectedAgent?.model_name, selectedAgent?.model_provider],
+    [reasoningModelsQuery.data?.models, reasoningModel],
   );
-  // The session's pinned level — server state, read back from the session
-  // record (the same `GET /api/sessions/{id}` the Sessions page uses). Absent
-  // on a daemon that predates the field, which the merge below reads as "the
-  // echo is silent", not as "nothing is pinned". Requested only for
-  // thinking-capable models: the control is hidden otherwise, so the extra
-  // read would buy nothing.
-  const sessionReasoningQuery = useSessionDetails(activeSessionId ?? "", {
-    enabled: !!activeSessionId && !!selectedAgent?.supports_thinking,
-  });
   const {
     pinned: sessionReasoningEffort,
     setOptimistic: setOptimisticReasoning,
@@ -3695,6 +3724,15 @@ export function ChatPage() {
       { onError: clearOptimisticReasoning },
     );
   }, [activeSessionId, selectedAgentId, mutateSessionReasoning, setOptimisticReasoning, clearOptimisticReasoning]);
+
+  // The pin mutation outlives the session it failed for. Scope the error to
+  // the session that saw the failure: switching away must not leave a red
+  // footer on an unrelated conversation.
+  const reasoningPinError =
+    setSessionReasoning.isError &&
+    setSessionReasoning.variables?.sessionId === activeSessionId
+      ? t("chat.reasoning_pin_failed")
+      : null;
 
   // Switching away abandons the export: the ids belong to the previous
   // agent/session, and keeping them would leave the bar saying "N selected"
@@ -4464,8 +4502,8 @@ export function ChatPage() {
               onPinReasoning={handlePinReasoning}
               onUnpinReasoning={handleUnpinReasoning}
               reasoningPinPending={setSessionReasoning.isPending}
-              reasoningPinError={setSessionReasoning.isError ? t("chat.reasoning_pin_failed") : null}
-              canPinReasoning={!!selectedAgentId && !!activeSessionId}
+              reasoningPinError={reasoningPinError}
+              canPinReasoning={canPinReasoning}
             />
           </div>
         </main>

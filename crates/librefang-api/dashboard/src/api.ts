@@ -615,9 +615,12 @@ export interface SendAgentMessageOptions {
   /**
    * Per-message reasoning effort ("none"|"low"|"medium"|"high"|"xhigh"|"max"
    * as the model declares them). Omitted = the session pin or the agent
-   * manifest's default applies; never sent as `null`. The wire name is the
-   * ecosystem's `reasoning_effort` — `reasoning_mode` is deprecated and must
-   * not be emitted.
+   * manifest's default applies; never sent as `null`.
+   *
+   * The HTTP body carries it as `reasoning_mode`: that is the key main's
+   * `MessageRequest` accepts (it denies unknown fields), and #8616 accepts it
+   * as a deprecated alias of `reasoning_effort`. The WS frame, which main
+   * parses as an open JSON object, keeps the canonical name.
    */
   reasoning_effort?: string | null;
   /** Whether to receive the model's reasoning trace. Defaults to true. */
@@ -2648,7 +2651,11 @@ export async function sendAgentMessage(
 ): Promise<AgentMessageResponse> {
   const body: Record<string, unknown> = { message };
   if (options?.thinking !== undefined) body.thinking = options.thinking;
-  if (options?.reasoning_effort) body.reasoning_effort = options.reasoning_effort;
+  // `reasoning_mode`, not `reasoning_effort`: `MessageRequest` on current main
+  // denies unknown fields, so the canonical name would 400 a send there. Main
+  // reads this key directly; #8616 keeps it as a deprecated alias of
+  // `reasoning_effort`. The dashboard sends the key both accept.
+  if (options?.reasoning_effort) body.reasoning_mode = options.reasoning_effort;
   if (options?.show_thinking !== undefined) body.show_thinking = options.show_thinking;
   if (options?.session_id) body.session_id = options.session_id;
   if (options?.attachments && options.attachments.length > 0) body.attachments = options.attachments;
@@ -2728,6 +2735,13 @@ export interface ModelItem {
    * nearest supported level, with a warning.
    */
   supported_efforts?: string[];
+  /**
+   * The backend's prepared offer for this model (`ReasoningEffortPolicy::
+   * offered()`): the declared rungs plus `none` when the model allows it,
+   * already capability-filtered. Served by #8616 and later; absent on older
+   * daemons. When present, the dashboard uses it verbatim.
+   */
+  offered_efforts?: string[];
   /**
    * The level the provider uses when no explicit value is sent — what the
    * "inherit/default" option resolves to.

@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Check, ChevronDown, Gauge, Pin } from "lucide-react";
 import {
+  CANONICAL_REASONING_EFFORTS,
   reasoningEffortLabel,
-  resolveReasoningEfforts,
 } from "../lib/reasoningEffort";
 
 /**
@@ -14,9 +14,10 @@ import {
  * catalog entry allows (`supported_efforts`, with the `off_allowed`/
  * `mandatory` filter applied by `lib/reasoningEffort` — a model that cannot be
  * switched off never shows `none`), and the menu never widens it. Only when
- * the caller hands in nothing (older daemon, provider with no metadata) does
- * the canonical set stand in, because an empty menu would read as "reasoning
- * does not exist". A stored level outside the offered set still gets a row so
+ * the caller hands in no list at all (older daemon, provider with no metadata)
+ * does the canonical set stand in; an explicit empty list is the backend saying
+ * the model offers no known level (#8616), not missing data. A stored level
+ * outside the offered set still gets a row so
  * the operator can see what is in effect, but it is marked and disabled — the
  * backend coerces such a value to the nearest supported level, and the UI must
  * not suggest it.
@@ -43,7 +44,10 @@ import {
  * from an older daemon, no pin wiring — to a usable menu.
  */
 export interface ReasoningEffortMenuProps {
-  /** Offered levels, capability-filtered by the caller; absent/empty = canonical. */
+  /**
+   * Offered levels, already capability-filtered by the caller. Absent =
+   * canonical fallback; an explicit empty list is honoured as "no known level".
+   */
   efforts?: readonly string[] | null;
   /** Model label shown as the menu's subtitle, when the caller knows it. */
   modelName?: string;
@@ -88,8 +92,13 @@ export function ReasoningEffortMenu({
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
+  // The caller already resolved the offer (`lib/reasoningEffort`): the active
+  // model's `offered_efforts`, or the same declaration mirrored the way the
+  // backend offers it. Re-resolving here would lose the capability flags and
+  // put `none` back on a model that cannot be switched off. Only an absent
+  // list — no caller data at all — falls back to the canonical vocabulary.
   const levels = useMemo(
-    () => resolveReasoningEfforts({ supported_efforts: efforts ? [...efforts] : undefined }),
+    () => (efforts == null ? [...CANONICAL_REASONING_EFFORTS] : [...efforts]),
     [efforts],
   );
 

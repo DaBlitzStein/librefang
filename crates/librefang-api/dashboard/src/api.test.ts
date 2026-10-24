@@ -456,9 +456,9 @@ describe("dashboard auth helpers", () => {
     ]);
   });
 
-  // The canonical wire spelling is `reasoning_effort` (the ecosystem's name);
-  // `reasoning_mode` survives server-side only as a deprecated alias, so the
-  // dashboard must never emit it.
+  // The session PATCH route targets #8616, which names the field
+  // `reasoning_effort` (and still accepts the old spelling as an alias). The
+  // HTTP message body is the exception — see the sendAgentMessage test below.
   it("setSessionReasoningOverride patches the session with reasoning_effort", async () => {
     setApiKey("secret-token");
     const okResponse = () =>
@@ -480,7 +480,13 @@ describe("dashboard auth helpers", () => {
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ reasoning_effort: null });
   });
 
-  it("sendAgentMessage carries reasoning_effort only when one is armed", async () => {
+  // The HTTP fallback must go out under `reasoning_mode`: main's
+  // `MessageRequest` (the only deployed backend when this dashboard ships) is
+  // `#[serde(deny_unknown_fields)]` and does not know `reasoning_effort`, so
+  // the canonical name would 400 every send that armed a level. #8616 accepts
+  // `reasoning_mode` as the deprecated alias, which is what makes the same
+  // body work on both.
+  it("sendAgentMessage carries the level as reasoning_mode, only when armed", async () => {
     setApiKey("secret-token");
     const okResponse = () =>
       new Response(JSON.stringify({ response: "ok" }), {
@@ -493,10 +499,11 @@ describe("dashboard auth helpers", () => {
     await sendAgentMessage("agent-1", "hi");
 
     const withEffort = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(withEffort.reasoning_effort).toBe("minimal");
-    expect(withEffort).not.toHaveProperty("reasoning_mode");
+    expect(withEffort.reasoning_mode).toBe("minimal");
+    expect(withEffort).not.toHaveProperty("reasoning_effort");
     // Unset is absent, not null: the session pin / manifest default applies.
     const without = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(without).not.toHaveProperty("reasoning_mode");
     expect(without).not.toHaveProperty("reasoning_effort");
   });
 

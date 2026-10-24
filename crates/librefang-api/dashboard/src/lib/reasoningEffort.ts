@@ -10,22 +10,29 @@
  *
  * Capability is the rule, and it comes from the model's catalog metadata:
  *
- *   - `supported_efforts` is the model's exact set; a level outside it is
- *     never offered — not armed, not pinned, not selectable in the editor. A
- *     value that still arrives from elsewhere is coerced server-side with a
- *     warning, so the UI shows it as current state, disabled, and never
- *     suggests it.
+ *   - `offered_efforts` is the backend's own answer (`ReasoningEffortPolicy::
+ *     offered()`, served by #8616 and later). When the payload carries it, it
+ *     is used verbatim — the list already has the declaration cleaned, `none`
+ *     removed from the declared rungs, and `none` put back only when the model
+ *     allows it. Nothing is re-derived from the other fields.
+ *   - Without it (current main and older daemons), `supported_efforts` is the
+ *     model's declaration; `none` is never part of it. The offered list is
+ *     built the way the backend builds it: the declared graded rungs, with
+ *     `none` prepended when the model may be switched off.
  *   - `off_allowed: false` (or `mandatory: true` — xAI, Kimi K3, Gemini 3 and
- *     friends) means the model cannot be switched off: `none` is dropped from
- *     the offered set, declared or canonical.
+ *     friends) means the model cannot be switched off: `none` is not offered.
  *   - `default_effort` is the level the provider uses when no explicit value
  *     is sent — what the "inherit/default" option resolves to. Carried on the
  *     source so a surface can name it; no surface does yet.
  *
+ * A level outside the offered list is never armed, pinned or selectable — the
+ * backend coerces one that still arrives, so the UI shows it as current state,
+ * disabled, and never suggests it.
+ *
  * The canonical seven are only a fallback for "nobody said" (older daemon,
- * provider without metadata), because an empty menu would read as "reasoning
- * does not exist" rather than as missing data — and the off-capability filter
- * still applies to them.
+ * provider without metadata, and no `offered_efforts` field), because an empty
+ * menu would read as "reasoning does not exist" rather than as missing data —
+ * and the off-capability filter still applies to them.
  *
  * Noted for when the catalog learns to mark it: a model whose reasoning is
  * shaped by a token budget rather than a level enum should get a budget input
@@ -71,8 +78,14 @@ export function reasoningEffortLabel(level: string): string {
 export interface ReasoningEffortSource {
   provider?: string;
   id?: string;
-  /** The model's exact set of accepted levels. Absent = the canonical set. */
+  /** The model's declared levels (`none` excluded). Absent = nobody said. */
   supported_efforts?: string[];
+  /**
+   * The backend's prepared offer (`ReasoningEffortPolicy::offered()`): the
+   * declared rungs, plus `none` when the model allows it. Present on #8616 and
+   * later; when present it wins over anything re-derived here.
+   */
+  offered_efforts?: string[];
   /**
    * The level the provider uses when no explicit value is sent (what
    * "inherit/default" resolves to). Presentational today.
@@ -89,33 +102,54 @@ const offDisallowed = (model?: ReasoningEffortSource | null): boolean =>
   model?.off_allowed === false || model?.mandatory === true;
 
 /**
- * The levels a model accepts.
+ * Trim blanks and duplicates out of a level list, preserving order.
  *
- * Absent, empty, or cleaned-to-empty all mean "nobody said": the canonical set
- * applies. A declared list wins as given, minus blanks and duplicates, in the
- * declared order. Either way, `none` is dropped when the model cannot be
- * switched off — the capability flags outrank a list that claims otherwise.
+ * An empty result means "nobody said" for `supported_efforts`; for
+ * `offered_efforts` it is authoritative and stays empty.
+ */
+function cleanLevels(levels: readonly unknown[]): string[] {
+  const cleaned: string[] = [];
+  for (const level of levels) {
+    if (typeof level !== "string") continue;
+    const trimmed = level.trim();
+    if (!trimmed || cleaned.includes(trimmed)) continue;
+    cleaned.push(trimmed);
+  }
+  return cleaned;
+}
+
+/**
+ * The levels a model offers, in the order a menu should show them.
+ *
+ * `offered_efforts` from the payload wins whenever the field is present — it
+ * is the backend's own answer and the only source that stays right when the
+ * coercion rules change. Otherwise the list mirrors `offered()`: the declared
+ * graded rungs (never `none`, even if the declaration lists it), with `none`
+ * prepended when `off_allowed !== false && mandatory !== true`.
+ *
+ * An undeclared model keeps the canonical fallback — but only while the
+ * payload has no `offered_efforts`. Once the backend serves that field, its
+ * answer (possibly empty) is authoritative, and main compatibility is no
+ * longer a reason to guess.
  */
 export function resolveReasoningEfforts(
   model?: ReasoningEffortSource | null,
 ): string[] {
-  const declared = model?.supported_efforts;
-  let levels: string[];
-  if (Array.isArray(declared)) {
-    const cleaned: string[] = [];
-    for (const level of declared) {
-      if (typeof level !== "string") continue;
-      const trimmed = level.trim();
-      if (!trimmed || cleaned.includes(trimmed)) continue;
-      cleaned.push(trimmed);
-    }
-    levels = cleaned.length > 0 ? cleaned : [...CANONICAL_REASONING_EFFORTS];
-  } else {
-    levels = [...CANONICAL_REASONING_EFFORTS];
+  if (Array.isArray(model?.offered_efforts)) {
+    return cleanLevels(model.offered_efforts);
   }
-  return offDisallowed(model)
-    ? levels.filter((level) => level.toLowerCase() !== "none")
-    : levels;
+
+  const declared = model?.supported_efforts;
+  const cleaned = Array.isArray(declared) ? cleanLevels(declared) : [];
+  // A list that cleans to nothing is "nobody said" (canonical fallback); a
+  // declaration that is non-empty but contains only `none` is a real, empty
+  // set of graded rungs, and must not widen to the canonical ones.
+  const rungs =
+    cleaned.length > 0
+      ? cleaned.filter((level) => level !== "none")
+      : CANONICAL_REASONING_EFFORTS.filter((level) => level !== "none");
+
+  return offDisallowed(model) ? rungs : ["none", ...rungs];
 }
 
 /**

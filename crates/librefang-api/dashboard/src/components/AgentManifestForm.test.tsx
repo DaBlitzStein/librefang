@@ -49,6 +49,7 @@ interface HarnessModel {
   max_output_tokens?: number;
   limits_known?: boolean;
   supported_efforts?: string[];
+  offered_efforts?: string[];
   default_effort?: string | null;
   off_allowed?: boolean;
   mandatory?: boolean;
@@ -889,8 +890,33 @@ describe("AgentManifestForm — reasoning effort default", () => {
 
     expect(levelOptions()).toEqual([
       "agents.form.reasoning_effort_inherit",
+      "None",
       "Minimal",
       "High",
+    ]);
+  });
+
+  it("offers the payload's prepared offered_efforts when present", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        initialState={stateWithModel()}
+        models={[
+          {
+            provider: "anthropic",
+            id: "claude-sonnet-5",
+            supported_efforts: ["none", "low", "high"],
+            offered_efforts: ["low", "medium"],
+          },
+        ]}
+      />,
+    );
+    await openThinking(user);
+
+    expect(levelOptions()).toEqual([
+      "agents.form.reasoning_effort_inherit",
+      "Low",
+      "Medium",
     ]);
   });
 

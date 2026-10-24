@@ -15,12 +15,33 @@ vi.mock("../http/client", async () => {
   };
 });
 
-// The session pin mirrors the session model override: one PATCH against the
-// session, then every cache that renders that session is invalidated.
+// A pin changes one scalar on the session record. The record also carries the
+// full transcript, so refetching it after every pin/unpin would re-download
+// the conversation to learn a value the caller already sent. These pin the
+// cached-scalar policy that replaced the invalidation.
+
+const DETAIL = {
+  session_id: "sess-1",
+  messages: [
+    { role: "user", content: "hello" },
+    { role: "assistant", content: "hi" },
+  ],
+  reasoning_effort: null as string | null,
+};
+
+function seeded() {
+  const { queryClient, wrapper } = createQueryClientWrapper();
+  queryClient.setQueryData(sessionKeys.detail("sess-1"), structuredClone(DETAIL));
+  return { queryClient, wrapper };
+}
+
+const cachedEffort = (queryClient: ReturnType<typeof seeded>["queryClient"]) =>
+  (queryClient.getQueryData(sessionKeys.detail("sess-1")) as { reasoning_effort?: string | null })
+    ?.reasoning_effort;
 
 describe("useSetSessionReasoning", () => {
-  it("patches the pinned level and invalidates the session caches", async () => {
-    const { queryClient, wrapper } = createQueryClientWrapper();
+  it("patches the pinned level and updates the cached scalar in place", async () => {
+    const { queryClient, wrapper } = seeded();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useSetSessionReasoning(), { wrapper });
@@ -31,16 +52,23 @@ describe("useSetSessionReasoning", () => {
     });
 
     expect(setSessionReasoningOverride).toHaveBeenCalledWith("sess-1", "xhigh");
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: sessionKeys.detail("sess-1") });
+    expect(cachedEffort(queryClient)).toBe("xhigh");
+
+    // The cheap list caches still refresh…
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: sessionKeys.lists() });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.sessions("agent-1") });
-    expect(invalidateSpy).toHaveBeenCalledWith({
+    // …but neither full transcript read is invalidated: the scalar above is
+    // the only thing the PATCH changed.
+    expect(invalidateSpy).not.toHaveBeenCalledWith({
+      queryKey: sessionKeys.detail("sess-1"),
+    });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({
       queryKey: agentKeys.sessionSnapshots("agent-1"),
     });
   });
 
-  it("clears the pin with null, without an agent to fan out to", async () => {
-    const { queryClient, wrapper } = createQueryClientWrapper();
+  it("clears the cached pin with null, without an agent to fan out to", async () => {
+    const { queryClient, wrapper } = seeded();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useSetSessionReasoning(), { wrapper });
@@ -51,9 +79,50 @@ describe("useSetSessionReasoning", () => {
     });
 
     expect(setSessionReasoningOverride).toHaveBeenCalledWith("sess-1", null);
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: sessionKeys.detail("sess-1") });
+    expect(cachedEffort(queryClient)).toBeNull();
     expect(invalidateSpy).not.toHaveBeenCalledWith({
       queryKey: agentKeys.sessions("agent-1"),
     });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({
+      queryKey: sessionKeys.detail("sess-1"),
+    });
+  });
+
+  it("writes the server's accepted level back when it coerced the request", async () => {
+    const { queryClient, wrapper } = seeded();
+    vi.mocked(setSessionReasoningOverride).mockResolvedValueOnce({
+      status: "ok",
+      reasoning_effort: "medium",
+    });
+
+    const { result } = renderHook(() => useSetSessionReasoning(), { wrapper });
+    await result.current.mutateAsync({
+      sessionId: "sess-1",
+      // A level the model does not declare; the backend coerces it.
+      reasoningEffort: "ultra",
+      agentId: null,
+    });
+
+    expect(cachedEffort(queryClient)).toBe("medium");
+  });
+
+  it("rolls the cached scalar back when the PATCH fails", async () => {
+    const { queryClient, wrapper } = seeded();
+    queryClient.setQueryData(sessionKeys.detail("sess-1"), {
+      ...structuredClone(DETAIL),
+      reasoning_effort: "high",
+    });
+    vi.mocked(setSessionReasoningOverride).mockRejectedValueOnce(new Error("nope"));
+
+    const { result } = renderHook(() => useSetSessionReasoning(), { wrapper });
+    await expect(
+      result.current.mutateAsync({
+        sessionId: "sess-1",
+        reasoningEffort: "max",
+        agentId: null,
+      }),
+    ).rejects.toThrow("nope");
+
+    expect(cachedEffort(queryClient)).toBe("high");
   });
 });

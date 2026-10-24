@@ -50,13 +50,22 @@ export function useSetSessionModelOverride() {
   });
 }
 
+/** The only field a reasoning pin changes on the cached session record. */
+function withReasoningEffort(previous: unknown, value: string | null): unknown {
+  if (!previous || typeof previous !== "object") return previous;
+  return { ...(previous as Record<string, unknown>), reasoning_effort: value };
+}
+
 /**
  * Pin a reasoning effort to one session, or clear it with `null`.
  *
- * Same invalidation policy as {@link useSetSessionModelOverride} — the session
- * detail carries the pinned level back (the chat composer reads it from
- * there), the session list snapshot may too, and the agent-scoped caches must
- * not keep serving the previous value.
+ * Pinning changes one scalar, not the transcript. Refetching either full
+ * session read (`sessionKeys.detail` and the agent-scoped history snapshot)
+ * after every click would re-download the conversation just to learn the level
+ * the caller already knows. The cached scalar is patched in place instead,
+ * optimistically before the PATCH and with the server's echoed value — it may
+ * be coerced to a level the model actually supports — on success. Only the
+ * cheap session list is invalidated.
  */
 export function useSetSessionReasoning() {
   const qc = useQueryClient();
@@ -69,12 +78,30 @@ export function useSetSessionReasoning() {
       reasoningEffort: string | null;
       agentId: string | null;
     }) => setSessionReasoningOverride(sessionId, reasoningEffort),
-    onSuccess: (_data, variables) => {
+    onMutate: (variables) => {
+      const key = sessionKeys.detail(variables.sessionId);
+      const previous = qc.getQueryData(key);
+      if (previous !== undefined) {
+        qc.setQueryData(key, withReasoningEffort(previous, variables.reasoningEffort));
+      }
+      return { previous };
+    },
+    onError: (_error, variables, context) => {
+      if (context?.previous !== undefined) {
+        qc.setQueryData(sessionKeys.detail(variables.sessionId), context.previous);
+      }
+    },
+    onSuccess: (data, variables) => {
+      const key = sessionKeys.detail(variables.sessionId);
+      const echoed = data.reasoning_effort;
+      const accepted = typeof echoed === "string" ? echoed : variables.reasoningEffort;
+      const cached = qc.getQueryData(key);
+      if (cached !== undefined) {
+        qc.setQueryData(key, withReasoningEffort(cached, accepted));
+      }
       qc.invalidateQueries({ queryKey: sessionKeys.lists() });
-      qc.invalidateQueries({ queryKey: sessionKeys.detail(variables.sessionId) });
       if (variables.agentId) {
         qc.invalidateQueries({ queryKey: agentKeys.sessions(variables.agentId) });
-        qc.invalidateQueries({ queryKey: agentKeys.sessionSnapshots(variables.agentId) });
       }
     },
   });

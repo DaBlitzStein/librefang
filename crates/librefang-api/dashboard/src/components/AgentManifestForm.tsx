@@ -217,6 +217,8 @@ interface AgentManifestFormProps {
      * that cannot be switched off loses `none`.
      */
     supported_efforts?: string[];
+    /** The backend's prepared offer; wins over `supported_efforts` when present. */
+    offered_efforts?: string[];
     default_effort?: string | null;
     off_allowed?: boolean;
     mandatory?: boolean;
