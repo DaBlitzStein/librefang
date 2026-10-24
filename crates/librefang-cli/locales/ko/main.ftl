@@ -1864,6 +1864,7 @@ tui-templates-source-dashboard = 대시보드 편집
 tui-templates-source-registry-restore = 레지스트리에서 복원됨
 tui-templates-source-pre-registry-restore = 복원 전 스냅샷
 tui-templates-source-restore = 복원됨
+tui-templates-source-agent-tool = 에이전트 도구
 tui-templates-source-unknown = 알 수 없는 출처
 tui-templates-version-restoring = { $name }을(를) 선택한 버전으로 복원하는 중…
 tui-templates-version-restore-failed = 버전을 복원하지 못했습니다

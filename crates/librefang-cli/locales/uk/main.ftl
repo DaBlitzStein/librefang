@@ -1885,6 +1885,7 @@ tui-templates-source-dashboard = Зміна через дашборд
 tui-templates-source-registry-restore = Відновлено з реєстру
 tui-templates-source-pre-registry-restore = Знімок до відновлення
 tui-templates-source-restore = Відновлено
+tui-templates-source-agent-tool = Інструмент агента
 tui-templates-source-unknown = Невідоме джерело
 tui-templates-version-restoring = Відновлення { $name } до вибраної версії…
 tui-templates-version-restore-failed = Не вдалося відновити версію

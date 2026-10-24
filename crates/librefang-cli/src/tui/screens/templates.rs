@@ -666,8 +666,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
 /// Mirrors the server's writable set: `toml`, `create`, `dashboard`, `registry-restore` and
 /// `restore` are the `AgentTypeWrite` variants in `routes/agent_templates.rs`; `pre-registry-restore`
 /// is the record-only snapshot `restore_from_registry` takes of the local file just before the
-/// registry copy overwrites it; `unknown` is the SQLite column default
-/// (`crates/librefang-memory/src/migration.rs`), which no producer writes but an older row can carry.
+/// registry copy overwrites it; `agent-tool` is the snapshot the kernel records when the
+/// agent-facing `agent_type_create` tool authors a type (`kernel/handles/agent_control.rs`);
+/// `unknown` is the SQLite column default (`crates/librefang-memory/src/migration.rs`), which no
+/// producer writes but an older row can carry.
 /// Every token here has a `tui-templates-source-<token>` key in all four locale packs.
 const TEMPLATE_CHANGE_SOURCES: &[&str] = &[
     "toml",
@@ -676,6 +678,7 @@ const TEMPLATE_CHANGE_SOURCES: &[&str] = &[
     "registry-restore",
     "pre-registry-restore",
     "restore",
+    "agent-tool",
     "unknown",
 ];
 
@@ -1506,6 +1509,7 @@ mod tests {
             ("registry-restore", "Restored from registry"),
             ("pre-registry-restore", "Pre-restore snapshot"),
             ("restore", "Restored"),
+            ("agent-tool", "Agent tool"),
             ("unknown", "Unknown source"),
         ];
         assert_eq!(
@@ -1547,6 +1551,10 @@ mod tests {
             template_change_source_label("pre-registry-restore"),
             "Знімок до відновлення"
         );
+        assert_eq!(
+            template_change_source_label("agent-tool"),
+            "Інструмент агента"
+        );
         assert_eq!(template_change_source_label("unknown"), "Невідоме джерело");
     }
 
@@ -1565,6 +1573,7 @@ mod tests {
             with_source("pre-registry-restore"),
             with_source("registry-restore"),
             with_source("toml"),
+            with_source("agent-tool"),
             with_source("some-future-source-token-that-does-not-fit"),
         ];
         state.history_list.select(Some(0));
@@ -1593,6 +1602,10 @@ mod tests {
         assert!(
             rendered.contains("Raw TOML edit"),
             "the toml label must render in full:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Agent tool"),
+            "the agent-tool label must render in full:\n{rendered}"
         );
         assert_eq!(
             truncate_template_source("some-future-source-token-that-does-not-fit"),

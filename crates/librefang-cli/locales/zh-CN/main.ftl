@@ -916,6 +916,7 @@ tui-templates-source-dashboard = 仪表盘编辑
 tui-templates-source-registry-restore = 已从注册表还原
 tui-templates-source-pre-registry-restore = 还原前快照
 tui-templates-source-restore = 已还原
+tui-templates-source-agent-tool = 智能体工具
 tui-templates-source-unknown = 未知来源
 tui-templates-version-restoring = 正在将 { $name } 还原到所选版本…
 tui-templates-version-restore-failed = 无法还原版本

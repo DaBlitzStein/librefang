@@ -1870,6 +1870,7 @@ tui-templates-source-dashboard = Dashboard edit
 tui-templates-source-registry-restore = Restored from registry
 tui-templates-source-pre-registry-restore = Pre-restore snapshot
 tui-templates-source-restore = Restored
+tui-templates-source-agent-tool = Agent tool
 tui-templates-source-unknown = Unknown source
 tui-templates-version-restoring = Restoring { $name } to the selected version…
 tui-templates-version-restore-failed = Could not restore version
