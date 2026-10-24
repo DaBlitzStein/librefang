@@ -25,9 +25,10 @@
  *     is sent — what the "inherit/default" option resolves to. Carried on the
  *     source so a surface can name it; no surface does yet.
  *
- * A level outside the offered list is never armed, pinned or selectable — the
- * backend coerces one that still arrives, so the UI shows it as current state,
- * disabled, and never suggests it.
+ * A level outside the offered list is never armed, pinned or selectable. A
+ * value that still arrives from elsewhere is shown as current state, disabled,
+ * never suggested: the session route stores a validated token as-is and a
+ * driver may coerce it at turn time, so offering it would misstate what runs.
  *
  * The canonical seven are only a fallback for "nobody said" (older daemon,
  * provider without metadata, and no `offered_efforts` field), because an empty
@@ -123,7 +124,7 @@ function cleanLevels(levels: readonly unknown[]): string[] {
  *
  * `offered_efforts` from the payload wins whenever the field is present — it
  * is the backend's own answer and the only source that stays right when the
- * coercion rules change. Otherwise the list mirrors `offered()`: the declared
+ * offer rules change. Otherwise the list mirrors `offered()`: the declared
  * graded rungs (never `none`, even if the declaration lists it), with `none`
  * prepended when `off_allowed !== false && mandatory !== true`.
  *

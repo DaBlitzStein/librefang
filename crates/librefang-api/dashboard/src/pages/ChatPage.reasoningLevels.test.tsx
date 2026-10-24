@@ -55,7 +55,12 @@ const reasoningMutation = vi.hoisted(() => ({
   isPending: false,
   variables: undefined as { sessionId?: string } | undefined,
   mutate: vi.fn(),
-  reset: vi.fn(),
+  // The page resets the mutation when the session changes; the stub has to
+  // clear its own error state or the reset would be invisible to the test.
+  reset: vi.fn(() => {
+    reasoningMutation.isError = false;
+    reasoningMutation.variables = undefined;
+  }),
 }));
 vi.mock("../lib/mutations/sessions", async () => {
   const actual = await vi.importActual<typeof import("../lib/mutations/sessions")>(
@@ -250,6 +255,22 @@ describe("chat reasoning levels follow the session's model", () => {
     expect(offeredLevels()).toEqual(["None", "Low", "Max"]);
     expect(screen.queryByRole("menuitemradio", { name: "Minimal" })).toBeNull();
   });
+
+  // A bare override carries no provider. The catalog can hold the same id
+  // under two providers with different level sets, so the agent's provider
+  // decides which entry the level list comes from. Here the wrong choice
+  // (first id match) is the openai row, which the order makes tempting.
+  it("keeps the agent's provider for a bare model_override", async () => {
+    modelsState.models = [
+      { provider: "openai", id: "shared-model", supported_efforts: ["minimal", "high"] },
+      { provider: "anthropic", id: "shared-model", supported_efforts: ["low", "max"] },
+    ];
+    sessionDetailState.data = { model_override: "shared-model" };
+    renderPage();
+    await openLevelMenu();
+
+    expect(offeredLevels()).toEqual(["None", "Low", "Max"]);
+  });
 });
 
 describe("chat reasoning pin failures", () => {
@@ -266,12 +287,10 @@ describe("chat reasoning pin failures", () => {
     router.search = { agentId: "agent-a", sessionId: "s2" };
   });
 
-  it("shows a failed pin only on the session that failed, clearing it on switch", async () => {
-    reasoningMutation.isError = true;
-    reasoningMutation.variables = { sessionId: "s2" };
-
+  it("resets a failed pin on session change so it does not return to that session", async () => {
     function SessionSwitch() {
       const [sessionId, setSessionId] = useState("s2");
+      const [, bump] = useState(0);
       // The router double reads this object on every render, like the real
       // `useSearch()` does after a navigation.
       router.search = { agentId: "agent-a", sessionId };
@@ -279,6 +298,21 @@ describe("chat reasoning pin failures", () => {
         <>
           <button type="button" onClick={() => setSessionId("s1")}>
             switch-session
+          </button>
+          <button type="button" onClick={() => setSessionId("s2")}>
+            return-session
+          </button>
+          {/* The failure arrives after mount, as it does in production; the
+              bump is the mutation result changing under a live component. */}
+          <button
+            type="button"
+            onClick={() => {
+              reasoningMutation.isError = true;
+              reasoningMutation.variables = { sessionId: "s2" };
+              bump((n) => n + 1);
+            }}
+          >
+            fail-pin
           </button>
           <ChatPage />
         </>
@@ -288,14 +322,24 @@ describe("chat reasoning pin failures", () => {
     renderPage(<SessionSwitch />);
     await openLevelMenu();
 
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "fail-pin" }));
+    });
     expect(screen.getByText("chat.reasoning_pin_failed")).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "switch-session" }));
     });
-
     expect(screen.queryByText("chat.reasoning_pin_failed")).toBeNull();
-    // The menu itself stays usable on the new session.
+
+    // Back on the session the PATCH failed for: the reset was a real one, not
+    // a render-time hide that the return would undo.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "return-session" }));
+    });
+    expect(screen.queryByText("chat.reasoning_pin_failed")).toBeNull();
+    expect(reasoningMutation.reset).toHaveBeenCalled();
+    // The menu itself stays usable on both sessions.
     expect(screen.getByTestId("reasoning-effort-button")).toBeInTheDocument();
   });
 });

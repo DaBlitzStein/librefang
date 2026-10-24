@@ -137,6 +137,8 @@ function AgentTypeEditor({
         // to a model that declares (or forbids) specific levels (#8591).
         supported_efforts: m.supported_efforts,
         offered_efforts: m.offered_efforts,
+        // Carried for the editor's future "inherit resolves to" hint; no
+        // surface reads it yet.
         default_effort: m.default_effort,
         off_allowed: m.off_allowed,
         mandatory: m.mandatory,

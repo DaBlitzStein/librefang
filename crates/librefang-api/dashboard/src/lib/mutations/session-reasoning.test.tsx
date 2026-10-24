@@ -88,22 +88,24 @@ describe("useSetSessionReasoning", () => {
     });
   });
 
-  it("writes the server's accepted level back when it coerced the request", async () => {
+  // The route validates and normalizes the token (trim/case); it does not
+  // rewrite the level to one the model declares. So the only echo worth
+  // reconciling against is the normalized spelling of what was sent.
+  it("writes the server's normalized level back when it trims the request", async () => {
     const { queryClient, wrapper } = seeded();
     vi.mocked(setSessionReasoningOverride).mockResolvedValueOnce({
       status: "ok",
-      reasoning_effort: "medium",
+      reasoning_effort: "high",
     });
 
     const { result } = renderHook(() => useSetSessionReasoning(), { wrapper });
     await result.current.mutateAsync({
       sessionId: "sess-1",
-      // A level the model does not declare; the backend coerces it.
-      reasoningEffort: "ultra",
+      reasoningEffort: " High ",
       agentId: null,
     });
 
-    expect(cachedEffort(queryClient)).toBe("medium");
+    expect(cachedEffort(queryClient)).toBe("high");
   });
 
   it("rolls the cached scalar back when the PATCH fails", async () => {

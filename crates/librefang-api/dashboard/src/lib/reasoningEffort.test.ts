@@ -54,7 +54,7 @@ describe("resolveReasoningEfforts", () => {
 
 // `offered_efforts` is the backend's prepared answer (#8616). When the payload
 // carries it — even as `[]` — it wins: re-deriving from `supported_efforts`
-// would second-guess the coercion rules and could put `none` back on a model
+// would second-guess the offer rules and could put `none` back on a model
 // that cannot be switched off.
 describe("resolveReasoningEfforts — the backend's own offer", () => {
   it("uses offered_efforts verbatim, declaration or not", () => {

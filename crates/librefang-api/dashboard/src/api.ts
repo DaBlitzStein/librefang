@@ -2731,8 +2731,8 @@ export interface ModelItem {
    * `["none","minimal","low","medium","high","xhigh","max"]`. Absent on older
    * daemons (and on providers that declare nothing) — callers fall back to the
    * canonical set rather than rendering an empty menu. A level outside this
-   * list is never offered; the backend coerces one that arrives anyway to the
-   * nearest supported level, with a warning.
+   * list is never offered. The session route validates what it accepts and
+   * does not coerce an unsupported level to a declared one.
    */
   supported_efforts?: string[];
   /**

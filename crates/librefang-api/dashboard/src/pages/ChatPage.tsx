@@ -1425,9 +1425,12 @@ export function useChatMessages(
  *     like it silently failed.
  *   - the optimistic value is what this window last PATCHed. It wins until the
  *     server echo catches up to it, the same "clear when the real value
- *     arrives" shape the header's model switcher uses. When the server value
- *     changes to something else — another client pinned a different level —
- *     the server is the authority and the override is dropped with it.
+ *     arrives" shape the header's model switcher uses. The comparison is
+ *     normalized (trim + case): the route validates and normalizes the token,
+ *     so a request for `" High "` can come back as `"high"`, and the pill must
+ *     not keep showing the spelling it sent. When the server value changes to
+ *     something else — another client pinned a different level — the server is
+ *     the authority and the override is dropped with it.
  *
  * `clearOptimistic` is the error path: a failed PATCH must not keep claiming
  * the level it never wrote.
@@ -1445,9 +1448,14 @@ export function useOptimisticPinnedReasoning(
   }, [activeSessionId]);
 
   useEffect(() => {
-    if (optimistic !== undefined && serverValue === optimistic) {
-      setOptimistic(undefined);
-    }
+    const same =
+      optimistic === null
+        ? serverValue === null
+        : typeof optimistic === "string" &&
+          typeof serverValue === "string" &&
+          serverValue.trim().toLowerCase() ===
+            optimistic.trim().toLowerCase();
+    if (same) setOptimistic(undefined);
   }, [serverValue, optimistic]);
 
   const clearOptimistic = useCallback(() => setOptimistic(undefined), []);
@@ -3667,7 +3675,10 @@ export function ChatPage() {
           model: override.slice(slash + 1),
         };
       }
-      return { provider: "", model: override };
+      // A bare model name says nothing about the provider, and the catalog
+      // can hold the same id under two of them. Stay on the provider the
+      // agent runs on rather than matching the first catalog entry by id.
+      return { provider: selectedAgent?.model_provider ?? "", model: override };
     }
     return {
       provider: selectedAgent?.model_provider ?? "",
@@ -3696,7 +3707,13 @@ export function ChatPage() {
     sessionReasoningQuery.data?.reasoning_effort,
   );
   const setSessionReasoning = useSetSessionReasoning();
-  const { mutate: mutateSessionReasoning } = setSessionReasoning;
+  const { mutate: mutateSessionReasoning, reset: resetSessionReasoning } = setSessionReasoning;
+  // A failed PATCH belongs to the session it was sent for. Reset on every
+  // session change so the error is gone for good — hiding it while another
+  // session is open would only make it reappear on the way back.
+  useEffect(() => {
+    resetSessionReasoning();
+  }, [activeSessionId, resetSessionReasoning]);
   const handlePinReasoning = useCallback((level: string) => {
     if (!activeSessionId) return;
     // Optimistic: the pill and the menu mark the new level immediately, and the

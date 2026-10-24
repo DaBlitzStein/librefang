@@ -19,8 +19,8 @@ import {
  * the model offers no known level (#8616), not missing data. A stored level
  * outside the offered set still gets a row so
  * the operator can see what is in effect, but it is marked and disabled — the
- * backend coerces such a value to the nearest supported level, and the UI must
- * not suggest it.
+ * session route validates the token rather than coercing it to a declared
+ * level, and the UI must not suggest it.
  * (When the catalog starts marking budget-only models — reasoning shaped by a
  * token budget rather than a level enum — this control should render a budget
  * input instead of a level list. Nothing marks that today; noted so the branch

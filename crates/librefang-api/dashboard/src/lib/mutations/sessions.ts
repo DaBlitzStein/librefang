@@ -63,9 +63,10 @@ function withReasoningEffort(previous: unknown, value: string | null): unknown {
  * session read (`sessionKeys.detail` and the agent-scoped history snapshot)
  * after every click would re-download the conversation just to learn the level
  * the caller already knows. The cached scalar is patched in place instead,
- * optimistically before the PATCH and with the server's echoed value — it may
- * be coerced to a level the model actually supports — on success. Only the
- * cheap session list is invalidated.
+ * optimistically before the PATCH and with the server's echoed value on
+ * success — the route validates and normalizes the token (it does not coerce
+ * it to a level the model supports), so the echo is authoritative about the
+ * spelling. Only the cheap session list is invalidated.
  */
 export function useSetSessionReasoning() {
   const qc = useQueryClient();
