@@ -147,6 +147,10 @@ async fn start_test_server_with_builder(builder: MockKernelBuilder) -> TestServe
             axum::routing::get(routes::get_agent_session),
         )
         .route(
+            "/api/sessions/{id}/reasoning",
+            axum::routing::patch(routes::patch_session_reasoning),
+        )
+        .route(
             "/api/uploads/{file_id}",
             axum::routing::get(routes::serve_upload),
         )
@@ -1120,6 +1124,112 @@ async fn test_agent_session_empty() {
         "empty session must include label"
     );
     assert!(body["label"].is_null());
+}
+
+/// The TUI's daemon-backed `/think` resolves the session id with
+/// `GET /api/agents/{id}/session` and then pins the effort with
+/// `PATCH /api/sessions/{id}/reasoning` (#8591).
+///
+/// On a never-used agent nothing had created the canonical session row, so the
+/// GET reported an id the PATCH could not address and the pin 404-ed with
+/// nothing in the payload to explain why. The GET now materializes the row;
+/// the PATCH must still refuse a genuinely unknown id — materialization on GET
+/// must not turn the PATCH into an upsert.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_agent_session_materializes_the_row_the_reasoning_patch_addresses() {
+    use librefang_types::agent::AgentId;
+
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let spawned: serde_json::Value = resp.json().await.unwrap();
+    let agent_id: AgentId = spawned["agent_id"].as_str().unwrap().parse().unwrap();
+
+    let substrate = server.state.kernel.memory_substrate();
+    let canonical = server
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .expect("spawned agent")
+        .session_id;
+    assert!(
+        substrate.get_session(canonical).unwrap().is_none(),
+        "pre-condition: a never-used agent has no session row"
+    );
+
+    // Half one: the GET reports the canonical id *and* leaves a row behind.
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session",
+            server.base_url, agent_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["session_id"].as_str(),
+        Some(canonical.0.to_string().as_str())
+    );
+    assert_eq!(body["message_count"], 0);
+    assert!(
+        substrate.get_session(canonical).unwrap().is_some(),
+        "GET must materialize the row the PATCH below addresses"
+    );
+
+    // Half two: the PATCH the TUI performs on the reported id succeeds and
+    // stores the validated effort.
+    let patch_url = format!(
+        "{}/api/sessions/{}/reasoning",
+        server.base_url,
+        body["session_id"].as_str().unwrap()
+    );
+    let resp = client
+        .patch(&patch_url)
+        .json(&serde_json::json!({"reasoning_effort": "high"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "PATCH on the id the GET reported");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["reasoning_effort"], "high");
+    assert_eq!(
+        substrate
+            .get_session(canonical)
+            .unwrap()
+            .unwrap()
+            .reasoning_effort
+            .as_deref(),
+        Some("high"),
+        "the pin must be persisted on the session row"
+    );
+
+    // Half three: an id no route ever reported still 404s. GET-side
+    // materialization must not have made the PATCH an upsert.
+    let resp = client
+        .patch(format!(
+            "{}/api/sessions/{}/reasoning",
+            server.base_url,
+            uuid::Uuid::new_v4()
+        ))
+        .json(&serde_json::json!({"reasoning_effort": "high"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "unknown session id must still 404"
+    );
 }
 
 /// Regression test for the cross-agent session-read guard added in PR #3071.
