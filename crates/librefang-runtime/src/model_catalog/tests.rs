@@ -218,6 +218,80 @@ fn test_find_model_for_provider_alias_is_scoped() {
     );
 }
 
+/// #8616 review (R1): a failover must not borrow a same-id entry from another
+/// provider. The catalog has only `openai:m`; `find_model_for_manifest`'s
+/// provider-blind tail returns it for `customgw:m`, which is why the failover
+/// resolver uses the strict lookup instead.
+#[test]
+fn test_find_model_for_failover_is_strictly_provider_scoped() {
+    let catalog = ModelCatalog::from_entries(
+        vec![ModelCatalogEntry {
+            id: "m".to_string(),
+            display_name: "M".to_string(),
+            provider: "openai".to_string(),
+            tier: ModelTier::Smart,
+            context_window: 128_000,
+            max_output_tokens: 8_192,
+            supported_efforts: vec!["low".to_string(), "xhigh".to_string()],
+            ..Default::default()
+        }],
+        vec![],
+    );
+
+    // Documents the leak the strict lookup exists to prevent.
+    assert_eq!(
+        catalog
+            .find_model_for_manifest("customgw", "m")
+            .map(|e| e.provider.as_str()),
+        Some("openai"),
+        "the manifest lookup is provider-blind by design; do not use it for failover"
+    );
+
+    // Strict: exact provider+model resolves, a provider miss is undeclared.
+    assert_eq!(
+        catalog
+            .find_model_for_failover("openai", "m")
+            .map(|e| e.id.as_str()),
+        Some("m")
+    );
+    assert!(
+        catalog.find_model_for_failover("customgw", "m").is_none(),
+        "a provider miss must not borrow another provider's entry"
+    );
+    // An empty provider cannot be scoped and keeps the legacy match.
+    assert!(catalog.find_model_for_failover("", "m").is_some());
+}
+
+/// The `{provider}/{model}` id form is still reconciled, so catalogs that key
+/// prefixed ids (OpenRouter) resolve under the strict lookup too.
+#[test]
+fn test_find_model_for_failover_reconciles_a_prefixed_catalog_id() {
+    let catalog = ModelCatalog::from_entries(
+        vec![ModelCatalogEntry {
+            id: "openrouter/tencent/hy3:free".to_string(),
+            display_name: "Tencent HY3 (free)".to_string(),
+            provider: "openrouter".to_string(),
+            tier: ModelTier::Smart,
+            context_window: 262_144,
+            ..Default::default()
+        }],
+        vec![],
+    );
+
+    assert_eq!(
+        catalog
+            .find_model_for_failover("openrouter", "tencent/hy3:free")
+            .map(|e| e.context_window),
+        Some(262_144)
+    );
+    assert!(catalog
+        .find_model_for_failover("openrouter", "openrouter/tencent/hy3:free")
+        .is_some());
+    assert!(catalog
+        .find_model_for_failover("othergw", "tencent/hy3:free")
+        .is_none());
+}
+
 /// #6423: OpenRouter live catalog entries are keyed `openrouter/{raw_id}`, but
 /// the dashboard model-picker (`set_agent_model`) strips the `{provider}/`
 /// prefix before persisting the manifest model. `find_model_for_manifest` must

@@ -933,6 +933,48 @@ impl ModelCatalog {
         self.find_model(model)
     }
 
+    /// Strictly provider-scoped lookup for a model a request is being
+    /// *re-targeted* at — a fallback slot (#8616 review).
+    ///
+    /// [`Self::find_model_for_manifest`] ends with a provider-blind
+    /// [`Self::find_model`] so historical manifest lookups keep resolving.
+    /// That fallback is wrong for a failover: with only `openai:m` in the
+    /// catalog, `find_model_for_manifest("customgw", "m")` returns the
+    /// `openai` entry, so a failover to `customgw:m` would inherit a token
+    /// (`xhigh`) that only `openai:m` declared and send it to a different
+    /// provider/model. This method therefore treats a provider miss as
+    /// undeclared.
+    ///
+    /// Resolution order:
+    /// 1. `(provider, model)` exact.
+    /// 2. `(provider, "{provider}/{model}")` — catalogs that key prefixed ids
+    ///    (the OpenRouter case), skipped when `model` already carries the
+    ///    prefix.
+    /// 3. `None`.
+    ///
+    /// An empty provider cannot be scoped, so it keeps the provider-blind
+    /// match; production chain entries always carry a provider name.
+    pub fn find_model_for_failover(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Option<&ModelCatalogEntry> {
+        if provider.is_empty() {
+            return self.find_model(model);
+        }
+        if let Some(entry) = self.find_model_for_provider(provider, model) {
+            return Some(entry);
+        }
+        let prefix = format!("{provider}/").to_lowercase();
+        if !model.to_lowercase().starts_with(&prefix) {
+            let qualified = format!("{provider}/{model}");
+            if let Some(entry) = self.find_model_for_provider(provider, &qualified) {
+                return Some(entry);
+            }
+        }
+        None
+    }
+
     /// Find a model by its canonical ID, display name, or alias.
     pub fn find_model(&self, id_or_alias: &str) -> Option<&ModelCatalogEntry> {
         let lower = id_or_alias.to_lowercase();

@@ -22569,3 +22569,126 @@ fn shutdown_publishes_kernel_stopping() {
     }
     assert!(stopping, "shutdown must publish KernelStopping");
 }
+
+/// #8616 review (R1): the catalog contains only `openai:m`, which declares
+/// `["low", "xhigh"]`. A failover to the uncatalogued `customgw:m` must not
+/// inherit that declaration merely because the model ids collide.
+///
+/// The resolver under test is the exact one `resolve_driver` attaches to a
+/// `FallbackDriver` (`fallback_reasoning_resolver`), so this covers the kernel
+/// wiring and not just `realign_reasoning`.
+#[tokio::test(flavor = "multi_thread")]
+async fn failover_to_an_uncatalogued_provider_drops_the_primary_rung() {
+    use librefang_runtime::llm_driver::{
+        CompletionRequest, CompletionResponse, LlmDriver, LlmError,
+    };
+    use librefang_runtime::model_catalog::ModelCatalog;
+    use librefang_types::config::{ReasoningEffortPolicy, ReasoningMode, ThinkingConfig};
+    use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+    use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier, ReasoningEchoPolicy};
+
+    struct FailPrimary;
+    #[async_trait]
+    impl LlmDriver for FailPrimary {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::Api {
+                status: 500,
+                message: "primary down".to_string(),
+                code: None,
+            })
+        }
+    }
+
+    struct RecordingFallback(Arc<std::sync::Mutex<Vec<CompletionRequest>>>);
+    #[async_trait]
+    impl LlmDriver for RecordingFallback {
+        async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            self.0.lock().unwrap().push(req);
+            Ok(CompletionResponse {
+                text_synthesized_from_thinking: false,
+                content: vec![ContentBlock::Text {
+                    text: "fallback served".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+                actual_provider: None,
+                actual_model: None,
+            })
+        }
+    }
+
+    let catalog = Arc::new(ModelCatalog::from_entries(
+        vec![ModelCatalogEntry {
+            id: "m".to_string(),
+            display_name: "M".to_string(),
+            provider: "openai".to_string(),
+            tier: ModelTier::Smart,
+            context_window: 128_000,
+            max_output_tokens: 8_192,
+            supported_efforts: vec!["low".to_string(), "xhigh".to_string()],
+            ..Default::default()
+        }],
+        vec![],
+    ));
+    let resolver = super::llm_drivers::fallback_reasoning_resolver(catalog);
+
+    // The manifest's own provider keeps its declaration …
+    let (primary_policy, _) = resolver("openai", "m");
+    assert_eq!(
+        primary_policy.supported_efforts,
+        vec!["low".to_string(), "xhigh".to_string()],
+        "the primary provider's own entry must still resolve"
+    );
+
+    // … and a same-id model under a provider the catalog never heard of is
+    // undeclared, not `openai:m`.
+    let (fallback_policy, echo) = resolver("customgw", "m");
+    assert_eq!(
+        fallback_policy,
+        ReasoningEffortPolicy::default(),
+        "customgw:m must not borrow openai:m's declaration"
+    );
+    assert_eq!(echo, ReasoningEchoPolicy::default());
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fb = librefang_runtime::drivers::fallback::FallbackDriver::with_models_and_providers(vec![
+        (
+            Arc::new(FailPrimary) as Arc<dyn LlmDriver>,
+            String::new(),
+            "openai".to_string(),
+        ),
+        (
+            Arc::new(RecordingFallback(seen.clone())) as Arc<dyn LlmDriver>,
+            "m".to_string(),
+            "customgw".to_string(),
+        ),
+    ])
+    .with_reasoning_resolver(resolver);
+
+    let req = CompletionRequest {
+        model: "m".to_string(),
+        thinking: Some(ThinkingConfig {
+            reasoning_effort: Some(ReasoningMode::new("xhigh").unwrap()),
+            ..Default::default()
+        }),
+        reasoning_policy: primary_policy,
+        ..Default::default()
+    };
+    fb.complete(req).await.expect("the fallback slot serves");
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].model, "m");
+    assert_eq!(
+        seen[0]
+            .thinking
+            .as_ref()
+            .and_then(|t| t.reasoning_effort.as_ref())
+            .map(|m| m.as_str()),
+        None,
+        "xhigh must not be forwarded to uncatalogued customgw:m"
+    );
+    assert_eq!(seen[0].reasoning_policy, ReasoningEffortPolicy::default());
+}

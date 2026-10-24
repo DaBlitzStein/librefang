@@ -8,6 +8,11 @@
 //! that only the primary model declared — `xhigh` on a model that has never
 //! heard of it — and the primary's echo policy, which describes a different
 //! wire format.
+//!
+//! Follow-up (R2, #8616 review): the boot-level `[[fallback_providers]]` driver
+//! and auxiliary chains are constructed without a resolver, so they apply the
+//! undeclared policy and drop non-legacy rungs; that is conservative (no
+//! cross-model leak) and will be tightened separately.
 
 use crate::llm_driver::CompletionRequest;
 use librefang_types::config::ReasoningEffortPolicy;

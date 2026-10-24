@@ -28,6 +28,30 @@ fn should_use_managed_everyapi(
         && managed_available
 }
 
+/// Build the resolver a `FallbackDriver` uses to re-target a request's
+/// reasoning policy when it rewrites `req.model` (#8616 review).
+///
+/// The lookup is strictly provider-scoped ([`ModelCatalog::find_model_for_failover`]):
+/// a fallback slot the catalog does not know under that provider is treated as
+/// undeclared, because borrowing a same-id entry from another provider is
+/// exactly the leak this resolver exists to prevent.
+pub(super) fn fallback_reasoning_resolver(
+    catalog: std::sync::Arc<librefang_runtime::model_catalog::ModelCatalog>,
+) -> librefang_runtime::drivers::fallback_reasoning::ReasoningResolver {
+    std::sync::Arc::new(move |provider: &str, model: &str| {
+        match catalog.find_model_for_failover(provider, model) {
+            Some(entry) => (
+                catalog.effective_reasoning_policy(entry),
+                entry.reasoning_echo_policy,
+            ),
+            None => (
+                librefang_types::config::ReasoningEffortPolicy::default(),
+                librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            ),
+        }
+    })
+}
+
 impl LibreFangKernel {
     /// Resolve the LLM driver for an agent.
     ///
@@ -561,20 +585,8 @@ impl LibreFangKernel {
                 // it will actually call (#8616 review). The snapshot is taken
                 // per `resolve_driver` call, i.e. per turn, so a catalog or
                 // override edit is picked up on the next turn.
-                let reasoning_catalog = self.llm.model_catalog.load_full();
-                let fb = fb.with_reasoning_resolver(std::sync::Arc::new(
-                    move |provider: &str, model: &str| match reasoning_catalog
-                        .find_model_for_manifest(provider, model)
-                    {
-                        Some(entry) => (
-                            reasoning_catalog.effective_reasoning_policy(entry),
-                            entry.reasoning_echo_policy,
-                        ),
-                        None => (
-                            librefang_types::config::ReasoningEffortPolicy::default(),
-                            librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-                        ),
-                    },
+                let fb = fb.with_reasoning_resolver(fallback_reasoning_resolver(
+                    self.llm.model_catalog.load_full(),
                 ));
                 return Ok(Arc::new(fb));
             }
