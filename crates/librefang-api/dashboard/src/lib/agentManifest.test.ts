@@ -1145,6 +1145,7 @@ reasoning_effort = "none"
     if (!result.ok) return;
     expect(result.form.thinking.budget_tokens).toBe("5000");
     expect(result.form.thinking.reasoning_effort).toBe("none");
+    expect(result.form.thinking.reasoning_effort_key).toBe("reasoning_effort");
     // Owned by the widget, not preserved as an opaque key.
     expect(result.extras.thinking).toEqual({});
 
@@ -1168,9 +1169,10 @@ reasoning_effort = "none"
 
   // `reasoning_mode` is the deprecated spelling of `reasoning_effort`. An
   // agent.toml that still carries it must load into the same form field, and
-  // the next save emits the canonical spelling — the alias is accepted on the
-  // way in, never written on the way out.
-  it("reads the deprecated reasoning_mode alias and re-emits the canonical key", () => {
+  // the next save writes the key back unchanged: a daemon that predates the
+  // rename reads nothing else, so rewriting it to `reasoning_effort` would
+  // silently drop the setting.
+  it("reads the deprecated reasoning_mode alias and writes that key back", () => {
     const original = `name = "agent"
 
 [thinking]
@@ -1180,10 +1182,38 @@ reasoning_mode = "high"
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.form.thinking.reasoning_effort).toBe("high");
+    expect(result.form.thinking.reasoning_effort_key).toBe("reasoning_mode");
     expect(result.extras.thinking).toEqual({});
 
     const out = serializeManifestForm(result.form, result.extras);
-    expect(out).toContain('reasoning_effort = "high"');
+    expect(out).toContain('reasoning_mode = "high"');
+    expect(out).not.toContain("reasoning_effort");
+
+    // And the key survives a second round trip, so repeated saves do not
+    // silently migrate the manifest one editor session at a time.
+    const second = parseManifestToml(out);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.form.thinking.reasoning_effort).toBe("high");
+    expect(second.form.thinking.reasoning_effort_key).toBe("reasoning_mode");
+  });
+
+  // A manifest already using the canonical key keeps it. This is the half the
+  // previous "always emit canonical" writer happened to get right; it must not
+  // regress into always preserving the alias either.
+  it("keeps the canonical reasoning_effort key when that is what the manifest used", () => {
+    const original = `name = "agent"
+
+[thinking]
+reasoning_effort = "low"
+`;
+    const result = parseManifestToml(original);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.form.thinking.reasoning_effort_key).toBe("reasoning_effort");
+
+    const out = serializeManifestForm(result.form, result.extras);
+    expect(out).toContain('reasoning_effort = "low"');
     expect(out).not.toContain("reasoning_mode");
   });
 

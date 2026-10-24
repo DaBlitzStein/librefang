@@ -279,6 +279,29 @@ describe("session pin merge (optimistic over server echo)", () => {
     expect(view.result.current.pinned).toBe("low");
   });
 
+  // The route validates and normalizes the token, so `" High "` can come back
+  // as `"high"`. Clearing only on an exact string match would leave the pill
+  // showing the spelling this window sent, and the normalized echo — the
+  // truth — would be ignored.
+  it("drops the override when the server echoes a normalized spelling", async () => {
+    const view = renderMerge("s1", null);
+
+    await act(async () => {
+      view.result.current.setOptimistic(" High ");
+    });
+    await act(async () => {
+      view.rerender({ sessionId: "s1", serverValue: "high" });
+    });
+    expect(view.result.current.pinned).toBe("high");
+
+    // The override is gone, not merely shadowed: a later null would lose to a
+    // surviving `" High "`.
+    await act(async () => {
+      view.rerender({ sessionId: "s1", serverValue: null });
+    });
+    expect(view.result.current.pinned).toBeNull();
+  });
+
   it("keeps the pin visible on a daemon that never echoes the field", async () => {
     const view = renderMerge("s1", undefined);
 
@@ -302,6 +325,26 @@ describe("session pin merge (optimistic over server echo)", () => {
       view.result.current.setOptimistic(null);
     });
     expect(view.result.current.pinned).toBeNull();
+  });
+
+  it("drops an unpin override once the server echoes null", async () => {
+    const view = renderMerge("s1", "high");
+
+    await act(async () => {
+      view.result.current.setOptimistic(null);
+    });
+    expect(view.result.current.pinned).toBeNull();
+
+    // The PATCH was accepted and the server reports no pin: the override has
+    // done its job. If it survived, a later value from another client would
+    // stay masked behind it.
+    await act(async () => {
+      view.rerender({ sessionId: "s1", serverValue: null });
+    });
+    await act(async () => {
+      view.rerender({ sessionId: "s1", serverValue: "high" });
+    });
+    expect(view.result.current.pinned).toBe("high");
   });
 
   it("drops the override when the session changes", async () => {
