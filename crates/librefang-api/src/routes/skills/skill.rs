@@ -2375,6 +2375,26 @@ mod raw_writer_drift_guard {
         ),
     ];
 
+    /// Raw writers whose call sites must be zero in this module: every API
+    /// write goes through the `*_with_snapshot` variant so the history row can
+    /// carry the exact bytes the writer produced. Listing the raw names here
+    /// as well keeps a plain call to one of them from sneaking past the funnel
+    /// check below just because it is not in `FUNNELS`.
+    ///
+    /// `restore_skill_snapshot` is deliberately absent: the restore handler
+    /// *is* its funnel and records the stored row itself.
+    const RAW_WRITERS: &[&str] = &[
+        "evolution::create_skill",
+        "evolution::update_skill",
+        "evolution::patch_skill",
+        "evolution::rollback_skill",
+        "evolution::delete_skill",
+        "evolution::write_supporting_file",
+        "evolution::remove_supporting_file",
+        "evolution::install_local_skill",
+        "evolution::uninstall_skill",
+    ];
+
     /// 0-based line range of `signature`'s body, closing brace included.
     ///
     /// `rustfmt` closes a top-level function with `}` in column 0, so the
@@ -2426,6 +2446,29 @@ mod raw_writer_drift_guard {
                     index + 1
                 );
             }
+        }
+    }
+
+    /// The snapshot-free writers must have no call site at all. Checking only
+    /// `FUNNELS` would pass a new raw writer call in this module, because
+    /// those names are not in the funnel list any more.
+    #[test]
+    fn raw_evolution_writers_have_no_call_sites() {
+        let lines: Vec<&str> = SOURCE.lines().collect();
+        for writer in RAW_WRITERS {
+            let needle = format!("{writer}(");
+            let call_lines: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.contains(&needle))
+                .map(|(index, _)| index)
+                .collect();
+            assert!(
+                call_lines.is_empty(),
+                "`{needle}` is called at skill.rs:{}; use `{writer}_with_snapshot` so the \
+                 snapshot the writer produced reaches the history row.",
+                call_lines.first().map(|index| index + 1).unwrap_or(0)
+            );
         }
     }
 }

@@ -2089,12 +2089,15 @@ pub fn restore_skill_snapshot(
     // validation it would be a way to land blocked content (or an oversized
     // prompt) that every forward path refuses — and then the reload drops the
     // skill from the registry while the request returned 200. Scan the
-    // external prompt and both manifest-carried prompt fields.
+    // external prompt and the manifest-carried inline prompt (size cap and
+    // injection scan, as for every writer), then reuse the load boundary's own
+    // scan so the tool name/description and skill description are refused
+    // here exactly as the reload would refuse them.
     validate_prompt_content(prompt_context)?;
     if let Some(inline_prompt) = manifest.prompt_context.as_deref() {
         validate_prompt_content(inline_prompt)?;
     }
-    validate_prompt_content(&manifest.skill.description)?;
+    crate::registry::SkillRegistry::scan_loaded_prompt_context(name, &manifest)?;
 
     // Resolve through the manifest when the directory is not named after the
     // skill (slug ≠ `[skill] name`) — same resolution as update/delete.
