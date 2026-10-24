@@ -933,6 +933,48 @@ impl ModelCatalog {
         self.find_model(model)
     }
 
+    /// Strictly provider-scoped lookup for a model a request is being
+    /// *re-targeted* at — a fallback slot (#8616 review).
+    ///
+    /// [`Self::find_model_for_manifest`] ends with a provider-blind
+    /// [`Self::find_model`] so historical manifest lookups keep resolving.
+    /// That fallback is wrong for a failover: with only `openai:m` in the
+    /// catalog, `find_model_for_manifest("customgw", "m")` returns the
+    /// `openai` entry, so a failover to `customgw:m` would inherit a token
+    /// (`xhigh`) that only `openai:m` declared and send it to a different
+    /// provider/model. This method therefore treats a provider miss as
+    /// undeclared.
+    ///
+    /// Resolution order:
+    /// 1. `(provider, model)` exact.
+    /// 2. `(provider, "{provider}/{model}")` — catalogs that key prefixed ids
+    ///    (the OpenRouter case), skipped when `model` already carries the
+    ///    prefix.
+    /// 3. `None`.
+    ///
+    /// An empty provider cannot be scoped, so it keeps the provider-blind
+    /// match; production chain entries always carry a provider name.
+    pub fn find_model_for_failover(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Option<&ModelCatalogEntry> {
+        if provider.is_empty() {
+            return self.find_model(model);
+        }
+        if let Some(entry) = self.find_model_for_provider(provider, model) {
+            return Some(entry);
+        }
+        let prefix = format!("{provider}/").to_lowercase();
+        if !model.to_lowercase().starts_with(&prefix) {
+            let qualified = format!("{provider}/{model}");
+            if let Some(entry) = self.find_model_for_provider(provider, &qualified) {
+                return Some(entry);
+            }
+        }
+        None
+    }
+
     /// Find a model by its canonical ID, display name, or alias.
     pub fn find_model(&self, id_or_alias: &str) -> Option<&ModelCatalogEntry> {
         let lower = id_or_alias.to_lowercase();
@@ -1616,7 +1658,26 @@ impl ModelCatalog {
             }
         };
         match serde_json::from_str::<HashMap<String, ModelOverrides>>(&data) {
-            Ok(map) => self.overrides = map,
+            Ok(mut map) => {
+                // The reasoning-policy tokens are hand-editable and go to the
+                // wire verbatim (#8616 review): drop an unspellable one with a
+                // warning instead of failing the whole file or letting it
+                // reach a provider request. `validate()` on the catalog entry
+                // rejects the same shape at load time; this is the overrides
+                // layer's equivalent.
+                for (key, overrides) in map.iter_mut() {
+                    let dropped = overrides.sanitize_reasoning();
+                    if !dropped.is_empty() {
+                        tracing::warn!(
+                            path = %path.display(),
+                            model = %key,
+                            tokens = ?dropped,
+                            "model-overrides file declares invalid reasoning tokens; dropped"
+                        );
+                    }
+                }
+                self.overrides = map;
+            }
             Err(e) => {
                 // A syntax error previously reverted to defaults with no log,
                 // silently dropping the operator's per-model tuning.
@@ -2233,6 +2294,19 @@ impl ModelCatalog {
             }
         };
         for entry in entries {
+            // Same schema gate the TOML loaders apply: a hand-edited file can
+            // carry a zero window or an unspellable reasoning token, and both
+            // would otherwise reach request-building (#8616 review).
+            if let Err(e) = entry.validate() {
+                tracing::warn!(
+                    path = %path.display(),
+                    model = %entry.id,
+                    provider = %entry.provider,
+                    error = %e,
+                    "Skipping invalid custom model entry"
+                );
+                continue;
+            }
             self.add_custom_model(entry);
         }
     }

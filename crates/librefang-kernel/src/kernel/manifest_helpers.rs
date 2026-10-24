@@ -218,7 +218,11 @@ pub(super) fn apply_resolved_inference_params(
 ///   make `thinking: true` a silent no-op.
 /// - [`ThinkingOverride::Disable`] (legacy `thinking: false`) — clear
 ///   `manifest.thinking` so the driver does not request thinking regardless of
-///   the manifest/global default.
+///   the manifest/global default. An explicit per-session reasoning pin in
+///   `session_pin` survives: the WebSocket dashboard sent the legacy boolean on
+///   every frame, so honouring it literally erased a pin the user had just set
+///   (#8616 review). A frame's explicit `reasoning_effort` is the `Mode` arm
+///   below and still wins over the pin.
 /// - [`ThinkingOverride::Mode`] — stamp the mode onto the manifest's thinking
 ///   config, creating it if absent. Note that `Mode(ReasoningMode::none())` is
 ///   *not* the same as `Disable`: it keeps a thinking config so the driver can
@@ -229,6 +233,7 @@ pub(super) fn apply_resolved_inference_params(
 pub(super) fn apply_thinking_override(
     manifest: &mut librefang_types::agent::AgentManifest,
     thinking_override: librefang_types::config::ThinkingOverride,
+    session_pin: Option<&str>,
 ) {
     use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
     match thinking_override {
@@ -245,9 +250,18 @@ pub(super) fn apply_thinking_override(
                 }
             }
         }
-        ThinkingOverride::Disable => {
-            manifest.thinking = None;
-        }
+        ThinkingOverride::Disable => match session_pin.and_then(|t| ReasoningMode::new(t).ok()) {
+            Some(mode) => {
+                // The pin is a deliberate per-session choice; keep the
+                // thinking config so the rung still reaches the wire, preserving
+                // any budget the manifest already carried.
+                manifest
+                    .thinking
+                    .get_or_insert_with(ThinkingConfig::default)
+                    .reasoning_effort = Some(mode);
+            }
+            None => manifest.thinking = None,
+        },
         ThinkingOverride::Mode(mode) => {
             manifest
                 .thinking
