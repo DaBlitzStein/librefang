@@ -53,14 +53,30 @@ fn is_global_skill_dir(registry: &SkillRegistry, skill_dir: &Path) -> bool {
     dir.starts_with(&global)
 }
 
+/// Values a caller may capture *before* a mutation, when the post-mutation
+/// directory can no longer yield them: the content a delete removed and the
+/// pre-delete scope decision.
+///
+/// `content: None` makes the recorder read the files from `skill_dir` (every
+/// non-removal caller); `is_global: None` makes it canonicalize the directory
+/// now (every caller whose directory still exists).
+#[derive(Default)]
+struct PreMutationSnapshot {
+    content: Option<(String, String)>,
+    is_global: Option<bool>,
+}
+
 /// Best-effort record of one skill snapshot after a successful mutation.
 ///
 /// Called *after* the content is already on disk, so a failure costs one
 /// history row, never the write — the same semantics as
-/// `record_template_version` on the API side. `snapshot` carries a pre-read
-/// snapshot for the delete path, where the files are gone by the time the
-/// operation has succeeded; every other caller passes `None` and the files are
-/// read from `skill_dir` here.
+/// `record_template_version` on the API side.
+///
+/// The delete path passes both pre-mutation values because
+/// `is_global_skill_dir` canonicalizes `skill_dir`, which fails once the
+/// delete has removed it, and the fallback (the uncleared path) does not match
+/// a symlinked skills root's canonical form — the row would be silently
+/// dropped.
 fn record_skill_snapshot(
     kernel: Option<&Arc<dyn KernelHandle>>,
     registry: &SkillRegistry,
@@ -68,12 +84,15 @@ fn record_skill_snapshot(
     skill_name: &str,
     author: &str,
     source: &str,
-    snapshot: Option<(String, String)>,
+    pre: PreMutationSnapshot,
 ) {
     let Some(kernel) = kernel else {
         return;
     };
-    if !is_global_skill_dir(registry, skill_dir) {
+    if !pre
+        .is_global
+        .unwrap_or_else(|| is_global_skill_dir(registry, skill_dir))
+    {
         tracing::debug!(
             skill = skill_name,
             dir = %skill_dir.display(),
@@ -81,7 +100,8 @@ fn record_skill_snapshot(
         );
         return;
     }
-    let Some((manifest_toml, prompt_context)) = snapshot.or_else(|| read_skill_snapshot(skill_dir))
+    let Some((manifest_toml, prompt_context)) =
+        pre.content.or_else(|| read_skill_snapshot(skill_dir))
     else {
         tracing::warn!(
             skill = skill_name,
@@ -171,7 +191,7 @@ pub(super) async fn tool_skill_evolve_create(
         &result.skill_name,
         &author,
         SkillWrite::Create.as_str(),
-        None,
+        PreMutationSnapshot::default(),
     );
     Ok(serde_json::to_string(&result)?)
 }
@@ -226,7 +246,7 @@ pub(super) async fn tool_skill_evolve_update(
         &result.skill_name,
         &author,
         SkillWrite::Evolve.as_str(),
-        None,
+        PreMutationSnapshot::default(),
     );
     Ok(serde_json::to_string(&result)?)
 }
@@ -284,7 +304,7 @@ pub(super) async fn tool_skill_evolve_patch(
         &result.skill_name,
         &author,
         SkillWrite::Patch.as_str(),
-        None,
+        PreMutationSnapshot::default(),
     );
     Ok(serde_json::to_string(&result)?)
 }
@@ -327,8 +347,12 @@ pub(super) async fn tool_skill_evolve_delete(
     };
     // Read the snapshot *before* the delete: the files this row records are
     // what the delete is about to remove, and they cannot be read afterwards.
-    // The row itself is only written once the delete has succeeded.
+    // The row itself is only written once the delete has succeeded. The scope
+    // check has the same lifetime constraint — `is_global_skill_dir`
+    // canonicalizes `skill_dir`, and a canonicalize of a symlinked root does
+    // not match its post-delete fallback form, silently dropping the row.
     let snapshot = read_skill_snapshot(&skill_dir);
+    let is_global = is_global_skill_dir(registry, &skill_dir);
     let result =
         librefang_skills::evolution::delete_skill(&parent, name).map_err(ToolError::upstream)?;
     let author = agent_author_tag(caller_agent_id);
@@ -339,7 +363,10 @@ pub(super) async fn tool_skill_evolve_delete(
         &result.skill_name,
         &author,
         SkillWrite::Delete.as_str(),
-        snapshot,
+        PreMutationSnapshot {
+            content: snapshot,
+            is_global: Some(is_global),
+        },
     );
     Ok(serde_json::to_string(&result)?)
 }
@@ -380,7 +407,7 @@ pub(super) async fn tool_skill_evolve_rollback(
         &result.skill_name,
         &author,
         SkillWrite::Rollback.as_str(),
-        None,
+        PreMutationSnapshot::default(),
     );
     Ok(serde_json::to_string(&result)?)
 }
@@ -429,7 +456,7 @@ pub(super) async fn tool_skill_evolve_write_file(
         &result.skill_name,
         &author,
         SkillWrite::FileWrite.as_str(),
-        None,
+        PreMutationSnapshot::default(),
     );
     Ok(serde_json::to_string(&result)?)
 }
@@ -473,7 +500,7 @@ pub(super) async fn tool_skill_evolve_remove_file(
         &result.skill_name,
         &author,
         SkillWrite::FileRemove.as_str(),
-        None,
+        PreMutationSnapshot::default(),
     );
     Ok(serde_json::to_string(&result)?)
 }
