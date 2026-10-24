@@ -193,7 +193,7 @@ async fn spawn_from_workspace_agent_name_still_works() {
     let _guard = home_lock().lock().await;
     let h = boot().await;
 
-    // Backward-compat fallback (kept deliberately): a
+    // Backward-compat fallback: a
     // "template" name that matches an existing agent's own workspace
     // directory still resolves. It is the second candidate in the kernel's
     // `agent_template_candidates` order — `agent-types/` → `workspaces/agents/`
@@ -856,8 +856,12 @@ async fn save_agent_as_agent_type_forbids_user_role() {
 }
 
 /// `signed_manifest` is verified against the exact bytes it was signed over.
-/// Main accepted the pair when those signed bytes equalled the resolved template's content — a verified flow, not a skipped one.
-/// This door rejects the pair anyway, so a signature-pinned spawn can only pin content the client supplied, never whatever the template store holds at verification time.
+/// `template` supplies the manifest server-side, so pairing the two leaves no
+/// client-supplied bytes to verify the signature against: `POST /api/agents`
+/// rejects the pair with `400 invalid_manifest`
+/// (`api-error-manifest-signed-template-conflict`).
+/// A signature-pinned spawn therefore pins only content the client supplied,
+/// never whatever the template store holds at verification time.
 #[tokio::test(flavor = "multi_thread")]
 async fn spawn_rejects_signed_manifest_combined_with_template() {
     let _guard = home_lock().lock().await;
