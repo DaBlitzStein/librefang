@@ -4635,6 +4635,7 @@ fn test_apply_thinking_override_none_leaves_manifest_untouched() {
     apply_thinking_override(
         &mut manifest,
         librefang_types::config::ThinkingOverride::Inherit,
+        None,
     );
     let cfg = manifest.thinking.as_ref().expect("thinking preserved");
     assert_eq!(cfg.budget_tokens, 4242);
@@ -4651,7 +4652,67 @@ fn test_apply_thinking_override_force_off_clears_thinking() {
     apply_thinking_override(
         &mut manifest,
         librefang_types::config::ThinkingOverride::Disable,
+        None,
     );
+    assert!(manifest.thinking.is_none());
+}
+
+/// #8616 review: the dashboard sent `thinking: deepThinking` on every frame,
+/// so the legacy `false` reached the kernel unconditionally and erased a
+/// per-session reasoning pin the user had just set. The pin outranks the
+/// boolean; a frame's explicit `reasoning_effort` (the `Mode` arm) still wins.
+#[test]
+fn test_session_reasoning_pin_survives_a_frame_that_sends_only_thinking_false() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: None,
+        ..Default::default()
+    };
+    apply_session_reasoning_effort(&mut manifest, "xhigh");
+    apply_thinking_override(&mut manifest, ThinkingOverride::Disable, Some("xhigh"));
+
+    let cfg = manifest
+        .thinking
+        .as_ref()
+        .expect("the session pin keeps the thinking config alive");
+    assert_eq!(
+        cfg.reasoning_effort,
+        Some(ReasoningMode::new("xhigh").unwrap()),
+        "thinking:false must not erase an explicit session pin"
+    );
+    assert_eq!(
+        cfg.budget_tokens,
+        ThinkingConfig::default().budget_tokens,
+        "the surviving config carries the default budget, not a cleared one"
+    );
+
+    // An explicit per-frame token still beats the pin.
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: None,
+        ..Default::default()
+    };
+    apply_session_reasoning_effort(&mut manifest, "xhigh");
+    apply_thinking_override(
+        &mut manifest,
+        ThinkingOverride::Mode(ReasoningMode::low()),
+        Some("xhigh"),
+    );
+    assert_eq!(
+        manifest.thinking.expect("kept").reasoning_effort,
+        Some(ReasoningMode::low()),
+        "frame > session must hold when the frame carries a token"
+    );
+
+    // Without a pin the legacy boolean keeps its clearing semantics.
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: Some(ThinkingConfig::default()),
+        ..Default::default()
+    };
+    apply_thinking_override(&mut manifest, ThinkingOverride::Disable, None);
     assert!(manifest.thinking.is_none());
 }
 
@@ -4662,6 +4723,7 @@ fn test_apply_thinking_override_force_on_inserts_default() {
     apply_thinking_override(
         &mut manifest,
         librefang_types::config::ThinkingOverride::Enable,
+        None,
     );
     let cfg = manifest.thinking.as_ref().expect("thinking inserted");
     assert_eq!(
@@ -4684,6 +4746,7 @@ fn test_apply_thinking_override_force_on_keeps_existing_budget() {
     apply_thinking_override(
         &mut manifest,
         librefang_types::config::ThinkingOverride::Enable,
+        None,
     );
     let cfg = manifest.thinking.as_ref().expect("thinking preserved");
     assert_eq!(cfg.budget_tokens, 1234);
@@ -4714,7 +4777,7 @@ fn test_reasoning_effort_global_reaches_an_agent_that_declares_nothing() {
     if manifest.thinking.is_none() {
         manifest.thinking = Some(global.clone());
     }
-    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit, None);
 
     assert_eq!(
         manifest.thinking.expect("backfilled").reasoning_effort,
@@ -4743,7 +4806,7 @@ fn test_reasoning_effort_per_agent_beats_global() {
     if manifest.thinking.is_none() {
         manifest.thinking = Some(global.clone());
     }
-    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit, None);
 
     assert_eq!(
         manifest.thinking.expect("per-agent kept").reasoning_effort,
@@ -4773,7 +4836,11 @@ fn test_reasoning_effort_per_call_beats_per_agent_beats_global() {
     if manifest.thinking.is_none() {
         manifest.thinking = Some(global.clone());
     }
-    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::max()));
+    apply_thinking_override(
+        &mut manifest,
+        ThinkingOverride::Mode(ReasoningMode::max()),
+        None,
+    );
 
     let cfg = manifest.thinking.expect("thinking present");
     assert_eq!(cfg.reasoning_effort, Some(ReasoningMode::max()));
@@ -4809,7 +4876,7 @@ fn test_session_reasoning_effort_resolution_order() {
         manifest.thinking = Some(global.clone());
     }
     apply_session_reasoning_effort(&mut manifest, "xhigh");
-    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit, None);
     let cfg = manifest.thinking.clone().expect("thinking present");
     assert_eq!(
         cfg.reasoning_effort,
@@ -4826,7 +4893,11 @@ fn test_session_reasoning_effort_resolution_order() {
         ..Default::default()
     };
     apply_session_reasoning_effort(&mut manifest, "xhigh");
-    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::max()));
+    apply_thinking_override(
+        &mut manifest,
+        ThinkingOverride::Mode(ReasoningMode::max()),
+        None,
+    );
     assert_eq!(
         manifest
             .thinking
@@ -4847,7 +4918,7 @@ fn test_session_reasoning_effort_resolution_order() {
         manifest.thinking = Some(global.clone());
     }
     apply_session_reasoning_effort(&mut manifest, "medium");
-    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit, None);
     assert_eq!(
         manifest
             .thinking
@@ -4860,7 +4931,11 @@ fn test_session_reasoning_effort_resolution_order() {
         "session beats the global backfill",
     );
 
-    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::low()));
+    apply_thinking_override(
+        &mut manifest,
+        ThinkingOverride::Mode(ReasoningMode::low()),
+        None,
+    );
     assert_eq!(
         manifest
             .thinking
@@ -4879,7 +4954,7 @@ fn test_session_reasoning_effort_resolution_order() {
         ..Default::default()
     };
     apply_session_reasoning_effort(&mut manifest, "none");
-    apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
+    apply_thinking_override(&mut manifest, ThinkingOverride::Enable, None);
     assert_eq!(
         manifest
             .thinking
@@ -4925,7 +5000,7 @@ fn test_session_reasoning_effort_open_token_and_clearing() {
         }),
         ..Default::default()
     };
-    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit, None);
     assert_eq!(
         manifest.thinking.expect("present").reasoning_effort,
         Some(ReasoningMode::low()),
@@ -5050,7 +5125,11 @@ fn test_reasoning_effort_per_call_creates_thinking_config_when_absent() {
     let mut manifest = librefang_types::agent::AgentManifest::default();
     assert!(manifest.thinking.is_none());
 
-    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::none()));
+    apply_thinking_override(
+        &mut manifest,
+        ThinkingOverride::Mode(ReasoningMode::none()),
+        None,
+    );
 
     assert_eq!(
         manifest
@@ -5079,7 +5158,7 @@ fn test_enable_clears_an_inherited_non_think_mode() {
         ..Default::default()
     };
 
-    apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
+    apply_thinking_override(&mut manifest, ThinkingOverride::Enable, None);
 
     let cfg = manifest
         .thinking
@@ -5113,7 +5192,7 @@ fn test_enable_leaves_a_graded_mode_alone() {
             }),
             ..Default::default()
         };
-        apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
+        apply_thinking_override(&mut manifest, ThinkingOverride::Enable, None);
         assert_eq!(
             manifest.thinking.expect("kept").reasoning_effort,
             Some(mode),
@@ -5138,7 +5217,7 @@ fn test_disable_and_mode_none_are_not_the_same_thing() {
     };
 
     let mut disabled = base.clone();
-    apply_thinking_override(&mut disabled, ThinkingOverride::Disable);
+    apply_thinking_override(&mut disabled, ThinkingOverride::Disable, None);
     assert!(
         disabled.thinking.is_none(),
         "Disable keeps its pre-#7946 meaning: drop the thinking config",
@@ -5148,6 +5227,7 @@ fn test_disable_and_mode_none_are_not_the_same_thing() {
     apply_thinking_override(
         &mut non_think,
         ThinkingOverride::Mode(ReasoningMode::none()),
+        None,
     );
     assert_eq!(
         non_think

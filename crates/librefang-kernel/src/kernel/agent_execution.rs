@@ -1113,8 +1113,14 @@ impl LibreFangKernel {
             super::manifest_helpers::apply_session_reasoning_effort(&mut manifest, token);
         }
 
-        // Apply per-call thinking override (from API request).
-        apply_thinking_override(&mut manifest, thinking_override);
+        // Apply per-call thinking override (from API request). The session pin
+        // is passed along so a frame that carries only the legacy
+        // `thinking: false` cannot erase it (#8616 review).
+        apply_thinking_override(
+            &mut manifest,
+            thinking_override,
+            session.reasoning_effort.as_deref(),
+        );
 
         // Coercion (#8591): the catalog's declared policy is authoritative, and
         // this is the last point before the request is built — so it sees the
