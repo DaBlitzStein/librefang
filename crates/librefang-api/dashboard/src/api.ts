@@ -2279,9 +2279,41 @@ export async function setAgentSkills(
 // Every caller of `listAgents` (dashboard nav, assignee pickers) wants "the
 // whole registry", not a page of it, and none of them paginate — so this is
 // a ceiling, not a page size. An install past this many registered agents
-// silently drops the tail rather than erroring; there is no signal today
-// that would tell an operator it happened.
+// used to drop the tail with nothing left to say it happened; the result's
+// `truncated` flag is that signal now (#8596), and callers that treat a
+// missing id as "gone" must honour it.
 const AGENT_LIST_LIMIT = 500;
+
+export type AgentListResult = { items: AgentItem[]; truncated: boolean };
+
+/**
+ * The registry as one page, plus whether the page holds the whole registry.
+ *
+ * `total` is the server's count *after* its own filtering — owner scoping
+ * for non-admin callers, the hand-agent and text filters — so `truncated`
+ * means "more agents exist than this page returned" under whichever view
+ * the caller is entitled to, never a comparison against an invisible set.
+ * `useAgents` splits the two apart again; anything that prunes state from
+ * the ids must look at `truncated` first (#8596).
+ */
+export async function listAgents(
+  opts: { includeHands?: boolean } = {},
+): Promise<AgentListResult> {
+  const params = new URLSearchParams({
+    limit: String(AGENT_LIST_LIMIT),
+    sort: "last_active",
+    order: "desc",
+  });
+  if (opts.includeHands) {
+    params.set("include_hands", "true");
+  }
+  const data = await get<PaginatedResponse<AgentItem>>(
+    `/api/agents?${params.toString()}`,
+  );
+  const items = data.items ?? [];
+  const total = data.total ?? 0;
+  return { items, truncated: total > items.length };
+}
 
 /**
  * PUT /api/agents/{id}/mcp_servers — replace the agent's MCP server grant
@@ -2306,23 +2338,6 @@ export async function setAgentMcpServers(
       ...(expectedVersion ? { expected_version: expectedVersion } : {}),
     },
   );
-}
-
-export async function listAgents(
-  opts: { includeHands?: boolean } = {},
-): Promise<AgentItem[]> {
-  const params = new URLSearchParams({
-    limit: String(AGENT_LIST_LIMIT),
-    sort: "last_active",
-    order: "desc",
-  });
-  if (opts.includeHands) {
-    params.set("include_hands", "true");
-  }
-  const data = await get<PaginatedResponse<AgentItem>>(
-    `/api/agents?${params.toString()}`,
-  );
-  return data.items ?? [];
 }
 
 /**
@@ -2502,10 +2517,25 @@ export async function restoreAgentTypeFromRegistry(
 /**
  * What produced a stored version, as the server writes it.
  *
- * `create`, `dashboard` and `restore` are the `record_template_version` call sites in `routes/agent_templates.rs`; `toml` is reserved for the raw-TOML save path that #8028 adds, so the label is ready before that producer lands; `unknown` is the SQLite column default (`crates/librefang-memory/src/migration.rs`), which no producer writes but an older row can carry.
+ * The producers: `routes/agent_templates.rs` records `create` (the flat and raw-TOML creates),
+ * `dashboard` (the editor's save), `toml` (a raw-TOML save), `restore` and `registry-restore`,
+ * plus `pre-registry-restore`, the snapshot it takes right before `restore_from_registry`
+ * overwrites the current file; the kernel records `agent-tool` when the agent-facing
+ * `agent_type_create` tool authors a type (`kernel/handles/agent_control.rs`); `unknown` is the
+ * SQLite column default (`crates/librefang-memory/src/migration.rs`), which no producer writes
+ * but an older row can carry.
  * Every entry needs an `agentTypes.change_source.<value>` locale key — render through `changeSourceLabel` in `lib/changeSource.ts`, never the raw token.
  */
-export const CHANGE_SOURCES = ["create", "dashboard", "restore", "toml", "unknown"] as const;
+export const CHANGE_SOURCES = [
+  "agent-tool",
+  "create",
+  "dashboard",
+  "pre-registry-restore",
+  "registry-restore",
+  "restore",
+  "toml",
+  "unknown",
+] as const;
 export type ChangeSource = (typeof CHANGE_SOURCES)[number];
 
 export interface TemplateVersionEntry {
