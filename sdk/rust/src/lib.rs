@@ -1112,14 +1112,19 @@ impl AgentsResource {
         .await
     }
 
-    pub async fn get_agent_session(&self, id: &str, session_id: Option<&str>) -> Result<Value> {
+    pub async fn get_agent_session(
+        &self,
+        id: &str,
+        session_id: Option<&str>,
+        materialize: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "agents", id, "session"],
             None,
-            &[("session_id", session_id)],
+            &[("session_id", session_id), ("materialize", materialize)],
         )
         .await
     }

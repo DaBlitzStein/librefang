@@ -2885,6 +2885,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "materialize",
+            "in": "query",
+            "description": "Create the empty canonical row when absent (default false)",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
