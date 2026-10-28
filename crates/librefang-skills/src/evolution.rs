@@ -2064,11 +2064,15 @@ pub fn get_evolution_info(skill: &InstalledSkill) -> SkillEvolutionMeta {
 /// atomic temp+rename write.
 ///
 /// Semantics: it *is* the restore, not a rollback to the previous version —
-/// whatever `manifest_toml` / `prompt_context` the row carried is written
-/// verbatim, and the caller records the resulting state as a fresh `restore`
-/// snapshot. The manifest is parsed here even though the API already parsed it
-/// for its 500-on-corrupt contract, so an unparseable document can never reach
-/// disk through any caller.
+/// whatever `manifest_toml` / `prompt_context` the row carried is written,
+/// with `[skill].version` bumped past the live version so a later patch bump
+/// cannot reuse a number that is already in `.evolution.json`. Like every
+/// forward mutation it snapshots the prompt it replaces (so the drawer's
+/// Rollback undoes the restore) and records itself in `.evolution.json`; it
+/// returns the `(skill.toml, prompt_context.md)` pair it wrote so the caller
+/// records exactly those bytes in the version store. The manifest is parsed
+/// here even though the API already parsed it for its 500-on-corrupt contract,
+/// so an unparseable document can never reach disk through any caller.
 ///
 /// The caller is responsible for the frozen-registry gate
 /// (`reject_if_frozen` on the API side): this module is filesystem-only and has
@@ -2078,22 +2082,25 @@ pub fn restore_skill_snapshot(
     name: &str,
     manifest_toml: &str,
     prompt_context: &str,
-) -> Result<(), SkillError> {
+    author: EvolutionAuthor<'_>,
+) -> Result<SkillWriteSnapshot, SkillError> {
     validate_name(name)?;
     // The snapshot must be a parseable manifest before anything is written; a
     // corrupt row has to fail as a 500 on the API side, not half-apply.
-    let manifest: SkillManifest = toml::from_str(manifest_toml).map_err(SkillError::from)?;
+    let mut manifest: SkillManifest = toml::from_str(manifest_toml).map_err(SkillError::from)?;
 
     // Every other writer scans prompt content before it reaches disk. A
-    // restore writes a historical snapshot verbatim, so without the same
-    // validation it would be a way to land blocked content (or an oversized
-    // prompt/description) that every forward path refuses — and then the
-    // reload drops the skill from the registry while the request returned 200.
-    // Scan the external prompt and the manifest-carried inline prompt (size cap
-    // and injection scan, as for every writer), keep the description cap, then
-    // reuse the load boundary's own scan so tool names/descriptions and the
-    // skill description are refused here exactly as the reload would refuse
-    // them.
+    // restore writes a historical snapshot, so without the same validation it
+    // would be a way to land blocked content (or an oversized prompt) that
+    // every forward path refuses — and then the reload drops the skill from
+    // the registry while the request returned 200. Scan the external prompt
+    // and the manifest-carried inline prompt (size cap and injection scan, as
+    // for every writer). The description is held to that same prompt-content
+    // cap rather than `create_skill`'s 1024-char one: this is a restore of an
+    // already-stored manifest, and the limit that matters is the one the
+    // system prompt inlines it under. Then reuse the load boundary's own scan
+    // so tool names/descriptions and the skill description are refused here
+    // exactly as the reload would refuse them.
     validate_prompt_content(prompt_context)?;
     if let Some(inline_prompt) = manifest.prompt_context.as_deref() {
         validate_prompt_content(inline_prompt)?;
@@ -2119,10 +2126,46 @@ pub fn restore_skill_snapshot(
         )));
     }
 
-    atomic_write(&skill_dir.join("skill.toml"), manifest_toml)?;
+    // A restore is a mutation like patch/update: snapshot the prompt it
+    // replaces so Rollback undoes it, and bump the version past both the live
+    // and the restored one so a later patch bump cannot reuse a number.
+    let live_version = std::fs::read_to_string(skill_dir.join("skill.toml"))
+        .ok()
+        .and_then(|toml_str| toml::from_str::<SkillManifest>(&toml_str).ok())
+        .map(|live| live.skill.version);
+    let live_prompt =
+        std::fs::read_to_string(skill_dir.join("prompt_context.md")).unwrap_or_default();
+    save_rollback_snapshot(&skill_dir, &live_prompt)?;
+
+    let base_version = match live_version.as_deref() {
+        Some(live) => newer_version(live, &manifest.skill.version),
+        None => manifest.skill.version.as_str(),
+    };
+    let next_version = bump_patch_version(base_version);
+    manifest.skill.version = next_version.clone();
+    let written_toml = toml::to_string_pretty(&manifest)
+        .map_err(|e| SkillError::InvalidManifest(e.to_string()))?;
+
+    atomic_write(&skill_dir.join("skill.toml"), &written_toml)?;
     atomic_write(&skill_dir.join("prompt_context.md"), prompt_context)?;
-    info!(skill = name, "Restored skill from version history");
-    Ok(())
+    record_version(
+        &skill_dir,
+        &next_version,
+        "Restored from version history",
+        prompt_context,
+        author,
+        /* is_mutation = */ true,
+    )?;
+    info!(skill = name, version = %next_version, "Restored skill from version history");
+    Ok(Some((written_toml, prompt_context.to_string())))
+}
+
+/// The later of two semver strings; `a` when either does not parse.
+fn newer_version<'a>(a: &'a str, b: &'a str) -> &'a str {
+    match (semver::Version::parse(a), semver::Version::parse(b)) {
+        (Ok(va), Ok(vb)) if vb > va => b,
+        _ => a,
+    }
 }
 
 /// Record a successful skill usage (for tracking effectiveness).
@@ -2888,27 +2931,58 @@ mod tests {
         manifest.prompt_context = None;
         let snapshot_toml = toml::to_string_pretty(&manifest).unwrap();
 
-        restore_skill_snapshot(dir.path(), "restorable", &snapshot_toml, "# Snapshot body")
-            .expect("restore must succeed");
+        let (written_toml, written_prompt) = restore_skill_snapshot(
+            dir.path(),
+            "restorable",
+            &snapshot_toml,
+            "# Snapshot body",
+            Some("tester"),
+        )
+        .expect("restore must succeed")
+        .expect("the restore must return the snapshot it wrote");
+        assert_eq!(written_prompt, "# Snapshot body");
 
         let restored =
             std::fs::read_to_string(dir.path().join("restorable/prompt_context.md")).unwrap();
         assert_eq!(restored, "# Snapshot body");
         let restored_toml =
             std::fs::read_to_string(dir.path().join("restorable/skill.toml")).unwrap();
+        assert_eq!(written_toml, restored_toml);
         assert!(
-            restored_toml.contains("0.9.9"),
-            "restore must write the manifest verbatim, got: {restored_toml}"
+            restored_toml.contains("version = \"0.9.10\""),
+            "restore must bump past both the live (0.1.0) and stored (0.9.9) version, got: \
+             {restored_toml}"
+        );
+
+        // The restore is a mutation: it lands in `.evolution.json` (so the
+        // drawer sees it and later bumps do not reuse a number) and keeps the
+        // prompt it replaced for Rollback.
+        let meta: SkillEvolutionMeta = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("restorable/.evolution.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(meta.versions.len(), 2, "the restore must be recorded");
+        assert_eq!(meta.versions[1].version, "0.9.10");
+        assert_eq!(meta.versions[1].changelog, "Restored from version history");
+        assert_eq!(meta.versions[1].author.as_deref(), Some("tester"));
+        assert_eq!(meta.mutation_count, 1, "a restore is a mutation");
+        assert!(
+            std::fs::read_dir(dir.path().join("restorable/.rollback"))
+                .unwrap()
+                .next()
+                .is_some(),
+            "the restore must keep the prompt it replaced so Rollback can undo it"
         );
 
         // An unknown skill is NotFound, not a resurrection.
-        let err = restore_skill_snapshot(dir.path(), "never-installed", &snapshot_toml, "x")
+        let err = restore_skill_snapshot(dir.path(), "never-installed", &snapshot_toml, "x", None)
             .expect_err("an uninstalled skill must not be restorable");
         assert!(matches!(err, SkillError::NotFound(_)), "got: {err:?}");
 
         // A corrupt snapshot must not half-apply: the prompt on disk stays put.
-        let err = restore_skill_snapshot(dir.path(), "restorable", "name = [not-a-skill", "bad")
-            .expect_err("an unparseable manifest must be refused");
+        let err =
+            restore_skill_snapshot(dir.path(), "restorable", "name = [not-a-skill", "bad", None)
+                .expect_err("an unparseable manifest must be refused");
         assert!(
             matches!(err, SkillError::TomlParse(_)),
             "expected a parse error, got: {err:?}"

@@ -10,10 +10,11 @@ import type { SkillDetail, SkillHistoryEntry, SkillItem } from "../api";
 
 /**
  * The version-history half of #8021: the Skills drawer renders the skill
- * version store's snapshots — not the legacy file-based `.evolution.json`
- * list — and restoring one overwrites `skill.toml` and `prompt_context.md`
- * on disk, so the action must reach a destructive confirmation that names
- * the version before the mutation fires.
+ * version store's snapshots, falling back to the legacy file-based
+ * `.evolution.json` list only while the store has none. Restoring a store row
+ * overwrites `skill.toml` and `prompt_context.md` on disk, so the action must
+ * reach a destructive confirmation that names the version before the mutation
+ * fires.
  *
  * The page is rendered whole and the client layer is mocked per function so
  * the real `useRestoreSkillVersion` hook (and its invalidation) sits between
@@ -168,6 +169,13 @@ async function openDrawer() {
   await screen.findByText("Evolved");
 }
 
+/** Open the drawer when the rendered history has no store row to wait for. */
+async function openDrawerWaitingFor(text: string) {
+  renderPage();
+  fireEvent.click(await screen.findByText("csv-analysis"));
+  await screen.findByText(text);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   useUIStore.setState({ toasts: [] });
@@ -202,18 +210,31 @@ describe("SkillsPage version history", () => {
     expect(screen.getByText(stamp(FILE_VERSION))).toBeInTheDocument();
   });
 
-  it("renders the store history rather than the legacy file-based evolution list", async () => {
+  it("prefers the store history over the legacy evolution list when it has rows", async () => {
     await openDrawer();
 
     // The `.evolution.json` changelog still travels in the detail payload, but
-    // the drawer no longer renders it as a second, contentless version list;
-    // the store snapshot is the canonical row (it carries the files and the
-    // restore action), so two near-identical time-ordered lists would only
-    // duplicate each other.
+    // once the store has rows the drawer renders only those: the store
+    // snapshot is the canonical row (it carries the files and the restore
+    // action), so two near-identical time-ordered lists would only duplicate
+    // each other.
     expect(
       screen.queryByText("Initial draft from the file-based evolution log"),
     ).toBeNull();
     expect(screen.getByText("Evolved")).toBeInTheDocument();
+  });
+
+  it("falls back to the legacy evolution list when the store is empty", async () => {
+    // A skill last evolved before the store shipped has no rows: the drawer
+    // must keep showing its `.evolution.json` history rather than an empty
+    // state.
+    vi.mocked(httpClient.getSkillHistory).mockResolvedValue([]);
+    await openDrawerWaitingFor("Initial draft from the file-based evolution log");
+
+    expect(screen.getByText("v0.1.0")).toBeInTheDocument();
+    expect(screen.queryByText("Evolved")).toBeNull();
+    // Legacy rows carry no files, so they offer no restore action.
+    expect(screen.queryAllByRole("button", { name: "Restore" })).toHaveLength(0);
   });
 
   it("expands a version to read the stored manifest and prompt context", async () => {
