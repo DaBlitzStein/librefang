@@ -166,7 +166,17 @@ export function modelReasoningEfforts(
   model: string,
   provider: string,
 ): string[] {
-  return resolveReasoningEfforts(findReasoningModel(models, model, provider));
+  const entry = findReasoningModel(models, model, provider);
+  if (entry) return resolveReasoningEfforts(entry);
+  // A catalog miss is not "undeclared": the model may simply be absent from
+  // the filtered list (custom model, `available: true`, or the query has not
+  // resolved). Once the payload serves `offered_efforts` on any model, the
+  // backend can answer for every model it knows, so a miss must offer
+  // nothing rather than guess the canonical seven (#8617 review).
+  const capabilityAware = models.some((candidate) =>
+    Array.isArray(candidate.offered_efforts),
+  );
+  return capabilityAware ? [] : resolveReasoningEfforts(null);
 }
 
 /**
