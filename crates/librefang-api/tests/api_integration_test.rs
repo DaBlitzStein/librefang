@@ -1132,11 +1132,12 @@ async fn test_agent_session_empty() {
 ///
 /// On a never-used agent nothing had created the canonical session row, so the
 /// GET reported an id the PATCH could not address and the pin 404-ed with
-/// nothing in the payload to explain why. The GET now materializes the row;
-/// the PATCH must still refuse a genuinely unknown id — materialization on GET
-/// must not turn the PATCH into an upsert.
+/// nothing in the payload to explain why. The TUI now asks the GET to
+/// materialize the row (`?materialize=true`) — a plain GET stays read-only;
+/// the PATCH must still refuse a genuinely unknown id, so materialization must
+/// not turn it into an upsert.
 #[tokio::test(flavor = "multi_thread")]
-async fn get_agent_session_materializes_the_row_the_reasoning_patch_addresses() {
+async fn get_agent_session_materializes_only_when_asked_and_the_patch_then_works() {
     use librefang_types::agent::AgentId;
 
     let server = start_test_server().await;
@@ -1165,10 +1166,30 @@ async fn get_agent_session_materializes_the_row_the_reasoning_patch_addresses() 
         "pre-condition: a never-used agent has no session row"
     );
 
-    // Half one: the GET reports the canonical id *and* leaves a row behind.
+    // Half one: a plain GET reports the canonical id and is read-only.
     let resp = client
         .get(format!(
             "{}/api/agents/{}/session",
+            server.base_url, agent_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["session_id"].as_str(),
+        Some(canonical.0.to_string().as_str())
+    );
+    assert!(
+        substrate.get_session(canonical).unwrap().is_none(),
+        "a read must not create the session row"
+    );
+
+    // ... and `?materialize=true` is the opt-in the TUI uses before its PATCH.
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session?materialize=true",
             server.base_url, agent_id
         ))
         .send()
