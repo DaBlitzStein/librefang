@@ -2207,9 +2207,12 @@ pub async fn list_skill_history(
 /// prior snapshot.
 ///
 /// The restore *is* the operation: the stored `skill.toml` +
-/// `prompt_context.md` are written back verbatim (including the version field
-/// the snapshot carried) and the resulting state is recorded as a fresh
-/// `restore` snapshot — it is not a rollback to "the version before this one".
+/// `prompt_context.md` are written back under the per-skill lock, with
+/// `[skill].version` bumped past the live one, and the resulting state is
+/// recorded as a fresh `restore` snapshot — it is not a rollback to "the
+/// version before this one". A row recorded before the skill's last
+/// delete/uninstall is refused: the directory is a later install under the
+/// same name.
 #[utoipa::path(
     post,
     path = "/api/skills/{name}/history/{version_id}/restore",
@@ -2221,7 +2224,7 @@ pub async fn list_skill_history(
     ),
     responses(
         (status = 200, description = "Skill restored", body = crate::types::JsonObject),
-        (status = 400, description = "Invalid skill name"),
+        (status = 400, description = "Invalid skill name, refused content, or version recorded before the skill's last removal"),
         (status = 404, description = "Skill or version not found"),
         (status = 500, description = "Stored version is corrupt and cannot be restored", body = crate::types::JsonObject)
     )
@@ -2272,13 +2275,32 @@ pub async fn restore_skill_version(
             .into_json_tuple();
     }
 
+    // History is keyed by name alone, so after an uninstall + re-create under
+    // the same name this row belongs to a different install: its manifest's
+    // `runtime` / `source` provenance does not describe the directory that is
+    // on disk now.
+    match store.removal_recorded_after(&name, version.id) {
+        Ok(true) => {
+            return ApiErrorResponse::bad_request(format!(
+                "version {version_id} predates the skill's last removal; \
+                 restore only versions recorded in the current install"
+            ))
+            .with_code("version_before_removal")
+            .into_json_tuple();
+        }
+        Ok(false) => {}
+        Err(e) => return ApiErrorResponse::internal_scrub(e).into_json_tuple(),
+    }
+
+    let history_author = dashboard_author(api_user.as_ref());
     match librefang_skills::evolution::restore_skill_snapshot(
         &skills_dir,
         &name,
         &version.manifest_toml,
         &version.prompt_context,
+        Some(&history_author),
     ) {
-        Ok(()) => {
+        Ok(snapshot) => {
             audit_evolve(
                 &state,
                 api_user.as_ref().map(|u| u.0.user_id),
@@ -2287,15 +2309,14 @@ pub async fn restore_skill_version(
                 &format!("restored version {version_id}"),
             );
             state.kernel.reload_skills();
-            // The restore itself is the newest snapshot, recorded under its
-            // own `restore` source so it is distinguishable from what it put
-            // back (the dedupe key includes the source).
-            let history_author = dashboard_author(api_user.as_ref());
-            let _ = record_skill_version(
+            // Record the bytes the restore actually wrote (its manifest has
+            // the version bumped past the live one), captured under the
+            // per-skill lock, under its own `restore` source so it is
+            // distinguishable from what it put back.
+            record_captured_skill_version(
                 &state,
                 &name,
-                &version.manifest_toml,
-                &version.prompt_context,
+                snapshot,
                 SkillWrite::Restore,
                 &history_author,
             );

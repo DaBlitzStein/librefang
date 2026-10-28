@@ -17,13 +17,15 @@
 //! `install` version once the skill lands globally. Direct CLI/TUI edits are
 //! the only in-scope write path that remains unrecorded (no daemon funnel yet).
 //!
-//! Retention is per-skill, capped at [`MAX_VERSIONS_PER_SKILL`] most recent
-//! snapshots, trimmed on insert inside the same transaction. Deduplication
-//! compares `(manifest_toml, prompt_context, change_source)`: a no-op persist
-//! that re-writes the same bytes under the same source is skipped. Event-only
-//! sources (`file-write`, `file-remove`, `restore`) are exempt: their snapshot
-//! does not change, so the row is the event, and consecutive identical rows
-//! must both land.
+//! Retention is per-skill, trimmed on insert inside the same transaction.
+//! Content-changing rows are capped at [`MAX_VERSIONS_PER_SKILL`]; the
+//! event-only sources (`file-write`, `file-remove`, `restore`) have their own
+//! [`MAX_EVENT_ROWS`] cap and are pruned first, so supporting-file chatter
+//! cannot evict restorable content. Deduplication compares `(manifest_toml,
+//! prompt_context, change_source)`: a no-op persist that re-writes the same
+//! bytes under the same source is skipped. Event-only sources are exempt:
+//! their snapshot does not change, so the row is the event, and consecutive
+//! identical rows must both land.
 
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::skill_history::SkillWrite;
@@ -31,8 +33,24 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::OptionalExtension;
 
-/// Most recent snapshots kept per skill.
+/// Most recent content-changing snapshots kept per skill.
 pub const MAX_VERSIONS_PER_SKILL: usize = 50;
+
+/// Most recent event-only rows (`file-write`, `file-remove`, `restore`) kept
+/// per skill.
+///
+/// Counted separately from [`MAX_VERSIONS_PER_SKILL`]: an agent that writes
+/// supporting files fifty times must not evict the content snapshots those
+/// writes happened at.
+pub const MAX_EVENT_ROWS: usize = 50;
+
+/// Sources whose row records an event rather than a new content state: they
+/// are exempt from deduplication and capped by [`MAX_EVENT_ROWS`].
+const EVENT_SOURCES: [SkillWrite; 3] = [
+    SkillWrite::FileWrite,
+    SkillWrite::FileRemove,
+    SkillWrite::Restore,
+];
 
 /// One recorded skill snapshot.
 ///
@@ -73,7 +91,8 @@ impl SkillVersionStore {
     }
 
     /// Record one skill snapshot and trim the skill back to
-    /// [`MAX_VERSIONS_PER_SKILL`].
+    /// [`MAX_VERSIONS_PER_SKILL`] content rows plus [`MAX_EVENT_ROWS`] event
+    /// rows.
     ///
     /// Skips the insert when the manifest, the prompt context and the
     /// `change_source` are all identical to the most recent stored version for
@@ -107,13 +126,9 @@ impl SkillVersionStore {
         // not change the v1 snapshot, and a restore of content identical to
         // the current state is still its own event, so the row is the only
         // record. Deduping them would collapse consecutive events into one.
-        let event_only = [
-            SkillWrite::FileWrite,
-            SkillWrite::FileRemove,
-            SkillWrite::Restore,
-        ]
-        .iter()
-        .any(|write| write.as_str() == change_source);
+        let event_only = EVENT_SOURCES
+            .iter()
+            .any(|write| write.as_str() == change_source);
         let latest: Option<(String, String, String)> = tx
             .query_row(
                 "SELECT manifest_toml, prompt_context, change_source FROM skill_versions
@@ -151,17 +166,48 @@ impl SkillVersionStore {
         )
         .map_err(|e| LibreFangError::memory_msg(format!("skill version insert failed: {e}")))?;
 
-        // Trim to cap.
+        // Trim to cap, event rows first. The two caps apply to disjoint sets:
+        // an event row's unchanged snapshot is kept in its own small budget
+        // rather than spending a content slot the operator could restore.
+        let event_sources = EVENT_SOURCES.map(SkillWrite::as_str);
         tx.execute(
             "DELETE FROM skill_versions
              WHERE skill_name = ?1
+               AND change_source IN (?2, ?3, ?4)
                AND id NOT IN (
                    SELECT id FROM skill_versions
                    WHERE skill_name = ?1
+                     AND change_source IN (?2, ?3, ?4)
                    ORDER BY timestamp DESC, id DESC
-                   LIMIT ?2
+                   LIMIT ?5
                )",
-            rusqlite::params![skill_name, MAX_VERSIONS_PER_SKILL as i64],
+            rusqlite::params![
+                skill_name,
+                event_sources[0],
+                event_sources[1],
+                event_sources[2],
+                MAX_EVENT_ROWS as i64
+            ],
+        )
+        .map_err(|e| LibreFangError::memory_msg(format!("skill version trim failed: {e}")))?;
+        tx.execute(
+            "DELETE FROM skill_versions
+             WHERE skill_name = ?1
+               AND change_source NOT IN (?2, ?3, ?4)
+               AND id NOT IN (
+                   SELECT id FROM skill_versions
+                   WHERE skill_name = ?1
+                     AND change_source NOT IN (?2, ?3, ?4)
+                   ORDER BY timestamp DESC, id DESC
+                   LIMIT ?5
+               )",
+            rusqlite::params![
+                skill_name,
+                event_sources[0],
+                event_sources[1],
+                event_sources[2],
+                MAX_VERSIONS_PER_SKILL as i64
+            ],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("skill version trim failed: {e}")))?;
 
@@ -226,6 +272,36 @@ impl SkillVersionStore {
         )
         .optional()
         .map_err(LibreFangError::memory)
+    }
+
+    /// Whether a `delete` or `uninstall` row was recorded after `version_id`.
+    ///
+    /// History is keyed by skill name alone, so a re-install under the same
+    /// name continues the old story: restoring a row that predates the
+    /// removal would write a manifest whose `runtime` / `source` provenance
+    /// belongs to the directory that was removed, not this one.
+    pub fn removal_recorded_after(
+        &self,
+        skill_name: &str,
+        version_id: i64,
+    ) -> LibreFangResult<bool> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM skill_versions
+                 WHERE skill_name = ?1
+                   AND id > ?2
+                   AND change_source IN (?3, ?4)
+             )",
+            rusqlite::params![
+                skill_name,
+                version_id,
+                SkillWrite::Delete.as_str(),
+                SkillWrite::Uninstall.as_str()
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|e| LibreFangError::memory_msg(format!("skill version removal read failed: {e}")))
     }
 
     /// Delete all versions for a skill.
@@ -393,6 +469,93 @@ mod tests {
             versions[0].manifest_toml,
             format!("iteration = {}", MAX_VERSIONS_PER_SKILL + 9)
         );
+    }
+
+    /// Event rows have their own budget: a burst of supporting-file events
+    /// must not evict the content snapshots (each carrying a full manifest +
+    /// prompt copy) those events happened at.
+    #[test]
+    fn event_rows_do_not_evict_content_versions() {
+        let store = SkillVersionStore::new(test_pool());
+        for i in 0..10 {
+            store
+                .record_version(
+                    "alpha",
+                    &format!("iteration = {i}"),
+                    &format!("prompt {i}"),
+                    "dashboard",
+                    "evolve",
+                )
+                .unwrap();
+        }
+        for _ in 0..60 {
+            store
+                .record_version(
+                    "alpha",
+                    "iteration = 9",
+                    "prompt 9",
+                    "agent",
+                    SkillWrite::FileWrite.as_str(),
+                )
+                .unwrap();
+        }
+
+        let versions = store.list_for_skill("alpha", 200).unwrap();
+        let content = versions
+            .iter()
+            .filter(|row| row.change_source == "evolve")
+            .count();
+        let events = versions
+            .iter()
+            .filter(|row| row.change_source == "file-write")
+            .count();
+        assert_eq!(
+            content, 10,
+            "all content versions must survive: {versions:?}"
+        );
+        assert_eq!(events, MAX_EVENT_ROWS, "event rows stay capped");
+        // The newest content snapshot is still there, restore-able.
+        let newest_content = versions
+            .iter()
+            .find(|row| row.change_source == "evolve")
+            .expect("a content row must remain");
+        assert_eq!(newest_content.manifest_toml, "iteration = 9");
+    }
+
+    #[test]
+    fn removal_recorded_after_only_counts_later_deletes() {
+        let store = SkillVersionStore::new(test_pool());
+        store
+            .record_version("alpha", "v1", "p1", "dashboard", "create")
+            .unwrap();
+        let create_id = store.list_for_skill("alpha", 10).unwrap()[0].id;
+        store
+            .record_version("alpha", "v2", "p2", "dashboard", "evolve")
+            .unwrap();
+        let evolve_id = store.list_for_skill("alpha", 10).unwrap()[0].id;
+
+        assert!(!store.removal_recorded_after("alpha", create_id).unwrap());
+        store
+            .record_version(
+                "alpha",
+                "v2",
+                "p2",
+                "dashboard",
+                SkillWrite::Delete.as_str(),
+            )
+            .unwrap();
+        assert!(store.removal_recorded_after("alpha", create_id).unwrap());
+        assert!(store.removal_recorded_after("alpha", evolve_id).unwrap());
+
+        // A later re-install starts a new generation of versions, but the
+        // delete still separates it from everything recorded before.
+        store
+            .record_version("alpha", "v3", "p3", "dashboard", "create")
+            .unwrap();
+        let reinstall_id = store.list_for_skill("alpha", 10).unwrap()[0].id;
+        assert!(!store.removal_recorded_after("alpha", reinstall_id).unwrap());
+        assert!(store.removal_recorded_after("alpha", create_id).unwrap());
+        assert!(!store.removal_recorded_after("beta", create_id).unwrap());
     }
 
     /// Four threads record the same content for the same skill at once.

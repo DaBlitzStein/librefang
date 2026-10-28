@@ -1228,6 +1228,11 @@ function SkillDetailModal({
     enabled: isOpen && !!skillName,
   });
   const historyVersions = historyQuery.data ?? [];
+  // Skills evolved before the version store shipped only have the legacy
+  // `.evolution.json` list in the detail payload. Fall back to it when the
+  // store has no rows, so pre-upgrade history does not disappear.
+  const legacyVersions = detail?.evolution?.versions ?? [];
+  const useLegacyHistory = historyVersions.length === 0 && legacyVersions.length > 0;
 
   const [pane, setPane] = useState<EvolvePane>("none");
   const [viewingFile, setViewingFile] = useState<string | null>(null);
@@ -1660,12 +1665,12 @@ function SkillDetailModal({
           {/* Version history (#8021) — the skill version store: every write
               that changed this skill, newest first, each expandable to the
               stored skill.toml + prompt context and restorable in place.
-              This replaces the file-based `.evolution.json` list that used to
-              render here: the store records all of the same writes (plus
-              installs, deletes and supporting-file events), carries the file
-              contents themselves, and is the only history a restore can act
-              on — two near-identical time-ordered lists would only duplicate
-              each other. */}
+              When the store has no rows (a skill last evolved before it
+              shipped), the legacy file-based `.evolution.json` list renders
+              instead — contentless but better than an empty drawer. Once the
+              store has rows it wins: two near-identical time-ordered lists
+              would only duplicate each other, and only the store's rows are
+              restorable. */}
           <div>
             <h3 className="text-xs font-bold uppercase text-text-dim mb-2">
               <History className="w-3 h-3 inline mr-1" />
@@ -1680,6 +1685,34 @@ function SkillDetailModal({
                 })}
                 onRetry={() => void historyQuery.refetch()}
               />
+            ) : useLegacyHistory ? (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {legacyVersions.map((v) => (
+                  <div
+                    key={`${v.version}-${v.timestamp}`}
+                    className="rounded-lg border border-border-subtle bg-surface-2 px-3 py-2 text-xs"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="font-medium text-text-main">
+                          {new Date(v.timestamp).toLocaleString()}
+                        </span>
+                        <Badge variant="default" className="ml-2" title={v.version}>
+                          v{v.version}
+                        </Badge>
+                        {v.author && (
+                          <span className="ml-2 font-mono text-[10px] text-text-dim">
+                            {v.author}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {v.changelog && (
+                      <p className="mt-1 text-[11px] text-text-dim">{v.changelog}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
             ) : historyVersions.length === 0 ? (
               <p className="text-xs text-text-dim py-2">
                 {t("skills.evo_history_empty", { defaultValue: "No version history yet" })}

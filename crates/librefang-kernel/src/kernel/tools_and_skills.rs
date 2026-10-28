@@ -1500,13 +1500,13 @@ impl LibreFangKernel {
                     );
                 }
 
-                match librefang_skills::evolution::update_skill(
+                match librefang_skills::evolution::update_skill_with_snapshot(
                     &skill,
                     prompt_context,
                     changelog,
                     Some(&review_author),
                 ) {
-                    Ok(result) => {
+                    Ok((result, snapshot)) => {
                         tracing::info!(skill = %result.skill_name, version = %result.version.as_deref().unwrap_or("?"), "💾 Background review: updated skill");
                         do_reload();
                         // The reviewer is not an evolve-surface edit: its
@@ -1517,8 +1517,8 @@ impl LibreFangKernel {
                             &librefang_memory::SkillVersionStore::new(
                                 kernel.memory.substrate.pool(),
                             ),
-                            &skill.path,
                             &result.skill_name,
+                            snapshot,
                             &review_author,
                             librefang_types::skill_history::SkillWrite::Update.as_str(),
                         );
@@ -1649,7 +1649,7 @@ impl LibreFangKernel {
                     );
                 }
 
-                match librefang_skills::evolution::patch_skill(
+                match librefang_skills::evolution::patch_skill_with_snapshot(
                     &skill,
                     old_string,
                     new_string,
@@ -1657,15 +1657,15 @@ impl LibreFangKernel {
                     false, // never replace_all from the reviewer — too risky
                     Some(&review_author),
                 ) {
-                    Ok(result) => {
+                    Ok((result, snapshot)) => {
                         tracing::info!(skill = %result.skill_name, version = %result.version.as_deref().unwrap_or("?"), "💾 Background review: patched skill");
                         do_reload();
                         crate::skill_workshop::storage::record_skill_version_snapshot(
                             &librefang_memory::SkillVersionStore::new(
                                 kernel.memory.substrate.pool(),
                             ),
-                            &skill.path,
                             &result.skill_name,
+                            snapshot,
                             &review_author,
                             librefang_types::skill_history::SkillWrite::Patch.as_str(),
                         );

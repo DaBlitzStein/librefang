@@ -281,6 +281,147 @@ async fn restore_rolls_back_the_skill_and_records_the_restore() {
     );
 }
 
+/// A restore is a mutation: it bumps `[skill].version` past the live version
+/// (so a later patch bump cannot reuse a number) and records itself in
+/// `.evolution.json` (so the drawer's Rollback undoes it). The history row
+/// must carry the bumped manifest that actually reached disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_bumps_the_version_and_records_evolution_history() {
+    let h = boot();
+    create_skill(&h, "hist_restore_version", "prompt v1").await;
+    evolve_skill(&h, "hist_restore_version", "prompt v2").await;
+    assert_eq!(
+        manifest_version(&h.skill_dir("hist_restore_version")),
+        "0.1.1"
+    );
+
+    let versions_before = evolution_meta(&h.skill_dir("hist_restore_version"))
+        .versions
+        .len();
+    let (_, body) = get_history(&h, "hist_restore_version").await;
+    let v1_id = body["versions"].as_array().expect("versions")[1]["id"]
+        .as_i64()
+        .expect("v1 id");
+
+    let (status, body) = send(
+        &h,
+        Method::POST,
+        &format!("/api/skills/hist_restore_version/history/{v1_id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let skill_dir = h.skill_dir("hist_restore_version");
+    assert_eq!(
+        manifest_version(&skill_dir),
+        "0.1.2",
+        "the restore must bump past the live version, not replay 0.1.0"
+    );
+    let meta = evolution_meta(&skill_dir);
+    assert_eq!(
+        meta.versions.len(),
+        versions_before + 1,
+        "the restore must append to .evolution.json"
+    );
+    assert_eq!(meta.versions.last().expect("last entry").version, "0.1.2");
+    assert_eq!(
+        meta.versions.last().expect("last entry").changelog,
+        "Restored from version history"
+    );
+
+    // The recorded row is the write that landed, not the stored snapshot.
+    let (_, body) = get_history(&h, "hist_restore_version").await;
+    let newest = &body["versions"][0];
+    assert_eq!(newest["change_source"], "restore");
+    assert!(
+        newest["manifest_toml"]
+            .as_str()
+            .expect("manifest_toml")
+            .contains("version = \"0.1.2\""),
+        "the restore row must carry the bumped manifest: {body}"
+    );
+}
+
+/// History is keyed by name alone: after an uninstall + re-create the
+/// directory is a later install, so a row recorded before the removal must be
+/// refused rather than writing the old install's provenance over it.
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_refuses_a_version_predating_the_last_removal() {
+    let h = boot();
+    create_skill(&h, "hist_reinstalled", "prompt v1").await;
+
+    let skill_dir = h.skill_dir("hist_reinstalled");
+    let toml_before = std::fs::read(skill_dir.join("skill.toml")).expect("read skill.toml");
+    let prompt_before =
+        std::fs::read(skill_dir.join("prompt_context.md")).expect("read prompt_context.md");
+    let v1 = h.store().list_for_skill("hist_reinstalled", 10).unwrap()[0].clone();
+
+    // The uninstall row a real removal records: the content it removed.
+    h.store()
+        .record_version(
+            "hist_reinstalled",
+            &v1.manifest_toml,
+            &v1.prompt_context,
+            "dashboard",
+            "uninstall",
+        )
+        .expect("seed uninstall row");
+
+    let (status, body) = send(
+        &h,
+        Method::POST,
+        &format!("/api/skills/hist_reinstalled/history/{}/restore", v1.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["error"]["code"], "version_before_removal", "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("removal")),
+        "the refusal must name the removal: {body}"
+    );
+
+    assert_eq!(
+        std::fs::read(skill_dir.join("skill.toml")).expect("reread skill.toml"),
+        toml_before,
+        "a refused restore must leave skill.toml untouched"
+    );
+    assert_eq!(
+        std::fs::read(skill_dir.join("prompt_context.md")).expect("reread prompt"),
+        prompt_before,
+        "a refused restore must leave prompt_context.md untouched"
+    );
+    assert!(
+        !h.store()
+            .list_for_skill("hist_reinstalled", 10)
+            .unwrap()
+            .iter()
+            .any(|version| version.change_source == "restore"),
+        "a refused restore must not record a restore row"
+    );
+}
+
+/// `[skill].version` currently on disk.
+fn manifest_version(skill_dir: &Path) -> String {
+    toml::from_str::<librefang_skills::SkillManifest>(
+        &std::fs::read_to_string(skill_dir.join("skill.toml")).expect("read skill.toml"),
+    )
+    .expect("parse skill.toml")
+    .skill
+    .version
+}
+
+/// The file-based evolution log the drawer's Rollback reads.
+fn evolution_meta(skill_dir: &Path) -> librefang_skills::evolution::SkillEvolutionMeta {
+    serde_json::from_str(
+        &std::fs::read_to_string(skill_dir.join(".evolution.json")).expect("read .evolution.json"),
+    )
+    .expect("parse .evolution.json")
+}
+
 /// A stored snapshot whose prompt fails the write-time injection scan must be
 /// refused with a 4xx and must not touch the files: every forward writer runs
 /// that scan, so restore cannot be the bypass.
@@ -467,9 +608,10 @@ fn manifest_with_description(manifest: &str, description: &str) -> String {
     toml::to_string_pretty(&parsed).expect("serialize manifest with description")
 }
 
-/// `skill.description` is inlined into the system prompt, so every forward
-/// writer caps it at the same 160,000-character limit as prompt content. A
-/// restore must not be the way around that cap.
+/// `skill.description` is inlined into the system prompt. `create_skill`
+/// caps it at 1,024 chars, but a restore replays an already-stored manifest,
+/// so it applies the prompt-content cap (160,000) instead — either way, a
+/// restore must not be the way to land a description every writer refuses.
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_rejects_an_oversized_description_and_leaves_disk_untouched() {
     let h = boot();
