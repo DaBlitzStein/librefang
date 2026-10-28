@@ -5,13 +5,13 @@ import { X } from "lucide-react";
 /**
  * Free-form list editor: a row of removable chips plus a text box.
  *
- * A value is committed on Enter or when the field loses focus. Commas also
- * commit (and separate pasted values) unless `splitOnComma` is false, which
- * is for fields whose values may contain commas as data, such as regexes or
- * command-line arguments. Semicolons and newlines always separate pasted
- * values. Duplicates are dropped while preserving the order they were
- * entered in; a `value` prop that already carries duplicates is only
- * de-duplicated for rendering, not rewritten.
+ * Enter and blur commit the typed draft as one value, separators included;
+ * only a paste is split — on comma, semicolon and newline when
+ * `splitOnComma` is true, on newline alone when it is false (for fields
+ * whose values may contain commas or semicolons as data, such as regexes or
+ * command-line arguments). Duplicates are dropped while preserving the order
+ * they were entered in; a `value` prop that already carries duplicates is
+ * only de-duplicated for rendering, not rewritten.
  */
 export function ListField({
   value,
@@ -33,19 +33,29 @@ export function ListField({
   const { t } = useTranslation();
   const [inputValue, setInputValue] = useState("");
 
-  /** Merge the typed draft and the current value, keeping first occurrences. */
+  /** Append the typed draft as one value, keeping first occurrences. */
   const mergePending = (pending: string): string[] => {
     const next = [...value];
-    for (const item of splitList(pending, splitOnComma)) {
-      if (!next.includes(item)) next.push(item);
-    }
+    const item = pending.trim();
+    if (item && !next.includes(item)) next.push(item);
     return next;
   };
 
   const commit = (raw: string): void => {
-    if (splitList(raw, splitOnComma).length === 0) return;
+    // Typed separators are data: only a paste may split a value.
+    if (!raw.trim()) return;
     setInputValue("");
     const next = mergePending(raw);
+    if (next.length !== value.length) onChange(next);
+  };
+
+  /** Commit the draft plus every separator-delimited pasted value. */
+  const commitPaste = (pasted: string): void => {
+    setInputValue("");
+    const next = mergePending(inputValue);
+    for (const item of splitList(pasted, splitOnComma)) {
+      if (!next.includes(item)) next.push(item);
+    }
     if (next.length !== value.length) onChange(next);
   };
 
@@ -107,7 +117,7 @@ export function ListField({
           const pasted = e.clipboardData.getData("text");
           if (!hasSeparator(pasted, splitOnComma)) return;
           e.preventDefault();
-          commit(inputValue + pasted);
+          commitPaste(pasted);
         }}
         onBlur={() => {
           if (inputValue) {
@@ -122,13 +132,13 @@ export function ListField({
 
 /** Whether pasted text contains a separator this field splits on. */
 function hasSeparator(raw: string, splitOnComma: boolean): boolean {
-  return splitOnComma ? /[,\n;]/.test(raw) : /[\n;]/.test(raw);
+  return splitOnComma ? /[,\n;]/.test(raw) : /\n/.test(raw);
 }
 
-/** Split a free-form list, dropping blanks. */
+/** Split one pasted string into values, dropping blanks. */
 function splitList(raw: string, splitOnComma: boolean): string[] {
   return raw
-    .split(splitOnComma ? /[,;\n]+/ : /[;\n]+/)
+    .split(splitOnComma ? /[,;\n]+/ : /\n+/)
     .map((item) => item.trim())
     .filter(Boolean);
 }
