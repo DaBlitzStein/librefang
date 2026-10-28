@@ -13995,7 +13995,7 @@
           "skills"
         ],
         "summary": "POST /api/skills/{name}/history/{version_id}/restore — restore a skill to a\nprior snapshot.",
-        "description": "The restore *is* the operation: the stored `skill.toml` +\n`prompt_context.md` are written back verbatim (including the version field\nthe snapshot carried) and the resulting state is recorded as a fresh\n`restore` snapshot — it is not a rollback to \"the version before this one\".",
+        "description": "The restore *is* the operation: the stored `skill.toml` +\n`prompt_context.md` are written back under the per-skill lock, with\n`[skill].version` bumped past the live one, and the resulting state is\nrecorded as a fresh `restore` snapshot — it is not a rollback to \"the\nversion before this one\". A row recorded before the skill's last\ndelete/uninstall is refused: the directory is a later install under the\nsame name.",
         "operationId": "restore_skill_version",
         "parameters": [
           {
@@ -14030,7 +14030,7 @@
             }
           },
           "400": {
-            "description": "Invalid skill name"
+            "description": "Invalid skill name, refused content, or version recorded before the skill's last removal"
           },
           "404": {
             "description": "Skill or version not found"
