@@ -1935,7 +1935,7 @@ class TelegramAdapter(SidecarAdapter):
             metadata=self._message_metadata(message, user_id, is_group),
         )
 
-    def _poll_once_guarded(self, emit, state: dict) -> None:
+    def _poll_once_guarded(self, offset: int):
         """Translate the normal socket timeout into ``_LongPollExpired``.
 
         Runs in the executor thread, so ``produce()`` can distinguish a
@@ -1943,14 +1943,22 @@ class TelegramAdapter(SidecarAdapter):
         even on Python versions where both errors are the same class.
         """
         try:
-            self._poll_once(emit, state)
+            return self._poll_once(offset)
         except TimeoutError as e:
             raise _LongPollExpired(str(e)) from e
 
-    def _poll_once(self, emit, state: dict) -> None:
+    def _poll_once(self, offset: int):
+        """Fetch one ``getUpdates`` batch for `offset`.
+
+        Pure with respect to the producer loop: it neither emits nor moves
+        the offset. An abandoned poll can return long after its deadline,
+        and anything it wrote into shared state would land underneath a
+        newer poll — double-emitting a batch and moving the offset
+        backwards. Returns ``(next_offset, events)``.
+        """
         data = _api_get(
             f"{self.api_base}/getUpdates",
-            {"offset": state["offset"], "timeout": LONGPOLL_SERVER_SECS,
+            {"offset": offset, "timeout": LONGPOLL_SERVER_SECS,
              "allowed_updates": json.dumps(
                  ["message", "edited_message", "callback_query",
                   "poll_answer"])},
@@ -1958,11 +1966,15 @@ class TelegramAdapter(SidecarAdapter):
         )
         if not data.get("ok"):
             raise RuntimeError(f"Telegram API error: {data}")
+        next_offset = offset
+        events = []
         for update in data.get("result", []):
-            state["offset"] = update.get("update_id", state["offset"]) + 1
+            next_offset = max(
+                next_offset, update.get("update_id", offset) + 1)
             ev = self._update_to_event(update)
             if ev:
-                emit(ev)
+                events.append(ev)
+        return next_offset, events
 
     async def produce(self, emit) -> None:
         # Reconnect / startup-recovery contract (#5111):
@@ -1992,7 +2004,7 @@ class TelegramAdapter(SidecarAdapter):
         #   the reconnect on their log timeline (the issue's
         #   "restored DNS — bridge does NOT recover" scenario).
         loop = asyncio.get_event_loop()
-        state = {"offset": 0}
+        state = {"offset": 0, "generation": 0}
         backoff = 1.0
         retries_in_a_row = 0
         timeouts_in_a_row = 0
@@ -2012,8 +2024,13 @@ class TelegramAdapter(SidecarAdapter):
                     "still retrying",
                     seconds_since_success=int(since_success),
                     retries_in_a_row=retries_in_a_row)
+            # Each poll gets its own offset snapshot and generation. Only the
+            # coroutine that owns the current future publishes its batch, so
+            # a poll abandoned at its deadline can no longer double-emit or
+            # move the offset backwards when its thread finally returns.
+            generation = state["generation"] = state["generation"] + 1
             poll = loop.run_in_executor(
-                None, self._poll_once_guarded, emit, state)
+                None, self._poll_once_guarded, state["offset"])
             try:
                 # `asyncio.wait` rather than `wait_for`: on 3.11 `wait_for`
                 # cancels the executor future and then awaits it, which can
@@ -2046,7 +2063,7 @@ class TelegramAdapter(SidecarAdapter):
                 await asyncio.sleep(POLL_YIELD_SECS)
                 continue
             try:
-                poll.result()
+                poll_next_offset, events = poll.result()
             except _LongPollExpired:
                 # Normal protocol behaviour: reset backoff and re-enter
                 # immediately. Still surface repeated expiries — a proxy
@@ -2085,6 +2102,13 @@ class TelegramAdapter(SidecarAdapter):
                              last_backoff=backoff)
                 backoff = 1.0
                 retries_in_a_row = 0
+                if generation != state["generation"]:
+                    # Superseded while awaiting: a newer poll owns the
+                    # offset and the events.
+                    continue
+                state["offset"] = max(state["offset"], poll_next_offset)
+                for ev in events:
+                    emit(ev)
 
     # ---- streaming ---------------------------------------------------
 
