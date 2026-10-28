@@ -277,7 +277,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         // channel-only.
         scope: Scope::CHANNEL.union(Scope::CLI).union(Scope::DASHBOARD),
         description: "Set the reasoning effort for this session",
-        args_hint: "[none|minimal|low|medium|high|xhigh|max|on|off]",
+        args_hint: "[none|minimal|low|medium|high|xhigh|max|off]",
         subcommands: &[],
         telegram_menu: true,
         // The dashboard has no "think" arm in `ws.rs::handle_command` — it
@@ -634,14 +634,21 @@ pub fn lookup(name_or_alias: &str) -> Option<&'static CommandDef> {
 /// One implementation for every surface that spells the command (channel
 /// bridge and TUI chat runner), so the accepted vocabulary cannot drift
 /// between them:
-/// - no argument, or `on` / `true` / `enable` / `enabled` → `Ok(None)` — clear
-///   the pin and let the agent / global / compiled default decide. A bare
-///   `/think` therefore inherits rather than forcing thinking on.
+/// - no argument → `Ok(None)` — clear the pin and let the agent / global /
+///   compiled default decide. A bare `/think` therefore inherits rather than
+///   forcing thinking on.
+/// - `on` / `true` / `enable` / `enabled` are rejected: before #8591 they
+///   forced thinking on, and there is no level they map to now, so the caller
+///   answers with the usage line instead of silently doing nothing.
 /// - `off` / `false` / `disable` / `disabled` → `Ok(Some("none"))` — the
 ///   explicit non-think toggle.
 /// - a canonical rung (`none` / `minimal` / `low` / `medium` / `high` /
 ///   `xhigh` / `max`, see [`librefang_types::config::CANONICAL_REASONING_EFFORTS`])
 ///   → `Ok(Some(rung))`.
+/// - a gateway-declared rung outside that list is refused here on purpose: the
+///   command answers in one line and cannot read the catalog, so an unknown
+///   token would be a silent typo. Those levels are set from the dashboard or
+///   `PATCH /api/sessions/{id}/reasoning`, which the catalog coerces.
 /// - anything else → `Err(argument)` carrying the original spelling, so the
 ///   caller can quote it. A typo must not silently pin a level nobody asked
 ///   for — the same confirmation-without-action class #7140 fixed for
@@ -652,7 +659,6 @@ pub fn parse_think_argument(arg: Option<&str>) -> Result<Option<&'static str>, S
     };
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
-        "on" | "true" | "enable" | "enabled" => Ok(None),
         "off" | "false" | "disable" | "disabled" => Ok(Some("none")),
         other => librefang_types::config::CANONICAL_REASONING_EFFORTS
             .iter()
@@ -1060,19 +1066,20 @@ mod tests {
     /// rather than folded onto a level nobody asked for.
     #[test]
     fn parse_think_argument_maps_aliases_and_levels() {
-        // Bare / on-aliases clear the pin; absent, empty and whitespace-only
-        // arguments all behave like a bare `/think`.
-        for clear in [
-            None,
-            Some(""),
-            Some("   "),
-            Some("on"),
-            Some("ON"),
-            Some(" true "),
-            Some("enable"),
-            Some("enabled"),
-        ] {
+        // A bare `/think` clears the pin; absent, empty and whitespace-only
+        // arguments all behave the same.
+        for clear in [None, Some(""), Some("   ")] {
             assert_eq!(parse_think_argument(clear), Ok(None), "arg {clear:?}");
+        }
+        // The legacy "enable" words are refused rather than silently clearing
+        // the pin: they used to force thinking on, and the caller answers with
+        // the level syntax (#8618 review).
+        for refused in ["on", "ON", " true ", "enable", "enabled"] {
+            assert_eq!(
+                parse_think_argument(Some(refused)),
+                Err(refused.trim().to_string()),
+                "arg {refused:?} must point at the level syntax"
+            );
         }
         for off in ["off", "false", "disable", "disabled"] {
             assert_eq!(

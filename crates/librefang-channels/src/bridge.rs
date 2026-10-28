@@ -9810,7 +9810,7 @@ mod tests {
         )
         .await;
         assert!(
-            result.contains("Usage: /think [none|minimal|low|medium|high|xhigh|max|on|off]"),
+            result.contains("Usage: /think [none|minimal|low|medium|high|xhigh|max|off]"),
             "got: {result}"
         );
         assert!(
@@ -9872,12 +9872,12 @@ mod tests {
         .await
     }
 
-    /// The pre-#8591 on/off spellings keep their old words with the pin
-    /// semantics #8591 gives them: `on` (and synonyms) clears the pin back to
-    /// the agent/global default, `off` (and synonyms) pins the explicit
-    /// non-think token.
+    /// The pre-#8591 off spellings keep their words: `off` (and synonyms) pins
+    /// the explicit non-think token. The `on` spellings are refused with the
+    /// usage line — they used to force thinking on, and with the level pin
+    /// there is no level they name (#8618 review).
     #[tokio::test]
-    async fn think_command_aliases_clear_on_and_pin_none_on_off() {
+    async fn think_command_refuses_on_aliases_and_pins_none_on_off() {
         let agent = AgentId::new();
         let recorder = Arc::new(ThinkRecorderHandle::new(vec![(
             agent,
@@ -9894,19 +9894,23 @@ mod tests {
 
         for alias in ["on", "true", "enable", "enabled"] {
             let reply = think_with(&handle, &router, &chat, Some(alias)).await;
-            assert_eq!(reply, "ok", "alias {alias}");
+            assert!(
+                reply.contains("Usage: /think"),
+                "alias {alias} must be refused with the level syntax, got: {reply}"
+            );
         }
+        assert!(
+            recorder.calls.lock().unwrap().is_empty(),
+            "a refused alias must not reach the handle"
+        );
         for alias in ["off", "false", "disable", "disabled"] {
             let reply = think_with(&handle, &router, &chat, Some(alias)).await;
             assert_eq!(reply, "ok", "alias {alias}");
         }
 
         let calls = recorder.calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 8, "every alias must reach the handle");
-        for call in calls.iter().take(4) {
-            assert_eq!(call.1, None, "the on-aliases must clear the pin");
-        }
-        for call in calls.iter().skip(4) {
+        assert_eq!(calls.len(), 4, "the off aliases must reach the handle");
+        for call in calls.iter() {
             assert_eq!(
                 call.1.as_deref(),
                 Some("none"),

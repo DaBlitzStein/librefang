@@ -103,6 +103,12 @@ async fn materialize_history_image(
 #[derive(serde::Deserialize)]
 pub struct GetAgentSessionQuery {
     pub session_id: Option<uuid::Uuid>,
+    /// Create the canonical empty row when it does not exist (default off).
+    /// A read must not write: callers that are about to PATCH the session by
+    /// id (the TUI's `/think`) opt in, because that route addresses the row
+    /// and has no agent context to create it from (#8618 review).
+    #[serde(default)]
+    pub materialize: bool,
 }
 
 /// GET /api/agents/:id/session — Get agent session (conversation history).
@@ -113,6 +119,7 @@ pub struct GetAgentSessionQuery {
     params(
         ("id" = String, Path, description = "Agent ID"),
         ("session_id" = Option<String>, Query, description = "Optional session id to load instead of the canonical active session"),
+        ("materialize" = Option<bool>, Query, description = "Create the empty canonical row when absent (default false)"),
     ),
     responses(
         (status = 200, description = "Get agent conversation session history", body = crate::types::JsonObject)
@@ -408,28 +415,26 @@ pub async fn get_agent_session(
                         .into_response();
                 }
             }
-            // Materialize the canonical row before answering (#8591). This
-            // route is the agent-scoped way a client resolves the session id
-            // it is about to act on — the TUI's daemon-backed `/think` reads
-            // `session_id` here and then PATCHes
-            // `/api/sessions/{id}/reasoning`, and that route addresses the row
-            // by id alone, with no agent context to create it from. Returning
-            // a payload for an id no row backs made the follow-up 404 on a
-            // never-used agent, with nothing in the GET payload to explain
-            // why. Creating the empty row here makes the response and the
-            // substrate agree; `ensure_session` never touches an existing row,
-            // and the first inbound turn adopts the same row (the resolver
-            // loads an existing session rather than replacing it), so nothing
-            // downstream observes the earlier creation.
-            if let Err(e) = state
-                .kernel
-                .memory_substrate()
-                .ensure_session(agent_id, entry.session_id)
-            {
-                tracing::warn!("Session materialization failed for agent {id}: {e}");
-                return ApiErrorResponse::internal(err_session_load_failed)
-                    .with_code("session_load_failed")
-                    .into_response();
+            // Materialize the canonical row only when the caller asks
+            // (`?materialize=true`). A plain GET is a read and must not create
+            // state (#8618 review). The opt-in exists for the TUI's
+            // daemon-backed `/think`: it resolves the id here and then PATCHes
+            // `/api/sessions/{id}/reasoning`, which addresses the row by id
+            // alone and has no agent context to create it from, so on a
+            // never-used agent the follow-up would 404. `ensure_session` never
+            // touches an existing row, and the first inbound turn adopts the
+            // same row, so nothing downstream observes an earlier creation.
+            if params.materialize {
+                if let Err(e) = state
+                    .kernel
+                    .memory_substrate()
+                    .ensure_session(agent_id, entry.session_id)
+                {
+                    tracing::warn!("Session materialization failed for agent {id}: {e}");
+                    return ApiErrorResponse::internal(err_session_load_failed)
+                        .with_code("session_load_failed")
+                        .into_response();
+                }
             }
             // Expose the LLM-generated compaction summary even with no
             // persisted messages yet (e.g. agent just spawned but

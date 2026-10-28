@@ -579,7 +579,7 @@ impl StandaloneChat {
     /// The session the pin lands on is the one the chat's turns resolve to: on
     /// the daemon the message stream carries no session override, so that is
     /// the agent's canonical-active session — read from
-    /// `GET /agents/{id}/session`, which materializes the row before answering
+    /// `GET /agents/{id}/session?materialize=true`, which creates the row before answering
     /// (#8591), so the `PATCH /api/sessions/{id}/reasoning` below always has a
     /// row to update; in-process it is the registry entry's session id,
     /// created-if-missing through the same `ensure_session` helper. `None`
@@ -592,7 +592,9 @@ impl StandaloneChat {
                 };
                 let client = crate::daemon_client();
                 let session = client
-                    .get(format!("{base_url}/api/agents/{agent}/session"))
+                    .get(format!(
+                        "{base_url}/api/agents/{agent}/session?materialize=true"
+                    ))
                     .send()
                     .and_then(|r| r.error_for_status())
                     .and_then(|r| r.json::<serde_json::Value>())
