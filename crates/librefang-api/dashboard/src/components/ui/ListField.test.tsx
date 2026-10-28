@@ -46,6 +46,28 @@ describe("ListField", () => {
     expect(getInput()).toHaveValue("");
   });
 
+  it("does not split a typed semicolon on Enter when splitOnComma is false", async () => {
+    const user = userEvent.setup();
+    render(<Harness splitOnComma={false} />);
+
+    await user.type(getInput(), "a;b{Enter}");
+
+    expect(screen.getByText("a;b")).toBeInTheDocument();
+    expect(screen.queryByText("a")).not.toBeInTheDocument();
+    expect(screen.queryByText("b")).not.toBeInTheDocument();
+  });
+
+  it("does not split a typed semicolon on Enter by default", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    await user.type(getInput(), "a;b{Enter}");
+
+    expect(screen.getByText("a;b")).toBeInTheDocument();
+    expect(screen.queryByText("a")).not.toBeInTheDocument();
+    expect(screen.queryByText("b")).not.toBeInTheDocument();
+  });
+
   it("commits the typed value on comma", async () => {
     const user = userEvent.setup();
     render(<Harness />);
@@ -195,5 +217,18 @@ describe("ListField", () => {
     expect(screen.getByText("^(foo|bar){2,3}$")).toBeInTheDocument();
     expect(screen.queryByText("^(foo|bar){2")).not.toBeInTheDocument();
     expect(screen.queryByText("3}$")).not.toBeInTheDocument();
+  });
+
+  it("splits a paste on newlines only when splitOnComma is false", async () => {
+    const user = userEvent.setup();
+    render(<Harness splitOnComma={false} />);
+
+    const input = getInput();
+    await user.click(input);
+    await user.paste("a;b\nc");
+
+    expect(screen.getByText("a;b")).toBeInTheDocument();
+    expect(screen.getByText("c")).toBeInTheDocument();
+    expect(screen.queryByText("a")).not.toBeInTheDocument();
   });
 });

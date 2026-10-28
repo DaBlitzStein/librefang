@@ -305,7 +305,10 @@ function ToolPolicyRow({
   const { t } = useTranslation();
   const [localName, setLocalName] = useState(name);
   useEffect(() => { setLocalName(name); }, [name]);
-  const [ruleSets, setRuleSets] = useState<string[]>(policy.rule_sets ?? []);
+  // Read straight from the draft, never a second copy: `onChangeRuleSets`
+  // already lands in the parent's `tools` state, and a mirrored `useState`
+  // drifts on the first refresh that bypasses this editor.
+  const ruleSets = useMemo(() => policy.rule_sets ?? [], [policy.rule_sets]);
   // Names typed by the operator that don't match any registered
   // `[[taint_rules]]` set — flagged inline so typos don't sit silent
   // (the scanner treats unknown names as no-ops; see one-shot WARN in
@@ -389,10 +392,7 @@ function ToolPolicyRow({
             <ListField
               value={ruleSets}
               ariaLabel="rule_sets"
-              onChange={(next) => {
-                setRuleSets(next);
-                onChangeRuleSets(next);
-              }}
+              onChange={onChangeRuleSets}
               placeholder={t(
                 "mcp.taint_rule_sets_placeholder",
                 "comma-separated names from [[taint_rules]]",
