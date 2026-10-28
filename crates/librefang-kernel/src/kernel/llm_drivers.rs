@@ -28,28 +28,25 @@ fn should_use_managed_everyapi(
         && managed_available
 }
 
-/// Build the resolver a `FallbackDriver` uses to re-target a request's
-/// reasoning policy when it rewrites `req.model` (#8616 review).
+/// Build the boot-level `FallbackDriver` with its reasoning resolver attached
+/// (#8616 review).
 ///
-/// The lookup is strictly provider-scoped ([`ModelCatalog::find_model_for_failover`]):
-/// a fallback slot the catalog does not know under that provider is treated as
-/// undeclared, because borrowing a same-id entry from another provider is
-/// exactly the leak this resolver exists to prevent.
-pub(super) fn fallback_reasoning_resolver(
+/// Split out of `boot` so the wiring is testable without booting a kernel:
+/// the resolver is the same strictly provider-scoped one `resolve_driver`
+/// uses, and the catalog snapshot is the one boot loaded. The chain lives for
+/// the process, so a later catalog hot-reload reaches the per-agent chains
+/// (`resolve_driver` snapshots per turn) but not this one — the same lifecycle
+/// as the drivers it wraps.
+pub(super) fn boot_fallback_driver(
+    triples: Vec<(Arc<dyn LlmDriver>, String, String)>,
+    exhaustion_store: librefang_llm_driver::exhaustion::ProviderExhaustionStore,
     catalog: std::sync::Arc<librefang_runtime::model_catalog::ModelCatalog>,
-) -> librefang_runtime::drivers::fallback_reasoning::ReasoningResolver {
-    std::sync::Arc::new(move |provider: &str, model: &str| {
-        match catalog.find_model_for_failover(provider, model) {
-            Some(entry) => (
-                catalog.effective_reasoning_policy(entry),
-                entry.reasoning_echo_policy,
-            ),
-            None => (
-                librefang_types::config::ReasoningEffortPolicy::default(),
-                librefang_types::model_catalog::ReasoningEchoPolicy::default(),
-            ),
-        }
-    })
+) -> librefang_runtime::drivers::fallback::FallbackDriver {
+    librefang_runtime::drivers::fallback::FallbackDriver::with_models_and_providers(triples)
+        .with_exhaustion_store(exhaustion_store)
+        .with_reasoning_resolver(
+            librefang_runtime::model_catalog::ModelCatalog::failover_reasoning_resolver(catalog),
+        )
 }
 
 impl LibreFangKernel {
@@ -585,9 +582,11 @@ impl LibreFangKernel {
                 // it will actually call (#8616 review). The snapshot is taken
                 // per `resolve_driver` call, i.e. per turn, so a catalog or
                 // override edit is picked up on the next turn.
-                let fb = fb.with_reasoning_resolver(fallback_reasoning_resolver(
-                    self.llm.model_catalog.load_full(),
-                ));
+                let fb = fb.with_reasoning_resolver(
+                    librefang_runtime::model_catalog::ModelCatalog::failover_reasoning_resolver(
+                        self.llm.model_catalog.load_full(),
+                    ),
+                );
                 return Ok(Arc::new(fb));
             }
         }

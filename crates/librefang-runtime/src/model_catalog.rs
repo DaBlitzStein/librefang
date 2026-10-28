@@ -975,6 +975,30 @@ impl ModelCatalog {
         None
     }
 
+    /// The resolver a fallback wrapper uses to re-target a request's reasoning
+    /// metadata at the model it will actually call (#8616 review).
+    ///
+    /// Uses the strict provider-scoped lookup, for the reason
+    /// [`Self::find_model_for_failover`] documents: a provider miss is
+    /// undeclared, because borrowing a same-id entry from another provider is
+    /// exactly the leak this resolver exists to prevent.
+    pub fn failover_reasoning_resolver(
+        catalog: std::sync::Arc<Self>,
+    ) -> librefang_llm_drivers::drivers::fallback_reasoning::ReasoningResolver {
+        std::sync::Arc::new(move |provider: &str, model: &str| {
+            match catalog.find_model_for_failover(provider, model) {
+                Some(entry) => (
+                    catalog.effective_reasoning_policy(entry),
+                    entry.reasoning_echo_policy,
+                ),
+                None => (
+                    librefang_types::config::ReasoningEffortPolicy::default(),
+                    librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+                ),
+            }
+        })
+    }
+
     /// Find a model by its canonical ID, display name, or alias.
     pub fn find_model(&self, id_or_alias: &str) -> Option<&ModelCatalogEntry> {
         let lower = id_or_alias.to_lowercase();

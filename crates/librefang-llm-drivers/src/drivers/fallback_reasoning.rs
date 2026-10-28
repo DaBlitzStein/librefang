@@ -9,10 +9,12 @@
 //! heard of it — and the primary's echo policy, which describes a different
 //! wire format.
 //!
-//! Follow-up (R2, #8616 review): the boot-level `[[fallback_providers]]` driver
-//! and auxiliary chains are constructed without a resolver, so they apply the
-//! undeclared policy and drop non-legacy rungs; that is conservative (no
-//! cross-model leak) and will be tightened separately.
+//! Every chain the kernel builds carries a resolver: the per-agent
+//! `FallbackDriver` (`resolve_driver`), the boot-level
+//! `[[fallback_providers]]` driver, and the auxiliary `FallbackChain` built by
+//! `AuxClient` when a model catalog is wired. A wrapper constructed without one
+//! (tests, `AuxClient::with_primary_only`) applies the undeclared policy, which
+//! is conservative — no cross-model leak — and never a silent pass-through.
 
 use crate::llm_driver::CompletionRequest;
 use librefang_types::config::ReasoningEffortPolicy;

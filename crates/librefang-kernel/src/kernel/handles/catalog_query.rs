@@ -34,14 +34,18 @@ impl LibreFangKernel {
     ///
     /// Reads the **effective** policy, so an operator's `model_overrides.json`
     /// declaration participates in coercion and in the wire gate exactly like
-    /// a catalog declaration does.
+    /// a catalog declaration does. Provider-scoped through
+    /// [`ModelCatalog::find_model_for_failover`](librefang_runtime::model_catalog::ModelCatalog::find_model_for_failover):
+    /// a provider the catalog never heard of is undeclared, not a same-id
+    /// entry from another provider (#8616 review).
     pub(crate) fn lookup_reasoning_policy(
         &self,
+        provider: &str,
         model: &str,
     ) -> librefang_types::config::ReasoningEffortPolicy {
         let catalog = self.model_catalog_ref().load();
         catalog
-            .find_model(model)
+            .find_model_for_failover(provider, model)
             .map(|entry| catalog.effective_reasoning_policy(entry))
             .unwrap_or_default()
     }
@@ -61,8 +65,12 @@ impl kernel_handle::CatalogQuery for LibreFangKernel {
         self.lookup_reasoning_echo_policy(model)
     }
 
-    fn reasoning_policy_for(&self, model: &str) -> librefang_types::config::ReasoningEffortPolicy {
-        self.lookup_reasoning_policy(model)
+    fn reasoning_policy_for(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> librefang_types::config::ReasoningEffortPolicy {
+        self.lookup_reasoning_policy(provider, model)
     }
 
     fn vision_support_for(&self, model: &str) -> VisionSupport {
