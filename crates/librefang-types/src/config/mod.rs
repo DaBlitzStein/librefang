@@ -1916,8 +1916,8 @@ admin_role = "admin"
     /// rule: a value outside the model's supported set maps to the **nearest**
     /// supported rung (ties resolve downward, `xhigh` → `high`), never a silent
     /// drop and never a 400. `none` on a model that cannot be switched off maps
-    /// to the lowest graded rung; an undeclared policy passes everything
-    /// through.
+    /// to the lowest graded rung; an undeclared policy constrains to the four
+    /// legacy rungs (#8616 review).
     #[test]
     fn test_reasoning_policy_coerces_to_the_nearest_supported_effort() {
         use crate::config::ReasoningEffortPolicy;
@@ -1983,12 +1983,22 @@ admin_role = "admin"
         assert_eq!(c.effective.as_str(), "low");
         assert!(!always_on.none_allowed());
 
-        // Undeclared policy: nothing is coerced (legacy wire).
+        // Undeclared policy: constrained to the four legacy rungs, because
+        // those are the only ones every driver can carry (#8616 review).
         let undeclared = ReasoningEffortPolicy::default();
         assert!(!undeclared.is_declared());
         let c = undeclared.coerce(&ReasoningMode::new("xhigh").unwrap());
-        assert_eq!(c.effective.as_str(), "xhigh");
-        assert_eq!(c.coerced_from, None);
+        assert_eq!(c.effective.as_str(), "high", "xhigh → nearest legacy rung");
+        assert_eq!(c.coerced_from.as_deref(), Some("xhigh"));
+        let c = undeclared.coerce(&ReasoningMode::new("medium").unwrap());
+        assert_eq!(c.effective.as_str(), "low", "tie resolves downward");
+        let c = undeclared.coerce(&ReasoningMode::new("minimal").unwrap());
+        assert_eq!(c.effective.as_str(), "low");
+        for legacy in ["none", "low", "high", "max"] {
+            let c = undeclared.coerce(&ReasoningMode::new(legacy).unwrap());
+            assert_eq!(c.effective.as_str(), legacy, "{legacy} is a legacy rung");
+            assert_eq!(c.coerced_from, None);
+        }
         assert!(
             undeclared.offered().is_empty(),
             "an undeclared model must not be offered a guessed rung",

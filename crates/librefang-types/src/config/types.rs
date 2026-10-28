@@ -2861,9 +2861,10 @@ pub fn canonical_reasoning_rank(token: &str) -> Option<usize> {
 /// and [`Self::mandatory`] says the model always reasons.
 ///
 /// An entry that declares nothing (`supported_efforts` empty) is **undeclared**
-/// — not "supports everything": drivers keep the pre-#8591 wire spellings for
-/// the legacy tokens and the open vocabulary stays unreachable, so existing
-/// configs cannot be retargeted onto rungs their model never had. Budget-based
+/// — not "supports everything": [`Self::coerce`] constrains a request to the
+/// four pre-#8591 rungs (`none` / `low` / `high` / `max`), which every driver
+/// can carry, so a rung only a declared entry offers (`minimal`, `medium`,
+/// `xhigh`) cannot be retargeted onto a model that never published it. Budget-based
 /// families (Gemini 2.5, legacy Anthropic, Qwen with a budget control) live in
 /// that state by design: their control is `budget_tokens`, never the enum, and
 /// the two are never emitted together.
@@ -2903,8 +2904,8 @@ impl Default for ReasoningEffortPolicy {
 /// token: the token that may go on the wire, plus the original when it changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffortCoercion {
-    /// The effective token — always inside the declared set, or the requested
-    /// token verbatim when the policy is undeclared.
+    /// The effective token — always inside the declared set, or inside the
+    /// four legacy rungs when the policy is undeclared.
     pub effective: ReasoningMode,
     /// `Some(original)` when the request was coerced, for the caller's warning.
     pub coerced_from: Option<String>,
@@ -2974,10 +2975,16 @@ impl ReasoningEffortPolicy {
         out
     }
 
-    /// Coerce a requested token to what this model accepts (#8591).
+    /// Coerce a requested token to what this model accepts (#8591, #8616
+    /// review).
     ///
     /// Rules, in order:
-    /// 1. Undeclared policy → the requested token, untouched (legacy wire).
+    /// 1. Undeclared policy → constrain to the four pre-#8591 rungs
+    ///    (`none`, `low`, `high`, `max`), which every driver can carry, using
+    ///    the same nearest-rung rule below. An undeclared model is not
+    ///    "supports everything": a rung only a declared entry offers
+    ///    (`minimal`, `medium`, `xhigh`) must not reach a wire that never
+    ///    published it.
     /// 2. `none` on a model that cannot be switched off → the lowest graded
     ///    rung (`none` is not offered at all on such a model).
     /// 3. A token inside the set → itself, verbatim.
@@ -2987,10 +2994,19 @@ impl ReasoningEffortPolicy {
     ///    falls back to `default_effort`, else the lowest rung.
     pub fn coerce(&self, requested: &ReasoningMode) -> EffortCoercion {
         if !self.is_declared() {
-            return EffortCoercion {
-                effective: requested.clone(),
-                coerced_from: None,
+            // The legacy rungs as a declared policy, so the rules below apply
+            // unchanged. The model's `off_allowed` / `mandatory` bits still
+            // shape the `none` case.
+            let legacy = ReasoningEffortPolicy {
+                supported_efforts: LEGACY_REASONING_EFFORTS
+                    .iter()
+                    .map(|t| (*t).to_string())
+                    .collect(),
+                default_effort: self.default_effort.clone(),
+                off_allowed: self.off_allowed,
+                mandatory: self.mandatory,
             };
+            return legacy.coerce(requested);
         }
 
         let verbatim = |r: &ReasoningMode| EffortCoercion {
@@ -3151,7 +3167,9 @@ pub struct ThinkingConfig {
     ///
     /// The TOML key is `reasoning_effort`; `reasoning_mode` — the key this
     /// field shipped under during #7946 — is accepted as a deprecated alias so
-    /// existing manifests keep loading unchanged (#8591).
+    /// existing manifests keep loading unchanged (#8591). A table carrying
+    /// both keys fails to deserialize as a duplicate field rather than
+    /// silently choosing one.
     #[serde(default, alias = "reasoning_mode")]
     pub reasoning_effort: Option<ReasoningMode>,
 }
