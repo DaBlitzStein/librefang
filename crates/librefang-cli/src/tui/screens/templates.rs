@@ -663,13 +663,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
 
 /// The closed inventory of `template_versions.change_source` tokens the API can record (#8609).
 ///
-/// Mirrors the server's writable set: `toml`, `create`, `dashboard`, `registry-restore` and
-/// `restore` are the `AgentTypeWrite` variants in `routes/agent_templates.rs`; `pre-registry-restore`
-/// is the record-only snapshot `restore_from_registry` takes of the local file just before the
-/// registry copy overwrites it; `agent-tool` is the snapshot the kernel records when the
-/// agent-facing `agent_type_create` tool authors a type (`kernel/handles/agent_control.rs`);
-/// `unknown` is the SQLite column default (`crates/librefang-memory/src/migration.rs`), which no
-/// producer writes but an older row can carry.
+/// Mirrors the server's writable set.
+/// `toml`, `create`, `dashboard`, `registry-restore` and `restore` are the `AgentTypeWrite` variants in `routes/agent_templates.rs`.
+/// `pre-registry-restore` is the record-only snapshot `restore_from_registry` takes of the local file just before the registry copy overwrites it.
+/// `agent-tool` is the snapshot the kernel records when the agent-facing `agent_type_create` tool authors a type (`kernel/handles/agent_control.rs`).
+/// `unknown` is the SQLite column default (`crates/librefang-memory/src/migration.rs`), which no producer writes but an older row can carry.
 /// Every token here has a `tui-templates-source-<token>` key in all four locale packs.
 const TEMPLATE_CHANGE_SOURCES: &[&str] = &[
     "toml",
@@ -684,13 +682,9 @@ const TEMPLATE_CHANGE_SOURCES: &[&str] = &[
 
 /// Operator-facing label for a stored version's `change_source` (#8609).
 ///
-/// The column is free text on the server, so the value is looked up against the closed vocabulary
-/// above rather than shown: a raw `pre-registry-restore` spliced into an otherwise translated row
-/// reads as neither language.
-/// A value outside [`TEMPLATE_CHANGE_SOURCES`] — a producer this list has not been taught, or a
-/// row from an older database — comes back verbatim, because provenance is worth more than a tidy
-/// blank, and membership is checked before the Fluent lookup so a dotted token can never resolve
-/// as a nested key.
+/// The column is free text on the server, so the value is looked up against the closed vocabulary above rather than shown: a raw `pre-registry-restore` spliced into an otherwise translated row reads as neither language.
+/// A value outside [`TEMPLATE_CHANGE_SOURCES`] — a producer this list has not been taught, or a row from an older database — comes back verbatim, because provenance is worth more than a tidy blank.
+/// Membership is checked before the Fluent lookup so a dotted token can never resolve as a nested key.
 fn template_change_source_label(source: &str) -> String {
     if TEMPLATE_CHANGE_SOURCES.contains(&source) {
         crate::i18n::t(&format!("tui-templates-source-{source}"))
@@ -701,14 +695,12 @@ fn template_change_source_label(source: &str) -> String {
 
 /// Characters the change-source column of the history overlay has room for.
 ///
-/// Sized to the widest label the shipped locales produce — 22 characters, English's
-/// `Restored from registry` — so a localized label reads in full instead of being cut.
+/// Sized to the widest label the shipped locales produce — 22 characters, English's `Restored from registry` — so a localized label reads in full instead of being cut.
 const TEMPLATE_SOURCE_COLUMN_CHARS: usize = 22;
 
 /// Truncate a rendered label to [`TEMPLATE_SOURCE_COLUMN_CHARS`], counting characters, with an ellipsis when it does not fit.
 ///
-/// `widgets::truncate` counts bytes, which would cut a Cyrillic label at roughly half the visible
-/// text (each letter is two bytes) while an ASCII token of the same visible width passed through.
+/// `widgets::truncate` counts bytes, which would cut a Cyrillic label at roughly half the visible text (each letter is two bytes) while an ASCII token of the same visible width passed through.
 /// Only unmapped tokens are long enough to reach this at all; the mapped labels fit by construction.
 fn truncate_template_source(label: &str) -> String {
     if label.chars().count() <= TEMPLATE_SOURCE_COLUMN_CHARS {
