@@ -147,6 +147,31 @@ describe("resolveReasoningEfforts — off is not always available", () => {
 });
 
 describe("modelReasoningEfforts", () => {
+  it("offers nothing on a catalog miss once the payload serves offered_efforts", () => {
+    // A #8616 daemon answers for every model it knows; a miss means this one
+    // was filtered out (custom model, `available: true`) or the query has not
+    // resolved — not that the model declared the canonical seven.
+    const models = [
+      { id: "declared", provider: "openai", offered_efforts: ["low", "high"] },
+    ];
+    expect(modelReasoningEfforts(models, "not-in-the-list", "openai")).toEqual([]);
+  });
+
+  it("keeps the canonical fallback while the payload has no offered_efforts", () => {
+    // Older daemon: nothing carries the field, so main compatibility still
+    // needs the canonical list for a model the filtered catalog omits.
+    const models = [{ id: "declared", provider: "openai" }];
+    expect(modelReasoningEfforts(models, "not-in-the-list", "openai")).toEqual([
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+  });
+
   const models = [
     {
       provider: "openai",
