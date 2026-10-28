@@ -111,12 +111,8 @@ async fn resolve_manifest(
     // Resolve template name → manifest text, or take a client-supplied one.
     let mut used_template: Option<String> = None;
     let manifest_toml: String = if req.manifest_toml.trim().is_empty() {
-        // A signature covers exactly the bytes the client signed.
-        // `signed_manifest` + `template` is rejected: a template supplies the
-        // manifest server-side, so there are no client-supplied bytes left to
-        // verify the signature against. A signature-pinned spawn therefore pins
-        // only content the client supplied, never whatever the template store
-        // holds at verification time.
+        // A signature covers exactly the bytes the client signed, so `signed_manifest` + `template` is rejected: a template supplies the manifest server-side, and no client-supplied bytes are left to verify against.
+        // A signature-pinned spawn therefore pins only content the client supplied, never whatever the template store holds at verification time.
         if req.signed_manifest.is_some() {
             let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
