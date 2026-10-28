@@ -58,6 +58,7 @@ import { Avatar } from "../components/ui/Avatar";
 import { canListAllAgents, useWhoami, whoamiPersonName } from "../lib/queries/authz";
 import { useUserAvatarUrl } from "../lib/queries/users";
 import { useMathPlugins } from "../lib/hooks/useMathPlugins";
+import { useRovingTabs } from "../lib/useRovingTabs";
 import {
   useCreateAgentSession,
   useDeleteAgentSession,
@@ -78,6 +79,7 @@ const isAuthUnavailable = (status?: string) =>
 // tab is selected. Ids are derived from the session id to stay unique.
 const CHAT_SESSION_PANEL_ID = "chat-session-panel";
 const chatSessionTabId = (sessionId: string) => `chat-session-tab-${sessionId}`;
+const CHAT_COMPOSER_ID = "chat-composer";
 
 /**
  * Format a chat message's timestamp for the message footer.
@@ -2446,6 +2448,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
         <div className="flex-1">
           <textarea
             ref={textareaRef}
+            id={CHAT_COMPOSER_ID}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onPaste={handlePaste}
@@ -3696,15 +3699,17 @@ export function ChatPage() {
   // as a tabpanel while there are tabs to explain it.
   const showSessionTabs = agentTabs.length > 1;
   // Exactly one tab owns the tab stop. Normally that is the selected one; if
-  // the active session has no tab yet (a prune window), anchor the roving
-  // tabindex on the first tab so the strip is never keyboard-unreachable.
-  const rovingSessionId =
-    activeSessionId && agentTabs.includes(activeSessionId) ? activeSessionId : agentTabs[0];
+  // the active session has no tab yet (a prune window), anchor on the first
+  // tab so the strip is never keyboard-unreachable.
+  const activeTabId =
+    activeSessionId && agentTabs.includes(activeSessionId)
+      ? activeSessionId
+      : (agentTabs[0] ?? "");
   // The panel belongs to the selected tab. When the active session has no tab
   // (a prune window), nothing in the strip is selected, so fall back to the
   // roving tab: the label must always point at an element that exists.
   const panelLabelledBySessionId =
-    activeSessionId && agentTabs.includes(activeSessionId) ? activeSessionId : rovingSessionId;
+    activeTabId;
 
   // Session ids whose tab was opened while the loaded session list could not
   // have contained them (#8596): the list on screen was fetched before the
@@ -3884,63 +3889,49 @@ export function ChatPage() {
     }
   }, [deleteSessionMutation, selectedAgentId, urlSessionId, navigate]);
 
-  // Keyboard model of the strip (#8597), following the APG tabs pattern with
-  // automatic activation: moving focus with the arrow keys selects that tab in
-  // one step, and both the tab stop and `aria-selected` follow the selection.
-  // Delete/Backspace close the focused tab — the close button itself is out of
-  // the tab order (tabindex -1) so it cannot interleave with the roving
-  // tabindex, and this handler is the keyboard path that replaces it.
+  // Keyboard model of the strip (#8597): the shared `useRovingTabs` hook owns
+  // the roving tab stop and the arrow/Home/End keys with automatic activation,
+  // the same model the other dashboard strips use, so the two cannot drift.
+  const tabNav = useRovingTabs({
+    ids: agentTabs,
+    activeId: activeTabId,
+    onSelect: (sessionId: string) => {
+      if (sessionId !== activeSessionId) void handleSwitchSession(sessionId);
+      // Focus the target directly: focus must not wait on navigate() resolving.
+      document.getElementById(chatSessionTabId(sessionId))?.focus();
+    },
+  });
+
+  // Delete/Backspace close the focused tab and Enter/Space select it — a div
+  // with role="tab" gets no native activation, and the hook's doc leaves those
+  // three keys to the caller. The close button is out of the tab order
+  // (tabindex -1) so it cannot interleave with the roving tab stop.
   const handleTabKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>, sessionId: string) => {
-      const index = agentTabs.indexOf(sessionId);
-      if (index === -1) return;
-
       if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
         const nextSessionId = sessionAfterClose(agentTabs, sessionId);
+        // With two tabs the strip unmounts after the close, so the neighbour
+        // focused now would be removed under the cursor. Move focus to the
+        // composer, which stays mounted, instead of dropping it to <body>
+        // (#8606 review).
+        const stripSurvives = agentTabs.length > 2;
         handleCloseTab(sessionId);
-        // The neighbour keeps its identity across the re-render (tabs are
-        // keyed by session id), so focusing it now survives the tab's removal.
-        if (nextSessionId) {
-          document.getElementById(chatSessionTabId(nextSessionId))?.focus();
-        }
+        const target = stripSurvives && nextSessionId
+          ? document.getElementById(chatSessionTabId(nextSessionId))
+          : document.getElementById(CHAT_COMPOSER_ID);
+        target?.focus();
         return;
       }
-
-      let targetIndex: number;
-      switch (event.key) {
-        case "ArrowRight":
-          targetIndex = (index + 1) % agentTabs.length;
-          break;
-        case "ArrowLeft":
-          targetIndex = (index - 1 + agentTabs.length) % agentTabs.length;
-          break;
-        case "Home":
-          targetIndex = 0;
-          break;
-        case "End":
-          targetIndex = agentTabs.length - 1;
-          break;
-        case "Enter":
-        case " ":
-          // A div with role="tab" has no native activation; select the tab
-          // under focus when it somehow is not the selected one.
-          targetIndex = index;
-          break;
-        default:
-          return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        if (sessionId !== activeSessionId) void handleSwitchSession(sessionId);
+        document.getElementById(chatSessionTabId(sessionId))?.focus();
+        return;
       }
-      event.preventDefault();
-      const targetSessionId = agentTabs[targetIndex];
-      if (!targetSessionId) return;
-      if (targetSessionId !== activeSessionId) {
-        void handleSwitchSession(targetSessionId);
-      }
-      // Focus the target directly rather than relying on the re-render to move
-      // it: focus must not depend on navigate() resolving first.
-      document.getElementById(chatSessionTabId(targetSessionId))?.focus();
+      tabNav.onKeyDown(event, sessionId);
     },
-    [agentTabs, activeSessionId, handleCloseTab, handleSwitchSession],
+    [agentTabs, activeSessionId, handleCloseTab, handleSwitchSession, tabNav],
   );
 
   // If the current selection is no longer visible (e.g. hand agents toggled
@@ -4275,9 +4266,7 @@ export function ChatPage() {
           )}
 
           {/*
-            Session tabs. Only once there are two — a single tab is a label
-            pretending to be a control, and the header already names the
-            conversation you are in.
+            Session tabs, only once there are two: a single tab is a label pretending to be a control, and the header already names the conversation you are in.
           */}
           {showSessionTabs && (
             <div className="flex items-center border-b border-border-subtle/50 pr-1">
@@ -4288,7 +4277,7 @@ export function ChatPage() {
               >
                 {agentTabs.map((sessionId) => {
                   const isActive = sessionId === activeSessionId;
-                  const isRoving = sessionId === rovingSessionId;
+                  const isRoving = tabNav.tabIndexFor(sessionId) === 0;
                   return (
                     <div
                       key={sessionId}
@@ -4335,9 +4324,7 @@ export function ChatPage() {
                   );
                 })}
               </div>
-              {/* New tab lives beside the tablist, not inside it: a tablist's
-                  children are tabs, and a plain button there reads as one
-                  (#8597). */}
+              {/* New tab lives beside the tablist, not inside it: a tablist's children are tabs, and a plain button there reads as one (#8597). */}
               <button
                 type="button"
                 onClick={() => { void handleNewSession(); }}

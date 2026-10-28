@@ -775,6 +775,29 @@ describe("chat session tab strip semantics and keyboard model", () => {
     expect(document.activeElement).toBe(tabs(tablist)[1]);
   });
 
+  it("moves focus to the composer when the last two tabs collapse to one", async () => {
+    // With two tabs the strip unmounts on close (a single tab is a label, not
+    // a control), so focusing the surviving tab would target a node that is
+    // removed in the same render and drop the user on <body> (#8606 review).
+    useUIStore.setState({
+      openChatTabs: { "agent-a": ["s1", "s2"] },
+      chatTabRecency: {},
+    });
+    const tablist = await renderStrip();
+    expect(tabLabels(tablist)).toEqual(["One", "Two"]);
+    const all = tabs(tablist);
+    all[1].focus(); // Two, the selected tab
+
+    fireEvent.keyDown(all[1], { key: "Delete" });
+
+    await vi.waitFor(() =>
+      expect(screen.queryByRole("tablist", { name: "Open conversations" })).toBeNull(),
+    );
+    const composer = document.getElementById("chat-composer");
+    expect(composer).not.toBeNull();
+    expect(document.activeElement).toBe(composer);
+  });
+
   it("does not reopen the selected tab while its close is still navigating", async () => {
     const tablist = await renderStrip();
     expect(tabLabels(tablist)).toEqual(["One", "Two", "Three"]);
