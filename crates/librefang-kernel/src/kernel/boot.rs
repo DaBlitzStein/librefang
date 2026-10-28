@@ -59,10 +59,8 @@ struct DefaultProviderEndpoint {
 
 /// Look up a provider's `base_url` in the model catalog, ignoring empty values.
 ///
-/// Provider files under `$HOME/providers/` and `$HOME/registry/providers/` are
-/// the source the per-turn path (`llm_drivers::lookup_provider_url`) already
-/// consults; boot has to read the same source or a provider that works after a
-/// dashboard edit fails on the next restart (#default-provider-file-resolution).
+/// `ModelCatalog::new` loads `~/.librefang/providers/*.toml`, the same source the per-turn path (`llm_drivers::lookup_provider_url`) consults.
+/// Boot has to read it too, or a provider that works after a dashboard edit fails on the next restart (#8663).
 fn provider_base_url_from_catalog(
     catalog: &librefang_runtime::model_catalog::ModelCatalog,
     provider: &str,
@@ -77,13 +75,10 @@ fn provider_base_url_from_catalog(
 ///
 /// Precedence intentionally mirrors the per-turn driver path:
 /// - base URL: explicit `[default_model].base_url` → `[provider_urls]` → provider catalog file.
-/// - env var: explicit `[default_model].api_key_env` → operator-explicit
-///   `[provider_api_keys]` / `[auth_profiles]` → provider catalog file →
-///   convention via [`KernelConfig::resolve_api_key_env`].
+/// - env var: explicit `[default_model].api_key_env` → operator-explicit `[provider_api_keys]` / `[auth_profiles]` → provider catalog file → convention via [`KernelConfig::resolve_api_key_env`].
 ///
-/// The operator-explicit step matches `llm_drivers::resolve_non_default_api_key_env`
-/// (#5807): an explicit `config.toml` mapping must never be shadowed by a
-/// provider file's `api_key_env`.
+/// The env-var half is `llm_drivers::resolve_default_provider_api_key_env`, shared with the per-turn path so the two cannot drift.
+/// Operator-explicit config wins over the provider file's `api_key_env` (#5807), the same rule as `llm_drivers::resolve_non_default_api_key_env`.
 ///
 /// Pure so the precedence can be pinned in unit tests without booting a kernel.
 fn resolve_default_provider_endpoint(
@@ -91,7 +86,6 @@ fn resolve_default_provider_endpoint(
     catalog: &librefang_runtime::model_catalog::ModelCatalog,
 ) -> DefaultProviderEndpoint {
     let provider = config.default_model.provider.as_str();
-    let catalog_entry = catalog.get_provider(provider);
 
     let base_url = config
         .default_model
@@ -100,21 +94,11 @@ fn resolve_default_provider_endpoint(
         .or_else(|| config.provider_urls.get(provider).cloned())
         .or_else(|| provider_base_url_from_catalog(catalog, provider));
 
-    let api_key_env = if !config.default_model.api_key_env.is_empty() {
-        config.default_model.api_key_env.clone()
-    } else if config.provider_api_keys.contains_key(provider)
-        || config.auth_profiles.contains_key(provider)
-    {
-        // Operator-explicit config wins over the provider file, same as the
-        // per-turn resolver (#5807).
-        config.resolve_api_key_env(provider)
-    } else {
-        catalog_entry
-            .map(|entry| entry.api_key_env.as_str())
-            .filter(|env| !env.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| config.resolve_api_key_env(provider))
-    };
+    let api_key_env = super::llm_drivers::resolve_default_provider_api_key_env(
+        config,
+        &config.default_model,
+        catalog,
+    );
 
     DefaultProviderEndpoint {
         base_url,
@@ -784,16 +768,11 @@ impl LibreFangKernel {
         }
 
         // Create LLM driver.
-        // Load the provider catalog once: `$HOME/providers/<id>.toml` and
-        // `$HOME/registry/providers/` are an endpoint source for boot just like
-        // they are for the per-turn path, so a provider that only exists as a
-        // file (no [provider_urls] entry) still resolves its base_url.
+        // Load the provider catalog once: `~/.librefang/providers/<id>.toml` is an endpoint source for boot just like it is for the per-turn path, so a provider that only exists as a file (no [provider_urls] entry) still resolves its base_url.
         let boot_provider_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
-        // For the API key, try: 1) explicit api_key_env from config, 2) the
-        // provider file's api_key_env, 3) provider_api_keys mapping, 4) auth
-        // profiles, 5) convention {PROVIDER}_API_KEY. This ensures custom
-        // providers (e.g. nvidia, azure) work without hardcoded env var names.
+        // For the API key, try, in order: 1) explicit api_key_env from config, 2) provider_api_keys mapping, 3) auth profiles, 4) the provider file's api_key_env, 5) convention {PROVIDER}_API_KEY.
+        // This ensures custom providers (e.g. nvidia, azure) work without hardcoded env var names.
         let default_endpoint = resolve_default_provider_endpoint(&config, &boot_provider_catalog);
         let default_api_key = if driverless {
             // #7743: no driver means no credential — and no reason to read one out of the environment.
@@ -3987,7 +3966,8 @@ mod default_provider_file_resolution {
     use tempfile::TempDir;
 
     const FILE_BASE_URL: &str = "http://192.168.1.220:8080/v1";
-    const FILE_API_KEY_ENV: &str = "STRATA1_API_KEY";
+    // Deliberately NOT `STRATA1_API_KEY`: the file's name must win over the `{PROVIDER}_API_KEY` convention, or these tests pass without reading the file.
+    const FILE_API_KEY_ENV: &str = "STRATA1_LAN_KEY";
 
     /// Build a throwaway `$HOME` with `providers/strata1.toml`, mirroring the
     /// real report. `tempfile` honours `TMPDIR`, so the test never touches `/tmp`.
