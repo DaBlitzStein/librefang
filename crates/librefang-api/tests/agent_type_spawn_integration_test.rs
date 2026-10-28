@@ -856,12 +856,9 @@ async fn save_agent_as_agent_type_forbids_user_role() {
 }
 
 /// `signed_manifest` is verified against the exact bytes it was signed over.
-/// `template` supplies the manifest server-side, so pairing the two leaves no
-/// client-supplied bytes to verify the signature against: `POST /api/agents`
-/// rejects the pair with `400 invalid_manifest`
-/// (`api-error-manifest-signed-template-conflict`).
-/// A signature-pinned spawn therefore pins only content the client supplied,
-/// never whatever the template store holds at verification time.
+/// `template` supplies the manifest server-side, so pairing the two leaves no client-supplied bytes to verify the signature against.
+/// `POST /api/agents` rejects the pair with `400 invalid_manifest` (`api-error-manifest-signed-template-conflict`).
+/// A signature-pinned spawn therefore pins only content the client supplied, never whatever the template store holds at verification time.
 #[tokio::test(flavor = "multi_thread")]
 async fn spawn_rejects_signed_manifest_combined_with_template() {
     let _guard = home_lock().lock().await;
