@@ -28,20 +28,20 @@ fn should_use_managed_everyapi(
         && managed_available
 }
 
-/// A manifest credential (`api_key_env`) or endpoint (`base_url`) pin applies
-/// only when the manifest names an explicit provider.
+/// Drop a slot's credential/endpoint pin only when the slot actually lands on the default provider.
 ///
-/// A pin on the `"default"` (or empty) provider sentinel is stale by
-/// construction: the instance default can be hot-swapped to another vendor at
-/// any time (config `[default_model]`, or the WebUI's
-/// `default_model_override`), and a surviving pin would then send the previous
-/// vendor's credential to the new endpoint — the production incident: a
-/// `DEEPSEEK_API_KEY` pin on a manifest whose default had become an
-/// `othervendor` gateway, 401 on primary and fallback alike. On the sentinel
-/// the effective default supplies provider, model, credential and endpoint;
-/// only an explicit provider owns its pins.
-fn applied_pin<'a>(provider: &str, pin: Option<&'a str>) -> Option<&'a str> {
-    if is_default_provider_sentinel(provider) {
+/// The sentinel alone is not enough: `resolve_fallback_target` infers a concrete vendor from a vendor-prefixed model (`deepseek/deepseek-chat`), and `FallbackModel.provider` is `#[serde(default)]`.
+/// Such a slot is a real pin for that vendor even though it wrote no provider.
+/// `resolved_provider` is the provider the slot will actually be built for, so the pins are stale only when it equals `default_provider`.
+///
+/// A pin on an explicit provider is never stale: the instance default can be hot-swapped to another vendor at any time (config `[default_model]`, or the WebUI's `default_model_override`), and a surviving pin would then send the previous vendor's credential to the new endpoint — the production incident: a `DEEPSEEK_API_KEY` pin on a manifest whose default had become an `othervendor` gateway, 401 on primary and fallback alike.
+fn applied_pin<'a>(
+    slot_provider: &str,
+    resolved_provider: &str,
+    default_provider: &str,
+    pin: Option<&'a str>,
+) -> Option<&'a str> {
+    if is_default_provider_sentinel(slot_provider) && resolved_provider == default_provider {
         None
     } else {
         pin
@@ -249,10 +249,16 @@ impl LibreFangKernel {
         // the effective default.
         let manifest_api_key_env = applied_pin(
             &manifest.model.provider,
+            agent_provider,
+            default_provider,
             manifest.model.api_key_env.as_deref(),
         );
-        let manifest_base_url =
-            applied_pin(&manifest.model.provider, manifest.model.base_url.as_deref());
+        let manifest_base_url = applied_pin(
+            &manifest.model.provider,
+            agent_provider,
+            default_provider,
+            manifest.model.base_url.as_deref(),
+        );
         let has_custom_key = manifest_api_key_env.is_some();
         let has_custom_url = manifest_base_url.is_some();
         let has_explicit_key = has_custom_key
@@ -478,30 +484,30 @@ impl LibreFangKernel {
                     );
                     continue;
                 }
-                // Same sentinel rule as the primary slot: when the slot's
-                // provider is the `"default"` sentinel, its credential and
-                // endpoint pins are stale and must not apply — the slot takes
-                // them from the effective default (or, when the model names a
-                // different vendor, from that provider's own
-                // catalog/convention resolution). An explicit slot provider
-                // keeps its pins.
+                // Same sentinel rule as the primary slot, narrowed to the slots that ACTUALLY land on the default provider: a sentinel slot with an explicit vendor-prefixed model (or an explicit provider field) resolves to that vendor, so its credential and endpoint pins are real and stay.
                 let fb_uses_default_sentinel = is_default_provider_sentinel(&fb.provider);
-                let fb_api_key_env = applied_pin(&fb.provider, fb.api_key_env.as_deref());
-                let fb_base_url_pin = applied_pin(&fb.provider, fb.base_url.as_deref());
-                // Global credential candidate for this fallback slot. An
-                // agent-pinned `api_key_env` on the fallback is an operator
-                // override — unless the slot declared the provider sentinel, in
-                // which case the pin is stale and the slot follows the primary
-                // rule: the effective default's own env var when the resolution
-                // lands on the default provider, else the same
-                // operator-explicit > catalog `api_key_env` > convention
-                // resolution as the primary path. A custom catalog provider
-                // used only as a fallback model would otherwise 401 on the
-                // convention-only env var — the same #5755 bug as the primary
-                // branch above. Refs: #5755, #5807.
+                let fb_api_key_env = applied_pin(
+                    &fb.provider,
+                    &fb_provider,
+                    default_provider,
+                    fb.api_key_env.as_deref(),
+                );
+                let fb_base_url_pin = applied_pin(
+                    &fb.provider,
+                    &fb_provider,
+                    default_provider,
+                    fb.base_url.as_deref(),
+                );
+                // Global credential candidate for this fallback slot.
+                // An agent-pinned `api_key_env` on the fallback is an operator override.
+                // A sentinel slot that lands on the default provider has no pin left (`applied_pin` dropped it), so it follows the primary rule: the effective default's own env var.
+                // Every other slot uses the same operator-explicit > catalog `api_key_env` > convention resolution as the primary path — a custom catalog provider used only as a fallback model would otherwise 401 on the convention-only env var, the #5755 bug.
+                // Refs: #5755, #5807.
+                let fb_lands_on_default =
+                    fb_uses_default_sentinel && fb_provider == *default_provider;
                 let fb_global_key = if let Some(env) = fb_api_key_env {
                     std::env::var(env).ok()
-                } else if fb_uses_default_sentinel && fb_provider == *default_provider {
+                } else if fb_lands_on_default {
                     let env_var = if effective_default.api_key_env.is_empty() {
                         self.resolve_non_default_api_key_env(&cfg, &fb_provider)
                     } else {
@@ -679,27 +685,78 @@ impl LibreFangKernel {
 
 #[cfg(test)]
 mod sentinel_pin_tests {
-    use super::applied_pin;
+    use super::{applied_pin, resolve_fallback_target};
 
-    /// A manifest credential/endpoint pin applies only for an explicit
-    /// provider; on the `"default"`/empty sentinel the effective default owns
-    /// those fields (production incident: stale `DEEPSEEK_API_KEY` pin sent to
-    /// an `othervendor` default → 401 on primary and fallback alike).
+    const DEFAULT: &str = "instance-default";
+
+    /// A manifest credential/endpoint pin applies unless the slot actually lands on the default provider (production incident: stale `DEEPSEEK_API_KEY` pin sent to an `othervendor` default → 401 on primary and fallback alike).
     #[test]
-    fn sentinel_provider_drops_credential_and_endpoint_pins() {
-        assert_eq!(applied_pin("default", Some("DEEPSEEK_API_KEY")), None);
-        assert_eq!(applied_pin("", Some("DEEPSEEK_API_KEY")), None);
+    fn sentinel_provider_landing_on_the_default_drops_credential_and_endpoint_pins() {
         assert_eq!(
-            applied_pin("default", Some("https://stale.example/v1")),
+            applied_pin("default", DEFAULT, DEFAULT, Some("DEEPSEEK_API_KEY")),
+            None
+        );
+        assert_eq!(
+            applied_pin("", DEFAULT, DEFAULT, Some("DEEPSEEK_API_KEY")),
+            None
+        );
+        assert_eq!(
+            applied_pin(
+                "default",
+                DEFAULT,
+                DEFAULT,
+                Some("https://stale.example/v1")
+            ),
             None
         );
 
         // An explicit provider keeps its operator override.
         assert_eq!(
-            applied_pin("othervendor", Some("OTHERVENDOR_KEY")),
+            applied_pin(
+                "othervendor",
+                "othervendor",
+                DEFAULT,
+                Some("OTHERVENDOR_KEY")
+            ),
             Some("OTHERVENDOR_KEY")
         );
-        assert_eq!(applied_pin("othervendor", None), None);
+        assert_eq!(
+            applied_pin("othervendor", "othervendor", DEFAULT, None),
+            None
+        );
+    }
+
+    /// A sentinel slot with an explicit vendor-prefixed model resolves to that vendor (`FallbackModel.provider` is `#[serde(default)]`), so its pin is a real operator choice and must survive.
+    #[test]
+    fn sentinel_slot_with_vendor_prefixed_model_keeps_its_pin() {
+        let (resolved, model) = resolve_fallback_target(
+            "default",
+            "deepseek/deepseek-chat",
+            DEFAULT,
+            "instance-default-model",
+        );
+        assert_eq!(resolved, "deepseek");
+        assert_eq!(model, "deepseek-chat");
+
+        assert_eq!(
+            applied_pin("default", &resolved, DEFAULT, Some("MY_DS_KEY")),
+            Some("MY_DS_KEY")
+        );
+        assert_eq!(
+            applied_pin(
+                "default",
+                &resolved,
+                DEFAULT,
+                Some("https://my-proxy.example/v1")
+            ),
+            Some("https://my-proxy.example/v1")
+        );
+
+        // Empty provider + a model that inherits the default still lands on the default provider and still drops the stale pin.
+        let (resolved, _) =
+            resolve_fallback_target("", "default", DEFAULT, "instance-default-model");
+        assert_eq!(resolved, DEFAULT);
+        assert_eq!(applied_pin("", &resolved, DEFAULT, Some("STALE_KEY")), None);
     }
 }
 
