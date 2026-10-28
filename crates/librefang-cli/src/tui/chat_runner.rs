@@ -1189,7 +1189,7 @@ mod tests {
         assert!(matches!(last.role, Role::System));
         assert!(
             last.text
-                .contains("Usage: /think [none|minimal|low|medium|high|xhigh|max|on|off]"),
+                .contains("Usage: /think [none|minimal|low|medium|high|xhigh|max|off]"),
             "got: {}",
             last.text
         );
