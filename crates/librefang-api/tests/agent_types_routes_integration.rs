@@ -742,6 +742,7 @@ fn tool_ctx(kernel: &Arc<dyn KernelHandle>) -> ToolExecContext<'_> {
         interrupt: None,
         dangerous_command_checker: None,
         acting_principal: None,
+        capture_artifacts: true,
     }
 }
 

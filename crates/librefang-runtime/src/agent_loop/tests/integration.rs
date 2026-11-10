@@ -376,7 +376,7 @@ impl LlmDriver for CascadeLeakTimedOutDriver {
     }
 }
 
-fn fresh_session() -> librefang_memory::session::Session {
+pub(super) fn fresh_session() -> librefang_memory::session::Session {
     librefang_memory::session::Session {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),

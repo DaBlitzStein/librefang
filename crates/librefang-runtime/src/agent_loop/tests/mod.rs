@@ -1558,6 +1558,7 @@ fn silent_response_single_source_of_truth() {
     );
 }
 
+mod artifact_capture;
 mod hook_payload;
 mod integration;
 mod loop_accounting;

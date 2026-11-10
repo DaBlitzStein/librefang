@@ -246,6 +246,7 @@ impl librefang_kernel_handle::SessionWriter for AgentTypeStubKernel {
 
 impl librefang_kernel_handle::AcpFsBridge for AgentTypeStubKernel {}
 impl librefang_kernel_handle::AcpTerminalBridge for AgentTypeStubKernel {}
+impl librefang_kernel_handle::ArtifactRecorder for AgentTypeStubKernel {}
 
 // ---------------------------------------------------------------------------
 // A kernel that never overrides `create_agent_type`, pinning the trait default
@@ -429,6 +430,7 @@ impl librefang_kernel_handle::SessionWriter for NoAgentTypesKernel {
 
 impl librefang_kernel_handle::AcpFsBridge for NoAgentTypesKernel {}
 impl librefang_kernel_handle::AcpTerminalBridge for NoAgentTypesKernel {}
+impl librefang_kernel_handle::ArtifactRecorder for NoAgentTypesKernel {}
 
 // ---------------------------------------------------------------------------
 // Helper: build a minimal ToolExecContext
@@ -466,6 +468,7 @@ fn make_ctx(kernel: &Arc<dyn KernelHandle>) -> ToolExecContext<'_> {
         interrupt: None,
         dangerous_command_checker: None,
         acting_principal: None,
+        capture_artifacts: true,
     }
 }
 

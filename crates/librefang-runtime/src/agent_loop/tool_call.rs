@@ -1184,6 +1184,9 @@ pub(super) async fn execute_single_tool_call_core(
             // #7744: the principal the turn acts for, so `workflow_create` /
             // `cron_create` can stamp an owner on what they persist.
             ctx.opts.acting_principal,
+            // T3.3: incognito turns never persist, so their file writes must
+            // not leave artifact rows or blobs behind either.
+            !ctx.opts.incognito,
         ),
     )
     .await

@@ -949,6 +949,9 @@ pub fn build_reload_plan_with_caps(
             "auto_reply",
         );
         restart_if_changed(field_changed(&old.canvas, &new.canvas), "canvas");
+        // The artifact store is attached to the memory substrate once at boot;
+        // a blob-directory or retention change needs a restart to take effect.
+        restart_if_changed(field_changed(&old.artifacts, &new.artifacts), "artifacts");
         restart_if_changed(old.update_channel != new.update_channel, "update_channel");
         restart_if_changed(field_changed(&old.inbox, &new.inbox), "inbox");
         restart_if_changed(
@@ -1164,6 +1167,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
         ("network", "R"),
         ("memory", "R"),
         ("memory_wiki", "R"),
+        ("artifacts", "R"),
         ("proxy", "H"),
         ("default_model", "H"),
         ("home_dir", "R"),
@@ -1250,7 +1254,6 @@ pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'
         ("telemetry", "R"),
         ("context_engine", "R"),
         ("session", "R"),
-        ("artifacts", "R"),
         ("task_board", "N"),
         ("broadcast", "R"),
         ("auto_reply", "R"),

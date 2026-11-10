@@ -4,7 +4,8 @@
 //! god-trait (issue #3746). It is now split into role traits — `AgentControl`,
 //! `MemoryAccess`, `TaskQueue`, `EventBus`, `KnowledgeGraph`, `CronControl`,
 //! `ApprovalGate`, `HandsControl`, `A2ARegistry`, `ChannelSender`,
-//! `PromptStore`, `WorkflowRunner`, `GoalControl`, `ToolPolicy` — so that
+//! `PromptStore`, `WorkflowRunner`, `GoalControl`, `ToolPolicy`,
+//! `ArtifactRecorder` — so that
 //!
 //! 1. each role trait lives in its own module file instead of one giant
 //!    trait file mixing every kernel domain,
@@ -69,6 +70,7 @@ mod acp_terminal;
 mod agent_control;
 mod api_auth;
 mod approval_gate;
+mod artifact_recorder;
 mod catalog_query;
 mod channel_sender;
 mod cron_control;
@@ -90,6 +92,7 @@ pub use acp_terminal::*;
 pub use agent_control::*;
 pub use api_auth::*;
 pub use approval_gate::*;
+pub use artifact_recorder::*;
 pub use catalog_query::*;
 pub use channel_sender::*;
 pub use cron_control::*;
@@ -135,6 +138,7 @@ pub trait KernelHandle:
     + AcpFsBridge
     + AcpTerminalBridge
     + CatalogQuery
+    + ArtifactRecorder
     + Send
     + Sync
 {
@@ -161,6 +165,7 @@ impl<T> KernelHandle for T where
         + AcpFsBridge
         + AcpTerminalBridge
         + CatalogQuery
+        + ArtifactRecorder
         + Send
         + Sync
         + ?Sized
@@ -174,11 +179,11 @@ pub mod prelude {
     pub use super::{
         A2ARegistry, AcpFsBridge, AcpFsClient, AcpTerminalBridge, AcpTerminalClient,
         AcpTerminalRunResult, AgentControl, AgentInfo, AgentTypeSummary, ApiAuth, ApiAuthSnapshot,
-        ApiUserConfigSnapshot, ApprovalGate, AsyncSendOutcome, CatalogQuery, ChannelSender,
-        CronControl, DashboardRawConfig, EventBus, GoalControl, HandsControl, KernelHandle,
-        KnowledgeGraph, MemoryAccess, PromptStore, SessionWriter, StepOutputSummary, TaskQueue,
-        ToolPolicy, WikiAccess, WorkflowDescription, WorkflowInputParam, WorkflowRunSummary,
-        WorkflowRunner, WorkflowSummary,
+        ApiUserConfigSnapshot, ApprovalGate, ArtifactRecorder, AsyncSendOutcome, CatalogQuery,
+        ChannelSender, CronControl, DashboardRawConfig, EventBus, GoalControl, HandsControl,
+        KernelHandle, KnowledgeGraph, MemoryAccess, PromptStore, SessionWriter, StepOutputSummary,
+        TaskQueue, ToolPolicy, WikiAccess, WorkflowDescription, WorkflowInputParam,
+        WorkflowRunSummary, WorkflowRunner, WorkflowSummary,
     };
 }
 

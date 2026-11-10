@@ -3083,5 +3083,6 @@ impl SessionWriter for SpawnCheckKernel {
 }
 impl AcpFsBridge for SpawnCheckKernel {}
 impl AcpTerminalBridge for SpawnCheckKernel {}
+impl ArtifactRecorder for SpawnCheckKernel {}
 
 // ---- END role-trait impls (#3746) ----

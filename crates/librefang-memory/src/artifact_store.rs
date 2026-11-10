@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 /// One recorded version of a session artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +48,84 @@ pub struct PruneReport {
     pub rows_deleted: usize,
     /// Unreferenced blob files removed.
     pub blobs_deleted: usize,
+}
+
+/// Outcome of one [`ArtifactStore::record_workspace_sweep`] run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    /// Files whose current bytes were recorded.
+    pub recorded: usize,
+    /// True when the sweep stopped at the file cap before walking the whole tree.
+    pub truncated: bool,
+}
+
+/// Cap on files recorded by one workspace sweep.
+pub const SWEEP_MAX_FILES: usize = 500;
+
+/// Cap on a single file recorded by a workspace sweep.
+///
+/// shortcut: one flat size cap, no streaming hashing — the sweep reads the
+/// whole file into memory. Raise or stream it if multi-GiB build outputs need
+/// to be captured.
+pub const SWEEP_MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Directories never walked by [`ArtifactStore::record_workspace_sweep`].
+///
+/// shortcut: name-matched at any depth, not an ignore-file implementation.
+const SWEEP_IGNORED_DIRS: &[&str] = &[".git", "target", "node_modules"];
+
+/// Workspace-relative, `/`-separated path for `path`, or `None` when it is
+/// not a regular file inside `root` after canonicalisation.
+///
+/// This is the only spelling an artifact path is stored under: no leading
+/// separator, no `..`, no `.` components, `/` separators on every platform.
+/// A path that escapes through a symlink canonicalises outside `root` and is
+/// rejected here.
+pub fn workspace_relative_path(root: &std::path::Path, path: &std::path::Path) -> Option<String> {
+    let canon_root = root.canonicalize().ok()?;
+    let canon_path = path.canonicalize().ok()?;
+    relative_below(&canon_root, &canon_path)
+}
+
+/// Workspace-relative path for a target that may not exist on disk yet.
+///
+/// `resolved` must be a path already returned by
+/// `workspace_sandbox::resolve_sandbox_path_ext`: that resolver canonicalises
+/// the deepest existing ancestor and appends the non-existent suffix, so a
+/// lexical strip against the canonical root is sound here and a symlinked
+/// ancestor outside the root still yields `None`. Used by the editor-buffer
+/// capture path, where the buffer has not been saved.
+pub fn workspace_relative_path_for_resolved(
+    root: &std::path::Path,
+    resolved: &std::path::Path,
+) -> Option<String> {
+    let canon_root = root.canonicalize().ok()?;
+    let relative = relative_below(&canon_root, resolved);
+    // A leaf that exists but is a symlink escaping the root was not covered
+    // by the resolver's ancestor walk; re-canonicalise when possible so the
+    // escape check stays the same as `workspace_relative_path`.
+    if resolved.exists() {
+        return workspace_relative_path(root, resolved);
+    }
+    relative
+}
+
+/// Shared by [`workspace_relative_path`] and the sweep: both already hold
+/// paths rooted at the canonical workspace directory.
+fn relative_below(canon_root: &std::path::Path, path: &std::path::Path) -> Option<String> {
+    let rel = path.strip_prefix(canon_root).ok()?;
+    let mut parts: Vec<&str> = Vec::new();
+    for component in rel.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part.to_str()?),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("/"))
 }
 
 /// Persistent artifact store backed by SQLite plus a blob directory.
@@ -280,6 +359,137 @@ impl ArtifactStore {
             rows_deleted,
             blobs_deleted,
         })
+    }
+
+    /// Record every regular file under `workspace_root` whose mtime is at or
+    /// after `since`, skipping [`SWEEP_IGNORED_DIRS`] and files larger than
+    /// `max_file_bytes`, stopping after `max_files` recorded files.
+    ///
+    /// Symlinks are never followed: a directory symlink is not traversed and
+    /// a file symlink is not recorded, so a link planted inside the workspace
+    /// cannot pull an outside file into the store. Unreadable entries are
+    /// logged and skipped; one bad file does not abort the sweep.
+    pub fn record_workspace_sweep(
+        &self,
+        session_id: &str,
+        workspace_root: &std::path::Path,
+        since: SystemTime,
+        max_files: usize,
+        max_file_bytes: u64,
+    ) -> LibreFangResult<SweepReport> {
+        if max_files == 0 {
+            return Ok(SweepReport::default());
+        }
+        let canon_root = match workspace_root.canonicalize() {
+            Ok(root) => root,
+            Err(e) => {
+                tracing::debug!(
+                    root = %workspace_root.display(),
+                    error = %e,
+                    "artifact sweep skipped: workspace root unavailable"
+                );
+                return Ok(SweepReport::default());
+            }
+        };
+
+        let mut stack = vec![canon_root.clone()];
+        // At most `max_files + 1` paths: enough to record the cap and know
+        // whether one more candidate was left out.
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        'walk: while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::debug!(dir = %dir.display(), error = %e, "artifact sweep: unreadable directory");
+                    continue;
+                }
+            };
+            for entry in entries.flatten() {
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(_) => continue,
+                };
+                if file_type.is_dir() {
+                    let name = entry.file_name();
+                    if !SWEEP_IGNORED_DIRS
+                        .iter()
+                        .any(|ignored| name.to_string_lossy() == *ignored)
+                    {
+                        stack.push(entry.path());
+                    }
+                    continue;
+                }
+                if !file_type.is_file() {
+                    continue;
+                }
+
+                let path = entry.path();
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
+                match metadata.modified() {
+                    Ok(modified) if modified >= since => {}
+                    _ => continue,
+                }
+                if metadata.len() > max_file_bytes {
+                    tracing::info!(
+                        path = %path.display(),
+                        size_bytes = metadata.len(),
+                        max_file_bytes,
+                        "artifact sweep: skipping oversized file"
+                    );
+                    continue;
+                }
+
+                candidates.push(path);
+                if candidates.len() > max_files {
+                    break 'walk;
+                }
+            }
+        }
+
+        let truncated = candidates.len() > max_files;
+        candidates.sort();
+        let mut report = SweepReport::default();
+        for path in candidates.iter().take(max_files) {
+            let Some(relative) = relative_below(&canon_root, path) else {
+                continue;
+            };
+            let bytes = match fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::debug!(path = %path.display(), error = %e, "artifact sweep: unreadable file");
+                    continue;
+                }
+            };
+            // The file can grow between the metadata check and the read.
+            if bytes.len() as u64 > max_file_bytes {
+                tracing::info!(
+                    path = %path.display(),
+                    size_bytes = bytes.len(),
+                    max_file_bytes,
+                    "artifact sweep: skipping oversized file"
+                );
+                continue;
+            }
+            match self.put(session_id, None, &relative, &bytes, None) {
+                Ok(_) => report.recorded += 1,
+                Err(e) => {
+                    tracing::warn!(path = %relative, error = %e, "artifact sweep: failed to record file")
+                }
+            }
+        }
+
+        if truncated {
+            report.truncated = true;
+            tracing::warn!(
+                session_id,
+                max_files,
+                "artifact sweep stopped at the per-turn file cap; remaining files were not recorded"
+            );
+        }
+        Ok(report)
     }
 
     fn latest(&self, session_id: &str, path: &str) -> LibreFangResult<Option<ArtifactRecord>> {
@@ -546,5 +756,201 @@ mod tests {
         assert_eq!(rows[0].version, 2);
         assert_eq!(rows[1].path, "a.txt");
         assert_eq!(rows[1].version, 1);
+    }
+
+    // ── Workspace sweep + path normalisation (T3.3) ─────────────────────
+
+    fn backdate_file(path: &std::path::Path, when: SystemTime) {
+        let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(when).unwrap();
+    }
+
+    #[test]
+    fn workspace_relative_path_is_slash_separated_and_rejects_escapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::write(root.join("a/b.txt"), b"x").unwrap();
+        let outside = tmp.path().join("outside.txt");
+        fs::write(&outside, b"x").unwrap();
+
+        assert_eq!(
+            workspace_relative_path(&root, &root.join("a/b.txt")).as_deref(),
+            Some("a/b.txt")
+        );
+        // `..` that stays inside normalises away rather than being stored.
+        assert_eq!(
+            workspace_relative_path(&root, &root.join("a/../a/b.txt")).as_deref(),
+            Some("a/b.txt")
+        );
+        assert_eq!(workspace_relative_path(&root, &outside), None);
+        assert_eq!(
+            workspace_relative_path(&root, &root),
+            None,
+            "the root itself has no workspace-relative spelling"
+        );
+    }
+
+    #[test]
+    fn relative_path_for_resolved_accepts_an_unsaved_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().join("outside.txt");
+        fs::write(&outside, b"x").unwrap();
+
+        // `notes/` does not exist yet: the editor-buffer case.
+        assert_eq!(
+            workspace_relative_path_for_resolved(&root, &root.join("notes/new.md")).as_deref(),
+            Some("notes/new.md")
+        );
+        assert_eq!(
+            workspace_relative_path_for_resolved(&root, &outside),
+            None,
+            "a resolved path outside the root still has no relative spelling"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_relative_path_rejects_symlink_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().join("outside.txt");
+        fs::write(&outside, b"secret").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.txt")).unwrap();
+
+        assert_eq!(
+            workspace_relative_path(&root, &root.join("link.txt")),
+            None,
+            "a symlink that resolves outside the workspace must not be recorded"
+        );
+    }
+
+    #[test]
+    fn sweep_records_recent_files_and_skips_old_ignored_and_oversized() {
+        let h = harness();
+        let ws = h._tmp.path().join("ws");
+        fs::create_dir_all(ws.join("sub")).unwrap();
+        for ignored in SWEEP_IGNORED_DIRS {
+            let dir = ws.join(ignored);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("fresh.txt"), b"fresh").unwrap();
+        }
+        fs::write(ws.join("new.txt"), b"new").unwrap();
+        fs::write(ws.join("sub/nested.txt"), b"nested").unwrap();
+        let old = ws.join("old.txt");
+        fs::write(&old, b"old").unwrap();
+        backdate_file(
+            &old,
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),
+        );
+        fs::write(ws.join("big.bin"), vec![b'x'; 64]).unwrap();
+
+        let since = SystemTime::now() - std::time::Duration::from_secs(3600);
+        let report = h
+            .store
+            .record_workspace_sweep("s1", &ws, since, SWEEP_MAX_FILES, 8)
+            .unwrap();
+
+        assert_eq!(report.recorded, 2, "{report:?}");
+        assert!(!report.truncated);
+        let mut paths: Vec<String> = h
+            .store
+            .list("s1")
+            .unwrap()
+            .into_iter()
+            .map(|row| row.path)
+            .collect();
+        paths.sort();
+        assert_eq!(paths, ["new.txt", "sub/nested.txt"]);
+        let (_, bytes) = h.store.read("s1", "sub/nested.txt", 1).unwrap().unwrap();
+        assert_eq!(bytes, b"nested");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_records_a_file_written_by_a_shell_command() {
+        let h = harness();
+        let ws = h._tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("echo from-shell > shell-made.txt")
+            .current_dir(&ws)
+            .status()
+            .expect("run sh");
+        assert!(status.success());
+
+        let since = SystemTime::now() - std::time::Duration::from_secs(60);
+        let report = h
+            .store
+            .record_workspace_sweep("s1", &ws, since, SWEEP_MAX_FILES, SWEEP_MAX_FILE_BYTES)
+            .unwrap();
+
+        assert_eq!(report.recorded, 1, "{report:?}");
+        let (_, bytes) = h.store.read("s1", "shell-made.txt", 1).unwrap().unwrap();
+        assert_eq!(bytes, b"from-shell\n");
+    }
+
+    #[test]
+    fn sweep_stops_at_the_file_cap_and_reports_truncation() {
+        let h = harness();
+        let ws = h._tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        for i in 0..3 {
+            fs::write(ws.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+
+        let since = SystemTime::now() - std::time::Duration::from_secs(3600);
+        let report = h
+            .store
+            .record_workspace_sweep("s1", &ws, since, 2, SWEEP_MAX_FILE_BYTES)
+            .unwrap();
+
+        assert_eq!(report.recorded, 2);
+        assert!(report.truncated);
+        assert_eq!(h.store.list("s1").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn sweep_at_exactly_the_file_cap_is_not_truncated() {
+        let h = harness();
+        let ws = h._tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        for i in 0..2 {
+            fs::write(ws.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+
+        let since = SystemTime::now() - std::time::Duration::from_secs(3600);
+        let report = h
+            .store
+            .record_workspace_sweep("s1", &ws, since, 2, SWEEP_MAX_FILE_BYTES)
+            .unwrap();
+
+        assert_eq!(report.recorded, 2);
+        assert!(
+            !report.truncated,
+            "exactly max_files candidates means nothing was left out"
+        );
+    }
+
+    #[test]
+    fn sweep_without_an_artifact_store_root_is_a_no_op_on_a_missing_workspace() {
+        let h = harness();
+        let missing = h._tmp.path().join("does-not-exist");
+        let report = h
+            .store
+            .record_workspace_sweep(
+                "s1",
+                &missing,
+                SystemTime::UNIX_EPOCH,
+                SWEEP_MAX_FILES,
+                SWEEP_MAX_FILE_BYTES,
+            )
+            .unwrap();
+        assert_eq!(report, SweepReport::default());
     }
 }

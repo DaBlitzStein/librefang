@@ -972,6 +972,12 @@ struct DispatchCapture {
     network_quota_spent: bool,
     /// Byte totals the dispatcher reported through `record_network_bytes`, in call order.
     network_bytes: std::sync::Mutex<Vec<u64>>,
+    /// Artifacts the dispatcher recorded through `ArtifactRecorder`, in call order.
+    artifacts: std::sync::Mutex<Vec<(librefang_types::agent::SessionId, String, Vec<u8>)>>,
+    /// Sessions whose workspace the end-of-turn sweep was asked to walk.
+    sweeps: std::sync::Mutex<Vec<librefang_types::agent::SessionId>>,
+    /// Editor stand-in returned by `acp_fs_client`; `None` = no editor bound.
+    acp_client: Option<Arc<dyn librefang_kernel_handle::AcpFsClient>>,
 }
 
 #[async_trait::async_trait]
@@ -1269,8 +1275,40 @@ impl SessionWriter for DispatchCapture {
     ) {
     }
 }
-impl AcpFsBridge for DispatchCapture {}
+impl AcpFsBridge for DispatchCapture {
+    fn acp_fs_client(
+        &self,
+        _session_id: librefang_types::agent::SessionId,
+    ) -> Option<Arc<dyn librefang_kernel_handle::AcpFsClient>> {
+        self.acp_client.clone()
+    }
+}
 impl AcpTerminalBridge for DispatchCapture {}
+impl ArtifactRecorder for DispatchCapture {
+    fn record_artifact(
+        &self,
+        session_id: librefang_types::agent::SessionId,
+        path: &str,
+        bytes: &[u8],
+        _mime_type: Option<&str>,
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+        self.artifacts
+            .lock()
+            .unwrap()
+            .push((session_id, path.to_string(), bytes.to_vec()));
+        Ok(())
+    }
+
+    fn sweep_workspace_artifacts(
+        &self,
+        session_id: librefang_types::agent::SessionId,
+        _workspace_root: &std::path::Path,
+        _since: std::time::SystemTime,
+    ) -> Result<usize, librefang_kernel_handle::KernelOpError> {
+        self.sweeps.lock().unwrap().push(session_id);
+        Ok(0)
+    }
+}
 
 /// (a) No `conversation_key` and no caller → unchanged behaviour: routes to
 /// `send_to_agent`.
@@ -1904,6 +1942,7 @@ impl ApiAuth for MirrorKernel {
 }
 impl AcpFsBridge for MirrorKernel {}
 impl AcpTerminalBridge for MirrorKernel {}
+impl ArtifactRecorder for MirrorKernel {}
 
 #[async_trait::async_trait]
 impl EventBus for MirrorKernel {
@@ -2648,6 +2687,7 @@ impl SessionWriter for ApprovalKernel {
 }
 impl AcpFsBridge for ApprovalKernel {}
 impl AcpTerminalBridge for ApprovalKernel {}
+impl ArtifactRecorder for ApprovalKernel {}
 
 // ---- END role-trait impls (#3746) ----
 
@@ -2883,6 +2923,7 @@ impl SessionWriter for ForceHumanCapturingKernel {
 }
 impl AcpFsBridge for ForceHumanCapturingKernel {}
 impl AcpTerminalBridge for ForceHumanCapturingKernel {}
+impl ArtifactRecorder for ForceHumanCapturingKernel {}
 
 // ---- END role-trait impls (#3746) ----
 
@@ -3146,6 +3187,7 @@ async fn a_tool_that_moves_no_bytes_reports_nothing() {
     );
 }
 
+mod artifact_capture;
 mod policy;
 mod shell;
 mod skills;

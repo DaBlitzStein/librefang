@@ -226,6 +226,7 @@ impl librefang_kernel_handle::SessionWriter for CapturingKernel {
 
 impl librefang_kernel_handle::AcpFsBridge for CapturingKernel {}
 impl librefang_kernel_handle::AcpTerminalBridge for CapturingKernel {}
+impl librefang_kernel_handle::ArtifactRecorder for CapturingKernel {}
 
 fn make_ctx<'a>(
     kernel: &'a Arc<dyn KernelHandle>,
@@ -262,6 +263,7 @@ fn make_ctx<'a>(
         interrupt: None,
         dangerous_command_checker: None,
         acting_principal: None,
+        capture_artifacts: true,
     }
 }
 

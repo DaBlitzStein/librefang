@@ -3553,6 +3553,21 @@ impl Default for ArtifactConfig {
     }
 }
 
+impl ArtifactConfig {
+    /// Resolve the effective blob root against the kernel's home directory.
+    ///
+    /// `blob_dir` honours a leading `~` / `~/...`; when unset the root is
+    /// `<home_dir>/artifacts`. Kept next to [`MemoryWikiConfig::resolved_vault_path`]
+    /// and using the same expansion so operator path config behaves the same
+    /// in both sections.
+    pub fn resolved_blob_dir(&self, home_dir: &std::path::Path) -> std::path::PathBuf {
+        match &self.blob_dir {
+            Some(dir) => expand_tilde(std::path::Path::new(dir)),
+            None => home_dir.join("artifacts"),
+        }
+    }
+}
+
 /// Session compaction configuration (exposed in `[compaction]` TOML section).
 ///
 /// Controls when and how the LLM-based history compaction runs.
@@ -8993,6 +9008,26 @@ impl Default for ToolResultsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `[artifacts] blob_dir` resolves like the wiki vault path: an explicit
+    /// path wins (with `~` expansion), otherwise `<home>/artifacts`.
+    #[test]
+    fn artifact_blob_dir_resolves_against_home() {
+        let home = std::path::Path::new("/srv/librefang");
+        assert_eq!(
+            ArtifactConfig::default().resolved_blob_dir(home),
+            home.join("artifacts")
+        );
+
+        let configured = ArtifactConfig {
+            blob_dir: Some("/mnt/artifacts".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            configured.resolved_blob_dir(home),
+            std::path::PathBuf::from("/mnt/artifacts")
+        );
+    }
 
     /// #8059 review: `AuxTask::ALL` is the single Rust-side enumeration the
     /// config-schema endpoint serves as `x-aux-tasks`, so a variant added to

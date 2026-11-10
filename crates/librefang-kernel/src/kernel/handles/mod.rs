@@ -17,6 +17,7 @@ mod acp_terminal_bridge;
 mod agent_control;
 mod api_auth;
 mod approval_gate;
+mod artifact_recorder;
 mod catalog_query;
 pub(in crate::kernel) mod channel_sender;
 mod cron_control;

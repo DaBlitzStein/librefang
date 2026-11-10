@@ -181,6 +181,7 @@ impl SessionWriter for StubKernel {
 }
 impl AcpFsBridge for StubKernel {}
 impl AcpTerminalBridge for StubKernel {}
+impl ArtifactRecorder for StubKernel {}
 
 #[test]
 fn stub_satisfies_kernel_handle_via_blanket_impl() {

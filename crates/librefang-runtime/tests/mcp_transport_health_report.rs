@@ -227,6 +227,7 @@ fn ctx<'a>(mcp_connections: &'a tokio::sync::Mutex<Vec<McpConnection>>) -> ToolE
         interrupt: None,
         dangerous_command_checker: None,
         acting_principal: None,
+        capture_artifacts: true,
     }
 }
 

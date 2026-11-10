@@ -51,6 +51,10 @@ pub async fn run_agent_loop_streaming(
     opts: &LoopOptions,
 ) -> LibreFangResult<AgentLoopResult> {
     let agent_label = manifest.name.clone();
+    // T3.3: keep the capture handle and the turn's wall-clock start past the
+    // inner loop, which consumes the handle.
+    let capture_kernel = kernel.clone();
+    let turn_started = std::time::SystemTime::now();
     // Scope the canvas task-locals from the resolved config (see the
     // non-streaming `run_agent_loop` for rationale).
     let canvas_cfg = opts.canvas_config.clone().unwrap_or_default();
@@ -93,6 +97,21 @@ pub async fn run_agent_loop_streaming(
         )
         .await;
     super::record_agent_loop_exit(&agent_label, &result);
+    // T3.3: an incognito turn is documented as never persisted, so it neither
+    // contributes a sweep nor consumes a flag a concurrent turn set.
+    if !opts.incognito {
+        let shell_ran = crate::artifact_capture::take_shell_ran(session.id);
+        if let (Some(capture_kernel), Some(root)) = (capture_kernel.as_ref(), workspace_root) {
+            crate::artifact_capture::sweep_turn_artifacts(
+                capture_kernel,
+                session.id,
+                root,
+                turn_started,
+                shell_ran,
+            )
+            .await;
+        }
+    }
     result
 }
 
