@@ -17,6 +17,7 @@ use axum::Json;
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use librefang_memory::artifact_store::{ArtifactRecord, ArtifactStore};
+use librefang_runtime::workspace_sandbox;
 use librefang_types::agent::{AgentId, SessionId};
 use rand::Rng as _;
 use serde::Deserialize;
@@ -125,21 +126,55 @@ pub fn verify_link_token(key: &[u8], token: &str, now: i64) -> Option<LinkClaims
     })
 }
 
+/// Read and validate the persisted link key.
+///
+/// Fails closed when the path is a symlink or, on Unix, when the file mode is
+/// not exactly `0600`. A key planted with looser permissions is treated as
+/// compromised rather than silently trusted.
+fn read_link_key(key_path: &FsPath) -> std::io::Result<Vec<u8>> {
+    let metadata = std::fs::symlink_metadata(key_path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "artifact link key must not be a symlink",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "artifact link key must have mode 0600",
+            ));
+        }
+    }
+    let key = std::fs::read(key_path)?;
+    if key.len() != LINK_KEY_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "artifact link key has the wrong length",
+        ));
+    }
+    Ok(key)
+}
+
 /// Read the link key under `blob_root`, creating it on first use.
 ///
-/// The key is written to a temp file in the same directory and renamed into
-/// place, so a reader never sees a partial key. A lost creation race re-reads
-/// the winner instead of overwriting it.
+/// The key is written to a temp file in the same directory and published with
+/// `hard_link`, which refuses to replace an existing destination: two daemons
+/// racing on first use cannot overwrite each other's key, the loser re-reads
+/// the winner. The temp file is removed on every failure path.
+///
+/// Remaining race: `hard_link` stops two *creators* from clobbering each
+/// other, not a principal that can already write `blob_root` from swapping
+/// `link.key` between the `symlink_metadata` check and the read. Closing that
+/// needs an `O_NOFOLLOW` open plus `fstat` on the same descriptor; the
+/// attacker who can do it can also replace the key outright.
 fn load_or_create_link_key(blob_root: &FsPath) -> std::io::Result<Vec<u8>> {
     let key_path = blob_root.join("link.key");
-    match std::fs::read(&key_path) {
-        Ok(key) if key.len() == LINK_KEY_BYTES => return Ok(key),
-        Ok(_) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "artifact link key has the wrong length",
-            ))
-        }
+    match read_link_key(&key_path) {
+        Ok(key) => return Ok(key),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
@@ -149,7 +184,7 @@ fn load_or_create_link_key(blob_root: &FsPath) -> std::io::Result<Vec<u8>> {
     rand::rng().fill_bytes(&mut key);
 
     let tmp_path = blob_root.join(format!(".link.key.{}.tmp", Uuid::new_v4()));
-    {
+    let write_result = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -159,23 +194,24 @@ fn load_or_create_link_key(blob_root: &FsPath) -> std::io::Result<Vec<u8>> {
         }
         let mut tmp = options.open(&tmp_path)?;
         tmp.write_all(&key)?;
-        tmp.sync_all()?;
+        tmp.sync_all()
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
     }
 
-    if key_path.exists() {
+    if let Err(e) = std::fs::hard_link(&tmp_path, &key_path) {
         let _ = std::fs::remove_file(&tmp_path);
-        return std::fs::read(&key_path);
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, &key_path) {
-        let _ = std::fs::remove_file(&tmp_path);
+        // A concurrent creator may have published the key first; the file on
+        // disk is the authority, never the bytes this call generated.
         if key_path.exists() {
-            return std::fs::read(&key_path);
+            return read_link_key(&key_path);
         }
         return Err(e);
     }
-    // A concurrent creator may have renamed between the check and ours; the
-    // file is the authority, never the bytes this call generated.
-    std::fs::read(&key_path)
+    let _ = std::fs::remove_file(&tmp_path);
+    read_link_key(&key_path)
 }
 
 // `axum::Response` is 128 bytes and trips clippy's `result_large_err` lint;
@@ -199,14 +235,16 @@ fn artifact_store(state: &AppState) -> Result<&ArtifactStore, Response> {
     })
 }
 
-/// Resolve the session's agent, applying the same existence and owner-scope
-/// contract as `GET /api/sessions/{id}`.
+/// Resolve the session's agent and canonical id, applying the same existence
+/// and owner-scope contract as `GET /api/sessions/{id}`. Store lookups must
+/// use the canonical lowercase UUID string, never the caller's spelling, or
+/// an uppercase UUID would address no rows.
 #[allow(clippy::result_large_err)]
 fn session_agent(
     state: &AppState,
     session_id: &str,
     api_user: Option<&axum::Extension<AuthenticatedApiUser>>,
-) -> Result<AgentId, Response> {
+) -> Result<(AgentId, String), Response> {
     let uuid = session_id
         .parse::<Uuid>()
         .map_err(|_| ApiErrorResponse::bad_request("invalid session id").into_response())?;
@@ -218,7 +256,7 @@ fn session_agent(
         Ok(Some((session, _)))
             if super::caller_may_access_agent_data(state, session.agent_id, api_user) =>
         {
-            Ok(session.agent_id)
+            Ok((session.agent_id, uuid.to_string()))
         }
         Ok(_) => Err(ApiErrorResponse::not_found("session not found").into_response()),
         Err(e) => {
@@ -267,14 +305,26 @@ fn download_response(record: &ArtifactRecord, bytes: Vec<u8>) -> Response {
 }
 
 /// `GET /api/sessions/{session_id}/artifacts`
+#[utoipa::path(
+    get,
+    path = "/api/sessions/{session_id}/artifacts",
+    tag = "artifacts",
+    params(("session_id" = String, Path, description = "Session ID")),
+    responses(
+        (status = 200, description = "Latest artifact version for each path in the session", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid session ID", body = crate::types::JsonObject),
+        (status = 404, description = "Session not found or not accessible to this caller", body = crate::types::JsonObject)
+    )
+)]
 pub async fn list_artifacts(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> Response {
-    if let Err(resp) = session_agent(&state, &session_id, api_user.as_ref()) {
-        return resp;
-    }
+    let (_, session_id) = match session_agent(&state, &session_id, api_user.as_ref()) {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
     let store = match artifact_store(&state) {
         Ok(store) => store,
         Err(resp) => return resp,
@@ -296,15 +346,30 @@ pub struct VersionsQuery {
 }
 
 /// `GET /api/sessions/{session_id}/artifacts/versions?path=...`
+#[utoipa::path(
+    get,
+    path = "/api/sessions/{session_id}/artifacts/versions",
+    tag = "artifacts",
+    params(
+        ("session_id" = String, Path, description = "Session ID"),
+        ("path" = String, Query, description = "Artifact path exactly as recorded")
+    ),
+    responses(
+        (status = 200, description = "Version history for one artifact path, oldest first", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid session ID", body = crate::types::JsonObject),
+        (status = 404, description = "Session or artifact path not found", body = crate::types::JsonObject)
+    )
+)]
 pub async fn list_artifact_versions(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Query(query): Query<VersionsQuery>,
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> Response {
-    if let Err(resp) = session_agent(&state, &session_id, api_user.as_ref()) {
-        return resp;
-    }
+    let (_, session_id) = match session_agent(&state, &session_id, api_user.as_ref()) {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
     let store = match artifact_store(&state) {
         Ok(store) => store,
         Err(resp) => return resp,
@@ -331,15 +396,31 @@ pub struct DownloadQuery {
 }
 
 /// `GET /api/sessions/{session_id}/artifacts/download?path=...&version=N`
+#[utoipa::path(
+    get,
+    path = "/api/sessions/{session_id}/artifacts/download",
+    tag = "artifacts",
+    params(
+        ("session_id" = String, Path, description = "Session ID"),
+        ("path" = String, Query, description = "Artifact path exactly as recorded"),
+        ("version" = i64, Query, description = "Version to download")
+    ),
+    responses(
+        (status = 200, description = "Raw artifact bytes with the recorded Content-Type and an attachment Content-Disposition", content_type = "application/octet-stream"),
+        (status = 400, description = "Invalid session ID or query", body = crate::types::JsonObject),
+        (status = 404, description = "Session, artifact path, or version not found", body = crate::types::JsonObject)
+    )
+)]
 pub async fn download_artifact(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Query(query): Query<DownloadQuery>,
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
 ) -> Response {
-    if let Err(resp) = session_agent(&state, &session_id, api_user.as_ref()) {
-        return resp;
-    }
+    let (_, session_id) = match session_agent(&state, &session_id, api_user.as_ref()) {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
     let store = match artifact_store(&state) {
         Ok(store) => store,
         Err(resp) => return resp,
@@ -364,14 +445,28 @@ pub struct RestoreRequest {
 }
 
 /// `POST /api/sessions/{session_id}/artifacts/restore`
+#[utoipa::path(
+    post,
+    path = "/api/sessions/{session_id}/artifacts/restore",
+    tag = "artifacts",
+    params(("session_id" = String, Path, description = "Session ID")),
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Artifact bytes restored into the agent workspace; no new artifact version is recorded", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid session ID or body", body = crate::types::JsonObject),
+        (status = 403, description = "Artifact path is unsafe for the agent workspace", body = crate::types::JsonObject),
+        (status = 404, description = "Session or artifact version not found", body = crate::types::JsonObject),
+        (status = 409, description = "The agent workspace is missing", body = crate::types::JsonObject)
+    )
+)]
 pub async fn restore_artifact(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     Json(request): Json<RestoreRequest>,
 ) -> Response {
-    let agent_id = match session_agent(&state, &session_id, api_user.as_ref()) {
-        Ok(agent_id) => agent_id,
+    let (agent_id, session_id) = match session_agent(&state, &session_id, api_user.as_ref()) {
+        Ok(scope) => scope,
         Err(resp) => return resp,
     };
     let store = match artifact_store(&state) {
@@ -402,10 +497,7 @@ pub async fn restore_artifact(
         return ApiErrorResponse::conflict("agent workspace is missing").into_response();
     };
 
-    let resolved = match librefang_kernel::workspace_sandbox::resolve_sandbox_path(
-        &request.path,
-        &workspace,
-    ) {
+    let resolved = match workspace_sandbox::resolve_sandbox_path(&request.path, &workspace) {
         Ok(path) => path,
         Err(e) => {
             tracing::warn!(path = %request.path, error = %e, "refused unsafe artifact restore path");
@@ -413,15 +505,33 @@ pub async fn restore_artifact(
                 .into_response();
         }
     };
-    if let Err(e) =
-        librefang_kernel::workspace_sandbox::deny_own_manifest_write(&resolved, &workspace)
-    {
+    if let Err(e) = workspace_sandbox::deny_own_manifest_write(&resolved, &workspace) {
         tracing::warn!(path = %request.path, error = %e, "refused artifact restore over agent manifest");
         return ApiErrorResponse::forbidden("artifact path is not allowed in the workspace")
             .into_response();
     }
 
-    if let Err(e) = write_atomically(&resolved, &bytes) {
+    // Re-resolve immediately before publishing the temp file. This narrows the
+    // parent-symlink-swap window between the first resolve and the rename.
+    //
+    // shortcut: a local attacker who can swap a workspace parent directory
+    // between this re-resolve and the rename can still redirect the write; the
+    // window is narrowed, not eliminated. Upgrade to openat/renameat with
+    // O_NOFOLLOW directory handles if the workspace threat model includes a
+    // racing local attacker.
+    let recheck = || {
+        let again = workspace_sandbox::resolve_sandbox_path(&request.path, &workspace)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e))?;
+        if again != resolved {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "workspace path resolved differently on re-check",
+            ));
+        }
+        workspace_sandbox::deny_own_manifest_write(&again, &workspace)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e))
+    };
+    if let Err(e) = write_atomically(&resolved, &bytes, recheck) {
         tracing::error!(path = %resolved.display(), error = %e, "failed to restore artifact");
         return ApiErrorResponse::internal("failed to write artifact into the workspace")
             .into_response();
@@ -436,8 +546,13 @@ pub async fn restore_artifact(
 }
 
 /// Write `bytes` through a sibling temp file and rename, so a reader sees the
-/// old file or the complete new one.
-fn write_atomically(destination: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
+/// old file or the complete new one. `recheck` runs after the bytes are
+/// flushed but before the rename publishes them.
+fn write_atomically(
+    destination: &FsPath,
+    bytes: &[u8],
+    recheck: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let parent = destination
         .parent()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent"))?;
@@ -458,6 +573,7 @@ fn write_atomically(destination: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
+        recheck()?;
         std::fs::rename(&tmp, destination)
     })();
     if result.is_err() {
@@ -478,15 +594,28 @@ pub struct LinkRequest {
 }
 
 /// `POST /api/sessions/{session_id}/artifacts/link`
+#[utoipa::path(
+    post,
+    path = "/api/sessions/{session_id}/artifacts/link",
+    tag = "artifacts",
+    params(("session_id" = String, Path, description = "Session ID")),
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Signed public download URL, token, and expiry", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid session ID or body", body = crate::types::JsonObject),
+        (status = 404, description = "Session, artifact path, or version not found", body = crate::types::JsonObject)
+    )
+)]
 pub async fn link_artifact(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     Json(request): Json<LinkRequest>,
 ) -> Response {
-    if let Err(resp) = session_agent(&state, &session_id, api_user.as_ref()) {
-        return resp;
-    }
+    let (_, session_id) = match session_agent(&state, &session_id, api_user.as_ref()) {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
     let store = match artifact_store(&state) {
         Ok(store) => store,
         Err(resp) => return resp,
@@ -533,6 +662,17 @@ pub async fn link_artifact(
 }
 
 /// `GET /api/artifacts/{token}` — public; the signed token is the credential.
+#[utoipa::path(
+    get,
+    path = "/api/artifacts/{token}",
+    tag = "artifacts",
+    params(("token" = String, Path, description = "HMAC-signed artifact link token")),
+    responses(
+        (status = 200, description = "Raw artifact bytes with the recorded Content-Type and an attachment Content-Disposition; public, the token is the credential", content_type = "application/octet-stream"),
+        (status = 403, description = "Malformed, tampered, or expired token", body = crate::types::JsonObject),
+        (status = 404, description = "Artifact version or blob no longer exists", body = crate::types::JsonObject)
+    )
+)]
 pub async fn download_linked_artifact(
     State(state): State<Arc<AppState>>,
     Path(token): Path<String>,

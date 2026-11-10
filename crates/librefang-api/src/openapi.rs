@@ -316,6 +316,14 @@ use crate::types;
         routes::search_sessions,
         routes::session_cleanup,
 
+        // ── Session artifacts ──
+        routes::artifacts::list_artifacts,
+        routes::artifacts::list_artifact_versions,
+        routes::artifacts::download_artifact,
+        routes::artifacts::restore_artifact,
+        routes::artifacts::link_artifact,
+        routes::artifacts::download_linked_artifact,
+
         // ── Budget / Usage ──
         routes::budget_status,
         routes::update_budget,

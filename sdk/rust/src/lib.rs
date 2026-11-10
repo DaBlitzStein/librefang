@@ -292,6 +292,7 @@ pub struct LibreFang {
     pub a2a: Arc<A2AResource>,
     pub agents: Arc<AgentsResource>,
     pub approvals: Arc<ApprovalsResource>,
+    pub artifacts: Arc<ArtifactsResource>,
     pub auth: Arc<AuthResource>,
     pub auto_dream: Arc<AutoDreamResource>,
     pub budget: Arc<BudgetResource>,
@@ -342,6 +343,7 @@ impl LibreFang {
             a2a: Arc::new(A2AResource::new(base_url.clone(), client.clone())),
             agents: Arc::new(AgentsResource::new(base_url.clone(), client.clone())),
             approvals: Arc::new(ApprovalsResource::new(base_url.clone(), client.clone())),
+            artifacts: Arc::new(ArtifactsResource::new(base_url.clone(), client.clone())),
             auth: Arc::new(AuthResource::new(base_url.clone(), client.clone())),
             auto_dream: Arc::new(AutoDreamResource::new(base_url.clone(), client.clone())),
             budget: Arc::new(BudgetResource::new(base_url.clone(), client.clone())),
@@ -1583,6 +1585,101 @@ impl ApprovalsResource {
             &["api", "approvals", id, "reject"],
             None,
             &[],
+        )
+        .await
+    }
+}
+
+// ── Artifacts ──
+
+#[derive(Debug, Clone)]
+pub struct ArtifactsResource {
+    base_url: String,
+    client: Client,
+}
+
+impl ArtifactsResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn download_linked_artifact(&self, token: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "artifacts", token],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_artifacts(&self, session_id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "sessions", session_id, "artifacts"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn download_artifact(
+        &self,
+        session_id: &str,
+        path: Option<&str>,
+        version: Option<&str>,
+    ) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "sessions", session_id, "artifacts", "download"],
+            None,
+            &[("path", path), ("version", version)],
+        )
+        .await
+    }
+
+    pub async fn link_artifact(&self, session_id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "sessions", session_id, "artifacts", "link"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn restore_artifact(&self, session_id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "sessions", session_id, "artifacts", "restore"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_artifact_versions(
+        &self,
+        session_id: &str,
+        path: Option<&str>,
+    ) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "sessions", session_id, "artifacts", "versions"],
+            None,
+            &[("path", path)],
         )
         .await
     }

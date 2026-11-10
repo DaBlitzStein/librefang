@@ -48,6 +48,7 @@ class LibreFang:
         self.a2a = _A2AResource(self)
         self.agents = _AgentsResource(self)
         self.approvals = _ApprovalsResource(self)
+        self.artifacts = _ArtifactsResource(self)
         self.auth = _AuthResource(self)
         self.auto_dream = _AutoDreamResource(self)
         self.budget = _BudgetResource(self)
@@ -468,6 +469,29 @@ class _ApprovalsResource(_Resource):
 
     def reject_request(self, id: str):
         return self._c._request("POST", f"/api/approvals/{quote(str(id), safe='')}/reject")
+
+
+# ── Artifacts Resource ─────────────────────────────────────────
+
+class _ArtifactsResource(_Resource):
+
+    def download_linked_artifact(self, token: str):
+        return self._c._request("GET", f"/api/artifacts/{quote(str(token), safe='')}")
+
+    def list_artifacts(self, session_id: str):
+        return self._c._request("GET", f"/api/sessions/{quote(str(session_id), safe='')}/artifacts")
+
+    def download_artifact(self, session_id: str, path: Any = None, version: Any = None):
+        return self._c._request("GET", f"/api/sessions/{quote(str(session_id), safe='')}/artifacts/download", None, query={"path": path, "version": version})
+
+    def link_artifact(self, session_id: str, **data):
+        return self._c._request("POST", f"/api/sessions/{quote(str(session_id), safe='')}/artifacts/link", data)
+
+    def restore_artifact(self, session_id: str, **data):
+        return self._c._request("POST", f"/api/sessions/{quote(str(session_id), safe='')}/artifacts/restore", data)
+
+    def list_artifact_versions(self, session_id: str, path: Any = None):
+        return self._c._request("GET", f"/api/sessions/{quote(str(session_id), safe='')}/artifacts/versions", None, query={"path": path})
 
 
 # ── Auth Resource ──────────────────────────────────────────────

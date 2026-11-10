@@ -35,6 +35,7 @@ type Client struct {
 	A2A *A2AResource
 	Agents *AgentsResource
 	Approvals *ApprovalsResource
+	Artifacts *ArtifactsResource
 	Auth *AuthResource
 	AutoDream *AutoDreamResource
 	Budget *BudgetResource
@@ -75,6 +76,7 @@ func New(baseURL string) *Client {
 		c.A2A = &A2AResource{client: c}
 		c.Agents = &AgentsResource{client: c}
 		c.Approvals = &ApprovalsResource{client: c}
+		c.Artifacts = &ArtifactsResource{client: c}
 		c.Auth = &AuthResource{client: c}
 		c.AutoDream = &AutoDreamResource{client: c}
 		c.Budget = &BudgetResource{client: c}
@@ -657,6 +659,34 @@ func (r *ApprovalsResource) ModifyRequest(id string, data map[string]interface{}
 
 func (r *ApprovalsResource) RejectRequest(id string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/approvals/%s/reject", url.PathEscape(id)), nil, nil)
+}
+
+// ── Artifacts Resource
+
+type ArtifactsResource struct{ client *Client }
+
+func (r *ArtifactsResource) DownloadLinkedArtifact(token string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/artifacts/%s", url.PathEscape(token)), nil, nil)
+}
+
+func (r *ArtifactsResource) ListArtifacts(session_id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/sessions/%s/artifacts", url.PathEscape(session_id)), nil, nil)
+}
+
+func (r *ArtifactsResource) DownloadArtifact(session_id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/sessions/%s/artifacts/download", url.PathEscape(session_id)), nil, query)
+}
+
+func (r *ArtifactsResource) LinkArtifact(session_id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/sessions/%s/artifacts/link", url.PathEscape(session_id)), data, nil)
+}
+
+func (r *ArtifactsResource) RestoreArtifact(session_id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/sessions/%s/artifacts/restore", url.PathEscape(session_id)), data, nil)
+}
+
+func (r *ArtifactsResource) ListArtifactVersions(session_id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/sessions/%s/artifacts/versions", url.PathEscape(session_id)), nil, query)
 }
 
 // ── Auth Resource

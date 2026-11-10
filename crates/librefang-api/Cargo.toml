@@ -21,6 +21,11 @@ librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
 librefang-llm-drivers = { path = "../librefang-llm-drivers" }
 librefang-memory = { path = "../librefang-memory" }
+# Artifact restore resolves workspace paths through the same sandbox resolver
+# the file tools use, so the HTTP layer cannot write outside an agent's
+# workspace. Direct dependency: this must stay in `librefang-api`, not a
+# kernel re-export.
+librefang-runtime = { path = "../librefang-runtime" }
 librefang-channels = { path = "../librefang-channels", default-features = false }
 librefang-wire = { path = "../librefang-wire" }
 librefang-skills = { path = "../librefang-skills" }
@@ -92,8 +97,6 @@ tempfile = { workspace = true }
 uuid = { workspace = true }
 http-body-util = "0.1"
 librefang-testing = { path = "../librefang-testing" }
-# tool-exec backend integration test (#3332)
-librefang-runtime = { path = "../librefang-runtime" }
 totp-rs = { workspace = true }
 # OIDC `sub` claim enforcement integration test (#5128): generates RSA
 # keypairs in-process, signs JWTs with `jsonwebtoken`, and serves the

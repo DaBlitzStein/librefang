@@ -3,6 +3,7 @@
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::Router;
+use librefang_api::middleware::{AuthenticatedApiUser, UserRole};
 use librefang_api::routes::{
     self,
     artifacts::{sign_link_token, LinkClaims},
@@ -11,7 +12,7 @@ use librefang_api::routes::{
 use librefang_api::server;
 use librefang_memory::artifact_store::{ArtifactRecord, ArtifactStore};
 use librefang_testing::{MockKernelBuilder, TestAppState};
-use librefang_types::agent::{AgentId, AgentManifest, SessionId};
+use librefang_types::agent::{AgentId, AgentManifest, SessionId, UserId};
 use serde_json::Value;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -36,14 +37,7 @@ async fn boot() -> Harness {
 }
 
 fn seed_agent_and_session(h: &Harness) -> (AgentId, SessionId) {
-    let agent = h
-        .state
-        .kernel
-        .spawn_agent_typed(AgentManifest {
-            name: format!("artifact-test-{}", uuid::Uuid::new_v4()),
-            ..AgentManifest::default()
-        })
-        .expect("spawn agent");
+    let agent = spawn_authored(&h.state, &format!("artifact-test-{}", uuid::Uuid::new_v4()));
     let session = h
         .state
         .kernel
@@ -53,16 +47,31 @@ fn seed_agent_and_session(h: &Harness) -> (AgentId, SessionId) {
     (agent, session.id)
 }
 
-fn store(h: &Harness) -> &ArtifactStore {
-    h.state
+fn spawn_authored(state: &AppState, author: &str) -> AgentId {
+    state
+        .kernel
+        .spawn_agent_typed(AgentManifest {
+            name: format!("artifact-test-{}", uuid::Uuid::new_v4()),
+            author: author.to_string(),
+            ..AgentManifest::default()
+        })
+        .expect("spawn agent")
+}
+
+fn store_for(state: &AppState) -> &ArtifactStore {
+    state
         .kernel
         .memory_substrate()
         .artifacts()
         .expect("boot attaches the artifact store")
 }
 
-fn put(h: &Harness, session: SessionId, path: &str, bytes: &[u8]) -> ArtifactRecord {
-    store(h)
+fn store(h: &Harness) -> &ArtifactStore {
+    store_for(&h.state)
+}
+
+fn put_for(state: &AppState, session: SessionId, path: &str, bytes: &[u8]) -> ArtifactRecord {
+    store_for(state)
         .put(
             &session.0.to_string(),
             None,
@@ -71,6 +80,10 @@ fn put(h: &Harness, session: SessionId, path: &str, bytes: &[u8]) -> ArtifactRec
             Some("text/plain"),
         )
         .expect("record artifact")
+}
+
+fn put(h: &Harness, session: SessionId, path: &str, bytes: &[u8]) -> ArtifactRecord {
+    put_for(&h.state, session, path, bytes)
 }
 
 struct Response {
@@ -85,13 +98,12 @@ impl Response {
     }
 }
 
-async fn request(
-    app: &Router,
+fn build_request(
     method: Method,
     uri: &str,
     body: Option<Value>,
     bearer: Option<&str>,
-) -> Response {
+) -> Request<Body> {
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(token) = bearer {
         builder = builder.header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
@@ -103,11 +115,11 @@ async fn request(
         }
         None => Vec::new(),
     };
-    let response = app
-        .clone()
-        .oneshot(builder.body(Body::from(bytes)).expect("request"))
-        .await
-        .expect("oneshot");
+    builder.body(Body::from(bytes)).expect("request")
+}
+
+async fn send(app: &Router, request: Request<Body>) -> Response {
+    let response = app.clone().oneshot(request).await.expect("oneshot");
     let status = response.status();
     let headers = response.headers().clone();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -119,6 +131,28 @@ async fn request(
         headers,
         body,
     }
+}
+
+async fn request(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    bearer: Option<&str>,
+) -> Response {
+    send(app, build_request(method, uri, body, bearer)).await
+}
+
+async fn request_as_user(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    user: AuthenticatedApiUser,
+) -> Response {
+    let mut request = build_request(method, uri, body, None);
+    request.extensions_mut().insert(user);
+    send(app, request).await
 }
 
 fn header(resp: &Response, name: &str) -> String {
@@ -152,6 +186,25 @@ async fn list_versions_and_download_round_trip() {
     assert_eq!(artifacts.len(), 1, "{body}");
     assert_eq!(artifacts[0]["path"], "docs/report.txt");
     assert_eq!(artifacts[0]["version"], 2);
+
+    // The path segment is caller-supplied; store lookups must use the parsed
+    // canonical UUID, or an uppercase spelling returns an empty list.
+    let resp = request(
+        &h.app,
+        Method::GET,
+        &format!("/api/sessions/{}/artifacts", sid.to_uppercase()),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        resp.json()["artifacts"]
+            .as_array()
+            .expect("artifacts")
+            .len(),
+        1
+    );
 
     let resp = request(
         &h.app,
@@ -243,6 +296,101 @@ async fn unknown_session_path_and_version_are_404() {
     )
     .await;
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_owner_session_artifacts_are_404_and_own_session_works() {
+    let h = boot().await;
+    let bob_agent = spawn_authored(&h.state, "Bob");
+    let bob_session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(bob_agent)
+        .expect("create Bob session")
+        .id;
+    put_for(&h.state, bob_session, "bob.txt", b"bob-bytes");
+
+    let alice_agent = spawn_authored(&h.state, "Alice");
+    let alice_session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(alice_agent)
+        .expect("create Alice session")
+        .id;
+    put_for(&h.state, alice_session, "alice.txt", b"alice-bytes");
+
+    let alice = AuthenticatedApiUser {
+        name: "Alice".to_string(),
+        role: UserRole::User,
+        user_id: UserId::from_name("Alice"),
+    };
+    let bob_sid = bob_session.0.to_string();
+    let cases = [
+        (
+            Method::GET,
+            format!("/api/sessions/{bob_sid}/artifacts"),
+            None,
+        ),
+        (
+            Method::GET,
+            format!("/api/sessions/{bob_sid}/artifacts/versions?path=bob.txt"),
+            None,
+        ),
+        (
+            Method::GET,
+            format!("/api/sessions/{bob_sid}/artifacts/download?path=bob.txt&version=1"),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/api/sessions/{bob_sid}/artifacts/restore"),
+            Some(serde_json::json!({"path": "bob.txt", "version": 1})),
+        ),
+        (
+            Method::POST,
+            format!("/api/sessions/{bob_sid}/artifacts/link"),
+            Some(serde_json::json!({"path": "bob.txt"})),
+        ),
+    ];
+    for (method, uri, body) in cases {
+        let resp = request_as_user(&h.app, method.clone(), &uri, body, alice.clone()).await;
+        assert_eq!(
+            resp.status,
+            StatusCode::NOT_FOUND,
+            "{method} {uri} must not disclose another owner's session"
+        );
+    }
+
+    let alice_sid = alice_session.0.to_string();
+    let resp = request_as_user(
+        &h.app,
+        Method::GET,
+        &format!("/api/sessions/{alice_sid}/artifacts"),
+        None,
+        alice.clone(),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        resp.json()["artifacts"]
+            .as_array()
+            .expect("artifacts")
+            .len(),
+        1
+    );
+
+    let resp = request_as_user(
+        &h.app,
+        Method::GET,
+        &format!("/api/sessions/{alice_sid}/artifacts/download?path=alice.txt&version=1"),
+        None,
+        alice,
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(resp.body, b"alice-bytes");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -375,6 +523,38 @@ async fn restore_refuses_a_missing_workspace() {
     )
     .await;
     assert_eq!(resp.status, StatusCode::CONFLICT);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_refuses_the_agent_manifest() {
+    let h = boot().await;
+    let (agent, session) = seed_agent_and_session(&h);
+    let sid = session.0.to_string();
+    let workspace = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent)
+        .expect("agent registered")
+        .manifest
+        .workspace
+        .expect("spawned agent has a workspace");
+    put(&h, session, "agent.toml", b"pwned = true\n");
+
+    let resp = request(
+        &h.app,
+        Method::POST,
+        &format!("/api/sessions/{sid}/artifacts/restore"),
+        Some(serde_json::json!({"path": "agent.toml", "version": 1})),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::FORBIDDEN);
+    assert_ne!(
+        std::fs::read(workspace.join("agent.toml")).unwrap_or_default(),
+        b"pwned = true\n",
+        "an artifact must not overwrite the agent's own manifest"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -684,6 +864,16 @@ async fn signed_url_is_public_while_management_routes_require_auth() {
         Method::POST,
         &format!("/api/sessions/{sid}/artifacts/link"),
         Some(serde_json::json!({"path": "public.txt"})),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+
+    let resp = request(
+        &h.app,
+        Method::POST,
+        &format!("/api/sessions/{sid}/artifacts/restore"),
+        Some(serde_json::json!({"path": "public.txt", "version": 1})),
         None,
     )
     .await;
