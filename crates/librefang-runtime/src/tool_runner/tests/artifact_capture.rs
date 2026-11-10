@@ -207,6 +207,102 @@ async fn editor_buffer_write_is_recorded_even_before_save() {
     assert_eq!(artifacts[0].2, b"hi\n");
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn call_tool_raw_with_capture(
+    tool_name: &str,
+    input: serde_json::Value,
+    kernel: &Arc<dyn KernelHandle>,
+    workspace_root: Option<&Path>,
+    session: SessionId,
+    exec_policy: Option<&librefang_types::config::ExecPolicy>,
+    capture_artifacts: bool,
+) -> ToolResult {
+    let ctx = ToolExecContext {
+        kernel: Some(kernel),
+        allowed_tools: None,
+        available_tools: None,
+        caller_agent_id: Some("agent-1"),
+        skill_registry: None,
+        allowed_skills: None,
+        mcp_connections: None,
+        web_ctx: None,
+        browser_ctx: None,
+        allowed_env_vars: None,
+        workspace_root,
+        media_engine: None,
+        media_drivers: None,
+        exec_policy,
+        tts_engine: None,
+        tts_config: None,
+        docker_config: None,
+        process_manager: None,
+        process_registry: None,
+        sender_id: None,
+        channel: None,
+        chat_id: None,
+        sender_account_id: None,
+        session_id: Some(session),
+        capture_artifacts,
+        spill_threshold_bytes: 0,
+        max_artifact_bytes: 0,
+        checkpoint_manager: None,
+        interrupt: None,
+        dangerous_command_checker: None,
+        acting_principal: None,
+    };
+    execute_tool_raw("capture-id", tool_name, &input, &ctx).await
+}
+
+/// `capture_artifacts = false` (the incognito path) must not arm the sweep
+/// marker, while the same dispatch with capture on does.
+#[tokio::test]
+async fn disabled_capture_does_not_arm_the_sweep_marker() {
+    let workspace = tempfile::tempdir().unwrap();
+    let capture = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = capture.clone();
+    let full_exec = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Full,
+        ..Default::default()
+    };
+    let input = serde_json::json!({"command": "echo hi > made.txt"});
+
+    // Control: capture enabled arms the marker for this session.
+    let armed = SessionId::new();
+    let result = call_tool_raw_with_capture(
+        "shell_exec",
+        input.clone(),
+        &kernel,
+        Some(workspace.path()),
+        armed,
+        Some(&full_exec),
+        true,
+    )
+    .await;
+    assert!(!result.is_error, "{}", result.content);
+    assert!(
+        take_shell_ran(armed),
+        "capture=true must arm the end-of-turn sweep marker"
+    );
+
+    // The incognito path: identical dispatch, no marker.
+    let quiet = SessionId::new();
+    let result = call_tool_raw_with_capture(
+        "shell_exec",
+        input,
+        &kernel,
+        Some(workspace.path()),
+        quiet,
+        Some(&full_exec),
+        false,
+    )
+    .await;
+    assert!(!result.is_error, "{}", result.content);
+    assert!(
+        !take_shell_ran(quiet),
+        "capture=false must not arm a marker, so no sweep can follow"
+    );
+}
+
 /// A turn that only ran a non-command tool must not walk the workspace.
 #[tokio::test]
 async fn sweep_is_not_requested_when_no_shell_tool_ran() {

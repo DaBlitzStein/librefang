@@ -206,6 +206,17 @@ pub struct DeferredToolExecution {
     ///    routing on resume, which is the historical behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<crate::agent::SessionId>,
+    /// Whether the turn that produced this deferred call was incognito.
+    ///
+    /// An incognito turn's session is never persisted, so neither its live
+    /// file writes nor a deferred one resumed later may record artifacts.
+    /// Carried on the record because the approval can be resolved after the
+    /// originating turn (and its loop options) is long gone.
+    ///
+    /// `#[serde(default)]` keeps pre-existing rows readable: they deserialise
+    /// as `false`, the pre-incognito capture behaviour.
+    #[serde(default)]
+    pub incognito: bool,
 }
 
 #[inline]
@@ -1464,12 +1475,17 @@ mod tests {
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
             force_human: false,
             session_id: None,
+            incognito: true,
         };
         let json = serde_json::to_string(&deferred).unwrap();
         let deserialized: DeferredToolExecution = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.agent_id, "agent-1");
         assert_eq!(deserialized.tool_use_id, "toolu_abc");
         assert_eq!(deserialized.tool_name, "shell_exec");
+        assert!(
+            deserialized.incognito,
+            "incognito must survive the deferred round trip"
+        );
         assert_eq!(
             deserialized.allowed_env_vars,
             Some(vec!["OPENAI_API_KEY".to_string()])
@@ -1479,5 +1495,12 @@ mod tests {
             Some(crate::config::ExecSecurityMode::Full)
         );
         assert_eq!(deserialized.sender_id, Some("user-123".to_string()));
+
+        // Rows persisted before `incognito` existed must still load, as the
+        // pre-incognito behaviour: capture on.
+        let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+        legacy.as_object_mut().unwrap().remove("incognito");
+        let legacy: DeferredToolExecution = serde_json::from_value(legacy).unwrap();
+        assert!(!legacy.incognito);
     }
 }

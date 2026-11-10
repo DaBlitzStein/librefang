@@ -1,10 +1,21 @@
-//! T3.3 at the loop boundary: a turn that writes a file or runs a command
-//! reaches the kernel's `ArtifactRecorder`, and an incognito turn reaches it
-//! not at all.
+//! T3.3 at the loop boundary.
 //!
-//! These drive the real `run_agent_loop` with a scripted driver, so deleting
-//! the capture hook from `run_agent_loop` (or the incognito guard around it)
-//! fails here rather than only in a unit test of the helper.
+//! What each test pins:
+//!
+//! - `normal_turn_records_a_file_write_as_an_artifact` — the loop's immediate
+//!   capture path reaches the recorder with the exact bytes and path.
+//! - `incognito_turn_records_nothing` — `LoopOptions::incognito` disables that
+//!   path while the tool itself still runs.
+//! - `shell_turn_requests_a_sweep_and_incognito_does_not` — the end-of-turn
+//!   hook calls the recorder's sweep exactly when a command ran and the turn
+//!   is not incognito.
+//! - `incognito_loop_end_consumes_a_seeded_marker_without_sweeping` — an
+//!   incognito end consumes a marker that is already set without sweeping, so
+//!   a stale flag cannot leak into a later turn.
+//!
+//! Deleting the sweep hook fails the third. The dispatch-level
+//! `capture_artifacts = false` guard on the marker itself is pinned in
+//! `tool_runner::tests::artifact_capture`.
 
 use super::*;
 use librefang_kernel_handle::ApiAuthSnapshot;
@@ -130,9 +141,9 @@ async fn run_one_turn(
     driver: ToolThenTextDriver,
     tool_name: &str,
     incognito: bool,
+    mut session: librefang_memory::session::Session,
 ) -> librefang_memory::session::Session {
     let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
-    let mut session = super::integration::fresh_session();
     let manifest = manifest_with_exec();
     let tool = fake_tool(tool_name);
     let opts = LoopOptions {
@@ -186,7 +197,15 @@ async fn normal_turn_records_a_file_write_as_an_artifact() {
         serde_json::json!({"path": "notes/a.md", "content": "hi\n"}),
     );
 
-    let session = run_one_turn(&kernel, workspace.path(), driver, "file_write", false).await;
+    let session = run_one_turn(
+        &kernel,
+        workspace.path(),
+        driver,
+        "file_write",
+        false,
+        super::integration::fresh_session(),
+    )
+    .await;
 
     let artifacts = capture.artifacts.lock().unwrap();
     assert_eq!(artifacts.len(), 1, "one successful write → one artifact");
@@ -206,7 +225,15 @@ async fn incognito_turn_records_nothing() {
         serde_json::json!({"path": "notes/a.md", "content": "hi\n"}),
     );
 
-    run_one_turn(&kernel, workspace.path(), driver, "file_write", true).await;
+    run_one_turn(
+        &kernel,
+        workspace.path(),
+        driver,
+        "file_write",
+        true,
+        super::integration::fresh_session(),
+    )
+    .await;
 
     assert!(
         capture.artifacts.lock().unwrap().is_empty(),
@@ -234,8 +261,15 @@ async fn shell_turn_requests_a_sweep_and_incognito_does_not() {
             serde_json::json!({"command": "echo hi > made.txt"}),
         );
 
-        let session =
-            run_one_turn(&kernel, workspace.path(), driver, "shell_exec", incognito).await;
+        let session = run_one_turn(
+            &kernel,
+            workspace.path(),
+            driver,
+            "shell_exec",
+            incognito,
+            super::integration::fresh_session(),
+        )
+        .await;
 
         let sweeps = capture.sweeps.lock().unwrap();
         if incognito {
@@ -248,6 +282,37 @@ async fn shell_turn_requests_a_sweep_and_incognito_does_not() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn incognito_loop_end_consumes_a_seeded_marker_without_sweeping() {
+    let workspace = tempfile::tempdir().unwrap();
+    let capture = Arc::new(CaptureKernel::default());
+    let kernel: Arc<dyn librefang_kernel_handle::KernelHandle> = capture.clone();
+    let driver = ToolThenTextDriver::new("file_read", serde_json::json!({"path": "missing.txt"}));
+    let session = super::integration::fresh_session();
+    // A marker can already be set when the turn begins (it was seeded here
+    // directly; a deferred resume is the production shape).
+    crate::artifact_capture::note_shell_tool(Some(session.id));
+
+    let session = run_one_turn(
+        &kernel,
+        workspace.path(),
+        driver,
+        "file_read",
+        true,
+        session,
+    )
+    .await;
+
+    assert!(
+        capture.sweeps.lock().unwrap().is_empty(),
+        "an incognito turn must not sweep"
+    );
+    assert!(
+        !crate::artifact_capture::take_shell_ran(session.id),
+        "the incognito loop end must consume the marker, not leave it for a later turn"
+    );
 }
 
 // ---- role-trait boilerplate (same shape as `vision_gate::VisionKernel`) ----
