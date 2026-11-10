@@ -202,6 +202,7 @@ impl librefang_kernel_handle::SessionWriter for RosterKernel {
 }
 impl librefang_kernel_handle::AcpFsBridge for RosterKernel {}
 impl librefang_kernel_handle::AcpTerminalBridge for RosterKernel {}
+impl librefang_kernel_handle::ArtifactRecorder for RosterKernel {}
 
 /// The rows the real `ChannelSenderHandle` builds out of `RosterStore::members`, in the order that store returns them (display name, then user id).
 impl ChannelSender for RosterKernel {
@@ -261,6 +262,7 @@ fn make_ctx<'a>(
         interrupt: None,
         dangerous_command_checker: None,
         acting_principal: None,
+        capture_artifacts: true,
     }
 }
 

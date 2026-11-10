@@ -2117,6 +2117,13 @@ impl LibreFangKernel {
             // before this field existed (pre-#3313 H1) — those still
             // resume, just without ACP routing.
             session_id: deferred.session_id,
+            // A deferred resume is a real approved call, never an incognito
+            // turn, so its writes are capturable. Its shell writes are not
+            // swept by this call (there is no loop end after it); the next
+            // turn on the session consumes the flag and sweeps from *its*
+            // start, which is later than the resume — see
+            // `artifact_capture::note_shell_tool`.
+            capture_artifacts: true,
             spill_threshold_bytes: cfg.tool_results.spill_threshold_bytes,
             max_artifact_bytes: cfg.tool_results.max_artifact_bytes,
             checkpoint_manager: self.checkpoint_manager.as_ref(),

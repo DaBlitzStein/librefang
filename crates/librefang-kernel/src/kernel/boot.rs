@@ -526,6 +526,12 @@ impl LibreFangKernel {
         // `[memory]` is restart-required in `build_reload_plan`, so a value read once here cannot go stale relative to the config on disk.
         substrate.set_max_episodic_chars(config.memory.max_episodic_chars);
 
+        // Session artifact capture: content-addressed blobs under
+        // `[artifacts] blob_dir` or `<home>/artifacts`. Attached before the
+        // substrate is shared so the runtime's ArtifactRecorder writes
+        // through the same pool as every other store.
+        substrate.attach_artifact_store(config.artifacts.resolved_blob_dir(&config.home_dir));
+
         // Optionally attach an external vector store backend.
         if let Some(ref backend) = config.memory.vector_backend {
             match backend.as_str() {

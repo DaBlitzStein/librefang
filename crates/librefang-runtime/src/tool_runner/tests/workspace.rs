@@ -686,6 +686,7 @@ impl AcpFsBridge for NamedWsKernel {
     }
 }
 impl AcpTerminalBridge for NamedWsKernel {}
+impl ArtifactRecorder for NamedWsKernel {}
 
 // ---- END role-trait impls (#3746) ----
 

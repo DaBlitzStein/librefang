@@ -1708,6 +1708,9 @@ pub async fn mcp_http(
             // to an identity nothing verified, so a tool run through this
             // bridge records what it creates as unowned.
             None,
+            // Not an incognito turn; with no session id there is nothing to
+            // capture under anyway.
+            true,
         )
         .await;
 

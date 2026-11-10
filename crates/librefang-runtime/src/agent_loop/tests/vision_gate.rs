@@ -286,6 +286,7 @@ impl librefang_kernel_handle::GoalControl for VisionKernel {}
 impl librefang_kernel_handle::ToolPolicy for VisionKernel {}
 impl librefang_kernel_handle::AcpFsBridge for VisionKernel {}
 impl librefang_kernel_handle::AcpTerminalBridge for VisionKernel {}
+impl librefang_kernel_handle::ArtifactRecorder for VisionKernel {}
 
 fn manifest_on(model: &str) -> AgentManifest {
     let mut manifest = super::integration::test_manifest();

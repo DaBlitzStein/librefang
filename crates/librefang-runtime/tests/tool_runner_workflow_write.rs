@@ -276,6 +276,7 @@ impl librefang_kernel_handle::SessionWriter for WorkflowWriteStubKernel {
 
 impl librefang_kernel_handle::AcpFsBridge for WorkflowWriteStubKernel {}
 impl librefang_kernel_handle::AcpTerminalBridge for WorkflowWriteStubKernel {}
+impl librefang_kernel_handle::ArtifactRecorder for WorkflowWriteStubKernel {}
 
 #[async_trait]
 impl WorkflowRunner for WorkflowWriteStubKernel {
@@ -385,6 +386,7 @@ fn make_ctx(kernel: &Arc<dyn KernelHandle>) -> ToolExecContext<'_> {
         interrupt: None,
         dangerous_command_checker: None,
         acting_principal: None,
+        capture_artifacts: true,
     }
 }
 
@@ -726,6 +728,7 @@ fn make_ctx_owned<'a>(
 ) -> ToolExecContext<'a> {
     ToolExecContext {
         acting_principal,
+        capture_artifacts: true,
         ..make_ctx(kernel)
     }
 }

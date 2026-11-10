@@ -97,6 +97,13 @@ pub struct ToolExecContext<'a> {
     /// upstream agent-loop callers pass it as a `Option<&str>` UUID
     /// string that we parse here.
     pub session_id: Option<librefang_types::agent::SessionId>,
+    /// Whether this call's writes may be recorded as session artifacts.
+    ///
+    /// `false` for incognito turns, whose session is documented as never
+    /// persisted: the tool still runs, but it leaves no row and no blob
+    /// behind. Explicit rather than inferred from `session_id`, because an
+    /// incognito turn still has one.
+    pub capture_artifacts: bool,
     /// Artifact spill threshold from `[tool_results] spill_threshold_bytes`.
     /// Tool results larger than this are written to the artifact store.
     /// `0` means use the compiled default (16 KiB).
@@ -320,6 +327,7 @@ async fn dispatch_tool_call(
         chat_id,
         sender_account_id,
         session_id,
+        capture_artifacts,
         spill_threshold_bytes,
         max_artifact_bytes,
         checkpoint_manager,
@@ -327,6 +335,15 @@ async fn dispatch_tool_call(
         dangerous_command_checker,
         acting_principal,
     } = ctx;
+
+    // T3.3: any command tool that was dispatched may have written into the
+    // workspace, even when it later failed. Mark the session so the agent
+    // loop runs its end-of-turn sweep; a call with no session id (MCP bridge)
+    // is ignored. Incognito turns are excluded here and again at the sweep
+    // site, so a throwaway session never produces a row.
+    if *capture_artifacts && crate::artifact_capture::is_shell_tool(tool_name) {
+        crate::artifact_capture::note_shell_tool(*session_id);
+    }
 
     // #8051: the kernel advertises every named workspace to the model as
     // `@name` in TOOLS.md, so expand that form here — once, before any arm
@@ -534,6 +551,7 @@ async fn dispatch_tool_call(
                 return ToolResult::error(tool_use_id.to_string(), violation);
             }
             maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
+            let extra_refs: Vec<&Path> = writable.iter().map(|p| p.as_path()).collect();
             // ACP routing: if an editor is attached to this session,
             // route the write through `fs/write_text_file` so it goes
             // into the editor's buffer (with its own undo stack and
@@ -555,6 +573,20 @@ async fn dispatch_tool_call(
                     let path = std::path::PathBuf::from(path_str);
                     match client.write_text_file(path, content.to_string()).await {
                         Ok(()) => {
+                            // T3.3: an editor buffer has no on-disk bytes, but
+                            // the input carries exactly what the buffer now
+                            // holds, so record that. The path resolver runs
+                            // here too (the buffer may not exist on disk yet).
+                            if *capture_artifacts {
+                                crate::artifact_capture::capture_written_bytes(
+                                    *kernel,
+                                    *session_id,
+                                    *workspace_root,
+                                    Some(path_str),
+                                    &extra_refs,
+                                    content.as_bytes(),
+                                );
+                            }
                             return ToolResult::ok(
                                 tool_use_id.to_string(),
                                 format!("Wrote {path_str} via editor"),
@@ -572,8 +604,24 @@ async fn dispatch_tool_call(
                     }
                 }
             }
-            let extra_refs: Vec<&Path> = writable.iter().map(|p| p.as_path()).collect();
-            tool_file_write(input, *workspace_root, &extra_refs).await
+            let result = tool_file_write(input, *workspace_root, &extra_refs).await;
+            if *capture_artifacts && result.is_ok() {
+                // T3.3 immediate capture: the bytes are already in the input,
+                // so this is a hash + blob write, not a second disk read.
+                crate::artifact_capture::capture_written_bytes(
+                    *kernel,
+                    *session_id,
+                    *workspace_root,
+                    input.get("path").and_then(|v| v.as_str()),
+                    &extra_refs,
+                    input
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .as_bytes(),
+                );
+            }
+            result
         }
         "file_list" => {
             let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
@@ -662,7 +710,19 @@ async fn dispatch_tool_call(
             // set.
             let ro_prefixes = named_ws_prefixes_readonly(*kernel, *caller_agent_id);
             let ro_refs: Vec<&Path> = ro_prefixes.iter().map(|p| p.as_path()).collect();
-            tool_apply_patch(input, *workspace_root, &extra_refs, &ro_refs).await
+            let result = tool_apply_patch(input, *workspace_root, &extra_refs, &ro_refs).await;
+            if *capture_artifacts && result.is_ok() {
+                // T3.3 immediate capture: `apply_patch` only returns a summary,
+                // so read each written target back from disk.
+                crate::artifact_capture::capture_patch_targets(
+                    *kernel,
+                    *session_id,
+                    *workspace_root,
+                    input.get("patch").and_then(|v| v.as_str()),
+                    &extra_refs,
+                );
+            }
+            result
         }
 
         // Web tools (upgraded: multi-provider search, SSRF-protected fetch)
@@ -826,14 +886,26 @@ async fn dispatch_tool_call(
             let extra_refs: Vec<&Path> = writable.iter().map(|p| p.as_path()).collect();
             // `web_fetch_to_file` is still stringly (un-migrated); wrap its
             // error at the dispatch boundary so the table stays `ToolError`.
-            crate::web_fetch_to_file::tool_web_fetch_to_file(
+            let result = crate::web_fetch_to_file::tool_web_fetch_to_file(
                 input,
                 *web_ctx,
                 *workspace_root,
                 &extra_refs,
             )
             .await
-            .map_err(ToolError::upstream_msg)
+            .map_err(ToolError::upstream_msg);
+            if *capture_artifacts && result.is_ok() {
+                // T3.3 immediate capture: a download is a file write like any
+                // other, so its bytes belong in the session's artifact store.
+                crate::artifact_capture::capture_file_from_disk(
+                    *kernel,
+                    *session_id,
+                    *workspace_root,
+                    input.get("dest_path").and_then(|v| v.as_str()),
+                    &extra_refs,
+                );
+            }
+            result
         }
         "web_search" => match input["query"].as_str() {
             None => Err(ToolError::MissingParameter("query")),
@@ -1829,6 +1901,9 @@ pub async fn execute_tool(
         // what these callers create is recorded unowned rather than attributed
         // to whichever agent happened to run the tool.
         None,
+        // Out-of-band callers are never incognito turns, so their writes are
+        // capturable when they carry a session id.
+        true,
     )
     .await
 }
@@ -1884,6 +1959,10 @@ pub async fn execute_tool_with_sender_account(
     // onto the artifacts the `*_create` tools persist; never read as a
     // permission by this layer.
     acting_principal: Option<librefang_types::principal::Principal>,
+    // When false, this call's writes are not recorded as session artifacts —
+    // an incognito turn, whose session is documented as never persisted.
+    // Separate from `session_id` because an incognito turn still has one.
+    capture_artifacts: bool,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -2148,6 +2227,7 @@ pub async fn execute_tool_with_sender_account(
         chat_id,
         sender_account_id,
         session_id: parsed_session_id,
+        capture_artifacts,
         spill_threshold_bytes,
         max_artifact_bytes,
         checkpoint_manager,

@@ -227,6 +227,7 @@ impl librefang_kernel_handle::SessionWriter for OverrideKernel {
 
 impl librefang_kernel_handle::AcpFsBridge for OverrideKernel {}
 impl librefang_kernel_handle::AcpTerminalBridge for OverrideKernel {}
+impl librefang_kernel_handle::ArtifactRecorder for OverrideKernel {}
 
 impl librefang_kernel_handle::CatalogQuery for OverrideKernel {
     fn proactive_memory_extraction_model_for(&self, agent_id: &str) -> Option<String> {

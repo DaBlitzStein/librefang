@@ -338,6 +338,7 @@ impl librefang_kernel_handle::SessionWriter for RosterKernel {
 
 impl librefang_kernel_handle::AcpFsBridge for RosterKernel {}
 impl librefang_kernel_handle::AcpTerminalBridge for RosterKernel {}
+impl librefang_kernel_handle::ArtifactRecorder for RosterKernel {}
 
 // --- Helpers ---------------------------------------------------------------
 
@@ -382,6 +383,7 @@ fn turn_ctx<'a>(
         interrupt: None,
         dangerous_command_checker: None,
         acting_principal: None,
+        capture_artifacts: true,
     }
 }
 

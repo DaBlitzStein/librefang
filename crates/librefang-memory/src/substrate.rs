@@ -27,7 +27,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,6 +75,10 @@ pub struct MemorySubstrate {
     roster: RosterStore,
     channel_bindings: ChannelBindingStore,
     workflow_store: WorkflowStore,
+    /// Session artifact store. `None` until the kernel boot path attaches it
+    /// with `[artifacts] blob_dir` (or `<home>/artifacts`); test substrates
+    /// that never attach one make artifact capture a no-op.
+    artifacts: Option<crate::artifact_store::ArtifactStore>,
     chunk_config: ChunkConfig,
     /// Upper bound, in characters, on the text of a single episodic memory row written by the agent loop's per-turn writer (#7911).
     /// Zero disables the cap.
@@ -336,6 +340,7 @@ impl MemorySubstrate {
             roster: RosterStore::new(pool.clone()),
             channel_bindings: ChannelBindingStore::new(pool.clone()),
             workflow_store: WorkflowStore::new(pool.clone()),
+            artifacts: None,
             consolidation: ConsolidationEngine::new(pool, decay_rate),
             chunk_config,
             max_episodic_chars: DEFAULT_MAX_EPISODIC_CHARS,
@@ -374,6 +379,7 @@ impl MemorySubstrate {
             roster: RosterStore::new(pool.clone()),
             channel_bindings: ChannelBindingStore::new(pool.clone()),
             workflow_store: WorkflowStore::new(pool.clone()),
+            artifacts: None,
             consolidation: ConsolidationEngine::new(pool, decay_rate),
             chunk_config,
             max_episodic_chars: DEFAULT_MAX_EPISODIC_CHARS,
@@ -403,6 +409,24 @@ impl MemorySubstrate {
     /// Get a reference to the workflow run store.
     pub fn workflow_store(&self) -> &WorkflowStore {
         &self.workflow_store
+    }
+
+    /// Attach the session artifact store, rooted at `blob_root`.
+    ///
+    /// Called once from the kernel boot path with `[artifacts] blob_dir` or
+    /// `<home>/artifacts`. Until it is called, [`Self::artifacts`] is `None`
+    /// and the runtime's artifact capture no-ops, which is what every test
+    /// substrate that does not ask for one gets.
+    pub fn attach_artifact_store(&mut self, blob_root: PathBuf) {
+        self.artifacts = Some(crate::artifact_store::ArtifactStore::new(
+            self.pool.clone(),
+            blob_root,
+        ));
+    }
+
+    /// The session artifact store, when the boot path attached one.
+    pub fn artifacts(&self) -> Option<&crate::artifact_store::ArtifactStore> {
+        self.artifacts.as_ref()
     }
 
     /// Force a WAL checkpoint on the shared connection pool.
@@ -2334,6 +2358,22 @@ impl Memory for MemorySubstrate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Artifact capture no-ops until the boot path attaches a store; once
+    /// attached, the shared pool backs it.
+    #[test]
+    fn artifact_store_is_absent_until_attached() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        assert!(substrate.artifacts().is_none());
+
+        substrate.attach_artifact_store(tmp.path().join("artifacts"));
+
+        let store = substrate.artifacts().expect("store attached");
+        let record = store.put("s1", None, "notes/a.md", b"hi", None).unwrap();
+        assert_eq!(record.size_bytes, 2);
+        assert_eq!(store.read("s1", "notes/a.md", 1).unwrap().unwrap().1, b"hi");
+    }
 
     /// #8645: a second conversation's compaction must not remove the first one's
     /// summary.

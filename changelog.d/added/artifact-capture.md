@@ -1,0 +1,1 @@
+Capture the files an agent's turn writes into its workspace. Successful `file_write`, `apply_patch` and `web_fetch_to_file` calls record their bytes into the session's artifact store immediately; when a shell/command tool ran during the turn, the loop also sweeps the workspace for files modified since the turn began. Turns with no command skip the sweep. (@DaBlitzStein)

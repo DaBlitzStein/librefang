@@ -1896,6 +1896,7 @@ mod tests {
     // `librefang-runtime` tests, not here.
     impl librefang_kernel_handle::AcpFsBridge for RecordingKernel {}
     impl librefang_kernel_handle::AcpTerminalBridge for RecordingKernel {}
+    impl librefang_kernel_handle::ArtifactRecorder for RecordingKernel {}
     impl librefang_kernel_handle::ApiAuth for RecordingKernel {
         fn auth_snapshot(&self) -> librefang_kernel_handle::ApiAuthSnapshot {
             librefang_kernel_handle::ApiAuthSnapshot::default()
