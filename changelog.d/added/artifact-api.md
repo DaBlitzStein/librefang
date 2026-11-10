@@ -1,0 +1,1 @@
+Expose session artifacts over HTTP: list the latest version per path, browse version history, download a version, restore a version into the agent workspace, and mint short-lived HMAC-signed public download links. (@DaBlitzStein)

@@ -256,6 +256,9 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/favicon.ico", Expect::AlwaysPublic),
     re("/logo.png", Expect::AlwaysPublic),
     re("/.well-known/agent.json", Expect::AlwaysPublic),
+    // Signed artifact link. The token is the credential; management routes
+    // under `/api/sessions/{id}/artifacts` stay authed (below).
+    re("/api/artifacts/some-token", Expect::AlwaysPublic),
     re("/api/health", Expect::AlwaysPublic),
     // #6633: readiness probe. Public for the same reason `/api/health` is —
     // the kubelet that issues a `readinessProbe` carries no credential.
@@ -351,6 +354,11 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     // The minimal-payload `/api/health` (above) is what `<OfflineBanner />`
     // polls pre-auth (see `dashboard/src/lib/queries/runtime.ts`).
     re("/api/health/detail", Expect::Authed),
+    // Session artifact management stays behind the session route's auth and
+    // owner checks; only `/api/artifacts/{token}` is public.
+    re("/api/sessions/some-id/artifacts", Expect::Authed),
+    re("/api/sessions/some-id/artifacts/versions", Expect::Authed),
+    re("/api/sessions/some-id/artifacts/download", Expect::Authed),
     // Security regression: /api/mcp/servers/{name} and /auth/status must NOT be
     // publicly reachable — the server config (including env vars) and OAuth token
     // state are sensitive. Only /auth/callback is public (via is_mcp_oauth_callback).

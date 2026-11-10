@@ -1635,6 +1635,10 @@ pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
 /// Routes that are public on **GET only**, regardless of auth config.
 pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
     PublicRoute::exact_get("/.well-known/agent.json"),
+    // Signed artifact links. The token is the credential; the management
+    // routes under `/api/sessions/{id}/artifacts` stay behind the normal
+    // session auth and owner checks.
+    PublicRoute::prefix_get("/api/artifacts/"),
     // A2A: agent listing is public so external callers can discover agents
     // without a bearer token (A2A spec intent). All other /a2a/* paths require
     // auth (Bug #3781).
