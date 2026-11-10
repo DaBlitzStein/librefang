@@ -32,6 +32,7 @@ class LibreFang {
     this.a2a = new A2AResource(this);
     this.agents = new AgentsResource(this);
     this.approvals = new ApprovalsResource(this);
+    this.artifacts = new ArtifactsResource(this);
     this.auth = new AuthResource(this);
     this.auto_dream = new AutoDreamResource(this);
     this.budget = new BudgetResource(this);
@@ -502,6 +503,36 @@ class ApprovalsResource {
 
   async rejectRequest(id) {
     return this._c._request("POST", `/api/approvals/${encodeURIComponent(String(id))}/reject`);
+  }
+}
+
+// ── Artifacts Resource
+
+class ArtifactsResource {
+  constructor(client) { this._c = client; }
+
+  async downloadLinkedArtifact(token) {
+    return this._c._request("GET", `/api/artifacts/${encodeURIComponent(String(token))}`);
+  }
+
+  async listArtifacts(session_id) {
+    return this._c._request("GET", `/api/sessions/${encodeURIComponent(String(session_id))}/artifacts`);
+  }
+
+  async downloadArtifact(session_id, query) {
+    return this._c._request("GET", `/api/sessions/${encodeURIComponent(String(session_id))}/artifacts/download`, undefined, query);
+  }
+
+  async linkArtifact(session_id, data) {
+    return this._c._request("POST", `/api/sessions/${encodeURIComponent(String(session_id))}/artifacts/link`, data, undefined);
+  }
+
+  async restoreArtifact(session_id, data) {
+    return this._c._request("POST", `/api/sessions/${encodeURIComponent(String(session_id))}/artifacts/restore`, data, undefined);
+  }
+
+  async listArtifactVersions(session_id, query) {
+    return this._c._request("GET", `/api/sessions/${encodeURIComponent(String(session_id))}/artifacts/versions`, undefined, query);
   }
 }
 

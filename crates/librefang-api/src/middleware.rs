@@ -915,6 +915,18 @@ fn metric_path_label(matched_path: Option<&str>) -> &str {
     matched_path.unwrap_or(UNMATCHED_METRIC_PATH)
 }
 
+/// Resolve the path written to the access-log line and the `http_request`
+/// span.
+///
+/// A route template (`/api/artifacts/{token}`) is preferred whenever axum
+/// matched one: raw URI path segments can be credentials — a signed artifact
+/// link is valid until it expires, so logging `/api/artifacts/<token>` would
+/// put a live bearer secret in logs and OTel traces. Unmatched requests have
+/// no template and keep the raw path for diagnosis.
+fn logged_path<'a>(matched_path: Option<&'a str>, raw_path: &'a str) -> &'a str {
+    matched_path.unwrap_or(raw_path)
+}
+
 pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response<Body> {
     let request_id = uuid::Uuid::new_v4().to_string();
     let method = request.method().clone();
@@ -934,6 +946,11 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
         .get::<axum::extract::MatchedPath>()
         .map(|m| m.as_str().to_string());
 
+    // Logged path = route template when matched, raw URI only for 404s. A
+    // signed artifact link is a bearer credential embedded in the path, so
+    // `/api/artifacts/{token}` must never be replaced by the concrete token.
+    let log_path = logged_path(matched_path.as_deref(), &uri);
+
     // #3639: stash the id in request extensions BEFORE the handler runs so
     // the [`crate::extractors::RequestId`] extractor (and any handler that
     // reads the extension directly) sees the same value that surfaces on
@@ -952,7 +969,7 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
         "http_request",
         request_id = %request_id,
         method = %method,
-        path = %uri,
+        path = %log_path,
     );
 
     let mut response = next.run(request).instrument(request_span).await;
@@ -982,7 +999,7 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
         error!(
             request_id = %request_id,
             method = %method,
-            path = %uri,
+            path = %log_path,
             status = status,
             latency_ms = elapsed.as_millis() as u64,
             agent_id = %agent_id_field,
@@ -1003,11 +1020,11 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
         // see `routes/config.rs::prometheus_metrics`), so a 401 here
         // is "you don't have the token", not "you're attacking us".
         // Genuinely interesting 4xx on other paths still WARNs.
-        if is_noisy_metrics_unauth(status, &uri) {
+        if is_noisy_metrics_unauth(status, log_path) {
             debug!(
                 request_id = %request_id,
                 method = %method,
-                path = %uri,
+                path = %log_path,
                 status = status,
                 latency_ms = elapsed.as_millis() as u64,
                 agent_id = %agent_id_field,
@@ -1018,7 +1035,7 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
             warn!(
                 request_id = %request_id,
                 method = %method,
-                path = %uri,
+                path = %log_path,
                 status = status,
                 latency_ms = elapsed.as_millis() as u64,
                 agent_id = %agent_id_field,
@@ -1030,7 +1047,7 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
         debug!(
             request_id = %request_id,
             method = %method,
-            path = %uri,
+            path = %log_path,
             status = status,
             latency_ms = elapsed.as_millis() as u64,
             agent_id = %agent_id_field,
@@ -1041,7 +1058,7 @@ pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response
         info!(
             request_id = %request_id,
             method = %method,
-            path = %uri,
+            path = %log_path,
             status = status,
             latency_ms = elapsed.as_millis() as u64,
             agent_id = %agent_id_field,
@@ -1635,14 +1652,15 @@ pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
 /// Routes that are public on **GET only**, regardless of auth config.
 pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
     PublicRoute::exact_get("/.well-known/agent.json"),
-    // Signed artifact links. The token is the credential; the management
-    // routes under `/api/sessions/{id}/artifacts` stay behind the normal
-    // session auth and owner checks.
-    PublicRoute::prefix_get("/api/artifacts/"),
     // A2A: agent listing is public so external callers can discover agents
     // without a bearer token (A2A spec intent). All other /a2a/* paths require
     // auth (Bug #3781).
     PublicRoute::exact_get("/a2a/agents"),
+    // Signed artifact links. The token is the credential; the management
+    // routes under `/api/sessions/{id}/artifacts` stay behind the normal
+    // session auth and owner checks. Single-segment scope: only the token
+    // itself is public, never a deeper path.
+    PublicRoute::single_segment_get("/api/artifacts/"),
     // `/api/auth/providers` is intentionally NOT here. Enumerating the
     // configured identity providers is information-gathering surface that
     // `require_auth_for_reads` exists to close, so it lives in
@@ -2804,6 +2822,23 @@ mod tests {
     #[test]
     fn test_request_id_header_constant() {
         assert_eq!(REQUEST_ID_HEADER, "x-request-id");
+    }
+
+    #[test]
+    fn logged_path_prefers_route_template_over_secret_path_param() {
+        // A signed artifact link is a live bearer secret. When axum matched
+        // `/api/artifacts/{token}`, neither the access log nor the span may
+        // carry the concrete token.
+        assert_eq!(
+            logged_path(Some("/api/artifacts/{token}"), "/api/artifacts/s3cret"),
+            "/api/artifacts/{token}"
+        );
+        // Unmatched requests (404) have no template; keep the raw path so
+        // broken clients are still diagnosable.
+        assert_eq!(
+            logged_path(None, "/api/artifacts/s3cret/typo"),
+            "/api/artifacts/s3cret/typo"
+        );
     }
 
     #[test]

@@ -259,6 +259,9 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     // Signed artifact link. The token is the credential; management routes
     // under `/api/sessions/{id}/artifacts` stay authed (below).
     re("/api/artifacts/some-token", Expect::AlwaysPublic),
+    // Single-segment scope: anything below the token (e.g. a path traversal
+    // attempt packed into extra segments) must fall back to auth.
+    re("/api/artifacts/token/extra", Expect::Authed),
     re("/api/health", Expect::AlwaysPublic),
     // #6633: readiness probe. Public for the same reason `/api/health` is —
     // the kubelet that issues a `readinessProbe` carries no credential.
