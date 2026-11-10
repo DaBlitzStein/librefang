@@ -16,6 +16,7 @@
 pub mod agent_templates;
 pub mod agents;
 pub mod approvals;
+pub mod artifacts;
 pub mod audit;
 pub mod authz;
 pub mod auto_dream;
