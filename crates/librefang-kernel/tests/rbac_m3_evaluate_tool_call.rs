@@ -331,6 +331,7 @@ async fn submit_tool_approval_hand_agent_force_human_skips_auto_approve() {
         workspace_root: None,
         force_human: false,
         session_id: None,
+        incognito: false,
     };
     let kh: &dyn KernelHandle = &*kernel;
     let lax = kh
@@ -365,6 +366,7 @@ async fn submit_tool_approval_hand_agent_force_human_skips_auto_approve() {
         workspace_root: None,
         force_human: true,
         session_id: None,
+        incognito: false,
     };
     let strict = kh
         .submit_tool_approval(

@@ -2148,6 +2148,9 @@ pub async fn execute_tool_with_sender_account(
                 // strings or non-session contexts — same fallback as
                 // the live path. `SessionId: Copy`, no clone needed.
                 session_id: parsed_session_id,
+                // An approved resume must inherit this turn's incognito
+                // state, or a throwaway session records on the resume path.
+                incognito: !capture_artifacts,
             };
             match kh
                 .submit_tool_approval(agent_id_str, tool_name, &summary, deferred, session_id)

@@ -2442,6 +2442,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         }
     }
 
@@ -3196,6 +3197,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
 
         let result = mgr.submit_request(req, deferred);
@@ -3229,6 +3231,7 @@ mod tests {
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
             force_human: false,
             session_id: None,
+            incognito: false,
         };
 
         let id = mgr.submit_request(req, deferred.clone()).unwrap();
@@ -3274,6 +3277,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
 
         let id = mgr.submit_request(req, deferred.clone()).unwrap();
@@ -3317,6 +3321,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
         mgr.submit_request(req, deferred).unwrap();
         mgr.pending.get_mut(&id).unwrap().submitted_at = Utc::now() - chrono::Duration::seconds(5);
@@ -3354,6 +3359,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
         mgr.submit_request(req, deferred).unwrap();
 
@@ -3395,6 +3401,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
 
         let id1 = mgr.submit_request(req1, deferred1).unwrap();
@@ -3416,6 +3423,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
 
         let result = mgr.submit_request(req2, deferred2);
@@ -3445,6 +3453,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
         let id1 = mgr.submit_request(req1, deferred1).unwrap();
 
@@ -3464,6 +3473,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
 
         let id2 = mgr.submit_request(req2, deferred2).unwrap();
@@ -3495,6 +3505,7 @@ mod tests {
                 workspace_root: None,
                 force_human: false,
                 session_id: None,
+                incognito: false,
             };
             let id = mgr.submit_request(req, deferred).unwrap();
             ids.push(id);
@@ -3517,6 +3528,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
         let result = mgr.submit_request(req, deferred);
         assert!(result.is_err());
@@ -3539,6 +3551,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
         let result = mgr.submit_request(req, deferred);
         assert!(result.is_ok());
@@ -3575,6 +3588,7 @@ mod tests {
                     workspace_root: None,
                     force_human: false,
                     session_id: None,
+                    incognito: false,
                 }),
                 submitted_at: Utc::now() - chrono::Duration::seconds(120),
             },
@@ -3620,6 +3634,7 @@ mod tests {
                     workspace_root: None,
                     force_human: false,
                     session_id: None,
+                    incognito: false,
                 }),
                 submitted_at: Utc::now() - chrono::Duration::seconds(120),
             },
@@ -4833,6 +4848,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
 
         let req1 = make_session_request("agent-1", "sess-dedup");
@@ -4860,6 +4876,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
         let req3 = make_session_request("agent-1", "sess-dedup");
         let id3 = mgr.submit_request(req3, deferred2).unwrap();
@@ -4891,6 +4908,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
         let req = make_session_request("agent-3611", "sess-3611");
         let request_id = mgr.submit_request(req, deferred).unwrap();
@@ -5312,6 +5330,7 @@ mod tests {
             workspace_root: Some(std::path::PathBuf::from("/tmp/restart-test")),
             force_human: false,
             session_id: Some(original_session_id),
+            incognito: false,
         };
 
         // 1. Pre-restart: submit + persist via the first ApprovalManager.
@@ -5416,6 +5435,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
         let blob = serde_json::to_vec(&tampered).unwrap();
         {
@@ -5501,6 +5521,7 @@ mod tests {
             force_human: false,
             // *** mismatch *** — row column carries `row_session`.
             session_id: Some(payload_session),
+            incognito: false,
         };
         let blob = serde_json::to_vec(&tampered).unwrap();
         {

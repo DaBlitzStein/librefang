@@ -14,6 +14,8 @@ use librefang_types::config::DefaultModelConfig;
 use std::collections::HashMap;
 use std::pin::Pin;
 
+mod artifact_capture;
+
 struct RecordingChannelAdapter {
     name: String,
     channel_type: ChannelType,
@@ -441,6 +443,7 @@ async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
         workspace_root: None,
         force_human: false,
         session_id: None,
+        incognito: false,
     };
     // Recipient + account resolution mirror `wake_agent_after_approval`: prefer
     // chat_id over sender_id, and forward account_id verbatim.

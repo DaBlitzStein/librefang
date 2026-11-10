@@ -2718,6 +2718,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
 
         // Cross the restart boundary: persist and reload.

@@ -97,10 +97,11 @@ pub async fn run_agent_loop_streaming(
         )
         .await;
     super::record_agent_loop_exit(&agent_label, &result);
-    // T3.3: an incognito turn is documented as never persisted, so it neither
-    // contributes a sweep nor consumes a flag a concurrent turn set.
+    // T3.3: consume the marker on every turn end so a stale flag cannot leak
+    // into a later turn on a reused session id. An incognito turn discards it
+    // without sweeping: its session is documented as never persisted.
+    let shell_ran = crate::artifact_capture::take_shell_ran(session.id);
     if !opts.incognito {
-        let shell_ran = crate::artifact_capture::take_shell_ran(session.id);
         if let (Some(capture_kernel), Some(root)) = (capture_kernel.as_ref(), workspace_root) {
             crate::artifact_capture::sweep_turn_artifacts(
                 capture_kernel,

@@ -555,6 +555,7 @@ mod tests {
             workspace_root: None,
             force_human: false,
             session_id: None,
+            incognito: false,
         };
         kernel
             .governance
