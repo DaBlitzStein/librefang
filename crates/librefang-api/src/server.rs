@@ -5,6 +5,7 @@ use crate::middleware;
 use crate::rate_limiter;
 use crate::routes::{self, AppState};
 use crate::webchat;
+use axum::extract::MatchedPath;
 use axum::response::IntoResponse;
 use axum::Router;
 use librefang_kernel::config_reload::HotAction;
@@ -19,7 +20,7 @@ use std::time::Instant;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::trace::{DefaultMakeSpan, TraceLayer};
+use tower_http::trace::{MakeSpan, TraceLayer};
 use tracing::info;
 
 /// Daemon info written to `~/.librefang/daemon.json` so the CLI can find us.
@@ -1821,6 +1822,33 @@ fn clear_sessions_file(home_dir: &std::path::Path) {
     }
 }
 
+/// Span shape for `TraceLayer`.
+///
+/// Mirrors `DefaultMakeSpan`'s INFO fields (`method`, `uri`, `version`) but
+/// derives `uri` from axum's `MatchedPath` route template when present, and
+/// from the path alone otherwise. The raw query string is never recorded: it
+/// can carry signed artifact tokens or other credentials, and the trace span
+/// is exported to OTel just like the `http_request` span.
+#[derive(Clone, Copy, Debug, Default)]
+struct RequestSpan;
+
+impl<B> MakeSpan<B> for RequestSpan {
+    fn make_span(&mut self, request: &axum::http::Request<B>) -> tracing::Span {
+        let path = request
+            .extensions()
+            .get::<MatchedPath>()
+            .map(MatchedPath::as_str)
+            .unwrap_or_else(|| request.uri().path());
+        tracing::span!(
+            tracing::Level::INFO,
+            "request",
+            method = %request.method(),
+            uri = %path,
+            version = ?request.version(),
+        )
+    }
+}
+
 /// Build the full API router with all routes, middleware, and state.
 ///
 /// This is extracted from `run_daemon()` so that embedders (e.g. librefang-desktop)
@@ -2440,7 +2468,7 @@ pub async fn build_router(
         // sees nothing.
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO)),
+                .make_span_with(RequestSpan),
         )
         .layer(cors);
 
@@ -5007,6 +5035,89 @@ mod dashboard_login_totp_lockout_tests {
         assert!(
             body.get("token").is_none(),
             "failed claim must not issue a session"
+        );
+    }
+}
+
+#[cfg(test)]
+mod request_span_tests {
+    use super::RequestSpan;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+    use std::io;
+    use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
+    use tower_http::trace::TraceLayer;
+    use tracing_subscriber::fmt::MakeWriter;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// A signed artifact link is a bearer credential in the URI path, and the
+    /// trace span from `TraceLayer` is exported to OTel as the parent of
+    /// `http_request`. Neither the concrete token nor the query string may
+    /// appear in the formatted span.
+    #[tokio::test]
+    async fn trace_span_uses_route_template_and_drops_query() {
+        async fn ok() {}
+
+        let writer = CaptureWriter::default();
+        let captured = writer.0.clone();
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(false)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW);
+        let _guard = tracing_subscriber::registry().with(layer).set_default();
+
+        let app: Router = Router::new()
+            .route("/api/artifacts/{token}", get(ok))
+            .layer(TraceLayer::new_for_http().make_span_with(RequestSpan));
+
+        let request = Request::builder()
+            .uri("/api/artifacts/secret-token?x=secret-query")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let logged = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+        assert!(
+            logged.contains("/api/artifacts/{token}"),
+            "trace span must record the route template: {logged}"
+        );
+        for secret in ["secret-token", "secret-query"] {
+            assert!(
+                !logged.contains(secret),
+                "trace span leaked {secret}: {logged}"
+            );
+        }
+        assert!(
+            !logged.contains('?'),
+            "trace span must not record the query string: {logged}"
         );
     }
 }
