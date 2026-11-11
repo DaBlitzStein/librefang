@@ -514,11 +514,14 @@ pub async fn restore_artifact(
     // Re-resolve immediately before publishing the temp file. This narrows the
     // parent-symlink-swap window between the first resolve and the rename.
     //
-    // shortcut: a local attacker who can swap a workspace parent directory
-    // between this re-resolve and the rename can still redirect the write; the
-    // window is narrowed, not eliminated. Upgrade to openat/renameat with
-    // O_NOFOLLOW directory handles if the workspace threat model includes a
-    // racing local attacker.
+    // shortcut: two windows remain, and neither is eliminated. (1) The temp
+    // file is created and written before this recheck, so a parent swapped
+    // before temp creation can receive the bytes; the recheck then aborts the
+    // rename and removes the temp, but a local attacker racing this can read
+    // or hardlink the temp first. The temp is created mode 0600 to limit that.
+    // (2) A swap between this recheck and the rename still redirects the final
+    // file. Upgrade to openat/renameat with O_NOFOLLOW directory handles if the
+    // workspace threat model includes a racing local attacker.
     let recheck = || {
         let again = workspace_sandbox::resolve_sandbox_path(&request.path, &workspace)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e))?;
@@ -566,10 +569,14 @@ fn write_atomically(
         Uuid::new_v4()
     ));
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);

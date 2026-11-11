@@ -188,11 +188,13 @@ async fn list_versions_and_download_round_trip() {
     assert_eq!(artifacts[0]["version"], 2);
 
     // The path segment is caller-supplied; store lookups must use the parsed
-    // canonical UUID, or an uppercase spelling returns an empty list.
+    // canonical UUID on every management route, or an uppercase spelling
+    // returns an empty list / 404 and cannot restore or link.
+    let upper = sid.to_uppercase();
     let resp = request(
         &h.app,
         Method::GET,
-        &format!("/api/sessions/{}/artifacts", sid.to_uppercase()),
+        &format!("/api/sessions/{upper}/artifacts"),
         None,
         None,
     )
@@ -205,6 +207,51 @@ async fn list_versions_and_download_round_trip() {
             .len(),
         1
     );
+
+    let resp = request(
+        &h.app,
+        Method::GET,
+        &format!("/api/sessions/{upper}/artifacts/versions?path=docs/report.txt"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        resp.json()["versions"].as_array().expect("versions").len(),
+        2
+    );
+
+    let resp = request(
+        &h.app,
+        Method::GET,
+        &format!("/api/sessions/{upper}/artifacts/download?path=docs/report.txt&version=1"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(resp.body, b"first");
+
+    let resp = request(
+        &h.app,
+        Method::POST,
+        &format!("/api/sessions/{upper}/artifacts/restore"),
+        Some(serde_json::json!({"path": "docs/report.txt", "version": 1})),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK, "{:?}", resp.json());
+
+    let resp = request(
+        &h.app,
+        Method::POST,
+        &format!("/api/sessions/{upper}/artifacts/link"),
+        Some(serde_json::json!({"path": "docs/report.txt"})),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK);
 
     let resp = request(
         &h.app,
@@ -821,6 +868,60 @@ async fn link_key_is_private_and_stable_across_calls() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn link_key_symlink_and_loose_mode_fail_closed() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let h = boot().await;
+    let (_, session) = seed_agent_and_session(&h);
+    let sid = session.0.to_string();
+    put(&h, session, "key.txt", b"key");
+    let blob_root = h.state.kernel.home_dir().join("artifacts");
+    std::fs::create_dir_all(&blob_root).expect("blob root");
+    let key_path = blob_root.join("link.key");
+
+    let outside = tempfile::tempdir().expect("outside dir");
+    let target = outside.path().join("planted.key");
+    std::fs::write(&target, [7u8; 32]).expect("planted key");
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+        .expect("planted key mode");
+    std::os::unix::fs::symlink(&target, &key_path).expect("plant symlink");
+    let resp = request(
+        &h.app,
+        Method::POST,
+        &format!("/api/sessions/{sid}/artifacts/link"),
+        Some(serde_json::json!({"path": "key.txt"})),
+        None,
+    )
+    .await;
+    assert_eq!(
+        resp.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a symlinked link.key must fail closed: {:?}",
+        resp.json()
+    );
+
+    std::fs::remove_file(&key_path).expect("remove symlink");
+    std::fs::write(&key_path, [9u8; 32]).expect("loose key");
+    std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644))
+        .expect("loose key mode");
+    let resp = request(
+        &h.app,
+        Method::POST,
+        &format!("/api/sessions/{sid}/artifacts/link"),
+        Some(serde_json::json!({"path": "key.txt"})),
+        None,
+    )
+    .await;
+    assert_eq!(
+        resp.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a 0644 link.key must fail closed: {:?}",
+        resp.json()
+    );
+}
+
 /// Boot the full server router with an operator key and `require_auth_for_reads`.
 async fn boot_full_with_strict_reads() -> (Harness, String) {
     let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
@@ -914,4 +1015,16 @@ async fn signed_url_is_public_while_management_routes_require_auth() {
         "a signed link must stay reachable when require_auth_for_reads is on"
     );
     assert_eq!(resp.body, b"public-bytes");
+
+    // Only GET is public. A POST to the token path must hit the auth layer,
+    // not the public GET allowlist.
+    let resp = request(
+        &h.app,
+        Method::POST,
+        &format!("/api/artifacts/{token}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 }
