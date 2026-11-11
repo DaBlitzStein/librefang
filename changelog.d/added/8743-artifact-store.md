@@ -1,1 +1,1 @@
-Add a content-addressed artifact store with per-session path versioning and retention pruning. (#8743) (@DaBlitzStein)
+A content-addressed artifact store records every version of a session file, keeps bytes once across sessions and prunes by retention without deleting blobs still referenced. (#8743) (@DaBlitzStein)

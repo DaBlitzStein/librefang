@@ -1,9 +1,8 @@
 //! Versioned, content-addressed session artifacts.
 //!
-//! Every row names one version of a caller-supplied path for a session. Bytes
-//! live once under `<blob_root>/blobs/<first2>/<sha256>` and are shared across
-//! sessions; a new version is recorded only when the content hash differs from
-//! the latest version of that `(session, path)`.
+//! Every row names one version of a caller-supplied path for a session.
+//! Bytes live once under `<blob_root>/blobs/<first2>/<sha256>` and are shared across sessions.
+//! A new version is recorded only when the content hash differs from the latest version of that `(session, path)`.
 
 use chrono::{DateTime, Duration, Utc};
 use librefang_types::error::{LibreFangError, LibreFangResult};
@@ -57,8 +56,10 @@ pub struct PruneReport {
 pub struct ArtifactStore {
     pool: Pool<SqliteConnectionManager>,
     blob_root: PathBuf,
-    /// Serialises `put` against `prune` inside this process. Without it a blob
-    /// written by `put` can be swept between its write and its row insert.
+    /// Serialises `put` against `prune` for this store instance. Without it a blob
+    /// written by `put` can be swept between its write and its row insert; sharing
+    /// one instance (as the kernel does when it attaches the store) keeps the lock shared.
+    /// A second store over the same pool or blob root does not share it.
     /// A second daemon pointed at the same blob directory is out of scope.
     op_lock: Arc<Mutex<()>>,
 }

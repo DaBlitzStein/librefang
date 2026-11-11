@@ -78,7 +78,8 @@ max_retrieve = 10               # Max memories per retrieval
 # max_memories_per_agent = 1000
 
 # ── Artifacts (file delivery) ────────────────────────────────
-# [artifacts]
+# [artifacts] — session artifacts (distinct from [tool_results] artifact_max_age_days,
+# which prunes spilled tool output). Parsed but inert until the artifact store is attached at boot.
 # retention_days = 90              # Days a delivered file version is kept (0 = unlimited)
 # blob_dir = "/home/me/.librefang/artifacts"  # Defaults to <home>/artifacts
 

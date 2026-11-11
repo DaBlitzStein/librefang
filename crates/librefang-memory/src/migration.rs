@@ -339,10 +339,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // the API boundary and stored as given.
     run_step!(65, migrate_v65);
 
-    // v66: versioned session artifacts. Each row names one version of a
+    // v67: versioned session artifacts. Each row names one version of a
     // caller-supplied path for a session; the bytes live once in a
     // content-addressed blob store shared across sessions.
-    run_step!(66, migrate_v66);
+    run_step!(67, migrate_v67);
 
     // Reconcile the pre-renumber reasoning footprint (#8616). A build of this
     // branch that carried the reasoning-effort step as v64 stamped databases
@@ -1745,7 +1745,7 @@ fn migrate_v65(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// v66: versioned session artifacts.
+/// v67: versioned session artifacts.
 ///
 /// One row per `(session, path, version)`; the bytes live in the
 /// content-addressed blob store and are shared across sessions. `version`
@@ -1753,7 +1753,7 @@ fn migrate_v65(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// identical bytes is a read of the latest row rather than a new version.
 /// `message_id` is the message that produced the write (nullable: crons and
 /// triggers have none). Purely additive.
-fn migrate_v66(conn: &Connection) -> Result<(), rusqlite::Error> {
+fn migrate_v67(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS artifacts (
             id            TEXT PRIMARY KEY,
@@ -1774,7 +1774,7 @@ fn migrate_v66(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (66, datetime('now'), 'Add artifacts table for versioned content-addressed session artifacts')",
+         VALUES (67, datetime('now'), 'Add artifacts table for versioned content-addressed session artifacts')",
         [],
     )?;
     Ok(())
@@ -5662,8 +5662,8 @@ mod tests {
                 [],
             )
             .unwrap();
-            // The deployed build predates v66, so it has no artifacts audit row.
-            conn.execute("DELETE FROM migrations WHERE version >= 66", [])
+            // The deployed build predates v67, so it has no artifacts audit row.
+            conn.execute("DELETE FROM migrations WHERE version >= 67", [])
                 .unwrap();
             // A real deployed row, so the trigger/map rebuild has something to
             // map and `save_session` has a row to update.
