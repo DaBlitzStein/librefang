@@ -192,6 +192,15 @@ pub fn create_rate_limiter(tokens_per_minute: u32) -> Arc<KeyedRateLimiter> {
 /// client has exhausted its token budget. Paths flagged by
 /// [`is_rate_limit_exempt`] (static SPA assets, locale files, root, favicon,
 /// logo) bypass the limiter entirely.
+/// Log the route template, not the raw path: `/api/artifacts/{token}` carries a
+/// bearer-like signed token, and the WARN (plus the OTel export) must not become
+/// a way to read one out of the logs.
+fn rate_limit_log_path(matched: Option<&str>, raw_path: &str) -> String {
+    matched
+        .map(str::to_string)
+        .unwrap_or_else(|| raw_path.to_string())
+}
+
 pub async fn gcra_rate_limit(
     axum::extract::State(state): axum::extract::State<GcraState>,
     request: Request<Body>,
@@ -201,6 +210,13 @@ pub async fn gcra_rate_limit(
     if is_rate_limit_exempt(&path) {
         return next.run(request).await;
     }
+    let logged_path = rate_limit_log_path(
+        request
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .map(|matched| matched.as_str()),
+        &path,
+    );
 
     // Resolve the real client IP. When the daemon sits behind a trusted
     // reverse proxy (config: `trusted_proxies` + `trust_forwarded_for`)
@@ -264,7 +280,7 @@ pub async fn gcra_rate_limit(
         Err(_insufficient_capacity) => true,
     };
     if rate_limited {
-        tracing::warn!(ip = %ip, cost = cost.get(), path = %path, "GCRA rate limit exceeded");
+        tracing::warn!(ip = %ip, cost = cost.get(), path = %logged_path, "GCRA rate limit exceeded");
         return rate_limit_response("Rate limit exceeded", state.retry_after_secs);
     }
 
@@ -1993,6 +2009,21 @@ mod tests {
             seen_by_handler.lock().unwrap().as_deref(),
             Some(canonical),
             "the handler must bind the same decoded id"
+        );
+    }
+
+    #[test]
+    fn rate_limit_log_path_prefers_the_route_template() {
+        assert_eq!(
+            rate_limit_log_path(
+                Some("/api/artifacts/{token}"),
+                "/api/artifacts/secret-token"
+            ),
+            "/api/artifacts/{token}"
+        );
+        assert_eq!(
+            rate_limit_log_path(None, "/api/agents/1/upload"),
+            "/api/agents/1/upload"
         );
     }
 }
