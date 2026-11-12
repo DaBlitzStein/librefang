@@ -318,6 +318,7 @@ async fn incognito_loop_end_consumes_a_seeded_marker_without_sweeping() {
 // ---- role-trait boilerplate (same shape as `vision_gate::VisionKernel`) ----
 
 impl librefang_kernel_handle::CatalogQuery for CaptureKernel {}
+impl librefang_kernel_handle::SkillHistory for CaptureKernel {}
 
 #[async_trait]
 impl librefang_kernel_handle::AgentControl for CaptureKernel {

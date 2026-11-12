@@ -843,6 +843,7 @@ async fn a_tool_authored_skill_records_agent_tool_in_history() {
         tts_engine: None,
         tts_config: None,
         docker_config: None,
+        capture_artifacts: false,
         process_manager: None,
         process_registry: None,
         sender_id: None,
