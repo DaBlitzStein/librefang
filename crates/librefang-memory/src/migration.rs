@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 66;
+const SCHEMA_VERSION: u32 = 67;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -368,6 +368,11 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // never runs the skipped step and the #3538 backfill writes its audit row
     // anyway, so the skew is silent and permanent.
     run_step!(66, migrate_v66);
+
+    // v67: versioned session artifacts. Each row names one version of a
+    // caller-supplied path for a session; the bytes live once in a
+    // content-addressed blob store shared across sessions.
+    run_step!(67, migrate_v67);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1788,6 +1793,41 @@ fn migrate_v65(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (65, datetime('now'), 'Add sessions.reasoning_effort for per-session reasoning-effort pin (#8591)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v67: versioned session artifacts.
+///
+/// One row per `(session, path, version)`; the bytes live in the
+/// content-addressed blob store and are shared across sessions. `version`
+/// increments per path only when the content hash changes, so re-writing
+/// identical bytes is a read of the latest row rather than a new version.
+/// `message_id` is the message that produced the write (nullable: crons and
+/// triggers have none). Purely additive.
+fn migrate_v67(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS artifacts (
+            id            TEXT PRIMARY KEY,
+            session_id    TEXT NOT NULL,
+            message_id    TEXT,
+            path          TEXT NOT NULL,
+            content_hash  TEXT NOT NULL,
+            size_bytes    INTEGER NOT NULL,
+            mime_type     TEXT,
+            version       INTEGER NOT NULL,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(session_id, path, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_artifacts_session_path
+            ON artifacts(session_id, path);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash
+            ON artifacts(content_hash);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (67, datetime('now'), 'Add artifacts table for versioned content-addressed session artifacts')",
         [],
     )?;
     Ok(())
@@ -5705,7 +5745,7 @@ mod tests {
             let conn = pool.get().unwrap();
             run_migrations(&conn).unwrap();
             simulate_pre_renumber_footprint(&conn, true);
-            // The pre-renumber build had no v65 or v66 audit row.
+            // The pre-renumber build had no v65, v66 or v67 audit row.
             conn.execute("DELETE FROM migrations WHERE version > 64", [])
                 .unwrap();
             conn.pragma_update(None, "user_version", 64i64).unwrap();
@@ -5761,6 +5801,9 @@ mod tests {
                 [],
             )
             .unwrap();
+            // The deployed build predates v67, so it has no artifacts audit row.
+            conn.execute("DELETE FROM migrations WHERE version >= 67", [])
+                .unwrap();
             // A real deployed row, so the trigger/map rebuild has something to
             // map and `save_session` has a row to update.
             conn.execute(
